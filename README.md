@@ -4,7 +4,7 @@ adorm (Async Django ORM, pronounced "adore") is an asynchronous ORM interface fo
 queries and model operations with adorm's own API; a driver executes them on a target ORM or database. The
 first drivers target the Django ORM and PostgreSQL directly.
 
-The package is pre-release and has no public API yet.
+The package is pre-release; the API reference on the documentation site lists what it provides.
 
 ## Requirements
 
@@ -28,6 +28,16 @@ server and leave other databases untouched.
 
 ```bash
 ADORM_TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/postgres uv run pytest
+```
+
+## Documentation
+
+The documentation site is in `docs/` (VitePress, published on docs.velis.si):
+
+```bash
+cd docs
+npm install
+npm run docs:dev
 ```
 
 ## Licence

@@ -38,6 +38,21 @@ jobs:
       - run: uv run pytest
       - run: uv build
 
+  docs:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - run: npm ci
+      - run: npm run docs:build
+
   coverage:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
