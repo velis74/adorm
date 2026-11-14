@@ -1,0 +1,117 @@
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14"]
+build-backend = "uv_build"
+
+[project]
+name = "adorm"
+version = "0.0.1"
+description = "Async ORM interface: an asynchronous query and model API executed by pluggable ORM drivers."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Jure Erznožnik" },
+]
+requires-python = ">=3.11"
+keywords = ["orm", "async", "asyncio", "django", "postgresql", "database"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: AsyncIO",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.11",
+]
+
+[project.optional-dependencies]
+django = ["django>=4.2"]
+asyncpg = ["asyncpg>=0.30"]
+
+[dependency-groups]
+dev = [
+    "asyncpg>=0.30",
+    "coverage",
+    "django>=4.2",
+    "psycopg[binary]>=3.2",
+    "pytest",
+    "pytest-asyncio",
+    "pytest-django",
+    "ruff",
+]
+
+[project.urls]
+Homepage = "https://github.com/velis74/adorm"
+Repository = "https://github.com/velis74/adorm"
+Issues = "https://github.com/velis74/adorm/issues"
+
+[tool.uv.build-backend]
+module-name = "adorm"
+module-root = ""
+source-include = ["LICENSE"]
+
+[tool.publish]
+tests = "pytest"
+additional_files = ["adorm/__init__.py"]
+
+[tool.ruff]
+extend-exclude = ["docs", "dist", "build", "*/migrations/*"]
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort
+    "Q",    # flake8-quotes
+    "B",    # flake8-bugbear
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "PT",   # flake8-pytest-style
+    "S",    # flake8-bandit
+    "C4",   # flake8-comprehensions
+    "ARG",  # flake8-unused-arguments
+]
+ignore = ["E731", "E722", "C408"]
+fixable = ["ALL"]
+unfixable = []
+dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
+
+[tool.ruff.lint.per-file-ignores]
+# S101: assert is how a test states its claim.
+"tests/**" = ["S101"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint.isort]
+case-sensitive = false
+lines-between-types = 1
+combine-as-imports = true
+order-by-type = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+DJANGO_SETTINGS_MODULE = "tests.djangoproject.settings"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+addopts = ["--strict-markers"]
+
+[tool.coverage.run]
+source = ["adorm"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
