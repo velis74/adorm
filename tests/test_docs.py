@@ -6,6 +6,14 @@ from pathlib import Path
 import pytest
 
 import adorm
+import adorm.codec
+import adorm.drivers
+import adorm.events
+import adorm.executor
+import adorm.models
+import adorm.operations
+import adorm.query
+import adorm.schema
 
 DOCS = Path(__file__).parent.parent / "docs"
 CONFIG = DOCS / ".vitepress" / "config.ts"
@@ -92,8 +100,39 @@ def test_has_reference_heading(reference, expected):
     assert has_reference_heading("atomic", reference) is expected
 
 
-def test_names_in_reference_tables_are_not_headings():
-    assert not has_reference_heading("QuerySet", reference_text())
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [
+        (m.__name__, n)
+        for m in (adorm.codec, adorm.drivers, adorm.events, adorm.operations, adorm.schema)
+        for n in m.__all__
+    ],
+)
+def test_submodule_public_names_are_documented(module, name):
+    pattern = rf"^#{{2,4}} `{re.escape(module)}\.{re.escape(name)}(\(.*\))?`"
+    assert re.search(pattern, reference_text(), re.MULTILINE), f"no reference heading for {module}.{name}"
+
+
+@pytest.mark.parametrize("name", adorm.query.__all__)
+def test_query_names_are_documented(name):
+    # a name adorm re-exports is documented as adorm.<name>
+    module = "adorm" if name in adorm.__all__ else "adorm.query"
+    pattern = rf"^#{{2,4}} `{re.escape(module)}\.{re.escape(name)}(\(.*\))?`"
+    assert re.search(pattern, reference_text(), re.MULTILINE), f"no reference heading for adorm.query.{name}"
+
+
+@pytest.mark.parametrize("name", adorm.models.__all__)
+def test_model_names_are_documented(name):
+    module = "adorm" if name in adorm.__all__ else "adorm.models"
+    pattern = rf"^#{{2,4}} `{re.escape(module)}\.{re.escape(name)}(\(.*\))?`"
+    assert re.search(pattern, reference_text(), re.MULTILINE), f"no reference heading for adorm.models.{name}"
+
+
+@pytest.mark.parametrize("name", adorm.executor.__all__)
+def test_executor_names_are_documented(name):
+    module = "adorm" if name in adorm.__all__ else "adorm.executor"
+    pattern = rf"^#{{2,4}} `{re.escape(module)}\.{re.escape(name)}(\(.*\))?`"
+    assert re.search(pattern, reference_text(), re.MULTILINE), f"no reference heading for adorm.executor.{name}"
 
 
 def test_crosslink_project_names_are_overridable():

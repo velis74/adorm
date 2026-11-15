@@ -25,7 +25,7 @@ URLs can be overridden with `CROSSLINKS_BASE_<NAME>` environment variables.
 
 - `.vitepress/config.ts`: title, navigation, sidebar, crosslink targets
 - `index.md`: the landing page
-- `intro/`: what adorm is, changelog
+- `intro/`: what adorm is, changelog, the demo application
 - `topics/`: topic guides
 - `howto/`: how-to guides
 - `ref/`: API reference

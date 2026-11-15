@@ -47,7 +47,12 @@ assert reports is same
 ```
 
 A context variable holds the current session. Without one, operations use the default session
-`("default", "default")`.
+`("default", "default")`. `session.activate()` sets it for a `with` block:
+
+```python
+with reports.activate():
+    await Activity.objects.count()        # runs on "reports"
+```
 
 ### Bound models
 
@@ -61,7 +66,8 @@ await reports.Activity.objects.count()    # the "reports" session
 
 Binding takes no slot. A BoundModel stored at module level stays bound to the session that was current when the
 module was imported. The transaction is not part of the binding: when an operation runs, the BoundModel looks up
-the active transaction of its session in the current context.
+the active transaction of its session in the current context. The [sessions topic](/topics/sessions) covers both
+in detail.
 
 ## Slots
 
@@ -155,17 +161,20 @@ async with adorm.atomic():                 # holds a slot of the "default" profi
 ## Drivers
 
 A driver turns adorm operations into work on its target and reports results as plain data (rows keyed by adorm
-field names, scalars, counts); adorm builds the model instances. The driver decides how it runs:
+field names, scalars, counts); adorm builds the model instances. The core imports no ORM: everything it knows
+about a target comes through the [driver contract](/topics/drivers). The driver decides how it runs:
 
 - **threaded**: a synchronous ORM runs on a dedicated thread per slot. The Django ORM driver works this way,
   because Django connections are bound to their thread, and calls only the synchronous Django ORM.
 - **async**: native coroutines without threads. The PostgreSQL driver uses asyncpg.
-- **direct**: the ORM runs on the calling thread, one task per event loop (for example a Celery task through
-  `celery_viewset`); Django's `async_unsafe` check is bypassed only for adorm's calls.
+
+A threaded driver can also run [**direct**](/topics/drivers#execution-mode): the ORM runs on the event loop's
+thread, one task per event loop (for example a Celery task through `celery_viewset`); Django's `async_unsafe`
+check accepts adorm's calls and still applies to everything else.
 
 A separate adorm server is one more driver: the application side sends the operation description to the server
 (over [muxws](:muxws:/) or HTTP), and the server executes it with an ORM driver. The server knows the profiles and
 their credentials; the client sends only the profile name.
 
-Errors are adorm's own exceptions modelled on Django's (`DoesNotExist`, `IntegrityError`, …). An error adorm
-does not recognise becomes a `DatabaseError` that carries the driver's exception in `original`.
+Errors are adorm's own [exceptions](/ref/exceptions) modelled on Django's (`DoesNotExist`, `IntegrityError`, …).
+An error adorm does not recognise becomes a `DatabaseError` that carries the driver's exception in `original`.

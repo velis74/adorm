@@ -40,11 +40,14 @@ dev = [
     "asyncpg>=0.30",
     "coverage",
     "django>=4.2",
+    "fastapi>=0.163.0",
+    "httpx>=0.28.1",
     "psycopg[binary]>=3.2",
     "pytest",
     "pytest-asyncio",
     "pytest-django",
     "ruff",
+    "uvicorn>=0.54.0",
 ]
 
 [project.urls]
@@ -86,8 +89,11 @@ unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.per-file-ignores]
-# S101: assert is how a test states its claim.
-"tests/**" = ["S101"]
+# S101: assert is how a test states its claim. S301: tests unpickle only objects they pickled themselves.
+# S608: tests build SQL from constant table names.
+"tests/**" = ["S101", "S301", "S608"]
+# N818: exception names mirror Django's (DoesNotExist, ObjectDoesNotExist …) and the executor's documented names.
+"adorm/exceptions.py" = ["N818"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -107,7 +113,8 @@ DJANGO_SETTINGS_MODULE = "tests.djangoproject.settings"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
-addopts = ["--strict-markers"]
+# Short tracebacks leave out frame arguments, which include database URLs with their passwords.
+addopts = ["--strict-markers", "--tb=short"]
 
 [tool.coverage.run]
 source = ["adorm"]

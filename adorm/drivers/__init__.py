@@ -1,0 +1,29 @@
+"""Drivers execute adorm operations on an ORM or a database library.
+
+This package holds the driver contract. A bundled driver lives in a subpackage that is imported only when a
+connection profile names it, so importing ``adorm`` imports no ORM.
+"""
+
+from adorm.drivers.base import (
+    Capabilities,
+    Driver,
+    DriverConnection,
+    ExecutionMode,
+    is_connection_error,
+    Operation,
+    Profile,
+    ThreadedConnection,
+    ThreadedDriver,
+)
+
+__all__ = [
+    "Capabilities",
+    "Driver",
+    "DriverConnection",
+    "ExecutionMode",
+    "Operation",
+    "Profile",
+    "ThreadedConnection",
+    "ThreadedDriver",
+    "is_connection_error",
+]

@@ -26,10 +26,12 @@ features:
     details: Everything that touches the database is a coroutine or returns an awaitable. Queries, saves, relation access and iteration use the Django ORM's names without an "a" prefix.
   - title: Queries without a connection
     details: Building a query (Q, F, aggregates, lookups) is pure Python and does no I/O. It produces an adorm operation description that a driver executes.
+    link: /topics/queries
   - title: Pluggable drivers
     details: A driver translates operations to its target. The Django ORM driver runs the synchronous ORM in a dedicated thread per slot; the PostgreSQL driver runs natively on asyncpg.
   - title: Sessions, slots and a pool
     details: Logical sessions name a connection profile. Atomic operations borrow a slot for one call, transactions hold one for the whole block, with timeouts and deadlock detection.
   - title: pydantic models
     details: Generated models are pydantic BaseModel subclasses, so the same schema serves the database layer and fastapi-viewsets endpoints.
+    link: /topics/models
 ---

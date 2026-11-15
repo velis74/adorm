@@ -23,11 +23,22 @@ uv run pytest
 ```
 
 The tests read the PostgreSQL server URL from `ADORM_TEST_DATABASE_URL` (default
-`postgres://postgres@127.0.0.1:5432/postgres`). They create and drop their own `adorm_test` database on that
-server and leave other databases untouched.
+`postgres://postgres@127.0.0.1:5432/postgres`). They create and drop their own `adorm_test` and `adorm_test_demo`
+databases on that server and leave other databases untouched.
 
 ```bash
 ADORM_TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/postgres uv run pytest
+```
+
+## Demo
+
+`demo.py` runs the demo application: a Django project with a club domain (`demo/backend`), a FastAPI app using
+adorm (`demo/api`) and PostgreSQL. It creates, migrates and seeds the database `ADORM_DEMO_DATABASE_URL` (default
+`postgres://postgres@127.0.0.1:5432/adorm_demo`), then serves the API on <http://127.0.0.1:8000/docs>.
+
+```bash
+uv run python demo.py --list-drivers
+uv run python demo.py
 ```
 
 ## Documentation
