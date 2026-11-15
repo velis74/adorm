@@ -418,6 +418,7 @@ class Slot:
         self._queue: deque[tuple[SlotLease, Request, contextvars.Context]] = deque()
         self._wakeup = asyncio.Event()
         self._running: tuple[Request, asyncio.Task] | None = None
+        self._current: tuple[SlotLease, Request, contextvars.Context] | None = None
         self._cancelled: Request | None = None
         self._in_transaction = False
         self._options: dict[str, Any] = {}  # set for the connection
@@ -477,6 +478,9 @@ class Slot:
         lease.channel.deliver(event)
 
     def _enqueue(self, lease: SlotLease, request: Request) -> None:
+        if self.state == _CLOSED or self._server is None or self._server.done():
+            self._deliver(lease, ErrorEvent(request.request_id, InterfaceError(f"{self!r} serves no requests")))
+            return
         self._queue.append((lease, request, contextvars.copy_context()))
         self._idle.clear()
         self._wakeup.set()
@@ -501,7 +505,6 @@ class Slot:
         await self._idle.wait()
 
     async def _serve(self) -> None:
-        current: tuple[SlotLease, Request, contextvars.Context] | None = None
         try:
             while True:
                 if not self._queue:
@@ -518,17 +521,21 @@ class Slot:
                         if not self._queue and self._commit_deadline() is not None:
                             await self._abort(deadline)
                     continue
-                current = self._queue.popleft()
-                await self._run(*current)
-                current = None
+                self._current = self._queue.popleft()
+                await self._run(*self._current)
+                self._current = None
         except Exception as exc:
             logger.exception("serving %r failed", self)
-            error = InterfaceError(f"{self!r} stopped serving requests: {exc}")
-            failed = ([current] if current is not None else []) + list(self._queue)
-            self._queue.clear()
-            for lease, request, _context in failed:
-                self._deliver(lease, ErrorEvent(request.request_id, error))
-            self._idle.set()
+            self._fail_outstanding(InterfaceError(f"{self!r} stopped serving requests: {exc}"))
+
+    def _fail_outstanding(self, error: InterfaceError) -> None:
+        """Answer the running request and every queued one with ``error``."""
+        failed = ([self._current] if self._current is not None else []) + list(self._queue)
+        self._current = None
+        self._queue.clear()
+        for lease, request, _context in failed:
+            self._deliver(lease, ErrorEvent(request.request_id, error))
+        self._idle.set()
 
     def _commit_deadline(self) -> float | None:
         """Seconds to wait for the next request of a lease inside a transaction; ``None`` for no limit."""
@@ -703,6 +710,12 @@ class Slot:
         return ErrorEvent(request_id, error)
 
     async def _finish(self, lease: SlotLease, reason: CloseReason | None) -> None:
+        if self.lease is lease and self.state == _CLOSED:
+            # Closed while leased (`close()`): the slot already left the pool's service.
+            self.lease = None
+            lease.channel.close()
+            self.pool._removed(self)
+            return
         if self.lease is not lease or self.state != _LEASED:
             return
         self.state = _FINISHING
@@ -811,8 +824,9 @@ class Slot:
         return True
 
     async def close(self, reason: CloseReason = CloseReason.POOL_CLOSED) -> None:
-        """Stop serving and close the connection; ``close_reason`` becomes ``reason``. Logs errors instead of raising
-        them; a second call does nothing."""
+        """Stop serving and close the connection; ``close_reason`` becomes ``reason``. The running request, the queued
+        ones and those sent later fail with `InterfaceError`; a lease holding the slot frees the pool's capacity when it
+        is released. Logs errors instead of raising them; a second call does nothing."""
         if self.state == _CLOSED:
             return
         self.state = _CLOSED
@@ -830,6 +844,7 @@ class Slot:
                     raise
             except Exception:
                 logger.exception("serving %r failed", self)
+        self._fail_outstanding(InterfaceError(f"{self!r} is closed"))
         if self.connection is not None:
             try:
                 await self.connection.close()

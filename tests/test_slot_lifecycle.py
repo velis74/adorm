@@ -602,3 +602,52 @@ async def test_a_purge_racing_an_acquisition_never_hands_out_a_stale_slot(setup,
     assert stale.close_reason is CloseReason.STALE
     assert fresh.close_reason is None
     assert pool.in_use == 0
+
+
+# A slot closed while leased
+
+
+@pytest.mark.parametrize("run", REPEAT)
+async def test_a_slot_closed_inside_its_block_ends_the_block_and_frees_the_capacity(setup, run):  # noqa: ARG001
+    pool, _ = setup.pool(max_connections=1)
+    flow = session()
+
+    async def block():
+        async with flow.atomic() as tx:
+            assert await flow.execute(Op("a")) == "a"
+            await tx.lease.slot.close()
+
+    async with asyncio.timeout(GUARD):
+        with pytest.raises(adorm.InterfaceError, match="serves no requests"):
+            await block()
+    assert pool.size == 0
+    async with asyncio.timeout(GUARD):
+        assert await flow.execute(Op("b")) == "b"
+    assert pool.size == 1
+
+
+@pytest.mark.parametrize("run", REPEAT)
+async def test_a_slot_closed_while_a_request_runs_answers_it_and_the_queued_ones(setup, run):  # noqa: ARG001
+    pool, _ = setup.pool(max_connections=1)
+    flow = session()
+    gate = asyncio.Event()
+    running = Op("running", gate=gate)
+    tasks = []
+
+    async def block():
+        async with flow.atomic() as tx:
+            tasks.extend([asyncio.create_task(flow.execute(running)), asyncio.create_task(flow.execute(Op("queued")))])
+            await running.started.wait()
+            await until(lambda: tx.lease.requests.qsize() == 1)
+            await tx.lease.slot.close()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async with asyncio.timeout(GUARD):
+        with pytest.raises(adorm.TransactionManagementError, match="is closed"):
+            await block()
+    for task in tasks:
+        with pytest.raises(adorm.InterfaceError, match="is closed"):
+            task.result()
+    assert pool.size == 0
+    async with asyncio.timeout(GUARD):
+        assert await flow.execute(Op("next")) == "next"
