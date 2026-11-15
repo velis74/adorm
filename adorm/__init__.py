@@ -28,10 +28,12 @@ from adorm.executor import (
     BoundModel,
     cancellation_outcome,
     CancellationOutcome,
+    connection_options,
     create_session,
     current_session,
     on_commit,
     Session,
+    timeout,
     TransactionOutcome,
 )
 from adorm.models import (
@@ -158,10 +160,12 @@ __all__ = [
     "cancellation_outcome",
     "client_base",
     "configure",
+    "connection_options",
     "create_session",
     "current_session",
     "driver_method",
     "expose",
     "on_commit",
+    "timeout",
     "__version__",
 ]

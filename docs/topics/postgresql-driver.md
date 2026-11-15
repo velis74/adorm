@@ -348,6 +348,19 @@ A statement error leaves the connection in the pool; a connection error or a can
 ([`is_connection_error()`](/ref/drivers#adorm-drivers-is-connection-error-exc)), and the next request gets a new
 connection.
 
+## Connection options
+
+The driver declares the [connection options](/topics/options) `statement_timeout`, `lock_timeout` and
+`idle_in_transaction_session_timeout`, in seconds, and sets them with the statements of
+[`set_options_sql()`](/ref/drivers#adorm-drivers-sql-set-options-sql-options-local) in one simple-protocol message.
+Values set in `OPTIONS["options"]` (`-c statement_timeout=30s`) are the connection's defaults, to which `RESET`
+and `SET LOCAL … TO DEFAULT` return.
+
+```python
+with adorm.connection_options(statement_timeout=0.5):
+    await Member.objects.count()          # OperationalError, SQLSTATE 57014, after half a second
+```
+
 ## Cancellation
 
 Cancelling the task that awaits an operation cancels the running statement: asyncpg sends PostgreSQL a cancel request

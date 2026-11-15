@@ -73,7 +73,20 @@ except TimeoutError as exc:
     outcome = adorm.cancellation_outcome(exc)      # NOT_STARTED while waiting for a slot, else as above
 ```
 
-It returns `None` for an exception that no cancelled adorm operation raised.
+It returns `None` for an exception that no cancelled adorm operation raised. The same holds for the
+`OperationTimeout` of [`adorm.timeout()`](/topics/options#adorm-timeout), which also tells whether the operation was
+waiting for a slot or executing:
+
+```python
+try:
+    async with adorm.timeout(2):
+        await Member.objects.filter(level="beginner").update(level="intermediate")
+except adorm.OperationTimeout as exc:
+    outcome = adorm.cancellation_outcome(exc)      # NOT_STARTED when exc.phase == "waiting_for_slot"
+```
+
+A set of [connection options](/topics/options) that a cancellation interrupts is sent again with the next operation
+that runs with them; the cancelled operation itself did not run.
 
 Inside an atomic block the outcome describes the request in the open transaction. A cancelled block rolls back, so
 none of its operations takes effect, whatever their outcome.

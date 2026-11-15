@@ -5,12 +5,13 @@ from __future__ import annotations
 import threading
 import weakref
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
 
 from adorm.exceptions import InterfaceError, TransactionManagementError
+from adorm.executor.options import session_options, set_session_options
 from adorm.executor.transactions import active_transaction, Atomic
 from adorm.models.base import Model, set_executor_resolver
 from adorm.models.managers import BoundModel
@@ -86,7 +87,7 @@ class Session:
     A session holds no slot. ``await session.execute(operation)`` runs the operation in the session's active
     transaction of the current context, or else on the configured `Runner`. ``session.Member`` (a model class name)
     and ``session.bind(model)`` return the model bound to this session; ``session.atomic()`` opens a transaction on
-    it.
+    it; ``session.set_options()`` sets its connection options.
     """
 
     __slots__ = ("__weakref__", "session_name", "using")
@@ -156,6 +157,18 @@ class Session:
     def atomic(self) -> Atomic:
         """An `Atomic` block on this session: ``async with session.atomic() as tx:``."""
         return Atomic(self)
+
+    @property
+    def options(self) -> Mapping[str, Any]:
+        """The connection options set on the session (`set_options()`), a read-only mapping."""
+        return session_options(self)
+
+    def set_options(self, **options: Any) -> Mapping[str, Any]:
+        """Replace the session's connection options, the layer between the profile and `adorm.connection_options()`
+        blocks; without arguments it removes them. They belong to the pair ``(using, session_name)``, so a session
+        created again for the pair has them too. Returns the checked options; raises `ValueError` as
+        `adorm.executor.options.check_options()`. Thread-safe."""
+        return set_session_options(self, options)
 
     async def execute(self, operation: Operation) -> Any:
         """Run ``operation``: in the transaction of this session active in the current context, or else on the

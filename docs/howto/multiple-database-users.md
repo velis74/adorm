@@ -142,5 +142,8 @@ privilege on raises `ProgrammingError` with SQLSTATE `42501`.
   `current_setting('app.user_id')`.
 - **A role per tenant**: the same hooks with the tenant's role in the context variable.
 - **Several hooks**: a hook is any callable, so a function that calls `set_role()` and then sets
-  `statement_timeout` combines both. `on_release` then resets both, `RESET ROLE` and `RESET statement_timeout`:
-  `RESET ALL` resets the settings but not the role.
+  `app.user_id` combines both. `on_release` then resets both, `RESET ROLE` and `RESET app.user_id`: `RESET ALL`
+  resets the settings but not the role.
+- **Time limits per user**: `statement_timeout` and `lock_timeout` are [connection options](/topics/options): the
+  profile's `options`, `session.set_options()` or `adorm.connection_options()` set them. A hook may set them too;
+  the slot sets its own values again after each hook.

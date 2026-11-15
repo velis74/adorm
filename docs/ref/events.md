@@ -50,9 +50,9 @@ The request `request_id` failed with `error`, an adorm exception. Kind `"error"`
 
 ### `adorm.events.CancelledEvent(request_id, started)`
 
-The request `request_id` was cancelled at the client's request. `started` is `False` when the request was still
-queued and never reached the driver connection, `True` when it was cancelled in the connection while it ran, so that
-whether it took effect is unknown. Kind `"cancelled"`.
+The request `request_id` was cancelled at the client's request. `started` is `False` when the request's call never
+started: it was still queued, or it was cancelled while the slot set its connection options. It is `True` when it was
+cancelled in the connection while it ran, so that whether it took effect is unknown. Kind `"cancelled"`.
 
 ### `adorm.events.CallbackEvent(name, payload=None)`
 
@@ -88,7 +88,8 @@ outcome.
 ### `adorm.events.ON_ROLLBACK`
 
 `"on_rollback"`: the `CallbackEvent` name a slot delivers when a `rollback` request succeeds, before the request's
-outcome, and when it rolls back a transaction whose client sent no request within the pool's `commit_timeout`.
+outcome, and when it rolls back a transaction whose client sent no request within the lease's
+[`commit_timeout`](/ref/pool#adorm-executor-slotlease).
 
 ### `adorm.events.RESERVED_CALLBACKS`
 
@@ -113,7 +114,7 @@ through it and drops any other event with an error on the `adorm.executor` logge
 | a model's `DoesNotExist` or `MultipleObjectsReturned` | `"class"` plus `"model"`, the model's label |
 | `Error` and its subclasses | also `sqlstate` |
 | `SessionTimeout`, `DeadlockError` | also `timeout` and the sessions as `(using, session_name)` pairs |
-| `OperationTimeout` | also `phase` and `timeout` |
+| `OperationTimeout` | also `phase`, `timeout` and the session as a `(using, session_name)` pair |
 | `ValidationError` | the messages by field, or the list of messages |
 | any other exception | `DatabaseError`, with the message `"<class name>: <message>"` |
 

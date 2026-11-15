@@ -138,7 +138,28 @@ await connection.set_options({"statement_timeout": 5}, local=False)
 # NotSupportedError: unsupported connection options: statement_timeout
 ```
 
-To support options, add their names to `connection_options` and implement `set_options_sync(options, local)`.
+To support options, add their names to `connection_options` and implement `set_options_sync(options, local)`:
+`local=True` limits them to the open transaction (`SET LOCAL`), and a value of `None` resets an option to its
+default. The slot calls it before an operation, only with the options that changed
+([connection options](/topics/options#what-reaches-the-database)). A PostgreSQL driver can build the statements with
+[`set_options_sql()`](/ref/drivers#adorm-drivers-sql-set-options-sql-options-local):
+
+```python
+from adorm.drivers import Capabilities, ThreadedConnection, ThreadedDriver
+from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
+
+
+class PostgresDriver(ThreadedDriver):
+    capabilities = Capabilities(operations={"raw"}, savepoints=True, connection_options=POSTGRESQL_OPTIONS)
+
+
+class PostgresConnection(ThreadedConnection):
+    def set_options_sync(self, options, local):
+        sql = set_options_sql(options, local)   # "SET LOCAL lock_timeout = 500; SET LOCAL statement_timeout TO DEFAULT"
+        if sql:
+            with self.db.cursor() as cursor:
+                cursor.execute(sql)
+```
 
 ## 4. Report events
 

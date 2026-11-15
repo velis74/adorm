@@ -263,6 +263,10 @@ def test_executor_errors_keep_sessions_timeouts_and_phase():
         None,
     )
     assert round_trip(SessionTimeout("plain")).session is None
+    on_session = round_trip(OperationTimeout(phase="waiting_for_slot", operation="op", session=a, timeout=1))
+    assert (on_session.phase, on_session.session, on_session.timeout) == ("waiting_for_slot", a, 1)
+    assert encode_error(OperationTimeout(session=a))["session"] == [a.using, a.session_name]
+    assert "session" not in encode_error(OperationTimeout())
 
 
 def test_validation_errors_keep_their_messages():

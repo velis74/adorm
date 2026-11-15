@@ -1,7 +1,8 @@
-"""The executor: sessions, models bound to a session, transactions and the active transactions of a context, and
-the pools and router that assign slots to sessions."""
+"""The executor: sessions, models bound to a session, transactions and the active transactions of a context, the
+pools and router that assign slots to sessions, connection options and the time limit of operations."""
 
 from adorm.executor.debug import debug_enabled, set_debug
+from adorm.executor.options import connection_options, Timeout, timeout
 from adorm.executor.pool import held_leases, holding, Pool, Router
 from adorm.executor.sessions import (
     BoundModel,
@@ -45,6 +46,7 @@ __all__ = [
     "Session",
     "Slot",
     "SlotLease",
+    "Timeout",
     "Transaction",
     "TransactionOutcome",
     "TransactionRunner",
@@ -52,6 +54,7 @@ __all__ = [
     "atomic",
     "bind_transaction",
     "cancellation_outcome",
+    "connection_options",
     "create_session",
     "current_session",
     "debug_enabled",
@@ -61,4 +64,5 @@ __all__ = [
     "on_commit",
     "set_debug",
     "set_runner",
+    "timeout",
 ]

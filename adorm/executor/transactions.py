@@ -30,6 +30,7 @@ from adorm.exceptions import (
     TransactionManagementError,
 )
 from adorm.executor.debug import debug_enabled
+from adorm.executor.options import resolve_options, ResolvedOptions, tracking
 from adorm.executor.slot import (
     cancellation_outcome,
     CancellationOutcome,
@@ -189,6 +190,9 @@ class Atomic:
 
     While a savepoint is open, operations that other tasks send to an enclosing block wait until it ends.
 
+    The slot sets the database connection options in effect (`resolve_options()`) before the ``BEGIN``, each
+    operation and the ``COMMIT``.
+
     `on_commit()` registers callbacks that run after the transaction commits. The block learns of the commit from the
     slot's ``CallbackEvent(ON_COMMIT)``, the same event in process and from a remote slot.
     """
@@ -325,13 +329,17 @@ class Atomic:
             if block._pending == 0:
                 block._drained.set()
 
-    async def _request(self, method: str, *args: Any) -> Any:
+    async def _request(
+        self, method: str, *args: Any, options: Mapping[str, Any] | None = None, operation: Any = None
+    ) -> Any:
         """Send a request to the slot, counted as pending in this block and its parents; a failure that may leave
-        the transaction aborted marks this block failed."""
+        the transaction aborted marks this block failed. The enclosing `adorm.timeout()` blocks see ``operation``
+        (default: ``method``) executing."""
         lease = cast("SlotLease", self.lease)
         self._hold()
         try:
-            return await lease.call(method, *args)
+            with tracking("executing", method if operation is None else operation, self.session):
+                return await lease.call(method, *args, options=options)
         except BaseException as exc:
             if self._failed is None and _leaves_transaction_failed(exc):
                 self._failed = exc
@@ -339,18 +347,29 @@ class Atomic:
         finally:
             self._unhold()
 
-    async def _wait_for_savepoint(self) -> None:
+    def _options(self) -> ResolvedOptions:
+        """The options in effect for the block's session (`resolve_options()`). Raises `NotSupportedError` for a
+        database option the driver does not declare."""
+        pool = cast("SlotLease", self.lease).pool
+        options = resolve_options(self.session, pool)
+        pool.driver.capabilities.check_options(options.database, pool.driver.name)
+        return options
+
+    async def _wait_for_savepoint(self, operation: Any, timeout: float | None = None) -> None:
         """Wait until no savepoint is open directly inside this block, then check that the block is open. Raises
-        `DeadlockError` when the wait exceeds the pool's ``acquire_timeout``."""
+        `DeadlockError` when the wait exceeds ``timeout``, by default the ``acquire_timeout`` connection option in
+        effect. The enclosing `adorm.timeout()` blocks see ``operation`` waiting for the slot."""
         while True:
             self._check_open()
             child = self._child
             if child is None or child._state == _ENDED:
                 return
-            timeout = cast("SlotLease", self.lease).pool.acquire_timeout
+            if timeout is None:
+                timeout = resolve_options(self.session, cast("SlotLease", self.lease).pool).acquire_timeout
             try:
                 async with asyncio.timeout(timeout):
-                    await child._ended.wait()
+                    with tracking("waiting_for_slot", operation, self.session):
+                        await child._ended.wait()
             except TimeoutError:
                 raise DeadlockError(
                     f"{child!r} stayed open for {timeout:g} s while another task of {self!r} waited for it",
@@ -360,14 +379,18 @@ class Atomic:
                 ) from None
 
     async def execute(self, operation: Operation) -> Any:
-        """Run ``operation`` in this block, after a savepoint open inside it ends. Raises `TransactionClosed` once
-        the block ends and `TransactionManagementError` after an operation of the block failed."""
+        """Run ``operation`` in this block, after a savepoint open inside it ends, with the database connection options
+        in effect (`resolve_options()`). Raises `TransactionClosed` once the block ends,
+        `TransactionManagementError` after an operation of the block failed and `NotSupportedError` for an option
+        the driver does not declare."""
         try:
-            await self._wait_for_savepoint()
+            self._check_open()
+            options = self._options()
+            await self._wait_for_savepoint(operation, options.acquire_timeout)
         except asyncio.CancelledError as exc:
             mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
             raise
-        return await self._request("execute", operation)
+        return await self._request("execute", operation, options=options.database, operation=operation)
 
     def on_commit(self, func: Callback, *, robust: bool = False) -> None:
         """Run ``func()`` after the transaction commits, once the slot has been released, in registration order and
@@ -424,9 +447,11 @@ class Atomic:
         self._state = _CLOSING
         try:
             slot_cm = runner.slot(self.session)
-            lease = await slot_cm.__aenter__()
+            with tracking("waiting_for_slot", "begin", self.session):
+                lease = await slot_cm.__aenter__()
             try:
-                await lease.call("begin")
+                with tracking("executing", "begin", self.session):
+                    await lease.call("begin", options=resolve_options(self.session, lease.pool).database)
             except BaseException:
                 # A begin that failed or was cancelled may have left the connection inside a transaction.
                 await lease.release(discard=True)
@@ -443,7 +468,7 @@ class Atomic:
     async def _begin_savepoint(self, parent: Atomic) -> None:
         self._state = _CLOSING
         try:
-            await parent._wait_for_savepoint()
+            await parent._wait_for_savepoint("savepoint")
             root = parent.root
             self.parent = parent
             self.savepoint = f"adorm_sp_{next(root._ids)}"
@@ -579,8 +604,14 @@ class Atomic:
         try:
             await self._drained.wait()
             failed = self._failed
+            options: Mapping[str, Any] = {}
             if commit and failed is None and lease._aborted is None:
                 failed = await self._discard_forced(forced)
+                if failed is None:
+                    try:
+                        options = self._options().database
+                    except NotSupportedError as exc:
+                        failed = exc
             if lease._aborted is not None:
                 failed = None
                 if commit:
@@ -588,13 +619,15 @@ class Atomic:
             elif commit and failed is None:
                 self._commit_error = None
                 try:
-                    await lease.call("commit")
+                    with tracking("executing", "commit", self.session):
+                        await lease.call("commit", options=options)
                 except BaseException as exc:
                     self._commit_error = exc
                     raise
             else:
                 try:
-                    await lease.call("rollback")
+                    with tracking("executing", "rollback", self.session):
+                        await lease.call("rollback")
                 except Exception:
                     if explicit and failed is None:
                         raise

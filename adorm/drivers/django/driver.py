@@ -19,6 +19,7 @@ from adorm.drivers.django.translation import (
     model_queryset,
     translate,
 )
+from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.exceptions import (
     InterfaceError,
     MultipleObjectsReturned,
@@ -97,10 +98,12 @@ CAPABILITIES = Capabilities(
         "clause.select_for_update.of",
         "clause.select_for_update.no_key",
     },
+    connection_options=POSTGRESQL_OPTIONS,
     savepoints=True,
     cancellation=True,
 )
-"""What `DjangoDriver` supports: `READ_CAPABILITIES`, the writes, row locks and savepoints."""
+"""What `DjangoDriver` supports: `READ_CAPABILITIES`, the writes, row locks, savepoints and the connection options of
+`adorm.drivers.sql.POSTGRESQL_OPTIONS`."""
 
 
 def model_row(instance: Any) -> ModelRow:
@@ -348,6 +351,13 @@ class DjangoConnection(ThreadedConnection):
         atomic = self._atomic
         if atomic is not None:
             self._leave(atomic, rollback=True)
+
+    def set_options_sync(self, options: Any, local: bool) -> None:
+        """Set PostgreSQL's time limits with `set_options_sql()` on a cursor of the connection."""
+        sql = set_options_sql(options, local)
+        if sql:
+            with self.db.cursor() as cursor:
+                cursor.execute(sql)
 
     def cancel_sync(self) -> None:
         # May run before connect_sync() has opened the connection.

@@ -1,6 +1,6 @@
 import pytest
 
-from adorm.drivers.sql import numbered_placeholders, Statement
+from adorm.drivers.sql import numbered_placeholders, POSTGRESQL_OPTIONS, set_options_sql, Statement
 
 
 @pytest.mark.parametrize(
@@ -50,3 +50,35 @@ def test_statement_is_frozen_and_compares_by_value():
     assert Statement("SELECT 1").params == ()
     with pytest.raises(AttributeError):
         statement.sql = "SELECT 2"
+
+
+def test_set_options_sql():
+    assert set_options_sql({"statement_timeout": 5, "lock_timeout": 0.25}, local=False) == (
+        "SET statement_timeout = 5000; SET lock_timeout = 250"
+    )
+    assert set_options_sql({"idle_in_transaction_session_timeout": 0}, local=True) == (
+        "SET LOCAL idle_in_transaction_session_timeout = 0"
+    )
+    assert set_options_sql({"statement_timeout": None}, local=False) == "RESET statement_timeout"
+    assert set_options_sql({"statement_timeout": None}, local=True) == "SET LOCAL statement_timeout TO DEFAULT"
+    assert set_options_sql({"lock_timeout": 0.0001, "statement_timeout": 0.3}, local=False) == (
+        "SET lock_timeout = 1; SET statement_timeout = 300"
+    )
+    assert set_options_sql({}, local=False) == ""
+    assert set_options_sql({"lock_timeout": 2147483.647}, local=False) == "SET lock_timeout = 2147483647"
+    assert {"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"} == POSTGRESQL_OPTIONS
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"work_mem": "1MB"},
+        {"statement_timeout": -1},
+        {"lock_timeout": True},
+        {"lock_timeout": float("inf")},
+        {"statement_timeout": 2147483.648},
+    ],
+)
+def test_set_options_sql_refuses_other_names_and_values(options):
+    with pytest.raises(ValueError, match="work_mem|seconds"):
+        set_options_sql(options, local=False)

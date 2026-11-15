@@ -149,8 +149,8 @@ class ErrorEvent(Event):
 class CancelledEvent(Event):
     """The request ``request_id`` was cancelled at the client's request.
 
-    ``started`` is ``False`` when it was still queued, so it never reached the driver connection, and ``True`` when it
-    was cancelled in the connection while running.
+    ``started`` is ``False`` when the request's call never started: it was still queued, or it was cancelled while
+    the slot set its connection options. It is ``True`` when it was cancelled in the connection while running.
     """
 
     kind: ClassVar[str] = "cancelled"
@@ -282,7 +282,10 @@ def encode_error(error: BaseException) -> dict[str, Any]:
         data["sqlstate"] = error.sqlstate
     if isinstance(error, (exceptions.SessionTimeout, exceptions.OperationTimeout)) and error.timeout is not None:
         data["timeout"] = error.timeout
-    if isinstance(error, exceptions.SessionTimeout) and _session_key(error.session) is not None:
+    if (
+        isinstance(error, (exceptions.SessionTimeout, exceptions.OperationTimeout))
+        and _session_key(error.session) is not None
+    ):
         data["session"] = _session_key(error.session)
     if isinstance(error, exceptions.DeadlockError):
         data["held_sessions"] = [k for k in map(_session_key, error.held_sessions) if k is not None]
@@ -315,7 +318,7 @@ def decode_error(data: Mapping[str, Any]) -> BaseException:
     if issubclass(cls, exceptions.SessionTimeout):
         return cls(message, session=_session(data.get("session")), timeout=data.get("timeout"))
     if issubclass(cls, exceptions.OperationTimeout):
-        return cls(message, phase=data.get("phase"), timeout=data.get("timeout"))
+        return cls(message, phase=data.get("phase"), session=_session(data.get("session")), timeout=data.get("timeout"))
     return cls(message)
 
 
@@ -385,6 +388,11 @@ class EventBus:
         return called
 
 
+# Cancel messages of a request future settled by a CancelledEvent.
+CANCELLED_BEFORE_START = "the request was cancelled before it started"
+_CANCELLED_RUNNING = "the request was cancelled while it ran"
+
+
 def _settle(future: asyncio.Future, event: Event) -> None:
     if future.done():
         return
@@ -393,7 +401,7 @@ def _settle(future: asyncio.Future, event: Event) -> None:
     elif isinstance(event, ErrorEvent):
         future.set_exception(event.error)
     else:
-        future.cancel(f"request {event.request_id!r} was cancelled")  # type: ignore[attr-defined]
+        future.cancel(_CANCELLED_RUNNING if event.started else CANCELLED_BEFORE_START)  # type: ignore[attr-defined]
 
 
 class EventChannel:

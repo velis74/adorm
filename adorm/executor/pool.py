@@ -6,7 +6,6 @@ import asyncio
 import inspect
 import itertools
 import logging
-import math
 
 from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator
@@ -16,6 +15,7 @@ from typing import Any, cast, TYPE_CHECKING
 
 from adorm.events import EventBus
 from adorm.exceptions import DeadlockError, InterfaceError, SessionTimeout
+from adorm.executor.options import check_profile_options, check_timeout, resolve_options, ResolvedOptions, tracking
 from adorm.executor.slot import (
     CancellationOutcome,
     carry_cancellation,
@@ -64,13 +64,6 @@ def holding(lease: SlotLease) -> Iterator[SlotLease]:
         _held.reset(token)
 
 
-def check_timeout(value: Any, what: str) -> float:
-    """``value`` as a float; `ValueError` unless it is a positive, finite number of seconds."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0 or math.isinf(value):
-        raise ValueError(f"{what} is a positive, finite number of seconds, not {value!r}")
-    return float(value)
-
-
 def check_hook(hook: Any, what: str, profile_name: str, mode: str | None) -> None:
     """Raise `TypeError` unless ``hook`` is ``None`` or a callable that a driver of ``mode`` can call: a threaded
     driver calls hooks on the connection's thread, so they are plain functions."""
@@ -114,9 +107,14 @@ class Pool:
     request before it rolls the transaction back and leaves the pool; ``None`` sets no limit.
 
     The profile's ``on_acquire`` and ``on_release`` attributes, when present and not ``None``, are its hooks: the
-    router calls ``on_acquire`` when it assigns a slot to a session, the slot calls ``on_release`` when the session
-    returns it usable. ``release_timeout`` is the number of seconds ``on_release`` may run before the slot leaves
-    the pool instead.
+    router calls ``on_acquire`` when it assigns a slot to a session, after setting the session's database connection
+    options, the slot calls ``on_release`` when the session returns it usable. After either hook the slot sets its
+    options again before the next request (`Slot`). ``release_timeout`` is the number of seconds ``on_release`` may
+    run before the slot leaves the pool instead.
+
+    The profile's ``options`` attribute, when present and not ``None``, holds its database connection options, the
+    first layer of `adorm.connection_options()`; ``options`` is that mapping, checked. An option the driver does
+    not declare raises `NotSupportedError` and ``acquire_timeout`` or ``commit_timeout`` among them `ValueError`.
 
     A pool serves one event loop; its slots are acquired through a `Router`. ``events`` receives the callbacks and
     backend events a connection emits while no lease holds its slot.
@@ -143,6 +141,10 @@ class Pool:
         check_hook(getattr(profile, "connect", None), "connect", profile.name, driver.mode)
         self.on_acquire = self._hook(profile, "on_acquire")
         self.on_release = self._hook(profile, "on_release")
+        self.options = check_profile_options(getattr(profile, "options", None), profile.name)
+        driver.capabilities.check_options(
+            [name for name, value in self.options.items() if value is not None], driver.name
+        )
         self.events = EventBus()
         self.closed = False
         self.router: Router | None = None
@@ -442,12 +444,21 @@ class Router:
     async def acquire(self, session: Session, *, timeout: float | None = None) -> SlotLease:
         """Acquire a slot of ``session.using``'s pool for ``session``; release it with `SlotLease.release()`.
 
-        ``timeout`` (seconds) defaults to the pool's ``acquire_timeout``. Raises `SessionTimeout` or
-        `DeadlockError`, `InterfaceError` when the pool is closed, and the driver's error when opening a
-        connection fails for another reason than a refusal.
+        ``timeout`` (seconds) defaults to the ``acquire_timeout`` connection option in effect (`resolve_options()`:
+        the pool's ``acquire_timeout`` unless the session or a `connection_options()` block sets one). The lease's
+        ``commit_timeout`` is the ``commit_timeout`` option in effect. Raises `NotSupportedError` before waiting for a
+        database option in effect that the driver does not declare, `SessionTimeout` or `DeadlockError`,
+        `InterfaceError` when the pool is closed, and the driver's error when opening a connection fails for another
+        reason than a refusal.
         """
         pool = await self.get_pool(session.using)
-        timeout = pool.acquire_timeout if timeout is None else check_timeout(timeout, "timeout")
+        return await self._acquire(pool, session, timeout, resolve_options(session, pool))
+
+    async def _acquire(
+        self, pool: Pool, session: Session, timeout: float | None, options: ResolvedOptions
+    ) -> SlotLease:
+        timeout = options.acquire_timeout if timeout is None else check_timeout(timeout, "timeout")
+        pool.driver.capabilities.check_options(options.database, pool.driver.name)
         if pool.closed:
             raise InterfaceError(f"pool {pool.name!r} is closed")
         task = asyncio.current_task()
@@ -462,17 +473,24 @@ class Router:
         if slot is None:
             slot = await self._wait(pool, session, task, deadline, timeout, front=refused)
         lease = slot._lease_to(session, task)
+        lease.commit_timeout = options.commit_timeout
         if pool.on_acquire is not None:
-            await self._on_acquire(pool, lease, deadline, timeout)
+            await self._on_acquire(pool, lease, deadline, timeout, options)
         return lease
 
-    async def _on_acquire(self, pool: Pool, lease: SlotLease, deadline: float, timeout: float) -> None:
-        """Run the profile's ``on_acquire`` hook within the acquisition's deadline; on failure discard the slot."""
-        connection = cast("DriverConnection", lease.slot.connection)
+    async def _on_acquire(
+        self, pool: Pool, lease: SlotLease, deadline: float, timeout: float, options: ResolvedOptions
+    ) -> None:
+        """Set the session's database options, then run the profile's ``on_acquire`` hook, within the acquisition's
+        deadline; on failure discard the slot."""
+        slot = lease.slot
+        connection = cast("DriverConnection", slot.connection)
         hook_timeout = asyncio.timeout_at(deadline)
         try:
             async with hook_timeout:
+                await slot.set_options_for(options.database)
                 await connection.call_hook(pool.on_acquire, pool.profile, lease.session)
+            slot.forget_options()
         except BaseException as exc:
             # The hook may have left the connection in any state.
             await lease.release(discard=True)
@@ -481,9 +499,15 @@ class Router:
                 raise self._timeout(lease.session, timeout, message) from None
             raise
 
-    async def _acquire_bound(self, session: Session, timeout: float | None) -> SlotLease:
+    async def _acquire_bound(
+        self, session: Session, timeout: float | None, pool: Pool | None = None, options: ResolvedOptions | None = None
+    ) -> SlotLease:
         """`acquire()` a lease that only the acquiring task releases, so it counts for immediate deadlocks."""
-        lease = await self.acquire(session, timeout=timeout)
+        if pool is None:
+            pool = await self.get_pool(session.using)
+        if options is None:
+            options = resolve_options(session, pool)
+        lease = await self._acquire(pool, session, timeout, options)
         lease._bound = True
         return lease
 
@@ -636,20 +660,27 @@ class Router:
     async def run(self, session: Session, operation: Operation) -> Any:
         """Acquire a slot for ``session``, execute ``operation``, release the slot and return the result.
 
-        An operation the pool's driver does not support raises `NotSupportedError` before a slot is acquired
-        (`Driver.check()`). A cancellation carries the operation's `CancellationOutcome`, final when the
-        ``CancelledError`` is raised: `NOT_STARTED` while it waits for a slot, else that of `SlotLease.call()`."""
+        An operation the pool's driver does not support, or a database connection option in effect that it does not
+        declare, raises `NotSupportedError` before a slot is acquired (`Driver.check()`). The slot sets the database
+        options in effect (`resolve_options()`) before it executes the operation. A cancellation carries the
+        operation's `CancellationOutcome`, final when the ``CancelledError`` is raised: `NOT_STARTED` while it waits
+        for a slot, else that of `SlotLease.call()`. The enclosing `adorm.timeout()` blocks see the operation in
+        the phase ``"waiting_for_slot"``, then ``"executing"``."""
         try:
             pool = await self.get_pool(session.using)
             pool.driver.check(operation)
-            lease = await self._acquire_bound(session, None)
+            options = resolve_options(session, pool)
+            pool.driver.capabilities.check_options(options.database, pool.driver.name)
+            with tracking("waiting_for_slot", operation, session):
+                lease = await self._acquire_bound(session, None, pool, options)
         except asyncio.CancelledError as exc:
             mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
             raise
         cancelled: asyncio.CancelledError | None = None
         outcome = CancellationOutcome.UNKNOWN
         try:
-            result = await lease.call("execute", operation)
+            with tracking("executing", operation, session):
+                result = await lease.call("execute", operation, options=options.database)
             outcome = CancellationOutcome.SUCCEEDED
         except asyncio.CancelledError as exc:
             cancelled = exc

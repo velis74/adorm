@@ -32,7 +32,7 @@ the names it covers:
 | [Sessions](./sessions) | `create_session`, `current_session`, `Session`, `BoundModel`, the runner (`adorm.executor`) |
 | [Pool and router](./pool) | `Pool`, `Router`, slots, leases and their request queues and event channels, held slots (`adorm.executor`) |
 | [Transactions](./transactions) | `atomic`, `Atomic`, `on_commit`, the active transactions of a context (`adorm.executor`) |
-| Connection options and timeouts | `connection_options`, `timeout` |
+| [Connection options and timeouts](./options) | `connection_options`, `timeout`, `Timeout`, the layers of options (`adorm.executor.options`) |
 | [Exceptions](./exceptions) | the exception hierarchy |
 | [Settings](./settings) | `configure`, connection profiles, pool settings, run-time profiles (`adorm.settings`) |
 | [Drivers](./drivers) | the driver contract (`adorm.drivers`), the Django driver and its query translation (`adorm.drivers.django`, `adorm.drivers.django.translation`), the native PostgreSQL driver (`adorm.drivers.asyncpg`, its writes in `adorm.drivers.asyncpg.writes`), SQL statements (`adorm.drivers.sql`), Django's compiler for asyncpg (`adorm.drivers.asyncpg.compiler`) |

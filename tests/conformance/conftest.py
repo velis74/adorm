@@ -27,12 +27,13 @@ async def driver(conformance_driver, demo_data):
 
 @pytest.fixture
 async def make_router(driver):
-    """``make_router(**pool)`` routes the profile ``default`` to one pool of the driver's slots and makes the router
-    adorm's runner; the routers are closed afterwards."""
+    """``make_router(profile=None, **pool)`` routes the profile ``default`` (built with the keyword arguments in
+    ``profile``) to one pool of the driver's slots and makes the router adorm's runner; the routers are closed
+    afterwards."""
     routers = []
 
-    def make(**pool) -> Router:
-        router = Router([Pool(driver, ConnectionProfile("default", driver), **pool)])
+    def make(*, profile: dict | None = None, **pool) -> Router:
+        router = Router([Pool(driver, ConnectionProfile("default", driver, **(profile or {})), **pool)])
         routers.append(router)
         set_runner(router)
         return router

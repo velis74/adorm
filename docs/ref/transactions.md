@@ -30,13 +30,15 @@ block is entered once; entering it again raises `TransactionManagementError`.
 **Entering** (`__aenter__`, returns the block itself):
 
 - When the session has no active transaction in the context, the block acquires a slot through the runner's
-  `slot(session)` ([`Router.slot()`](/ref/pool#slot-session-timeout-none)) and sends `begin`. The acquisition raises
-  `SessionTimeout` or `DeadlockError` here. A runner that is not a
+  `slot(session)` ([`Router.slot()`](/ref/pool#slot-session-timeout-none)) and sends `begin` with the database
+connection options in effect, which the slot sets (`SET`, `RESET`) before the `BEGIN`. The acquisition raises
+  `SessionTimeout` or `DeadlockError` here, after the `acquire_timeout` [connection option](/ref/options) in effect;
+  the lease's `commit_timeout` is the `commit_timeout` option in effect at entry. A runner that is not a
   [`TransactionRunner`](/ref/sessions#adorm-executor-transactionrunner), or no runner, raises `InterfaceError`. When
   `begin` fails or is cancelled, the slot is discarded and the error propagates.
 - When the active transaction of the session is an `Atomic`, the block is a savepoint of it, on the same slot. It
-  waits until a savepoint that another task opened in the same enclosing block ends; after the pool's
-  `acquire_timeout` the wait raises `DeadlockError` with the session in `held_sessions`. An enclosing block that has
+  waits until a savepoint that another task opened in the same enclosing block ends; after the `acquire_timeout`
+  connection option in effect the wait raises `DeadlockError` with the session in `held_sessions`. An enclosing block that has
   ended raises `TransactionClosed`; one with a failed operation raises `TransactionManagementError`. A driver
   without savepoints raises `NotSupportedError`.
 - Any other active transaction ([`bind_transaction()`](#adorm-executor-bind-transaction-session-transaction)) raises
@@ -59,7 +61,9 @@ savepoint it closed (when it would commit or release), and then:
 | while `commit()` or `rollback()` of another task runs | waits for it; a normal exit raises its error | waits for it; a normal exit raises its error |
 | normal, after the enclosing block closed it | | raises `TransactionClosed` |
 
-A failing `commit` or `release_savepoint` propagates. A failing rollback on an exit with an exception is logged and
+The `commit` carries the database connection options in effect where the block ends, which the slot sets
+(`SET LOCAL`) before the `COMMIT`; with an option the driver does not declare the transaction rolls back instead and
+the exit raises `TransactionManagementError` from the `NotSupportedError`. A failing `commit` or `release_savepoint` propagates. A failing rollback on an exit with an exception is logged and
 the block's exception propagates. A failing rollback to a savepoint closed by the end is logged and the block rolls
 back instead (to its own savepoint), as after a failed operation. A transaction block returns its slot to the pool at the end; a slot whose commit
 or rollback did not succeed leaves the pool. A savepoint whose end failed or was cancelled marks the enclosing
@@ -95,16 +99,21 @@ except asyncio.CancelledError:
 
 #### `async execute(operation)`
 
-Runs `operation` on the transaction's slot and returns its result. While a savepoint block of another task is open
-directly inside this block, it first waits until that savepoint ends; after the pool's `acquire_timeout` it raises
-`DeadlockError`. Raises `TransactionClosed` once the block (or an enclosing block) is closed or the slot aborted the
+Runs `operation` on the transaction's slot and returns its result, with the database connection options in effect
+([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)), which the slot sets with
+`SET LOCAL`. An option the driver does not declare raises `NotSupportedError` before anything is sent. While a
+savepoint block of another task is open directly inside this block, it first waits until that savepoint ends; after
+the `acquire_timeout` connection option in effect it raises `DeadlockError`. Raises `TransactionClosed` once the block (or an enclosing block) is closed or the slot aborted the
 transaction, and `TransactionManagementError` after an operation of the block failed. An operation that fails with
 a `DatabaseError` or `InterfaceError`, or is cancelled after it reached the slot's connection, marks the block as
 failed. A `NotSupportedError` without `sqlstate` and `original` (a capability check on the client side) and a
 cancellation of an operation still queued do not. A cancellation while the operation waits for a savepoint carries
 [`CancellationOutcome.NOT_STARTED`](/ref/pool#adorm-cancellationoutcome); a cancellation after the request was sent
-carries the outcome [`SlotLease.call()`](/ref/pool#async-call-method-args) gives it. Operations of a session's bound models reach the block
-through [`Session.execute()`](/ref/sessions#async-execute-operation).
+carries the outcome [`SlotLease.call()`](/ref/pool#async-call-method-args-options-none) gives it. Enclosing
+[`adorm.timeout()`](/ref/options#adorm-timeout-delay) blocks see the operation `"waiting_for_slot"` while it waits for
+the savepoint, then `"executing"`; they see the block's own requests by name (`"begin"`, `"savepoint"`, `"commit"`,
+`"rollback"` …). Operations of a session's bound models reach the block through
+[`Session.execute()`](/ref/sessions#async-execute-operation).
 
 #### `async commit()`
 

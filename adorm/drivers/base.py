@@ -66,7 +66,8 @@ class Profile(Protocol):
     ``connect``, when not ``None``, opens the target's connection in place of the driver's default:
     ``connect(profile)`` returns the target's connection; an async driver awaits the result. The pool also reads the
     optional ``on_acquire`` and ``on_release`` attributes, when present and not ``None``: hooks called as
-    ``hook(connection, profile, session)`` with the connection's `DriverConnection.target`.
+    ``hook(connection, profile, session)`` with the connection's `DriverConnection.target`, and the optional
+    ``options`` attribute, the profile's database connection options.
     """
 
     @property
@@ -222,7 +223,8 @@ class DriverConnection(ABC):
         await self._rollback_to_savepoint(name)
 
     async def set_options(self, options: Mapping[str, Any], local: bool) -> None:
-        """Set connection options; ``local`` limits them to the open transaction (``SET LOCAL``)."""
+        """Set connection options; ``local`` limits them to the open transaction (``SET LOCAL``). A value of ``None``
+        resets the option to its default."""
         self.driver.capabilities.check_options(options, self.driver.name)
         await self._set_options(dict(options), local)
 
@@ -264,7 +266,8 @@ class DriverConnection(ABC):
         raise NotSupportedError("savepoints are not supported")
 
     async def _set_options(self, options: dict[str, Any], local: bool) -> None:  # noqa: ARG002 - subclasses use it
-        """Set supported connection options. Raises `NotSupportedError` for any option unless overridden."""
+        """Set supported connection options, ``None`` values to their default. Raises `NotSupportedError` for any
+        option unless overridden."""
         if options:
             raise NotSupportedError(f"unsupported connection options: {', '.join(sorted(options))}")
 
@@ -482,7 +485,8 @@ class ThreadedConnection(DriverConnection):
         raise NotSupportedError("savepoints are not supported")
 
     def set_options_sync(self, options: Mapping[str, Any], local: bool) -> None:  # noqa: ARG002 - subclasses use it
-        """Set connection options. Raises `NotSupportedError` for any option unless overridden."""
+        """Set connection options, ``None`` values to their default. Raises `NotSupportedError` for any option unless
+        overridden."""
         if options:
             raise NotSupportedError(f"unsupported connection options: {', '.join(sorted(options))}")
 

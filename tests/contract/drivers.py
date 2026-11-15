@@ -24,6 +24,7 @@ from adorm.drivers import (
     ThreadedConnection,
     ThreadedDriver,
 )
+from adorm.drivers.sql import set_options_sql
 from adorm.events import BackendEvent, Emit, Event
 from adorm.exceptions import InterfaceError, OperationalError, wrap_driver_error
 
@@ -87,12 +88,6 @@ def quote(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def option_value(name: str, value: Any) -> str:
-    if name in OPTIONS:
-        return f"{round(float(value) * 1000)}ms"
-    return str(value)
-
-
 # Django ORM, threaded
 
 
@@ -149,8 +144,8 @@ class DjangoConnection(ThreadedConnection):
         self._run(f"ROLLBACK TO SAVEPOINT {quote(name)}")
 
     def set_options_sync(self, options: Mapping[str, Any], local: bool) -> None:
-        for name, value in options.items():
-            self._run("SELECT set_config(%s, %s, %s)", (name, option_value(name, value), local))
+        if options:
+            self._run(set_options_sql(options, local))
 
     def cancel_sync(self) -> None:
         # Runs on another thread, possibly while connect_sync() has not yet set self.pg.
@@ -254,8 +249,8 @@ class AsyncpgConnection(DriverConnection):
         await self._run(f"ROLLBACK TO SAVEPOINT {quote(name)}")
 
     async def _set_options(self, options: dict[str, Any], local: bool) -> None:
-        for name, value in options.items():
-            await self._run("SELECT set_config($1, $2, $3)", (name, option_value(name, value), local))
+        if options:
+            await self._guard(self.conn.execute(set_options_sql(options, local)))
 
     def cancel(self) -> None:
         def cancel_statement() -> None:

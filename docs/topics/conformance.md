@@ -82,6 +82,25 @@ Coverage tests fail when:
 | a connection option the driver declares | `set_options()` accepts the value in `OPTIONS` and the connection executes the next operation |
 | a connection option the driver does not declare | `NotSupportedError` naming it, with `local` false and true; the connection stays usable |
 
+`tests/conformance/test_options.py` runs every driver through [connection options](/topics/options) and
+`adorm.timeout()` on the executor, each test repeated. A blocked operation waits on the driver's `Blocker`
+(below); "waits" means it still waits after twice the limit the test set:
+
+| Test | What holds |
+|---|---|
+| a blocked read in a `connection_options(lock_timeout=…)` or `(statement_timeout=…)` block | `OperationalError` with SQLSTATE `55P03` or `57014`; after the block the same slot waits again |
+| a session's `set_options(lock_timeout=…)` | every operation of the session is limited; a block with `lock_timeout=None` lifts the limit |
+| a profile's `options={"lock_timeout": …}` | every operation is limited; a block or a session's `set_options()` with `lock_timeout=None` lifts the limit, and it returns when they end |
+| `idle_in_transaction_session_timeout` left on the only slot by one session, then another session's transaction that idles past it before its first operation | the transaction runs and commits: its `BEGIN` reset the option |
+| a limited read in a savepoint that rolls back | the enclosing transaction waits again |
+| a limit set inside a released savepoint, then lifted inside the same transaction | the transaction waits again (`SET LOCAL … TO DEFAULT` was sent) |
+| a limit set inside a committed transaction | the next operation on the slot waits |
+| `current_setting()` read by an `on_release` hook after operations with two options, in a transaction inside the same block, and with none | the options of the block after the operation and after the transaction, the defaults after an operation without options |
+| an `on_acquire` hook that sets `statement_timeout` and an `on_release` hook that runs `RESET ALL`, around operations with and without a block | the block's value inside the block, the hook's value without one |
+| an option the driver does not declare | `NotSupportedError` naming it before a slot is opened; `None` values run |
+| `adorm.timeout()` around a blocked operation | `OperationTimeout` with `phase="executing"`, the operation and the session; the pool serves the next operation |
+| `adorm.timeout()` while the only slot is held | `OperationTimeout` with `phase="waiting_for_slot"` and `CancellationOutcome.NOT_STARTED`; nothing stays queued |
+
 ## Python code of the target ORM
 
 `tests/conformance/test_driver_code.py` runs every driver through the Python code of the target ORM that a write

@@ -232,7 +232,7 @@ methods), no direct call reaches the test's connection; the installed contract d
 | `savepoint(name)` | `SAVEPOINT` with the given name | `SAVEPOINT` | `begin_nested()`; the driver keeps a map from name to `NestedTransaction` |
 | `release_savepoint(name)` | `RELEASE SAVEPOINT` | `RELEASE SAVEPOINT` | `NestedTransaction.commit()` |
 | `rollback_to_savepoint(name)` | `ROLLBACK TO SAVEPOINT` | `ROLLBACK TO SAVEPOINT` | `NestedTransaction.rollback()` |
-| `set_options(options, local)` | `set_config(name, value, local)` on a cursor | `set_config()` | `set_config()` through `exec_driver_sql()` |
+| `set_options(options, local)` | [`set_options_sql()`](/ref/drivers#adorm-drivers-sql-set-options-sql-options-local) on a cursor: `SET` / `RESET`, or `SET LOCAL` / `SET LOCAL … TO DEFAULT` | the same statements in one simple-protocol message | `set_config()` through `exec_driver_sql()` |
 
 ### Cancellation
 

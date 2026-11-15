@@ -21,6 +21,9 @@ class Profile:
     alias: str = "default"
     params: Mapping[str, Any] = field(default_factory=dict)
     connect: Callable[[Any], Any] | None = None
+    options: Mapping[str, Any] = field(default_factory=dict)
+    on_acquire: Callable[..., Any] | None = None
+    on_release: Callable[..., Any] | None = None
 
 
 async def _wait(gate: asyncio.Event, finish_when_cancelled: bool) -> None:
@@ -58,7 +61,8 @@ class FakeConnection(DriverConnection):
     """``close_gate`` holds closing. ``gates`` holds a transaction call (``"commit"``, ``"savepoint"`` …) until the
     event is set; a call named in ``uncancellable`` keeps waiting when cancelled. ``errors`` makes it raise.
     ``entered`` maps a transaction call to an event set when it starts; ``finished`` lists the calls that ran to
-    completion."""
+    completion. ``option_calls`` lists the ``set_options()`` calls as ``(options, local)``; ``gates``, ``errors``,
+    ``entered`` and ``uncancellable`` take ``"set_options"`` too."""
 
     def __init__(self, driver: FakeDriver, emit: Emit, number: int) -> None:
         super().__init__(driver)
@@ -76,6 +80,7 @@ class FakeConnection(DriverConnection):
         self.entered: dict[str, asyncio.Event] = {}
         self.uncancellable: set[str] = set()
         self.finished: list[str] = []
+        self.option_calls: list[tuple[dict[str, Any], bool]] = []
 
     async def _execute(self, operation: Op) -> Any:
         self.calls.append(("execute", operation.name))
@@ -129,6 +134,16 @@ class FakeConnection(DriverConnection):
     async def _rollback_to_savepoint(self, name: str) -> None:
         await self._transaction_call("rollback_to_savepoint", name)
 
+    async def _set_options(self, options: dict[str, Any], local: bool) -> None:
+        self.option_calls.append((dict(options), local))
+        self.entered.setdefault("set_options", asyncio.Event()).set()
+        gate = self.gates.get("set_options")
+        if gate is not None:
+            await _wait(gate, "set_options" in self.uncancellable)
+        error = self.errors.get("set_options")
+        if error is not None:
+            raise error
+
     def cancel(self) -> None:
         pass
 
@@ -168,3 +183,12 @@ class FakeDriver(Driver):
         connection = FakeConnection(self, emit, len(self.connections) + 1)
         self.connections.append(connection)
         return connection
+
+
+class OptionsDriver(FakeDriver):
+    """`FakeDriver` that declares the connection options ``statement_timeout``, ``lock_timeout`` and ``work_mem``."""
+
+    name = "fake-options"
+    capabilities = Capabilities(
+        operations={"op"}, connection_options={"statement_timeout", "lock_timeout", "work_mem"}, savepoints=True
+    )

@@ -10,12 +10,15 @@ import itertools
 import logging
 
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, cast, TYPE_CHECKING
 
 from adorm.events import (
     BackendEvent,
     CallbackEvent,
+    CANCELLED_BEFORE_START,
     CancelledEvent,
     ErrorEvent,
     Event,
@@ -95,7 +98,13 @@ class _Outcome:
 
     def _settle(self, future: asyncio.Future) -> None:
         if future.cancelled():
-            return  # a CancelledEvent: the request was cancelled while it ran
+            # A CancelledEvent: the request never started, or was cancelled while it ran.
+            try:
+                future.result()
+            except asyncio.CancelledError as cancelled:
+                if cancelled.args == (CANCELLED_BEFORE_START,):
+                    self.value = CancellationOutcome.NOT_STARTED
+            return
         error = future.exception()  # also marks the exception as retrieved
         self.value = CancellationOutcome.SUCCEEDED if error is None else failure_outcome(error)
 
@@ -150,17 +159,27 @@ def cancelled_before_start(exc: BaseException) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Request:
-    """A call of the driver connection's ``method`` with ``args``; its outcome event carries ``request_id``."""
+    """A call of the driver connection's ``method`` with ``args``; its outcome event carries ``request_id``.
+
+    ``options``, when not ``None``, are the database connection options the call runs with: before the call the slot
+    sets those that differ from the values it set on the connection and resets to the default those it set that
+    ``options`` lacks (`Slot`).
+    """
 
     method: str
     args: tuple[Any, ...] = ()
     request_id: Any = field(default_factory=lambda: next(_request_ids))
+    options: Mapping[str, Any] | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.method not in REQUEST_METHODS:
             raise ValueError(f"unknown request method {self.method!r}; one of {', '.join(sorted(REQUEST_METHODS))}")
         if not isinstance(self.args, tuple):
             object.__setattr__(self, "args", tuple(self.args))
+        if self.options is not None:
+            if not isinstance(self.options, Mapping):
+                raise TypeError(f"request options are a mapping or None, not {type(self.options).__name__}")
+            object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
 
 
 class RequestQueue:
@@ -202,7 +221,9 @@ class SlotLease:
     the outcome of each request (`ResultEvent`, `ErrorEvent` or `CancelledEvent`) and the callbacks and backend
     events the slot and its connection deliver while the lease is held, except what the channel interprets itself:
     the outcome of a request sent with `call()` is returned, and a callback with a handler registered with
-    ``channel.on()`` runs it. ``owner`` is the task that acquired the lease.
+    ``channel.on()`` runs it. ``owner`` is the task that acquired the lease. ``commit_timeout`` is the number of
+    seconds the slot waits for the next request of the lease inside a transaction (``None`` for no limit); it
+    starts as the pool's and `Router.acquire()` sets the ``commit_timeout`` connection option in effect.
     """
 
     __slots__ = (
@@ -210,6 +231,7 @@ class SlotLease:
         "_bound",
         "_released",
         "channel",
+        "commit_timeout",
         "owner",
         "pool",
         "requests",
@@ -224,6 +246,7 @@ class SlotLease:
         self.owner = owner
         self.requests = RequestQueue(self)
         self.channel = EventChannel(slot.pool.events)
+        self.commit_timeout: float | None = slot.pool.commit_timeout
         self._released = False
         self._aborted: str | None = None
         self._bound = False  # released only by ``owner``
@@ -240,7 +263,7 @@ class SlotLease:
 
     @property
     def aborted(self) -> bool:
-        """Whether the slot rolled back the lease's transaction and ended the lease (the pool's ``commit_timeout``)."""
+        """Whether the slot rolled back the lease's transaction and ended the lease (``commit_timeout``)."""
         return self._aborted is not None
 
     def __repr__(self) -> str:
@@ -259,15 +282,15 @@ class SlotLease:
             raise TypeError(f"a lease takes Request objects, not {type(request).__name__}")
         self.slot._enqueue(self, request)
 
-    async def call(self, method: str, *args: Any) -> Any:
-        """Send ``Request(method, args)`` and return its result or raise its error.
+    async def call(self, method: str, *args: Any, options: Mapping[str, Any] | None = None) -> Any:
+        """Send ``Request(method, args, options=options)`` and return its result or raise its error.
 
         Cancelling the caller cancels the request: a queued one never runs, a running one is cancelled in the
         driver connection. The raised ``CancelledError`` carries the request's `CancellationOutcome`
         (`cancellation_outcome()`). A `CancelledEvent` for a request the caller did not cancel raises
         `InterfaceError`. A lease that is released raises `InterfaceError`, one the slot aborted `TransactionClosed`.
         """
-        request = Request(method, args)
+        request = Request(method, args, options=options)
         self._check_open()
         future = self.channel.expect(request.request_id)
         try:
@@ -319,6 +342,8 @@ class SlotLease:
 
 _IDLE, _LEASED, _FINISHING, _CLOSED = "idle", "leased", "finishing", "closed"
 
+_UNKNOWN = object()  # an option value a failed or cancelled set_options() may or may not have set
+
 
 class Slot:
     """An exclusive channel to one driver connection of a pool.
@@ -330,10 +355,18 @@ class Slot:
     go to the current lease's channel, or to the pool's `EventBus` while no lease holds the slot; only `CallbackEvent`
     and `BackendEvent` values are accepted, and a `CallbackEvent` with a name in `RESERVED_CALLBACKS` is dropped.
 
-    When the lease is inside a transaction and no request arrives within the pool's ``commit_timeout``, the slot
+    When the lease is inside a transaction and no request arrives within the lease's ``commit_timeout``, the slot
     rolls the transaction back, delivers ``CallbackEvent(ON_ROLLBACK)``, ends the lease (later requests raise
     `TransactionClosed`) and leaves the pool. A rollback that does not finish within ``commit_timeout`` either is
     cancelled in the driver connection.
+
+    The slot remembers the database options it set on the connection. Before a request with ``options`` it calls
+    the connection's ``set_options()`` with the options whose value differs from the remembered one, ``None`` for
+    each remembered option the request lacks, and nothing when all match. Outside a transaction it sets them for the
+    connection (``local=False``); inside one with ``local=True`` (``SET LOCAL``), remembered until the transaction
+    ends and restored by a rollback to a savepoint. An option whose setting failed or was cancelled is set again by
+    the next request with options. After a profile hook has run on the connection, every remembered option counts as
+    unknown and is set again, since the hook may have set or reset it.
     """
 
     _ids = itertools.count(1)
@@ -349,6 +382,9 @@ class Slot:
         self._running: tuple[Request, asyncio.Task] | None = None
         self._cancelled: Request | None = None
         self._in_transaction = False
+        self._options: dict[str, Any] = {}  # set for the connection
+        self._local_options: dict[str, Any] = {}  # set for the open transaction
+        self._savepoint_options: list[tuple[str, dict[str, Any]]] = []
         self._idle = asyncio.Event()
         self._idle.set()
         self._server: asyncio.Task | None = None
@@ -457,7 +493,86 @@ class Slot:
         lease = self.lease
         if not self._in_transaction or lease is None or lease.released:
             return None
-        return self.pool.commit_timeout
+        return lease.commit_timeout
+
+    @property
+    def options(self) -> Mapping[str, Any]:
+        """The database options in effect on the connection by what the slot set: those it set for the connection,
+        replaced inside a transaction by those it set for the transaction. ``None`` stands for the database's
+        default; an option whose setting failed is left out."""
+        current = {**self._options, **self._local_options} if self._in_transaction else dict(self._options)
+        return MappingProxyType({name: value for name, value in current.items() if value is not _UNKNOWN})
+
+    def _option_changes(self, desired: Mapping[str, Any]) -> dict[str, Any]:
+        """The options ``set_options()`` must set so that the connection runs with ``desired``."""
+        if self._in_transaction:
+            current = {**self._options, **self._local_options}
+        else:
+            current = self._options
+        names = sorted(desired.keys() | current.keys())
+        return {
+            name: desired.get(name)
+            for name in names
+            if current.get(name) is _UNKNOWN or current.get(name) != desired.get(name)
+        }
+
+    async def set_options_for(self, desired: Mapping[str, Any]) -> None:
+        """Bring the connection's database options to ``desired`` outside a request (`_set_options()`), as before the
+        ``on_acquire`` hook."""
+        await self._set_options(desired)
+
+    async def _set_options(self, desired: Mapping[str, Any]) -> None:
+        changes = self._option_changes(desired)
+        if not changes:
+            return
+        local = self._in_transaction
+        remembered = self._local_options if local else self._options
+        remembered.update(dict.fromkeys(changes, _UNKNOWN))
+        await cast("DriverConnection", self.connection).set_options(changes, local)
+        for name, value in changes.items():
+            if value is None and not local:
+                del remembered[name]
+            else:
+                remembered[name] = value
+
+    async def _with_options(self, desired: Mapping[str, Any], coroutine: Any, started: list[bool]) -> Any:
+        """Set ``desired`` (`_set_options()`), then await ``coroutine``, the request's call; ``started[0]`` becomes
+        true once the call starts."""
+        await self._set_options(desired)
+        started[0] = True
+        return await coroutine
+
+    def forget_options(self) -> None:
+        """Treat every option the slot set as unknown, so the next request with options sets it again (a hook may
+        have changed it)."""
+        self._options = dict.fromkeys(self._options, _UNKNOWN)
+
+    def _end_transaction_options(self) -> None:
+        self._local_options = {}
+        self._savepoint_options = []
+
+    def _track_options(self, request: Request, succeeded: bool) -> None:
+        """Follow the transaction's options through the end of ``request``, a transaction or savepoint call."""
+        method = request.method
+        if method in ("commit", "rollback") or (method == "begin" and succeeded):
+            self._end_transaction_options()
+            return
+        if not request.args or method not in ("savepoint", "release_savepoint", "rollback_to_savepoint"):
+            return
+        name = request.args[0]
+        index = next((i for i, (saved, _) in enumerate(self._savepoint_options) if saved == name), None)
+        if method == "savepoint":
+            if succeeded:
+                self._savepoint_options.append((name, dict(self._local_options)))
+        elif not succeeded:
+            if method == "rollback_to_savepoint":
+                self._local_options = dict.fromkeys(self._local_options, _UNKNOWN)
+        elif index is not None:
+            if method == "release_savepoint":
+                del self._savepoint_options[index:]
+            else:
+                self._local_options = dict(self._savepoint_options[index][1])
+                del self._savepoint_options[index + 1 :]
 
     async def _abort(self, deadline: float) -> None:
         """Roll back the transaction of a lease that sent no request in time, end the lease and leave the pool."""
@@ -477,6 +592,7 @@ class Slot:
             logger.error("rolling back the abandoned transaction of %r did not finish within %g s", self, deadline)
         except Exception:
             logger.exception("rolling back the abandoned transaction of %r failed", self)
+        self._end_transaction_options()
         self._deliver(lease, CallbackEvent(ON_ROLLBACK))
         self.state = _FINISHING
         self._finisher = asyncio.get_running_loop().create_task(self._return(lease, True))
@@ -493,8 +609,16 @@ class Slot:
             error = InterfaceError(f"{type(connection).__name__}.{request.method}() did not return a coroutine")
             self._deliver(lease, ErrorEvent(request_id, error))
             return
+        inner = coroutine
+        started = [True]
+        if request.options is not None:
+            started[0] = False
+            coroutine = self._with_options(request.options, inner, started)
         # The connection method runs in the context of the flow that sent the request.
         call = asyncio.get_running_loop().create_task(coroutine, context=context)
+        if inner is not coroutine:
+            # A call cancelled before it started never ran the connection method.
+            call.add_done_callback(lambda _call: inner.close())
         self._running = (request, call)
         event: Event
         try:
@@ -507,7 +631,7 @@ class Slot:
             if not call.cancelled():
                 event = ErrorEvent(request_id, cast("BaseException", call.exception()))
             elif self._cancelled is request:
-                event = CancelledEvent(request_id, started=True)
+                event = CancelledEvent(request_id, started=started[0])
             else:
                 event = ErrorEvent(request_id, InterfaceError(f"{request.method}() was cancelled by the driver"))
         except Exception as exc:
@@ -515,6 +639,7 @@ class Slot:
         finally:
             self._running = None
             self._cancelled = None
+        self._track_options(request, isinstance(event, ResultEvent))
         if isinstance(event, ResultEvent):
             if request.method == "begin":
                 self._in_transaction = True
@@ -557,6 +682,7 @@ class Slot:
         try:
             async with asyncio.timeout(timeout):
                 await connection.call_hook(self.pool.on_release, self.pool.profile, lease.session)
+            self.forget_options()
         except TimeoutError:
             logger.error("on_release of %r did not finish within %g s; the slot leaves the pool", self, timeout)
             return False

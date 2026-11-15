@@ -2,8 +2,8 @@
 
 ::: info Status
 The installed version provides `atomic()` blocks, savepoints, the transaction in the context and the slot's commit
-deadline and `on_commit` callbacks. Transactions run on the [router](/topics/pool) set as the runner. Connection
-options (`connection_options()`) and `adorm.timeout()` are not part of it yet. The [Django driver](/topics/django-driver)
+deadline and `on_commit` callbacks. Transactions run on the [router](/topics/pool) set as the runner, with the
+[connection options](/topics/options) in effect (`SET LOCAL`). The [Django driver](/topics/django-driver)
 and the [native PostgreSQL driver](/topics/postgresql-driver) run reads, writes and savepoints in transactions. Any `Driver` implementation (see
 [Writing a driver](/howto/writing-a-driver)) works.
 :::
@@ -44,8 +44,8 @@ transaction of one session does not affect another session, even on the same pro
 
 ## Taking the slot
 
-The block acquires its slot on entry and sends `BEGIN` there. When no slot becomes free within the pool's
-`acquire_timeout`, entry raises [`SessionTimeout`](/ref/exceptions#adorm-sessiontimeout-message-none-session-none-timeout-none);
+The block acquires its slot on entry and sends `BEGIN` there. When no slot becomes free within the
+`acquire_timeout` [connection option](/topics/options) in effect, entry raises [`SessionTimeout`](/ref/exceptions#adorm-sessiontimeout-message-none-session-none-timeout-none);
 the body does not run. Operations inside the block take no further slot, so a transaction does not wait for slots
 halfway through.
 
@@ -204,7 +204,7 @@ block run one after another: a second one waits until the first ends. Operations
 block while a savepoint is open wait until it ends too, so a rollback to the savepoint never undoes them.
 
 A task that waits for a savepoint, which in turn waits for that task (a task created before the savepoint and
-awaited inside it), would wait for ever. After the pool's `acquire_timeout` the waiting task raises
+awaited inside it), would wait for ever. After the `acquire_timeout` in effect the waiting task raises
 `DeadlockError` instead.
 
 ```python
@@ -260,8 +260,9 @@ block.outcome      # TransactionOutcome.COMMITTED, ROLLED_BACK or UNKNOWN; None 
 
 ## The commit deadline
 
-A slot inside a transaction expects its next request (an operation, the commit or the rollback) within the pool's
-`commit_timeout`. When none arrives in time, for example because the client that held the block is gone, the slot
+A slot inside a transaction expects its next request (an operation, the commit or the rollback) within the
+`commit_timeout` in effect when the block was entered: the pool's, unless the session or a
+[`connection_options()`](/topics/options) block sets one. When none arrives in time, for example because the client that held the block is gone, the slot
 rolls the transaction back, ends the lease and leaves the pool, so the next request gets a fresh connection. A
 request that is running does not count against the deadline. `commit_timeout` is 60 seconds by default; `None`
 sets no deadline. A rollback that does not finish within `commit_timeout` either is cancelled, and the slot leaves
@@ -277,6 +278,30 @@ async with adorm.atomic():
 ```
 
 The end of such a block raises `TransactionClosed` when it exits normally.
+
+```python
+with adorm.connection_options(commit_timeout=600):
+    async with adorm.atomic():             # this transaction may wait up to 10 minutes between requests
+        ...
+```
+
+## Connection options in a transaction
+
+Operations in a transaction run with the [connection options](/topics/options) in effect where they are awaited, as
+outside one. The slot sets them with `SET LOCAL`, so they end with the transaction, and a rollback to a savepoint
+restores the values from before the savepoint. An option the driver does not declare raises `NotSupportedError`
+and leaves the transaction usable.
+
+```python
+async with adorm.atomic():
+    with adorm.connection_options(lock_timeout=0.5):
+        try:
+            async with adorm.atomic():
+                await Member.objects.filter(pk=1).update(fee=0)    # SET LOCAL lock_timeout = 500
+        except adorm.OperationalError:
+            ...                                                   # the row stayed locked; savepoint rolled back
+    await Club.objects.count()                                    # SET LOCAL lock_timeout TO DEFAULT
+```
 
 ## Events
 

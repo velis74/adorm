@@ -17,6 +17,7 @@ from typing import Any, TYPE_CHECKING
 from adorm.drivers.base import Driver
 from adorm.exceptions import InterfaceError
 from adorm.executor.debug import set_debug
+from adorm.executor.options import check_profile_options
 from adorm.executor.pool import (
     check_hook,
     check_timeout,
@@ -116,9 +117,11 @@ class ConnectionProfile:
     - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.
 
     ``connection`` is the target's connection. A threaded driver runs the hooks on the connection's thread and
-    they are plain functions; an async driver awaits a hook's result when it is awaitable. ``pool`` overrides the
-    registry's pool defaults. ``params`` and ``connect`` do not appear in the representation. A profile copies as
-    itself.
+    they are plain functions; an async driver awaits a hook's result when it is awaitable. ``options`` are the
+    database connection options of the profile, the first layer of `adorm.connection_options()`; ``acquire_timeout``
+    and ``commit_timeout`` are pool settings and raise `ValueError` there, and an option a driver given as an
+    instance or class does not declare raises `NotSupportedError`. ``pool`` overrides the registry's pool defaults.
+    ``params`` and ``connect`` do not appear in the representation. A profile copies as itself.
     """
 
     name: str
@@ -129,6 +132,7 @@ class ConnectionProfile:
     on_acquire: Hook | None = None
     on_release: Hook | None = None
     pool: PoolSettings | None = None
+    options: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         for what in ("name", "alias"):
@@ -148,6 +152,13 @@ class ConnectionProfile:
         mode = None if isinstance(driver, str) else getattr(driver, "mode", None)
         for what in ("connect", "on_acquire", "on_release"):
             check_hook(getattr(self, what), what, self.name, mode)
+        options = check_profile_options(self.options, self.name)
+        object.__setattr__(self, "options", options)
+        capabilities = None if isinstance(driver, str) else getattr(driver, "capabilities", None)
+        if capabilities is not None:
+            capabilities.check_options(
+                [name for name, value in options.items() if value is not None], getattr(driver, "name", None)
+            )
         if self.pool is not None:
             object.__setattr__(self, "pool", PoolSettings.coerce(self.pool))
         object.__setattr__(self, "_driver", driver if isinstance(driver, Driver) else None)

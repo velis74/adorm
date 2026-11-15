@@ -2,7 +2,7 @@
 
 ::: info Status
 The installed version provides connection profiles, their hooks, run-time profiles and the default router built
-from them. Connection options in a profile and slot lifetimes (`purge_stale_connections_at`) are not part of it yet.
+from them, and connection options in a profile. Slot lifetimes (`purge_stale_connections_at`) are not part of it yet.
 The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run
 profiles' hooks; both execute reads, writes, row locks and savepoints. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
 works.
@@ -68,6 +68,26 @@ configuring adorm imports no ORM.
 | `commit_timeout` | seconds a slot inside a transaction waits for the next request before it rolls back; `None` for no limit |
 | `release_timeout` | seconds the `on_release` hook may run before the slot leaves the pool |
 
+`acquire_timeout` and `commit_timeout` are also the profile layer of the [connection options](/topics/options) of
+the same names, which a session or a `connection_options()` block can override.
+
+## Connection options
+
+A profile's `options` are database connection options every session of the profile runs with, unless the session
+or a [`connection_options()`](/topics/options) block sets another value. A name the driver does not declare raises
+`NotSupportedError` when the profile is created with a driver instance or class, else when its pool is created.
+
+```python
+adorm.configure(
+    profiles={
+        "default": {"driver": "adorm.drivers.django.DjangoDriver", "options": {"statement_timeout": 30}},
+        "reports": {"driver": "adorm.drivers.asyncpg.AsyncpgDriver", "options": {"statement_timeout": 600}},
+    }
+)
+```
+
+The slot sets them once per connection and keeps them; see [what reaches the database](/topics/options#what-reaches-the-database).
+
 ## The default router
 
 Once a profile or a provider is configured, operations outside a transaction and `atomic()` blocks run on the
@@ -93,8 +113,8 @@ A profile has three optional hooks:
 | Hook | Runs | Typical use |
 |---|---|---|
 | `connect(profile)` | when a slot opens its connection, instead of the driver's default | credentials from a vault, custom connection arguments |
-| `on_acquire(connection, profile, session)` | when a slot is assigned to a session, before its first request | `SET ROLE`, `SET statement_timeout`, `set_config()` for row-level security |
-| `on_release(connection, profile, session)` | when the session returns a usable slot to the pool | `RESET ROLE`, `RESET statement_timeout`, undoing what `on_acquire` set |
+| `on_acquire(connection, profile, session)` | when a slot is assigned to a session, before its first request | `SET ROLE`, `set_config()` for row-level security |
+| `on_release(connection, profile, session)` | when the session returns a usable slot to the pool | `RESET ROLE`, undoing what `on_acquire` set |
 
 `connection` is the target's connection (for the Django ORM driver Django's connection wrapper, for asyncpg an
 `asyncpg.Connection`), `session` the session that gets or returns the slot. A threaded driver runs the hooks on the
@@ -108,13 +128,18 @@ application set, such as the current user. One profile, and one pool, then serve
 ```python
 def on_acquire(connection, profile, session):
     with connection.cursor() as cursor:                    # Django's connection, on the slot's thread
-        cursor.execute("SET statement_timeout = '5s'")
+        cursor.execute("SELECT set_config('app.user_id', %s, false)", [str(current_user.get().pk)])
 
 
 def on_release(connection, profile, session):
     with connection.cursor() as cursor:
-        cursor.execute("RESET statement_timeout")
+        cursor.execute("RESET app.user_id")
 ```
+
+`on_acquire` runs with the session's [connection options](/topics/options) already set. A hook may set or reset
+options adorm manages, `RESET ALL` and `DISCARD ALL` included: after each hook the slot sets its options again before
+the next operation. A value a hook sets holds until a layer sets that option; once that layer ends, the slot resets
+the option to the database's default, not to the hook's value. The profile's `options` keep a value in every case.
 
 An atomic operation outside a transaction runs `on_acquire`, the operation and `on_release`; a transaction runs
 `on_acquire` before `BEGIN` and `on_release` after `COMMIT` or `ROLLBACK`. The next session gets the slot only after

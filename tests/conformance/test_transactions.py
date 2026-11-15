@@ -14,10 +14,10 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 REPEAT = range(3)
 
-OPTIONS: dict[str, object] = {}
+OPTIONS: dict[str, object] = {"statement_timeout": 5, "lock_timeout": 2, "idle_in_transaction_session_timeout": 60}
 """A value for every connection option a demo driver declares; `test_set_options` sets each one."""
 
-UNDECLARED_OPTION = ("statement_timeout", 5000)
+UNDECLARED_OPTION = ("work_mem", "1MB")
 
 
 class RolledBackError(Exception):

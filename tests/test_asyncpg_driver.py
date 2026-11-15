@@ -23,6 +23,7 @@ from adorm.drivers.asyncpg import (
     server_version_num,
 )
 from adorm.drivers.django import CAPABILITIES as DJANGO_CAPABILITIES, READ_CAPABILITIES
+from adorm.drivers.sql import POSTGRESQL_OPTIONS
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Count, Select
 from adorm.query import Query
@@ -125,7 +126,7 @@ def test_capabilities():
     assert "clause.select_for_update.skip_locked" in CAPABILITIES.constructs
     assert CAPABILITIES.cancellation
     assert CAPABILITIES.savepoints
-    assert not CAPABILITIES.connection_options
+    assert CAPABILITIES.connection_options == POSTGRESQL_OPTIONS == DJANGO_CAPABILITIES.connection_options
     assert (AsyncpgDriver.name, AsyncpgDriver.mode) == ("asyncpg", "async")
 
 

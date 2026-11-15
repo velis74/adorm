@@ -2,10 +2,9 @@
 
 ::: info Status
 The installed version provides the exception classes, `wrap_driver_error`, the [driver contract](/ref/drivers),
-whose connections raise these exceptions, the [pool and router](/ref/pool), [`atomic()`](/ref/transactions), the
-[Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver).
-`timeout()`, which raises `OperationTimeout`, is described on the [concepts](/topics/concepts) page and is not part
-of the installed version; the examples below show how application code handles the exceptions it raises.
+whose connections raise these exceptions, the [pool and router](/ref/pool), [`atomic()`](/ref/transactions),
+[`adorm.timeout()`](/ref/options#adorm-timeout-delay), the [Django driver](/topics/django-driver) and the
+[native PostgreSQL driver](/topics/postgresql-driver).
 :::
 
 adorm has its own exceptions, modelled on Django's. Applications catch adorm's classes, never the target ORM's or
@@ -263,7 +262,7 @@ async with adorm.atomic():
 
 An operation arrived for a transaction that has already ended, typically from a task that inherited the
 transaction's context and outlived the `atomic()` block. It is also raised by operations after `tx.commit()` or
-`tx.rollback()`, by the requests of a lease whose slot aborted the transaction (the pool's `commit_timeout`), by the
+`tx.rollback()`, by the requests of a lease whose slot aborted the transaction (its `commit_timeout`), by the
 normal end of a block whose transaction the slot aborted, and by the normal end of a savepoint block that its
 enclosing block closed first.
 
@@ -298,8 +297,8 @@ except adorm.SessionTimeout as exc:
 A `SessionTimeout` raised while the waiting flow already holds slots, so waiting can make it wait on itself. It is
 raised when the acquisition times out while the flow holds a slot, and at once when every slot is held by a flow
 that itself waits for a slot. Inside a transaction, an operation or a nested `atomic()` that waits longer than the
-pool's `acquire_timeout` for a savepoint of another task to end raises it too, with the transaction's session in
-`held_sessions`. `held_sessions` is a tuple of the sessions whose slots the flow holds.
+`acquire_timeout` connection option in effect for a savepoint of another task to end raises it too, with the
+transaction's session in `held_sessions`. `held_sessions` is a tuple of the sessions whose slots the flow holds.
 
 ```python
 audit = adorm.create_session(using="default", session_name="audit")
@@ -312,15 +311,17 @@ async with adorm.atomic():                 # holds a slot of the "default" pool
         log.error("waiting for %r while holding %r", exc.session, exc.held_sessions)
 ```
 
-### `adorm.OperationTimeout(message=None, *, phase=None, operation=None, timeout=None)`
+### `adorm.OperationTimeout(message=None, *, phase=None, operation=None, session=None, timeout=None)`
 
-An `adorm.timeout()` block expired. A subclass of `TimeoutError`, so `except TimeoutError` catches it too.
-`adorm.timeout()` is not provided yet, so nothing raises this exception at present.
+An [`adorm.timeout()`](/ref/options#adorm-timeout-delay) block expired. A subclass of `TimeoutError`, so
+`except TimeoutError` catches it too. It is raised from the block's `TimeoutError`, so
+[`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) tells what the interrupted request did.
 
 | Attribute | Value |
 |---|---|
-| `phase` | `"waiting_for_slot"` or `"executing"`; any other value raises `ValueError` |
-| `operation` | the operation in progress, `None` when none was |
+| `phase` | `"waiting_for_slot"` or `"executing"`, `None` when no adorm operation was in progress; any other value raises `ValueError` |
+| `operation` | the operation in progress: an adorm operation, or the name of a transaction request (`"begin"`, `"commit"` …); `None` when none was |
+| `session` | the session of that operation, `None` when none was |
 | `timeout` | the limit in seconds |
 
 ```python

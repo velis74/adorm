@@ -535,6 +535,9 @@ def test_operation_timeout_message():
     exc = OperationTimeout(phase="waiting_for_slot", operation="Count(Member)", timeout=5)
     assert str(exc) == "operation timed out after 5 s while waiting for slot: 'Count(Member)'"
     assert str(OperationTimeout()) == "operation timed out"
+    on_session = OperationTimeout(phase="executing", operation="commit", session="Session('default', 'x')", timeout=1)
+    assert on_session.session == "Session('default', 'x')"
+    assert str(on_session) == ("operation timed out after 1 s while executing on \"Session('default', 'x')\": 'commit'")
 
 
 def test_operation_timeout_rejects_unknown_phase():

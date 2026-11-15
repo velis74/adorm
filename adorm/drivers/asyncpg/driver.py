@@ -20,6 +20,7 @@ from adorm.drivers.asyncpg.writes import Writer, WRITES
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
 from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
 from adorm.drivers.django.translation import translate
+from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.events import Emit
 from adorm.exceptions import (
     InterfaceError,
@@ -47,11 +48,12 @@ logger = logging.getLogger("adorm.drivers.asyncpg")
 CAPABILITIES = Capabilities(
     operations=DJANGO_CAPABILITIES.operations,
     constructs=DJANGO_CAPABILITIES.constructs,
+    connection_options=POSTGRESQL_OPTIONS,
     savepoints=True,
     cancellation=True,
 )
 """What `AsyncpgDriver` supports: the operations and constructs of `adorm.drivers.django.CAPABILITIES` (reads,
-writes, row locks), savepoints and cancellation."""
+writes, row locks), savepoints, cancellation and the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`."""
 
 MAX_GET_RESULTS = 21
 """How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""
@@ -362,6 +364,12 @@ class AsyncpgConnection(DriverConnection):
         self._savepoints = []
         self._rollback_only = None
         await self._command("ROLLBACK")
+
+    async def _set_options(self, options: dict[str, Any], local: bool) -> None:
+        """Set PostgreSQL's time limits with `set_options_sql()`, in one simple-protocol message."""
+        sql = set_options_sql(options, local)
+        if sql:
+            await self._command(sql)
 
     def _savepoint_index(self, name: str) -> int:
         if not self.conn.is_in_transaction():

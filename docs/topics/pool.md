@@ -2,8 +2,8 @@
 
 ::: info Status
 The installed version provides pools, the router, slots and leases, used by [transactions](/topics/transactions)
-and built from [connection profiles](/topics/profiles); connection options and slot lifetimes are not part of it
-yet. The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) execute
+and built from [connection profiles](/topics/profiles), with [connection options](/topics/options); idle slots
+are not closed after a period of inactivity (`purge_stale_connections_at`) yet. The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) execute
 reads, writes, row locks and savepoints. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver)) works.
 :::
 
@@ -93,8 +93,9 @@ A slot leaves the pool when its lease is released and the connection reports its
 left a transaction that no successful `commit` or `rollback` ended (including one whose request was cancelled); the
 next request opens a fresh connection. `lease.release(discard=True)` drops the slot in any case.
 
-A slot inside a transaction waits at most the pool's `commit_timeout` (60 seconds by default, `None` for no limit) for the next request
-of its lease. When none arrives, the slot rolls the transaction back and leaves the pool; the lease is then
+A slot inside a transaction waits at most the lease's `commit_timeout` for the next request of its lease: the
+pool's `commit_timeout` (60 seconds by default, `None` for no limit), or the `commit_timeout`
+[connection option](/topics/options) in effect when the transaction acquired the slot. When none arrives, the slot rolls the transaction back and leaves the pool; the lease is then
 `aborted`, and its requests raise `TransactionClosed`. This frees the slot of a client that is gone.
 
 ```python
@@ -107,7 +108,7 @@ task itself fails, every queued request fails with `InterfaceError` and the slot
 ## Requests and events
 
 A lease is a pair of queues, like the reader and writer of an asyncio stream: `lease.requests` takes
-[`Request`](/ref/pool#adorm-executor-request-method-args-request-id) objects, and `lease.events` delivers what the
+[`Request`](/ref/pool#adorm-executor-request-method-args-request-id-options-none) objects, and `lease.events` delivers what the
 slot sends back that the lease's [event channel](/topics/events) (`lease.channel`) does not interpret itself. The slot runs the requests one at a time, in the order they were put, each in the context of the
 task that put it.
 
@@ -141,7 +142,9 @@ task is cancelled meanwhile, so a cancelled flow does not leak its slot.
 
 ## Timeouts
 
-Every acquisition has a timeout: the pool's `acquire_timeout` (30 seconds by default) or the `timeout` argument.
+Every acquisition has a timeout: the `timeout` argument, else the `acquire_timeout` [connection option](/topics/options)
+in effect, which is the pool's `acquire_timeout` (30 seconds by default) unless the session or a
+`connection_options()` block sets one.
 
 ```python
 try:

@@ -32,13 +32,17 @@ with profiles creates its pools itself.
 | Argument | Meaning |
 |---|---|
 | `max_connections` | the maximum number of slots, a non-negative integer (`ValueError` otherwise). `0` opens new slots until the driver reports a refusal ([`Driver.is_refusal()`](/ref/drivers#is-refusal-exc)). After a refusal, with any `max_connections`, the pool holds at most as many slots as it had at that moment, until a slot leaves the pool |
-| `acquire_timeout` | the default number of seconds an acquisition waits, positive and finite (`ValueError` otherwise) |
-| `commit_timeout` | the number of seconds a slot inside a transaction waits for its lease's next request before it rolls the transaction back, ends the lease and leaves the pool; positive and finite (default 60), or `None` for no limit |
+| `acquire_timeout` | the default number of seconds an acquisition waits, positive and finite (`ValueError` otherwise); the profile layer of the `acquire_timeout` [connection option](/ref/options) |
+| `commit_timeout` | the default number of seconds a slot inside a transaction waits for its lease's next request before it rolls the transaction back, ends the lease and leaves the pool; positive and finite (default 60), or `None` for no limit; the profile layer of the `commit_timeout` connection option |
 | `release_timeout` | the number of seconds the profile's `on_release` hook may run before it is cancelled and the slot leaves the pool; positive and finite (default 30) |
 
 The profile's `on_acquire` and `on_release` attributes, when present and not `None`, are its
 [hooks](/topics/profiles#hooks); a profile without them has none. A hook or `connect` that is not callable raises
-`TypeError`, and so does a coroutine function with a threaded driver.
+`TypeError`, and so does a coroutine function with a threaded driver. The profile's `options` attribute, when
+present and not `None`, holds its database connection options, the first layer of
+[`connection_options()`](/ref/options#adorm-connection-options-options): a name the driver does not declare in
+`Capabilities.connection_options` raises `NotSupportedError`, `acquire_timeout` or `commit_timeout` among them
+`ValueError`.
 
 A threaded driver cancels a hook by asking its thread to stop the running call
 ([`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection)). A hook that does not stop extends the
@@ -57,6 +61,7 @@ pool = Pool(DjangoDriver(), profile, max_connections=10, acquire_timeout=5, comm
 | `name` | the profile name |
 | `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout` | the constructor arguments |
 | `on_acquire`, `on_release` | the profile's hooks, `None` when it has none |
+| `options` | the profile's database connection options, checked, as a read-only mapping |
 | `limit` | the current maximum number of slots: the lower of `max_connections` and the slot count at the last refusal, `None` when neither applies |
 | `size` | slots in the pool, opening ones included |
 | `idle` | slots no lease holds |
@@ -135,9 +140,12 @@ The routed pools, as a tuple.
 
 Acquires a slot of the pool of `session.using` (`get_pool()`) for `session` and returns a
 [`SlotLease`](#adorm-executor-slotlease) owned by the current task. `timeout` (seconds, positive and finite) defaults
-to the pool's `acquire_timeout`. When the profile has an `on_acquire` hook, the acquisition calls it with the
-connection's [`target`](/ref/drivers#adorm-drivers-driverconnection), the profile and `session`, in the current task's
-context, before it returns the lease.
+to the `acquire_timeout` [connection option](/ref/options) in effect: the pool's `acquire_timeout`, unless the session
+or an enclosing `connection_options()` block sets one. The lease's `commit_timeout` is the `commit_timeout` option in
+effect. A database option in effect that the driver does not declare raises `NotSupportedError` before the
+acquisition waits. When the profile has an `on_acquire` hook, the acquisition sets the session's database options on
+the connection, then calls the hook with the connection's [`target`](/ref/drivers#adorm-drivers-driverconnection),
+the profile and `session`, in the current task's context, before it returns the lease.
 
 | Outcome | Raised |
 |---|---|
@@ -185,11 +193,15 @@ current task (the default), those of `held_leases()`.
 #### `async run(session, operation)`
 
 Acquires a slot for `session`, executes `operation`, releases the slot and returns the result; the slot is released
-also after an error or a cancellation. An operation the pool's driver does not support raises `NotSupportedError`
-([`Driver.check()`](/ref/drivers#check-operation)) before a slot is acquired. A cancellation raises `CancelledError` with
+also after an error or a cancellation. An operation the pool's driver does not support, and a database connection
+option in effect ([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)) that it does
+not declare, raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation)) before a slot is acquired.
+The operation's request carries the database options in effect, which the slot sets before it executes the
+operation. Enclosing [`adorm.timeout()`](/ref/options#adorm-timeout-delay) blocks see the operation in the phase
+`"waiting_for_slot"` until the slot is acquired, then `"executing"`. A cancellation raises `CancelledError` with
 the operation's [`CancellationOutcome`](#adorm-cancellationoutcome), final when it is raised, also after repeated
 cancellations, since it waits for the slot to be returned: `NOT_STARTED` while waiting for a slot, else that of
-[`call()`](#async-call-method-args), or of the operation's own outcome (`SUCCEEDED`, `FAILED`, `UNKNOWN` for a lost
+[`call()`](#async-call-method-args-options-none), or of the operation's own outcome (`SUCCEEDED`, `FAILED`, `UNKNOWN` for a lost
 connection) when only the release was cancelled.
 
 ```python
@@ -238,7 +250,8 @@ A slot handed to one flow by `Router.acquire()`. Use it as an asynchronous conte
 | `pool`, `slot` | the pool and the [`Slot`](#adorm-executor-slot) |
 | `owner` | the task that acquired the lease |
 | `released` | whether `release()` was called or the slot aborted the lease's transaction |
-| `aborted` | whether the slot rolled back the lease's transaction because no request arrived within the pool's `commit_timeout`; requests then raise [`TransactionClosed`](/ref/exceptions#adorm-transactionclosed) |
+| `aborted` | whether the slot rolled back the lease's transaction because no request arrived within `commit_timeout`; requests then raise [`TransactionClosed`](/ref/exceptions#adorm-transactionclosed) |
+| `commit_timeout` | the seconds the slot waits for the lease's next request inside a transaction, `None` for no limit: the pool's `commit_timeout`, which `acquire()` replaces with the `commit_timeout` connection option in effect |
 
 ```python
 async with await router.acquire(session) as lease:
@@ -249,9 +262,9 @@ async with await router.acquire(session) as lease:
         event = await lease.events.get()       # three outcomes, and CallbackEvent("on_commit") before the last
 ```
 
-#### `async call(method, *args)`
+#### `async call(method, *args, options=None)`
 
-Sends `Request(method, args)` and returns its result or raises its error: the lease's channel awaits the
+Sends `Request(method, args, options=options)` and returns its result or raises its error: the lease's channel awaits the
 request's outcome, which therefore does not appear on `events`. A lease the slot aborted raises `TransactionClosed`,
 a released lease `InterfaceError`. Cancelling the caller cancels the request: a queued request never runs; a running one is
 cancelled in the driver connection. The raised `CancelledError` carries the request's
@@ -282,7 +295,7 @@ nothing.
 
 The [`CancellationOutcome`](#adorm-cancellationoutcome) of the adorm operation or request whose cancellation raised
 `exc`: the `CancelledError` itself, or an exception it caused through `__cause__`, such as the `TimeoutError` of
-`asyncio.timeout()`. `None` for any other exception. Set by [`call()`](#async-call-method-args), by
+`asyncio.timeout()`. `None` for any other exception. Set by [`call()`](#async-call-method-args-options-none), by
 [`Router.run()`](#async-run-session-operation) (`NOT_STARTED` while it waits for a slot) and by
 [`Atomic.execute()`](/ref/transactions#async-execute-operation) (`NOT_STARTED` while it waits for a savepoint of another
 task). `UNKNOWN` turns into the request's outcome when the slot delivers it later; the value is final once the slot has
@@ -328,19 +341,24 @@ of the flow that put it.
 
 | Method | Meaning |
 |---|---|
-| `put_nowait(request)` | queue a [`Request`](#adorm-executor-request-method-args-request-id); a lease the slot aborted raises `TransactionClosed`, a released lease `InterfaceError`, anything but a `Request` `TypeError` |
+| `put_nowait(request)` | queue a [`Request`](#adorm-executor-request-method-args-request-id-options-none); a lease the slot aborted raises `TransactionClosed`, a released lease `InterfaceError`, anything but a `Request` `TypeError` |
 | `async put(request)` | the same; the queue is unbounded, so it never waits |
 | `cancel(request)` | cancel a request of this lease: a queued one never runs, a running one is cancelled in the driver connection; its outcome on `events` is a `CancelledEvent`, or its result or error when it finished before the cancellation reached it. The `CancelledEvent` of a queued request arrives at once, ahead of the outcomes of earlier requests; results and errors keep the order of the requests. Returns whether the request was still queued; a request neither queued nor running is left alone |
 | `async join()` | wait until every request queued so far has run |
 | `qsize()` | queued requests that have not started |
 
-### `adorm.executor.Request(method, args=(), request_id=...)`
+### `adorm.executor.Request(method, args=(), request_id=..., *, options=None)`
 
 A call of the driver connection's `method` with `args`, a frozen dataclass. `request_id` defaults to a number
 unique in the process; the outcome event carries it. A method outside `REQUEST_METHODS` raises `ValueError`.
+`options`, when not `None`, are the database connection options the call runs with, copied into a read-only mapping
+(anything but a mapping raises `TypeError`): before the call the slot sets those that differ from what it set on the
+connection (see [`Slot`](#adorm-executor-slot)). A `set_options` request sets options without the slot remembering
+them.
 
 ```python
 Request("execute", (operation,))
+Request("execute", (operation,), options={"statement_timeout": 5})
 Request("set_options", ({"statement_timeout": 5}, True))
 ```
 
@@ -364,10 +382,27 @@ connection; any other event, and a `CallbackEvent` named `on_commit` or `on_roll
 error.
 
 While its lease is inside a transaction (a successful `begin` not yet ended by a successful `commit` or `rollback`)
-and no request is queued or running, the slot waits at most the pool's `commit_timeout` for the next request. Then it
+and no request is queued or running, the slot waits at most the lease's `commit_timeout` for the next request. Then it
 calls the connection's `rollback()` (a failure is logged; one that does not finish within `commit_timeout` is
 cancelled and the connection's `cancel()` is called), delivers `CallbackEvent("on_rollback")`, marks the lease as
 aborted and released, and leaves the pool with its connection closed.
+
+The slot remembers the database connection options it set on its connection. Before a request with `options` it
+calls the connection's `set_options()` once, with every option whose value differs from the remembered one and
+`None` (the database's default) for every remembered option the request lacks; when all match, it calls nothing.
+Outside a transaction it sets them for the connection (`local=False`, `SET`). Inside a transaction it sets them
+for the transaction (`local=True`, `SET LOCAL`) and forgets them when the transaction ends; a rollback to a savepoint
+restores what was remembered when the savepoint was created, a released savepoint keeps them. A setting that fails or
+is cancelled leaves those options unknown, so the next request with options sets them again; the request's call
+then does not run, and its outcome is the error, or `CancelledEvent(started=False)` for a cancellation. After a
+profile hook has run on the connection, every remembered option is unknown, since the hook may have set or reset it.
+Options that a `set_options` request or the driver itself set are not remembered.
+
+```python
+await lease.call("execute", count, options={"statement_timeout": 5})   # set_options({"statement_timeout": 5}, False)
+await lease.call("execute", count, options={"statement_timeout": 5})   # nothing to set
+await lease.call("execute", count, options={})                         # set_options({"statement_timeout": None}, False)
+```
 
 | Member | Meaning |
 |---|---|
@@ -376,10 +411,20 @@ aborted and released, and leaves the pool with its connection closed.
 | `connection` | the [`DriverConnection`](/ref/drivers#adorm-drivers-driverconnection) |
 | `lease` | the current lease, `None` while idle |
 | `state` | `"idle"`, `"leased"`, `"finishing"` or `"closed"` |
+| `options` | the database options in effect by what the slot set: those set for the connection, replaced inside a transaction by those set for it; `None` stands for the database's default, unknown ones are left out |
 
 #### `async open()`
 
 Opens the driver connection for the pool's profile and starts serving requests. The pool calls it.
+
+#### `async set_options_for(desired)`
+
+Sets the database options `desired` on the connection outside a request, as before a request with `options`: only
+the differences. The slot must be leased and idle.
+
+#### `forget_options()`
+
+Makes every option the slot remembers unknown, so the next request with options sets it again.
 
 #### `is_usable()`
 

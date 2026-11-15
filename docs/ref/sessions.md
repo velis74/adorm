@@ -87,6 +87,24 @@ async with reports.atomic() as tx:
     await reports.Member.filter(active=False).update(fee=0)
 ```
 
+#### `set_options(**options)`
+
+Replaces the session's [connection options](/ref/options), the layer between the profile's options and
+[`connection_options()`](/ref/options#adorm-connection-options-options) blocks; without arguments it removes them.
+They belong to the pair `(using, session_name)`, so a session object created again for the pair has them too.
+Returns the checked options as a read-only mapping. Values are checked as in `connection_options()` (`ValueError`);
+a name the session's driver does not declare raises `NotSupportedError` when an operation runs. Thread-safe.
+
+```python
+reports.set_options(statement_timeout=300, acquire_timeout=60)
+reports.options                       # {'statement_timeout': 300, 'acquire_timeout': 60.0}
+reports.set_options()                 # removes them
+```
+
+#### `options`
+
+The connection options set on the session with `set_options()`, a read-only mapping; empty when none are set.
+
 #### `async execute(operation)`
 
 Run `operation` and return its result: in this session's transaction active in the current context

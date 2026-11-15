@@ -367,6 +367,18 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is
 dropped by its slot; the next request gets a new one. Other errors leave the connection in the pool.
 
+## Connection options
+
+The driver declares the [connection options](/topics/options) `statement_timeout`, `lock_timeout` and
+`idle_in_transaction_session_timeout`, in seconds. It sets them with
+[`set_options_sql()`](/ref/drivers#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the thread's
+connection: `SET` / `RESET` outside a transaction, `SET LOCAL` inside one.
+
+```python
+with adorm.connection_options(lock_timeout=2):
+    await Member.objects.filter(pk=1).update(active=False)   # SET lock_timeout = 2000, then the UPDATE
+```
+
 ## Cancellation
 
 Cancelling the task that awaits an operation cancels the running statement: the driver calls psycopg's `cancel_safe()`

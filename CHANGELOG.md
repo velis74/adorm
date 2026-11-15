@@ -308,3 +308,21 @@
   owner's end of the block raise `TransactionManagementError`. A cancelled `ThreadedConnection` request method returns
   the result, or raises the error, of a call that finished before the cancellation reached the target, so the Django
   driver reports `SUCCEEDED`, `FAILED` and `COMMITTED` for statements that completed despite a cancellation.
+- Connection options and operation timeouts (`adorm.executor.options`): `statement_timeout`, `lock_timeout`,
+  `idle_in_transaction_session_timeout` and adorm's `acquire_timeout` and `commit_timeout` in layers, the last one
+  winning: the profile (`ConnectionProfile.options`, its pool settings), the session (`Session.set_options()`,
+  `Session.options`) and `with adorm.connection_options(...)` blocks, inherited by tasks. Every operation's request
+  carries the database options in effect (`Request.options`, `SlotLease.call(..., options=...)`); the slot remembers
+  what it set on its connection (`Slot.options`) and calls `set_options()` only with the differences, `None` resetting
+  an option: `SET` / `RESET` outside a transaction, `SET LOCAL` inside one, restored by a rollback to a savepoint.
+  A transaction's `begin` and `commit` carry the options too, so no transaction runs with options another session
+  left on the slot. `on_acquire` runs with the session's options set; after each profile hook the slot sets its
+  options again (`Slot.forget_options()`). Time limits are checked up to PostgreSQL's 2147483.647 s
+  (`MAX_TIMEOUT_OPTION`). A request cancelled while the slot sets its options is `NOT_STARTED`.
+  An option the driver does not declare raises `NotSupportedError` before a slot is taken. `Router.acquire()` and
+  transactions take `acquire_timeout` from the options in effect; a lease's `commit_timeout` is the option in effect
+  when it is acquired. The Django and the native PostgreSQL drivers declare the three PostgreSQL time limits
+  (`adorm.drivers.sql.POSTGRESQL_OPTIONS`, `set_options_sql()`). `async with adorm.timeout(5):` (`Timeout`) wraps
+  `asyncio.timeout()` and raises `OperationTimeout` with the `phase` (`"waiting_for_slot"` or `"executing"`), the
+  `operation` and its `session` (new attribute, encoded with the error) of the operation the expiry interrupted, also
+  in tasks created in the block; `cancellation_outcome()` of the error is that operation's outcome.

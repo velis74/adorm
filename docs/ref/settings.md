@@ -53,7 +53,7 @@ adorm.configure(
 ### `adorm.ConnectionProfile`
 
 `ConnectionProfile(name, driver, alias="default", params={}, connect=None, on_acquire=None, on_release=None,
-pool=None)`
+pool=None, options={})`
 
 A named connection profile, frozen. It satisfies the driver contract's
 [`Profile`](/ref/drivers#adorm-drivers-profile) protocol.
@@ -68,6 +68,7 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request |
 | `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
+| `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
 
 `connection` is the target's connection ([`DriverConnection.target`](/ref/drivers#adorm-drivers-driverconnection)).
 A threaded driver runs `connect` and the hooks on the connection's thread and they are plain functions; a coroutine
@@ -85,6 +86,8 @@ def set_role(connection, profile, session):
 
 profile = ConnectionProfile("user:alice", "adorm.drivers.django.DjangoDriver", params={"role": "alice"},
                             on_acquire=set_role, on_release=reset_role)
+reports = ConnectionProfile("reports", AsyncpgDriver(), options={"statement_timeout": 300},
+                            pool=PoolSettings(acquire_timeout=60))
 ```
 
 #### `get_driver()`

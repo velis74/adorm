@@ -149,6 +149,7 @@ A runtime-checkable protocol for the connection profile a connection is opened f
 | `params` | a mapping of driver parameters |
 | `connect` | `None`, or a callable that opens the target's connection in place of the driver's default: `connect(profile)` returns the target's connection. A threaded driver calls it in `connect_sync()` on the connection's thread; an async driver awaits its result in `open_connection()` |
 | `on_acquire`, `on_release` | optional; when present and not `None`, [hooks](/topics/profiles#hooks) the pool calls as `hook(connection, profile, session)` with the connection's [`target`](#adorm-drivers-driverconnection) |
+| `options` | optional; when present and not `None`, the profile's database [connection options](/ref/options), which the pool reads |
 
 ### `adorm.drivers.is_connection_error(exc)`
 
@@ -193,7 +194,7 @@ The contract the slot calls:
 | `async rollback_to_savepoint(name)` | checks `capabilities.savepoints`, then rolls back to the savepoint `name` |
 | `async commit()` | commits the open transaction |
 | `async rollback()` | rolls back the open transaction |
-| `async set_options(options, local)` | checks the option names against `capabilities.connection_options`, then sets them from a mapping; `local=True` limits them to the open transaction (`SET LOCAL`) |
+| `async set_options(options, local)` | checks the option names against `capabilities.connection_options`, then sets them from a mapping; `local=True` limits them to the open transaction (`SET LOCAL`); a value of `None` resets the option to its default (`RESET`, or `SET LOCAL … TO DEFAULT`). The slot calls it with the options that changed ([`Slot`](/ref/pool#adorm-executor-slot)) |
 | `cancel()` | cancels the running statement, if any; callable from any thread, returns without waiting; the call raises `OperationalError` with SQLSTATE `57014` |
 | `is_usable()` | whether the connection can serve further calls; does no I/O |
 | `async close()` | closes the connection; logs errors instead of raising them; a second call does nothing |
@@ -212,7 +213,7 @@ implements:
 | `async _execute(operation)` | yes | executes a supported operation |
 | `begin()`, `commit()`, `rollback()`, `cancel()`, `is_usable()`, `close()` | yes | as above |
 | `async _savepoint(name)`, `async _release_savepoint(name)`, `async _rollback_to_savepoint(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
-| `async _set_options(options, local)` | no | sets supported options from a dict; raises `NotSupportedError` for any option unless overridden |
+| `async _set_options(options, local)` | no | sets supported options from a dict, `None` values to their default; raises `NotSupportedError` for any option unless overridden |
 
 #### Managers and driver methods
 
@@ -304,7 +305,7 @@ caller's context variables are visible; changes made inside the call do not flow
 | `begin_sync()`, `commit_sync()`, `rollback_sync()` | yes | transaction control |
 | `close_sync()` | yes | closes the target's connection; also runs after a failed `connect_sync()` |
 | `savepoint_sync(name)`, `release_savepoint_sync(name)`, `rollback_to_savepoint_sync(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
-| `set_options_sync(options, local)` | no | connection options; raises `NotSupportedError` for any option unless overridden |
+| `set_options_sync(options, local)` | no | connection options, `None` values to their default; raises `NotSupportedError` for any option unless overridden |
 | `prepare_call_sync()` | no | runs before every other `*_sync` method and every hook, in the same context copy, to prepare that context; an exception it raises is the call's; does nothing unless overridden |
 
 `cancel_sync()` is the one method that runs on another thread, while a call is running. It asks the target to
@@ -406,6 +407,7 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | `rollback_to_savepoint_sync(name)` | rolls back to the savepoint, which stays open, discarding the savepoints opened after it and the `on_commit()` callbacks registered since; clears Django's `needs_rollback` first, since Django refuses every statement of a transaction marked for rollback |
 | `commit_sync()` | leaves the block, which commits, and hands Django's `on_commit()` callbacks to `after_call_sync()` (see below); raises `TransactionManagementError` and rolls back when Django marked the transaction for rollback or the database transaction failed, `InterfaceError` when the connection was closed inside it |
 | `rollback_sync()` | leaves the block with a rollback; nothing without an open transaction |
+| `set_options_sync(options, local)` | [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the wrapper, one `execute()` without parameters; nothing for no options |
 | `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
 | `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's) |
 | `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals) |
@@ -446,7 +448,8 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create` |
 | `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `path.nested`; `clause.annotate`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `function.Lower`, `function.Upper`; `expression.Subquery`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
-| `connection_options`, `backend_events` | none |
+| `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` |
+| `backend_events` | none |
 
 The constructs are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON
 fields); `DjangoConnection` refuses other database backends.
@@ -701,6 +704,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 | `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)); inside a transaction `TransactionManagementError` |
 | `commit()`, `rollback()` | `COMMIT`, `ROLLBACK`; a `COMMIT` whose status is `ROLLBACK` (the transaction failed earlier) raises `TransactionManagementError`, and so does `commit()` of a rollback-only transaction, after sending `ROLLBACK` instead |
 | `savepoint(name)`, `release_savepoint(name)`, `rollback_to_savepoint(name)` | `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` with `name` quoted. Outside a transaction, for a savepoint name already open (`savepoint`) and for one that is not open (the others) `TransactionManagementError`. Releasing a savepoint releases those opened after it; rolling back to one discards those opened after it and keeps it open, and ends the rollback-only state of a write that failed after it was opened |
+| `set_options(options, local)` | the statements of [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) in one simple-protocol message; errors as for any statement |
 | `cancel()` | cancels the statement running when it is called, from any thread; that call raises `OperationalError` with SQLSTATE `57014`, a statement that starts later is not affected. Nothing without a running statement |
 | `is_usable()` | `False` once a connection error was raised, once a statement was cancelled before it finished, once a write was cancelled inside a transaction of its own (also right after its `BEGIN` or during its `COMMIT`) or that transaction's `ROLLBACK` failed or was cancelled, after `close()` and when asyncpg reports the connection closed |
 | `close()` | asyncpg's `close()` within the driver's `close_timeout` (asyncpg aborts the connection when it fails); logs errors, a second call does nothing |
@@ -729,7 +733,8 @@ Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (the reads,
 `delete`, `delete_instance`, `get_or_create`, `update_or_create`; every lookup, `Lower`, `Upper`, `Subquery`,
 arithmetic (`CombinedExpression`), `distinct`, `DISTINCT ON`, `only`, `defer`, `select_related`, the query's manager,
 `select_for_update()` with its options, field paths across relations (`path.nested`) and annotations
-(`clause.annotate`)), `savepoints` and `cancellation`. No `connection_options` or `backend_events`.
+(`clause.annotate`)), `savepoints`, `cancellation` and the `connection_options` of
+[`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options). No `backend_events`.
 
 ### `adorm.drivers.asyncpg.writes.Writer(connection)`
 
@@ -854,7 +859,7 @@ Returns PostgreSQL's `server_version_num` for an asyncpg `ServerVersion` (`Conne
 imports no ORM or database library.
 
 ```python
-from adorm.drivers.sql import numbered_placeholders, Statement
+from adorm.drivers.sql import numbered_placeholders, POSTGRESQL_OPTIONS, set_options_sql, Statement
 ```
 
 ### `adorm.drivers.sql.Statement`
@@ -886,6 +891,29 @@ numbered_placeholders("REPLACE(%s, E'%%', E'\\\\%%')")
 # "REPLACE($1, E'%', E'\\\\%')"
 numbered_placeholders("SELECT %s, %s", ["int4", None])
 # 'SELECT $1::int4, $2'
+```
+
+### `adorm.drivers.sql.POSTGRESQL_OPTIONS`
+
+`frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})`: the
+[connection options](/ref/options) `set_options_sql()` sets, PostgreSQL's time limits. The Django and the native
+PostgreSQL drivers declare them.
+
+### `adorm.drivers.sql.set_options_sql(options, local)`
+
+The statements that set `options` on a PostgreSQL connection, separated by `; `, in the order of `options`; an empty
+string for no options. Values are seconds, non-negative and finite, sent as whole milliseconds (`0` means no limit; a
+positive value below one millisecond becomes one millisecond). A value of `None` resets the option to its default.
+Raises `ValueError` for a name outside `POSTGRESQL_OPTIONS` and for any other value.
+
+| `local` | A value | `None` |
+|---|---|---|
+| `False` | `SET name = <ms>` | `RESET name` |
+| `True` | `SET LOCAL name = <ms>` | `SET LOCAL name TO DEFAULT` |
+
+```python
+set_options_sql({"statement_timeout": 5, "lock_timeout": None}, local=True)
+# 'SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout TO DEFAULT'
 ```
 
 ## Django's compiler for asyncpg

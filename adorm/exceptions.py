@@ -369,7 +369,8 @@ class OperationTimeout(AdormError, TimeoutError):
     """An ``adorm.timeout()`` block expired.
 
     ``phase`` tells whether the operation was waiting for a free slot or executing; ``operation`` is the
-    operation that was in progress, ``None`` when none was.
+    operation that was in progress (an adorm operation or the name of a transaction request), ``session`` its session;
+    both are ``None`` when no operation was in progress.
     """
 
     def __init__(
@@ -378,6 +379,7 @@ class OperationTimeout(AdormError, TimeoutError):
         *,
         phase: TimeoutPhase | None = None,
         operation: Any = None,
+        session: Any = None,
         timeout: float | None = None,
     ) -> None:
         if phase is not None and phase not in _PHASES:
@@ -388,9 +390,12 @@ class OperationTimeout(AdormError, TimeoutError):
                 message += f" after {timeout:g} s"
             if phase is not None:
                 message += f" while {phase.replace('_', ' ')}"
+            if session is not None:
+                message += f" on {session!r}"
             if operation is not None:
                 message += f": {operation!r}"
         super().__init__(message)
         self.phase = phase
         self.operation = operation
+        self.session = session
         self.timeout = timeout
