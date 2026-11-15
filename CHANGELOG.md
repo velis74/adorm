@@ -188,6 +188,21 @@
   with the cast psycopg's client-side or server-side binding implies; `DjangoStatement.rows()` returns asyncpg rows
   as Django returns them on psycopg. The `asyncpg` extra installs Django and psycopg 3 as well.
 - Documentation: "SQL compilation for asyncpg" topic.
+- Native PostgreSQL driver `adorm.drivers.asyncpg.AsyncpgDriver` (async, an `asyncpg.Connection` per slot, no threads
+  of its own) for reads: the operations and constructs of the Django driver, with the same query translation, compiled
+  on the event loop by `DjangoCompiler` and run as one statement each (`get` as Django's `get()`, `count` over the
+  query as a subquery, `exists` as Django's `exists()`); transactions with the `DATABASES` entry's isolation level;
+  cancellation of the running statement, by the awaiting task or by `cancel()` from any thread (SQLSTATE `57014`).
+  Connections are opened from the profile's `DATABASES` entry and `params` (`connect_arguments()`: the libpq `OPTIONS`
+  asyncpg reads through its `dsn` (`DSN_PARAMETERS`; other keys raise `NotSupportedError`), `-c` settings, connect
+  timeout) with Django's session time zone and `assume_role`, or by the profile's `connect` hook; the compiler follows
+  the server's version (`server_version_num()`). Errors map as on the Django driver (asyncpg's `InternalClientError`
+  as `InterfaceError`); a manager's `get_queryset()` that accesses the database raises `NotSupportedError` and leaves
+  the connection in the pool. `DjangoCompiler` gains `params` (keys replacing the entry's), `settings_dict` and
+  `compile_count()`; `DjangoStatement.rows()` returns `timestamptz` values in the connection's time zone (naive
+  without `USE_TZ`), as Django's psycopg loader does. The demo runs on the driver (`--driver asyncpg`), and a
+  conformance suite (`tests/conformance`) runs the same read tests on the Django and asyncpg drivers.
+- Documentation: "The native PostgreSQL driver" topic.
 - Django ORM driver `adorm.drivers.django.DjangoDriver` (threaded, one Django connection per slot thread) for reads:
   `select`, `get`, `first`, `last`, `count` and `exists` with every lookup, relation paths in adorm names (renamed
   fields and reverse accessor names translated), `Q`, a query as subquery in `in`, `Subquery`, `Lower` / `Upper`,

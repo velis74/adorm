@@ -1,9 +1,9 @@
 # Managers and driver methods
 
 ::: info Status
-The installed [Django driver](/topics/django-driver) applies a manager's `get_queryset()` to reads
-(`clause.manager`). Driver methods (`call` operations) and the write overrides (`create()`, `delete()`,
-`update()` …) raise `NotSupportedError` on it.
+The installed [Django driver](/topics/django-driver) and [native PostgreSQL driver](/topics/postgresql-driver)
+apply a manager's `get_queryset()` to reads (`clause.manager`). Driver methods (`call` operations) and the write
+overrides (`create()`, `delete()`, `update()` …) raise `NotSupportedError` on both.
 :::
 
 A Django model carries logic in its managers and query sets: a `get_queryset()` that hides soft-deleted rows, a
@@ -24,11 +24,13 @@ A query-building method stays in the client because building a query needs no co
 set that further methods extend. A method of the driver side returns data, not a query set, so it is the last step
 of a chain.
 
-Driver-side logic needs a driver that runs the target ORM's code: the Django driver does; a native driver, which
-builds SQL itself, cannot. A query with an ORM manager uses the construct `clause.manager` and a driver method is a
-`call` operation, so a driver without them refuses both with `NotSupportedError` before anything runs. A manager
-that only has driver methods keeps its queries off the ORM manager, so on a native driver only its driver methods
-are refused.
+A query with an ORM manager uses the construct `clause.manager`; a driver that builds its queries from the target
+ORM's query sets applies it: the Django driver and the native PostgreSQL driver. The native PostgreSQL driver builds
+the query on the event loop, so there a manager's `get_queryset()` must only build a query; one that accesses the
+database raises `NotSupportedError`. A driver method is a `call` operation and needs a driver that runs the ORM's
+code: the Django driver. A driver without these capabilities refuses them with `NotSupportedError` before anything
+runs. A manager that only has driver methods keeps its queries off the ORM manager, so on such a driver only its
+driver methods are refused.
 
 ## Managers
 

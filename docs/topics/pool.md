@@ -3,8 +3,8 @@
 ::: info Status
 The installed version provides pools, the router, slots and leases, used by [transactions](/topics/transactions)
 and built from [connection profiles](/topics/profiles); connection options and slot lifetimes are not part of it
-yet. The [Django driver](/topics/django-driver) executes reads; the native PostgreSQL driver used in the examples is
-not part of it yet. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver)) works.
+yet. The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver)
+execute reads. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver)) works.
 :::
 
 A **pool** holds the slots of one connection profile. A **slot** is an exclusive channel to one driver connection;

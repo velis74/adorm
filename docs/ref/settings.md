@@ -44,7 +44,7 @@ close.
 adorm.configure(
     profiles={
         "default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"},
-        "reports": ConnectionProfile("reports", AsyncpgDriver(), params={"dsn": REPORTS_DSN}),
+        "reports": ConnectionProfile("reports", AsyncpgDriver(), params={"USER": "reports", "PASSWORD": PASSWORD}),
     },
     pool={"max_connections": 20, "acquire_timeout": 10},
 )
@@ -64,7 +64,7 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `driver` | a [`Driver`](/ref/drivers#adorm-drivers-driver) instance, a `Driver` subclass (instantiated without arguments) or the import path of either, `"package.module.Name"` or `"package.module:Name"` |
 | `alias` | the target's database alias, a non-empty string |
 | `params` | the driver parameters; stored as a read-only copy |
-| `connect` | `None`, or `connect(profile)` returning a new connection in place of the one the driver opens; each driver documents what it returns (the [Django driver](/ref/drivers#adorm-drivers-django-djangoconnection): the DB-API connection Django's wrapper uses) |
+| `connect` | `None`, or `connect(profile)` returning a new connection in place of the one the driver opens; each driver documents what it returns (the [Django driver](/ref/drivers#adorm-drivers-django-djangoconnection): the DB-API connection Django's wrapper uses; the [native PostgreSQL driver](/ref/drivers#adorm-drivers-asyncpg-asyncpgdriver): an `asyncpg.Connection` or an awaitable of one) |
 | `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request |
 | `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
@@ -133,7 +133,7 @@ Registers `profile` in the settings and returns it. A registered name raises `Va
 routers close the pool of a replaced profile.
 
 ```python
-register_profile(ConnectionProfile("tenant:acme", AsyncpgDriver(), params={"dsn": acme_dsn}))
+register_profile(ConnectionProfile("tenant:acme", AsyncpgDriver(), params={"NAME": "tenant_acme"}))
 ```
 
 ### `adorm.settings.unregister_profile(name)`
@@ -159,7 +159,7 @@ Anything but a callable raises `TypeError`.
 @add_profile_provider
 def per_tenant(name):
     if name.startswith("tenant:"):
-        return ConnectionProfile(name, AsyncpgDriver(), params={"dsn": dsn_of(name.removeprefix("tenant:"))})
+        return ConnectionProfile(name, AsyncpgDriver(), params={"NAME": "tenant_" + name.removeprefix("tenant:")})
     return None
 ```
 
@@ -191,7 +191,7 @@ closes the pool of a profile that is unregistered or replaced by another object.
 
 ```python
 registry = ProfileRegistry(pool=PoolSettings(max_connections=5))
-registry.register(ConnectionProfile("default", AsyncpgDriver(), params={"dsn": DSN}))
+registry.register(ConnectionProfile("default", AsyncpgDriver()))
 profile = await registry.resolve("default")
 ```
 

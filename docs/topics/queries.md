@@ -3,8 +3,8 @@
 ::: info Status
 The installed version provides the query building blocks on this page: `Q`, `F`, lookups, functions, aggregates,
 other expressions, the immutable [`Query`](/ref/query), the [operations](/ref/operations) that read and write
-with it and the [`QuerySet`](/ref/queryset) that runs them on a session. The [Django driver](/topics/django-driver)
-executes the reads (`select`, `get`, `first`, `last`, `count`, `exists`).
+with it and the [`QuerySet`](/ref/queryset) that runs them on a session. The [Django driver](/topics/django-driver) and
+the [native PostgreSQL driver](/topics/postgresql-driver) execute the reads (`select`, `get`, `first`, `last`, `count`, `exists`).
 :::
 
 A query is built from adorm's own building blocks, never from the target ORM's. Building one is plain Python: it

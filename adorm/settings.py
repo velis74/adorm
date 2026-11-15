@@ -109,7 +109,8 @@ class ConnectionProfile:
     target's database alias and ``params`` the driver parameters. The hooks:
 
     - ``connect(profile)`` opens a connection in place of the one the driver opens; each driver documents what it
-      returns (the Django driver: the DB-API connection Django's wrapper uses);
+      returns (the Django driver: the DB-API connection Django's wrapper uses; the asyncpg driver: an
+      ``asyncpg.Connection``);
     - ``on_acquire(connection, profile, session)`` runs when a slot is assigned to a session, before its first
       request;
     - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.

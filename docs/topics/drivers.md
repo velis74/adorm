@@ -2,8 +2,8 @@
 
 ::: info Status
 The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`), the
-[slots and pool](/topics/pool) that call drivers and the [Django driver](/topics/django-driver) for reads. The
-native PostgreSQL driver is not part of it yet.
+[slots and pool](/topics/pool) that call drivers, and two drivers for reads: the [Django driver](/topics/django-driver)
+and the [native PostgreSQL driver](/topics/postgresql-driver).
 :::
 
 A driver executes adorm operations on one target: an ORM such as Django's or SQLAlchemy, or a database library
@@ -198,21 +198,21 @@ methods), no direct call reaches the test's connection; the installed contract d
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| `alias` names a `DATABASES` entry; `connect(profile)` runs in `connect_sync()` on the connection's thread and returns the DB-API connection Django's wrapper uses in place of `get_new_connection()` | `await connect(profile)` returns the `asyncpg.Connection` in place of `asyncpg.connect()` | `connect(profile)` returns the `Connection` (threaded) or an awaitable of the `AsyncConnection` (async) in place of `engine.connect()` |
+| `alias` names a `DATABASES` entry; `connect(profile)` runs in `connect_sync()` on the connection's thread and returns the DB-API connection Django's wrapper uses in place of `get_new_connection()` | `alias` names a `DATABASES` entry, whose keys become `asyncpg.connect()` arguments; `connect(profile)` returns the `asyncpg.Connection` (or an awaitable of it) in place of `asyncpg.connect()` | `connect(profile)` returns the `Connection` (threaded) or an awaitable of the `AsyncConnection` (async) in place of `engine.connect()` |
 
 ### Operation translation and results
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | a Django query compiled without a connection by [`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version) ([SQL compilation for asyncpg](./sql-compilation)), run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
-| rows from `values()`, keys renamed from ORM to adorm field names (`orm_names`) | [`DjangoStatement.rows()`](/ref/drivers#rows-records): tuples in select order with Django's converters applied, paired with the selected adorm field names | `Row._mapping` to dict |
+| the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | the same Django query set, compiled without a connection by [`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none) ([SQL compilation for asyncpg](./sql-compilation)), run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
+| rows from `values_list()`, keyed by adorm field names (`orm_names`) | [`DjangoStatement.rows()`](/ref/drivers#rows-records): tuples in select order with Django's converters applied, keyed by adorm field names as on the Django driver | `Row._mapping` to dict |
 
 ### Transactions and savepoints
 
 | Call | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|---|
-| `begin()` | `set_autocommit(False)` | `Transaction.start()` | `conn.begin()` |
-| `commit()` / `rollback()` | `commit()` / `rollback()`, then `set_autocommit(True)` | `Transaction.commit()` / `rollback()` | `Transaction.commit()` / `rollback()` |
+| `begin()` | `set_autocommit(False)` | `BEGIN` (with the isolation level of `OPTIONS`) | `conn.begin()` |
+| `commit()` / `rollback()` | `commit()` / `rollback()`, then `set_autocommit(True)` | `COMMIT` / `ROLLBACK` | `Transaction.commit()` / `rollback()` |
 | `savepoint(name)` | `SAVEPOINT` with the given name | `SAVEPOINT` | `begin_nested()`; the driver keeps a map from name to `NestedTransaction` |
 | `release_savepoint(name)` | `RELEASE SAVEPOINT` | `RELEASE SAVEPOINT` | `NestedTransaction.commit()` |
 | `rollback_to_savepoint(name)` | `ROLLBACK TO SAVEPOINT` | `ROLLBACK TO SAVEPOINT` | `NestedTransaction.rollback()` |
@@ -222,7 +222,7 @@ methods), no direct call reaches the test's connection; the installed contract d
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| `cancel_sync()` calls `cancel_safe()` on the psycopg connection under Django's wrapper (`connection.connection`); psycopg's cancel is thread-safe and returns once the request is delivered | task cancellation: asyncpg sends a cancel request and waits for the statement to end; `cancel()` cancels the task running the statement | async: task cancellation reaches the DBAPI through SQLAlchemy's greenlet bridge; threaded: `cancel_safe()` on the DBAPI connection |
+| `cancel_sync()` calls `cancel_safe()` on the psycopg connection under Django's wrapper (`connection.connection`); psycopg's cancel is thread-safe and returns once the request is delivered | task cancellation: asyncpg sends a cancel request and handles it before the connection's next statement; `cancel()` cancels the task running the statement | async: task cancellation reaches the DBAPI through SQLAlchemy's greenlet bridge; threaded: `cancel_safe()` on the DBAPI connection |
 
 ### Errors
 

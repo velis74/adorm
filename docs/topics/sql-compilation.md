@@ -1,18 +1,13 @@
 # SQL compilation for asyncpg
 
-::: info Status
-The installed version provides `adorm.drivers.sql` and `adorm.drivers.asyncpg.compiler`. The native PostgreSQL
-driver that uses them is not part of it.
-:::
-
 The native PostgreSQL driver executes SQL on asyncpg. This page describes how that SQL is built: what Django's
 query compiler does without a database connection, how its output differs from what asyncpg accepts, and what
 SQLAlchemy Core offers instead.
 
 ## Design
 
-The native PostgreSQL driver is designed to build its SQL with
-[`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version): it
+The [native PostgreSQL driver](/topics/postgresql-driver) builds its SQL with
+[`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none): it
 turns an adorm operation into a Django query, compiles it on a database wrapper that never connects, converts
 placeholders and parameters for asyncpg, and applies Django's result converters to the rows asyncpg returns.
 Lookups, functions, custom fields and their converters are Django's own. The `asyncpg` extra therefore installs

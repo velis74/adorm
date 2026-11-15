@@ -59,6 +59,7 @@ export default defineConfig({
           { text: 'Events', link: '/topics/events' },
           { text: 'Drivers', link: '/topics/drivers' },
           { text: 'The Django driver', link: '/topics/django-driver' },
+          { text: 'The native PostgreSQL driver', link: '/topics/postgresql-driver' },
           { text: 'SQL compilation for asyncpg', link: '/topics/sql-compilation' },
         ],
       },

@@ -14,13 +14,15 @@ import ipaddress
 import json
 import math
 import uuid
+import zoneinfo
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 
 import asyncpg
 
+from django.conf import settings
 from django.core.exceptions import EmptyResultSet
 from django.db import connections
 from django.db.backends.postgresql.psycopg_any import is_psycopg3
@@ -165,15 +167,18 @@ def bind_param(value: Any, *, server_side_binding: bool = False) -> tuple[Any, s
     return value, None
 
 
-def _psycopg_value(value: Any) -> Any:
+def _psycopg_value(value: Any, timezone: datetime.tzinfo, naive: bool) -> Any:
     """``value`` from an asyncpg row as Django's psycopg setup loads it: ``inet`` / ``cidr`` as text, ``uuid`` as
-    ``uuid.UUID``, lists item by item."""
+    ``uuid.UUID``, an aware ``datetime`` in ``timezone`` (naive when ``naive``), lists item by item."""
     if isinstance(value, _IP_TYPES):
         return str(value)
     if isinstance(value, uuid.UUID) and type(value) is not uuid.UUID:
         return uuid.UUID(bytes=value.bytes)
+    if isinstance(value, datetime.datetime) and value.tzinfo is not None:
+        value = value.astimezone(timezone)
+        return value.replace(tzinfo=None) if naive else value
     if isinstance(value, list):
-        return [_psycopg_value(item) for item in value]
+        return [_psycopg_value(item, timezone, naive) for item in value]
     return value
 
 
@@ -194,11 +199,21 @@ class DjangoStatement(Statement):
     def rows(self, records: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
         """Return ``records`` (asyncpg ``Record`` objects or tuples, in select order) as tuples of the values Django's
         own evaluation of the query produces: columns Django adds only for ordering or ``extra(select=)`` dropped,
-        ``inet`` / ``cidr`` values as text and ``uuid`` values as ``uuid.UUID``, as psycopg loads them, and the
-        fields' ``from_db_value()`` converters applied."""
+        ``inet`` / ``cidr`` values as text, ``uuid`` values as ``uuid.UUID`` and ``timestamptz`` values in the
+        connection's time zone (naive without ``USE_TZ``), as psycopg loads them, and the fields' ``from_db_value()``
+        converters applied."""
         width = self.compiler.col_count if self.compiler.has_extra_select else None
-        rows = [tuple(_psycopg_value(v) for v in tuple(r)[:width]) for r in records]
+        timezone, naive = _result_timezone(self.compiler.connection)
+        rows = [tuple(_psycopg_value(v, timezone, naive) for v in tuple(r)[:width]) for r in records]
         return list(self.compiler.results_iter(results=[rows], tuple_expected=True))
+
+
+def _result_timezone(wrapper: Any) -> tuple[datetime.tzinfo, bool]:
+    """The time zone Django's psycopg setup gives ``timestamptz`` values of ``wrapper``'s connections, and whether it
+    drops it: the connection's time zone under ``USE_TZ``, else ``TIME_ZONE`` with naive values."""
+    if settings.USE_TZ:
+        return wrapper.timezone, False
+    return zoneinfo.ZoneInfo(wrapper.timezone_name), True
 
 
 class DjangoCompiler:
@@ -208,13 +223,14 @@ class DjangoCompiler:
     Django's thread-local connection for ``alias`` is not touched, so compiling works in any thread and inside a
     running event loop. ``server_version`` is PostgreSQL's ``server_version_num`` (``170006`` for 17.6); Django
     reads it to choose SQL for some constructs (``AnyValue``, ``JSONObject``, ``JSONArray``, ``UUID7``) and would
-    otherwise connect to ask. Parameters are bound for the entry's ``OPTIONS["server_side_binding"]``. A construct
-    that needs a connection to compile (``SearchHeadline`` with options, which quotes them through psycopg) raises
+    otherwise connect to ask. ``params`` replace keys of the entry for this compiler, as a connection profile's
+    ``params`` do. Parameters are bound for the entry's ``OPTIONS["server_side_binding"]``. A construct that needs a
+    connection to compile (``SearchHeadline`` with options, which quotes them through psycopg) raises
     ``NotSupportedError``. The entry must use Django's PostgreSQL backend on psycopg 3.
     """
 
-    def __init__(self, alias: str = "default", *, server_version: int):
-        settings_dict = copy.deepcopy(connections.settings[alias])
+    def __init__(self, alias: str = "default", *, server_version: int, params: Mapping[str, Any] | None = None):
+        settings_dict = copy.deepcopy({**connections.settings[alias], **(params or {})})
         wrapper = load_backend(settings_dict["ENGINE"]).DatabaseWrapper(settings_dict, alias)
         if wrapper.vendor != "postgresql":
             raise NotSupportedError(f"DATABASES[{alias!r}] is {wrapper.vendor}, not PostgreSQL")
@@ -228,6 +244,7 @@ class DjangoCompiler:
         self.alias = alias
         self.server_version = server_version
         self.server_side_binding = bool(settings_dict.get("OPTIONS", {}).get("server_side_binding"))
+        self.settings_dict = settings_dict
         self.connection = wrapper
 
     def _refuse_connection(self) -> NoReturn:
@@ -246,9 +263,7 @@ class DjangoCompiler:
         query = getattr(query, "query", query)
         if getattr(query, "related_updates", None):
             raise NotSupportedError("an update of parent model fields runs as several statements")
-        if getattr(query, "select_for_update", False) and not in_transaction:
-            raise TransactionManagementError("select_for_update cannot be used outside of a transaction.")
-        compiler = query.get_compiler(connection=self.connection, elide_empty=False)
+        compiler = self._compiler(query, in_transaction)
         try:
             compiled = compiler.as_sql()
         except EmptyResultSet:
@@ -258,6 +273,28 @@ class DjangoCompiler:
         sql, params = compiled
         if not sql:
             return DjangoStatement("", (), compiler=compiler)
+        return self._statement(sql, params, compiler)
+
+    def compile_count(self, query: Any, *, in_transaction: bool = False) -> DjangoStatement:
+        """Compile the number of rows of ``query``, a Django select ``QuerySet`` or ``Query``, into a statement that
+        returns one row with one ``bigint`` column: ``SELECT COUNT(*) FROM (<query>) subquery``.
+
+        The rows counted are those the query returns, after its distinct, slice and annotations; its ordering is
+        dropped unless the slice or ``distinct()`` on fields needs it, as Django's ``count()`` does. A query that
+        matches no rows counts 0. ``in_transaction`` and the errors are those of `compile()`."""
+        inner = getattr(query, "query", query).clone()
+        inner.subquery = True
+        inner.clear_ordering(force=False)
+        compiler = self._compiler(inner, in_transaction)
+        sql, params = compiler.as_sql(with_col_aliases=True)
+        return self._statement(f"SELECT COUNT(*) FROM ({sql}) subquery", params, compiler)  # noqa: S608 - compiled SQL
+
+    def _compiler(self, query: Any, in_transaction: bool) -> Any:
+        if getattr(query, "select_for_update", False) and not in_transaction:
+            raise TransactionManagementError("select_for_update cannot be used outside of a transaction.")
+        return query.get_compiler(connection=self.connection, elide_empty=False)
+
+    def _statement(self, sql: str, params: Sequence[Any], compiler: Any) -> DjangoStatement:
         if len(params) > MAX_QUERY_PARAMS:
             raise NotSupportedError(f"{len(params)} parameters; asyncpg sends at most {MAX_QUERY_PARAMS}")
         bound = [bind_param(p, server_side_binding=self.server_side_binding) for p in params]

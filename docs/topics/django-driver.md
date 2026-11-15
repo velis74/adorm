@@ -9,7 +9,8 @@ raise `NotSupportedError` before anything runs.
 [`DjangoDriver`](/ref/drivers#adorm-drivers-django-djangodriver) executes adorm operations with Django's ORM. It is
 a [threaded driver](/topics/drivers#execution-mode): every slot has a thread of its own with that thread's Django
 connection, and the driver calls only Django's synchronous ORM methods on it. The application never touches
-Django's query sets; the driver builds them from adorm's [operation description](/ref/operations).
+Django's query sets; the driver builds them from adorm's [operation description](/ref/operations). The
+[native PostgreSQL driver](/topics/postgresql-driver) builds the same query sets and runs their SQL on asyncpg.
 
 ```bash
 pip install "adorm[django]"

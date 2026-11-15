@@ -204,7 +204,9 @@ assert connection.is_usable()
 
 An async driver implements `DriverConnection` directly. `DriverConnection` checks operations, options and
 savepoint calls against the capabilities and then calls `_execute()`, `_set_options()` and the `_savepoint()`
-family. The driver maps errors itself and keeps the statement that `cancel()` must stop:
+family. The driver maps errors itself and keeps the statement that `cancel()` must stop. This one runs the
+`RawSQL` operations on asyncpg; adorm's own driver for adorm queries on asyncpg is
+[`AsyncpgDriver`](/topics/postgresql-driver).
 
 ```python
 import asyncio
@@ -215,7 +217,7 @@ from adorm.drivers import Capabilities, Driver, DriverConnection
 from adorm.exceptions import OperationalError, wrap_driver_error
 
 
-class AsyncpgConnection(DriverConnection):
+class RawSQLConnection(DriverConnection):
     def __init__(self, driver, conn, emit):
         super().__init__(driver)
         self.conn, self.emit = conn, emit
@@ -263,8 +265,8 @@ class AsyncpgConnection(DriverConnection):
     # follow the same pattern: await self.run(...) around the asyncpg call.
 
 
-class AsyncpgDriver(Driver):
-    name = "asyncpg"
+class RawSQLDriver(Driver):
+    name = "raw-sql"
     mode = "async"
     capabilities = Capabilities(operations={"raw"}, savepoints=True, cancellation=True)
 
@@ -276,7 +278,7 @@ class AsyncpgDriver(Driver):
                 conn = await asyncpg.connect(profile.params["dsn"])
         except Exception as exc:
             raise wrap_driver_error(exc) from exc
-        return AsyncpgConnection(self, conn, emit)
+        return RawSQLConnection(self, conn, emit)
 ```
 
 Cancelling the task that awaits `execute()` needs no code: the cancellation reaches asyncpg, which sends a cancel

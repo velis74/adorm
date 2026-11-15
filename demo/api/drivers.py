@@ -98,7 +98,7 @@ class DemoDriver:
 
 DRIVERS: tuple[DemoDriver, ...] = (
     DemoDriver("django", "adorm.drivers.django:DjangoDriver", setup_django),
-    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver"),
+    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver", setup_django),
     DemoDriver(
         "memory",
         "demo.api.memory:MemoryDriver",

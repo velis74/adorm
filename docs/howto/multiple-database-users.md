@@ -1,9 +1,9 @@
 # Multiple database users
 
 ::: info Status
-The [Django driver](/topics/django-driver) runs the hooks of this recipe and executes reads; the native PostgreSQL
-driver used in the examples is not part of the installed version. Any `Driver` whose connection `target` is Django's
-connection wrapper or an `asyncpg.Connection` works (see [Writing a driver](/howto/writing-a-driver)).
+The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run the
+hooks of this recipe and execute reads. Any `Driver` whose connection `target` is Django's connection wrapper or an
+`asyncpg.Connection` works (see [Writing a driver](/howto/writing-a-driver)).
 :::
 
 This recipe runs each application user's queries as that user's own PostgreSQL role, with database privileges and

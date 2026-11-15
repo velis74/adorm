@@ -10,7 +10,8 @@ API has two groups of endpoints:
   executor with the active driver, and answer the calls the driver received.
 
 The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. The
-[Django driver](/topics/django-driver), the first available one, executes the reads; the demo's
+[Django driver](/topics/django-driver), the first available one, and the
+[native PostgreSQL driver](/topics/postgresql-driver) (`--driver asyncpg`) execute the reads; the demo's
 [in-memory driver](#memory-driver) (`--driver memory`) also executes the writes.
 
 ## Running it
@@ -36,7 +37,7 @@ uv run python demo.py
 ```text
 $ uv run python demo.py --list-drivers
 django     adorm.drivers.django:DjangoDriver        available
-asyncpg    adorm.drivers.asyncpg:AsyncpgDriver      not available: adorm.drivers.asyncpg does not define AsyncpgDriver
+asyncpg    adorm.drivers.asyncpg:AsyncpgDriver      available
 memory     demo.api.memory:MemoryDriver             available
 ```
 
@@ -380,8 +381,8 @@ with memory.tracing() as calls:
 `demo/api/drivers.py` lists the drivers by import path. A driver is available when its module imports. It is not
 available when the module does not exist or needs a package that is not installed; any other import error stops the
 demo. The active driver comes from `--driver` (environment variable `ADORM_DEMO_DRIVER`), else it is the first
-available one. At startup the API runs the active driver's setup on a worker thread (for the Django driver,
-`django.setup()` with the demo settings; for the memory driver, also loading the rows), instantiates it and registers
+available one. At startup the API runs the active driver's setup on a worker thread (for the Django and asyncpg
+drivers, `django.setup()` with the demo settings; for the memory driver, also loading the rows), instantiates it and registers
 it as the connection profile `default` with the driver's profile hooks; at shutdown the pools close and the profile is
 removed. The other available drivers are imported without setup. For every operation endpoint the API reports what
 each available driver does not support, read from the driver class's `capabilities`.
@@ -389,7 +390,7 @@ each available driver does not support, read from the driver class's `capabiliti
 ```python
 DRIVERS = (
     DemoDriver("django", "adorm.drivers.django:DjangoDriver", setup_django),
-    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver"),
+    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver", setup_django),
     DemoDriver(
         "memory",
         "demo.api.memory:MemoryDriver",

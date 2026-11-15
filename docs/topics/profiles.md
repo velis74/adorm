@@ -3,8 +3,8 @@
 ::: info Status
 The installed version provides connection profiles, their hooks, run-time profiles and the default router built
 from them. Connection options in a profile and slot lifetimes (`purge_stale_connections_at`) are not part of it yet.
-The [Django driver](/topics/django-driver) runs profiles' hooks and executes reads; the native PostgreSQL driver used
-in the examples is not part of it yet. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
+The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run
+profiles' hooks and execute reads. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
 works.
 :::
 
@@ -20,8 +20,8 @@ adorm.configure(
     profiles={
         "default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"},
         "reports": {
-            "driver": "myproject.drivers.AsyncpgDriver",
-            "params": {"dsn": REPORTS_DSN},
+            "driver": "adorm.drivers.asyncpg.AsyncpgDriver",
+            "params": {"USER": "reports", "PASSWORD": REPORTS_PASSWORD},
             "pool": {"max_connections": 4, "acquire_timeout": 5},
         },
     },
@@ -201,7 +201,7 @@ from adorm.executor import Router, set_runner
 from adorm.settings import ProfileRegistry
 
 registry = ProfileRegistry(pool={"max_connections": 5})
-registry.register(ConnectionProfile("default", AsyncpgDriver(), params={"dsn": DSN}))
+registry.register(ConnectionProfile("default", AsyncpgDriver()))
 router = Router(profiles=registry)
 set_runner(router)
 ```

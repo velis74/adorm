@@ -1,0 +1,451 @@
+"""The native PostgreSQL driver: adorm reads executed on asyncpg, on the event loop, without threads."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+import shlex
+
+from collections.abc import Mapping
+from typing import Any
+from urllib.parse import urlencode
+
+import asyncpg
+
+from django.core.exceptions import SynchronousOnlyOperation
+
+from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
+from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
+from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
+from adorm.drivers.django.translation import translate
+from adorm.events import Emit
+from adorm.exceptions import (
+    InterfaceError,
+    MultipleObjectsReturned,
+    NotSupportedError,
+    ObjectDoesNotExist,
+    OperationalError,
+    ProgrammingError,
+)
+
+__all__ = [
+    "CAPABILITIES",
+    "DSN_PARAMETERS",
+    "ISOLATION_LEVELS",
+    "MAX_GET_RESULTS",
+    "AsyncpgConnection",
+    "AsyncpgDriver",
+    "connect_arguments",
+    "server_version_num",
+]
+
+logger = logging.getLogger("adorm.drivers.asyncpg")
+
+CAPABILITIES = Capabilities(
+    operations=DJANGO_CAPABILITIES.operations,
+    constructs=DJANGO_CAPABILITIES.constructs,
+    cancellation=True,
+)
+"""What `AsyncpgDriver` supports: the reads and constructs of the Django driver."""
+
+MAX_GET_RESULTS = 21
+"""How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""
+
+ISOLATION_LEVELS = {
+    1: "READ UNCOMMITTED",
+    2: "READ COMMITTED",
+    3: "REPEATABLE READ",
+    4: "SERIALIZABLE",
+}
+"""The ``BEGIN`` isolation level for each value of psycopg's ``IsolationLevel`` (``OPTIONS["isolation_level"]``)."""
+
+# OPTIONS keys that configure psycopg, Django's own pool or the compiler; they do not reach asyncpg.
+_IGNORED_OPTIONS = frozenset({"pool", "prepare_threshold", "cursor_factory", "context", "server_side_binding"})
+_ADORM_OPTIONS = frozenset({"assume_role", "isolation_level", "options", "connect_timeout"})
+
+DSN_PARAMETERS = frozenset(
+    {
+        "passfile",
+        "sslmode",
+        "sslcert",
+        "sslkey",
+        "sslrootcert",
+        "sslcrl",
+        "sslpassword",
+        "sslnegotiation",
+        "ssl_min_protocol_version",
+        "ssl_max_protocol_version",
+        "target_session_attrs",
+        "krbsrvname",
+        "gsslib",
+        "service",
+        "application_name",
+        "client_encoding",
+    }
+)
+"""The ``OPTIONS`` keys passed in asyncpg's ``dsn``: libpq parameters asyncpg reads, and ``application_name`` and
+``client_encoding``, which it sends to the server as settings."""
+
+
+def _server_settings(options: str) -> dict[str, str]:
+    """The run-time parameters of a libpq ``options`` string (``-c name=value`` and ``--name=value``)."""
+    found: dict[str, str] = {}
+    tokens = shlex.split(options)
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-c" and index + 1 < len(tokens):  # noqa: S105 - a libpq flag
+            setting = tokens[index + 1]
+            index += 2
+        elif token.startswith("-c"):
+            setting = token[2:]
+            index += 1
+        elif token.startswith("--"):
+            setting = token[2:]
+            index += 1
+        else:
+            raise NotSupportedError(f"unsupported libpq options {options!r}: only -c name=value is passed to asyncpg")
+        name, separator, value = setting.partition("=")
+        if not separator or not name:
+            raise NotSupportedError(f"unsupported libpq options {options!r}: only -c name=value is passed to asyncpg")
+        found[name.replace("-", "_")] = value
+    return found
+
+
+def _isolation_level(value: Any) -> str:
+    try:
+        return ISOLATION_LEVELS[int(value)]
+    except (KeyError, TypeError, ValueError):
+        raise ProgrammingError(
+            f"invalid transaction isolation level {value!r}; use one of the psycopg.IsolationLevel values"
+        ) from None
+
+
+def connect_arguments(settings_dict: Mapping[str, Any], *, time_zone: str | None = None) -> dict[str, Any]:
+    """The keyword arguments of ``asyncpg.connect()`` for a Django ``DATABASES`` entry.
+
+    ``NAME``, ``USER``, ``PASSWORD``, ``HOST`` and ``PORT`` become ``database``, ``user``, ``password``, ``host`` and
+    ``port`` (empty values are left to asyncpg's defaults; ``NAME`` ``None`` is ``postgres``). ``OPTIONS``:
+    ``connect_timeout`` becomes ``timeout``, the ``-c name=value`` settings of ``options`` and ``time_zone`` (as
+    ``TimeZone``) go to ``server_settings``; ``assume_role`` and ``isolation_level`` are applied by the connection;
+    ``pool``, ``prepare_threshold``, ``cursor_factory``, ``context`` and ``server_side_binding`` do not concern
+    asyncpg; the keys in `DSN_PARAMETERS` (``sslmode``, ``sslrootcert``, ``application_name`` …) go to asyncpg's
+    ``dsn``. Any other key (a libpq parameter asyncpg does not read, such as ``keepalives``) and ``options`` other
+    than run-time settings raise `NotSupportedError`.
+    """
+    options = dict(settings_dict.get("OPTIONS") or {})
+    arguments: dict[str, Any] = {}
+    name = settings_dict.get("NAME")
+    if name is None:
+        arguments["database"] = "postgres"
+    elif name:
+        arguments["database"] = name
+    for key, argument in (("USER", "user"), ("PASSWORD", "password"), ("HOST", "host")):
+        if settings_dict.get(key):
+            arguments[argument] = settings_dict[key]
+    if settings_dict.get("PORT"):
+        arguments["port"] = int(settings_dict["PORT"])
+    server_settings = _server_settings(options["options"]) if options.get("options") else {}
+    if options.get("connect_timeout") is not None:
+        arguments["timeout"] = float(options["connect_timeout"])
+    if "isolation_level" in options:
+        _isolation_level(options["isolation_level"])
+    if time_zone is not None:
+        server_settings["TimeZone"] = time_zone
+    if server_settings:
+        arguments["server_settings"] = server_settings
+    unsupported = sorted(set(options) - _IGNORED_OPTIONS - _ADORM_OPTIONS - DSN_PARAMETERS)
+    if unsupported:
+        raise NotSupportedError(f"the asyncpg driver does not support the OPTIONS {', '.join(map(repr, unsupported))}")
+    libpq = {k: str(v) for k, v in options.items() if k in DSN_PARAMETERS and v is not None}
+    if libpq:
+        arguments["dsn"] = "postgresql://?" + urlencode(libpq)
+    return arguments
+
+
+class AsyncpgConnection(DriverConnection):
+    """An ``asyncpg.Connection`` for one slot, with a `DjangoCompiler` for its profile's ``DATABASES`` entry.
+
+    Each read translates the operation's query into a Django query set, compiles it on the event loop without a
+    database connection and runs the statement on asyncpg. ``target`` (what profile hooks receive) is the
+    ``asyncpg.Connection``.
+    """
+
+    driver: AsyncpgDriver
+
+    def __init__(
+        self,
+        driver: AsyncpgDriver,
+        profile: Profile,
+        emit: Emit,
+        conn: asyncpg.Connection,
+        compiler: DjangoCompiler,
+    ) -> None:
+        super().__init__(driver)
+        self.profile = profile
+        self.conn = conn
+        self.compiler = compiler
+        self._emit = emit
+        self._loop = asyncio.get_running_loop()
+        options = compiler.settings_dict.get("OPTIONS") or {}
+        level = options.get("isolation_level")
+        self._begin = "BEGIN" if level is None else f"BEGIN ISOLATION LEVEL {_isolation_level(level)}"
+        self._statement: asyncio.Task | None = None
+        self._cancelled: asyncio.Task | None = None
+        self._statement_failed = False
+        self._in_transaction = False
+        self._usable = True
+        self._closed = False
+
+    @property
+    def target(self) -> Any:
+        return self.conn
+
+    # Statements
+
+    async def _run(self, coroutine: Any) -> Any:
+        """Await ``coroutine`` in a task of its own, so that `cancel()` stops it without cancelling the caller."""
+        if self._closed:
+            coroutine.close()
+            raise InterfaceError("asyncpg connection is closed")
+        task = asyncio.ensure_future(coroutine)
+        self._statement = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if self._cancelled is task and current is not None and not current.cancelling():
+                raise OperationalError("canceling statement due to user request", sqlstate="57014") from None
+            raise
+        except BaseException:
+            self._statement_failed = True
+            raise
+        finally:
+            self._statement = None
+            self._cancelled = None
+
+    def _compile(self, query: Any, *, count: bool = False) -> DjangoStatement:
+        if count:
+            return self.compiler.compile_count(query, in_transaction=self._in_transaction)
+        return self.compiler.compile(query, in_transaction=self._in_transaction)
+
+    async def _fetch(self, statement: DjangoStatement) -> list[tuple[Any, ...]]:
+        return statement.rows(await self._run(self.conn.fetch(statement.sql, *statement.params)))
+
+    async def _execute(self, operation: Any) -> Any:
+        self._statement_failed = False
+        try:
+            return await self._read(operation)
+        except asyncio.CancelledError:
+            raise
+        except SynchronousOnlyOperation as exc:
+            raise NotSupportedError(
+                f"building the {operation.kind!r} query accessed the database, which the asyncpg driver does not do "
+                "on the event loop: a Django manager's get_queryset() must only build a query"
+            ) from exc
+        except Exception as exc:
+            mapped = self._mapped(exc) if self._statement_failed else self.map_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    async def _read(self, operation: Any) -> Any:
+        kind = operation.kind
+        translated = translate(operation.query)
+        queryset = translated.queryset
+        if kind == "select":
+            return translated.rows(await self._fetch(self._compile(queryset)))
+        if kind == "get":
+            return translated.row(await self._get(queryset))
+        if kind in ("first", "last"):
+            if kind == "first":
+                ordered = queryset if queryset.ordered else queryset.order_by("pk")
+            else:
+                ordered = queryset.reverse() if queryset.ordered else queryset.order_by("-pk")
+            rows = await self._fetch(self._compile(ordered[:1]))
+            return translated.row(rows[0]) if rows else None
+        if kind == "count":
+            statement = self._compile(queryset, count=True)
+            return await self._run(self.conn.fetchval(statement.sql, *statement.params))
+        if kind == "exists":
+            statement = self._compile(queryset.query.exists())
+            return await self._run(self.conn.fetchrow(statement.sql, *statement.params)) is not None
+        raise NotSupportedError(f"the asyncpg driver does not execute {kind!r} operations")
+
+    async def _get(self, queryset: Any) -> tuple[Any, ...]:
+        """The one row of ``queryset``, selected as Django's ``get()`` selects it."""
+        clone = queryset.all()
+        if clone.query.can_filter() and not clone.query.distinct_fields:
+            clone = clone.order_by()
+        clone.query.set_limits(high=MAX_GET_RESULTS)
+        rows = await self._fetch(self._compile(clone))
+        if len(rows) == 1:
+            return rows[0]
+        name = queryset.model._meta.object_name
+        if not rows:
+            raise ObjectDoesNotExist(f"{name} matching query does not exist.")
+        found = len(rows) if len(rows) < MAX_GET_RESULTS else f"more than {MAX_GET_RESULTS - 1}"
+        raise MultipleObjectsReturned(f"get() returned more than one {name} -- it returned {found}!")
+
+    async def _command(self, sql: str) -> None:
+        try:
+            await self._run(self.conn.execute(sql))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            mapped = self._mapped(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    # Transactions
+
+    async def begin(self) -> None:
+        await self._command(self._begin)
+        self._in_transaction = True
+
+    async def commit(self) -> None:
+        try:
+            await self._command("COMMIT")
+        finally:
+            self._in_transaction = self.conn.is_in_transaction()
+
+    async def rollback(self) -> None:
+        try:
+            await self._command("ROLLBACK")
+        finally:
+            self._in_transaction = self.conn.is_in_transaction()
+
+    # Connection
+
+    def cancel(self) -> None:
+        """Cancel the statement running now, if any; a statement that starts later is not affected. Callable from
+        any thread. The cancelled call raises `OperationalError` with SQLSTATE ``57014``."""
+        task = self._statement
+        if task is None:
+            return
+        try:
+            self._loop.call_soon_threadsafe(self._cancel_statement, task)
+        except RuntimeError:
+            logger.warning("event loop closed, cannot cancel the running asyncpg statement")
+
+    def _cancel_statement(self, task: asyncio.Task) -> None:
+        if task is self._statement and not task.done():
+            self._cancelled = task
+            task.cancel()
+
+    def is_usable(self) -> bool:
+        return self._usable and not self._closed and not self.conn.is_closed()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            await self.conn.close(timeout=self.driver.close_timeout)
+        except Exception:
+            logger.exception("closing asyncpg connection failed")
+
+    def map_error(self, exc: BaseException) -> BaseException:
+        """`map_django_error()`; asyncpg's ``InternalClientError`` (its protocol in an unexpected state, as after the
+        server ended an idle connection) is `InterfaceError`."""
+        if isinstance(exc, asyncpg.InternalClientError):
+            return InterfaceError(str(exc), original=exc)
+        return map_django_error(exc)
+
+    def _mapped(self, exc: BaseException) -> BaseException:
+        """``exc`` of a statement, mapped; a connection error makes the connection unusable."""
+        mapped = self.map_error(exc)
+        if self.is_connection_lost(mapped):
+            self._usable = False
+        return mapped
+
+
+async def _configure(conn: asyncpg.Connection, settings_dict: Mapping[str, Any], time_zone: str) -> None:
+    """Set the session time zone when it differs from ``time_zone`` and assume ``OPTIONS["assume_role"]``."""
+    if conn.get_settings().TimeZone != time_zone:
+        await conn.execute("SELECT set_config('TimeZone', $1, false)", time_zone)
+    role = (settings_dict.get("OPTIONS") or {}).get("assume_role")
+    if role:
+        await conn.execute("SELECT set_config('role', $1, false)", role)
+
+
+class AsyncpgDriver(Driver):
+    """Executes adorm reads on asyncpg, natively async.
+
+    A connection is an ``asyncpg.Connection`` opened with the profile's ``DATABASES`` entry (``alias``) and
+    ``params``, which replace keys of that entry; SQL is compiled from Django query sets by a `DjangoCompiler` for the
+    same entry and the server's version. Django must be set up (``django.setup()``) before the first connection
+    opens. ``close_timeout`` is how many seconds closing a connection may take before it is aborted.
+    """
+
+    name = "asyncpg"
+    mode = "async"
+    capabilities = CAPABILITIES
+    close_timeout: float = 5.0
+
+    async def open_connection(self, profile: Profile, emit: Emit) -> AsyncpgConnection:
+        """Open ``profile``'s connection: ``profile.connect(profile)`` when the profile has a ``connect`` hook (its
+        result is awaited when awaitable and must be an ``asyncpg.Connection``, else `InterfaceError`), otherwise
+        ``asyncpg.connect()`` with `connect_arguments()`. Either way the session time zone is set to Django's for the
+        entry and ``OPTIONS["assume_role"]`` is assumed. An alias without a ``DATABASES`` entry raises
+        `ProgrammingError` and a backend that is not PostgreSQL `NotSupportedError`, both before anything
+        connects."""
+        conn = None
+        try:
+            settings_dict = _settings_dict(profile)
+            time_zone = _time_zone(settings_dict)
+            if profile.connect is None:
+                conn = await asyncpg.connect(**connect_arguments(settings_dict, time_zone=time_zone))
+            else:
+                conn = profile.connect(profile)
+                if inspect.isawaitable(conn):
+                    conn = await conn
+                if not isinstance(conn, asyncpg.Connection):
+                    raise InterfaceError(f"the connect hook of {profile.name!r} returned {conn!r}, not a connection")
+            await _configure(conn, settings_dict, time_zone)
+            compiler = DjangoCompiler(
+                profile.alias, server_version=server_version_num(conn.get_server_version()), params=profile.params
+            )
+        except BaseException as exc:
+            if isinstance(conn, asyncpg.Connection):
+                conn.terminate()
+            mapped = map_django_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        return AsyncpgConnection(self, profile, emit, conn, compiler)
+
+
+def server_version_num(version: Any) -> int:
+    """PostgreSQL's ``server_version_num`` for an asyncpg ``ServerVersion`` (``170006`` for 17.6, ``90624`` for
+    9.6.24); asyncpg reads 17.6 as ``major`` 17, ``micro`` 6."""
+    if version.major >= 10:
+        return version.major * 10000 + version.micro
+    return version.major * 10000 + version.minor * 100 + version.micro
+
+
+def _settings_dict(profile: Profile) -> dict[str, Any]:
+    """``profile``'s ``DATABASES`` entry with its ``params`` applied; it must use a PostgreSQL backend."""
+    from django.db import connections
+    from django.db.utils import load_backend
+
+    try:
+        entry = connections.settings[profile.alias]
+    except KeyError:
+        raise ProgrammingError(f"DATABASES has no entry {profile.alias!r} for profile {profile.name!r}") from None
+    settings_dict = {**entry, **profile.params}
+    vendor = load_backend(settings_dict["ENGINE"]).DatabaseWrapper.vendor
+    if vendor != "postgresql":
+        raise NotSupportedError(f"the asyncpg driver supports PostgreSQL databases, not {vendor!r}")
+    return settings_dict
+
+
+def _time_zone(settings_dict: Mapping[str, Any]) -> str:
+    """The session time zone Django sets for a ``DATABASES`` entry."""
+    from django.conf import settings
+
+    if not settings.USE_TZ:
+        return settings.TIME_ZONE
+    return settings_dict.get("TIME_ZONE") or "UTC"

@@ -28,10 +28,10 @@ comes from it instead of the driver's default. The connection reports events by 
 [`CallbackEvent` or a `BackendEvent`](/ref/events). A failure raises an adorm exception.
 
 ```python
-class AsyncpgDriver(Driver):
-    name = "asyncpg"
+class RawSQLDriver(Driver):
+    name = "raw-sql"
     mode = "async"
-    capabilities = Capabilities(operations={"select"}, connection_options={"statement_timeout"})
+    capabilities = Capabilities(operations={"raw"}, connection_options={"statement_timeout"})
 
     async def open_connection(self, profile, emit):
         try:
@@ -41,7 +41,7 @@ class AsyncpgDriver(Driver):
                 conn = await asyncpg.connect(profile.params["dsn"])
         except Exception as exc:
             raise wrap_driver_error(exc) from exc
-        return AsyncpgConnection(self, conn, emit)
+        return RawSQLConnection(self, conn, emit)
 ```
 
 #### `is_refusal(exc)`
@@ -514,6 +514,132 @@ A read-only mapping from adorm function class names to Django function classes: 
 `5`: how many relations deep `select_related()` without paths follows non-null foreign keys, as Django's
 `Query.max_depth`.
 
+## Native PostgreSQL driver
+
+`adorm.drivers.asyncpg` executes adorm operations on asyncpg, natively async. Importing it imports asyncpg, Django
+and psycopg 3 (the `asyncpg` extra, `pip install "adorm[asyncpg]"`); connections need Django set up
+(`django.setup()`). The [native PostgreSQL driver topic](/topics/postgresql-driver) shows it in use. The names below
+are defined in `adorm.drivers.asyncpg.driver`.
+
+```python
+from adorm.drivers.asyncpg import AsyncpgDriver, connect_arguments
+```
+
+### `adorm.drivers.asyncpg.AsyncpgDriver`
+
+A [`Driver`](#adorm-drivers-driver): `name` `"asyncpg"`, `mode` `"async"`, `capabilities`
+[`CAPABILITIES`](#adorm-drivers-asyncpg-capabilities). Created without arguments; a profile names it by class,
+instance or import path. `close_timeout` (`5.0`) is how many seconds closing a connection may take before asyncpg
+aborts it.
+
+#### `async open_connection(profile, emit)`
+
+Opens an [`AsyncpgConnection`](#adorm-drivers-asyncpg-asyncpgconnection) for `profile`:
+
+1. Takes the `DATABASES` entry `profile.alias` (Django's `connections.settings`) with `profile.params` replacing
+   its keys. An alias without an entry raises `ProgrammingError`, a backend other than PostgreSQL
+   `NotSupportedError`, before anything connects.
+2. Opens the connection with `asyncpg.connect(**connect_arguments(entry, time_zone=...))`, the time zone being the
+   one Django sets on its own connections (Django's `TIME_ZONE` without `USE_TZ`, else the entry's `TIME_ZONE` or
+   `UTC`); or with `profile.connect(profile)`, awaited when it returns an awaitable, which must give an
+   `asyncpg.Connection` (anything else raises `InterfaceError`).
+3. Sets the session time zone when the connection's differs and assumes `OPTIONS["assume_role"]`.
+4. Builds the connection's [`DjangoCompiler`](#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none)
+   for the alias, `profile.params` and the server's version
+   ([`server_version_num()`](#adorm-drivers-asyncpg-server-version-num-version)).
+
+A failure closes the connection and raises an adorm exception (`OperationalError` with SQLSTATE `3D000` for an
+unknown database, `53300` for too many connections, which [`is_refusal()`](#is-refusal-exc) recognises).
+
+```python
+adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDriver", "alias": "default"}})
+driver = AsyncpgDriver()
+pool = Pool(driver, ConnectionProfile("default", driver, params={"USER": "reports"}), max_connections=10)
+```
+
+### `adorm.drivers.asyncpg.AsyncpgConnection`
+
+The [`DriverConnection`](#adorm-drivers-driverconnection) of `AsyncpgDriver`. `conn` is the `asyncpg.Connection`,
+also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `profile` its profile.
+
+| Method | Does |
+|---|---|
+| `_execute(operation)` | [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`). Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while the query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error of a statement can make the connection unusable |
+| `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)) |
+| `commit()`, `rollback()` | `COMMIT`, `ROLLBACK` |
+| `cancel()` | cancels the statement running when it is called, from any thread; that call raises `OperationalError` with SQLSTATE `57014`, a statement that starts later is not affected. Nothing without a running statement |
+| `is_usable()` | `False` once a connection error was raised, after `close()` and when asyncpg reports the connection closed |
+| `close()` | asyncpg's `close()` within the driver's `close_timeout` (asyncpg aborts the connection when it fails); logs errors, a second call does nothing |
+| `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc): Django's exceptions as on the Django driver, asyncpg's by their SQLSTATE; asyncpg's `InternalClientError` (its protocol in an unexpected state, as after the server ended an idle connection) is `InterfaceError` |
+
+Each statement runs in a task of its own, so `cancel()` stops it without cancelling the caller. Cancelling the
+task that awaits `execute()` cancels the statement as well (asyncpg sends a cancel request and handles it before
+the connection's next statement) and raises `asyncio.CancelledError`; the connection stays usable. A statement
+inside a transaction compiles with `in_transaction=True`.
+
+### `adorm.drivers.asyncpg.CAPABILITIES`
+
+The [`Capabilities`](#adorm-drivers-capabilities) of `AsyncpgDriver`: the `operations` and `constructs` of the
+Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (`select`, `get`, `first`, `last`, `count`,
+`exists`; every lookup, `Lower`, `Upper`, `Subquery`, `distinct`, `DISTINCT ON`, `only`, `defer`,
+`select_related`, the query's manager) and `cancellation`. No `savepoints`, `connection_options` or
+`backend_events`.
+
+### `adorm.drivers.asyncpg.connect_arguments(settings_dict, *, time_zone=None)`
+
+Returns the keyword arguments of `asyncpg.connect()` for a Django `DATABASES` entry:
+
+| Entry | Argument |
+|---|---|
+| `NAME`, `USER`, `PASSWORD`, `HOST` | `database`, `user`, `password`, `host`; empty values are left out, `NAME` `None` is `"postgres"` |
+| `PORT` | `port` as `int`, left out when empty |
+| `OPTIONS["options"]` | its `-c name=value`, `-cname=value` and `--name=value` settings in `server_settings` (dashes in the name become underscores); any other token raises `NotSupportedError` |
+| `OPTIONS["connect_timeout"]` | `timeout` as `float` |
+| `time_zone` | `server_settings["TimeZone"]` |
+| `OPTIONS["isolation_level"]` | checked only: a value that is not one of psycopg's `IsolationLevel` values raises `ProgrammingError` |
+| `OPTIONS["assume_role"]` | none; the connection applies it |
+| `OPTIONS["pool"]`, `["prepare_threshold"]`, `["cursor_factory"]`, `["context"]`, `["server_side_binding"]` | none |
+| `OPTIONS` keys in [`DSN_PARAMETERS`](#adorm-drivers-asyncpg-dsn-parameters) | URL-encoded into `dsn` (`"postgresql://?sslmode=require"`), which asyncpg parses |
+| any other `OPTIONS` key | raises `NotSupportedError` naming it |
+
+```python
+connect_arguments({"NAME": "clubs", "USER": "app", "PORT": "6432", "OPTIONS": {"sslmode": "require"}})
+# {'database': 'clubs', 'user': 'app', 'port': 6432, 'dsn': 'postgresql://?sslmode=require'}
+connect_arguments({"NAME": None, "OPTIONS": {"options": "-c search_path=app"}}, time_zone="UTC")
+# {'database': 'postgres', 'server_settings': {'search_path': 'app', 'TimeZone': 'UTC'}}
+```
+
+### `adorm.drivers.asyncpg.DSN_PARAMETERS`
+
+The `OPTIONS` keys `connect_arguments()` passes in asyncpg's `dsn`: the libpq parameters asyncpg reads (`passfile`,
+`sslmode`, `sslcert`, `sslkey`, `sslrootcert`, `sslcrl`, `sslpassword`, `sslnegotiation`,
+`ssl_min_protocol_version`, `ssl_max_protocol_version`, `target_session_attrs`, `krbsrvname`, `gsslib`, `service`)
+and `application_name` and `client_encoding`, which asyncpg sends to the server as settings. asyncpg sends any other
+`dsn` parameter to the server as a setting, so a libpq-only parameter such as `keepalives` would make the server
+refuse the connection; `connect_arguments()` refuses it before connecting.
+
+### `adorm.drivers.asyncpg.ISOLATION_LEVELS`
+
+The isolation level `begin()` names for each value of psycopg's `IsolationLevel`: `1` `READ UNCOMMITTED`, `2`
+`READ COMMITTED`, `3` `REPEATABLE READ`, `4` `SERIALIZABLE`.
+
+```python
+"default": {
+    "driver": "adorm.drivers.asyncpg.AsyncpgDriver",
+    "params": {"OPTIONS": {"isolation_level": psycopg.IsolationLevel.SERIALIZABLE}},
+}
+```
+
+### `adorm.drivers.asyncpg.MAX_GET_RESULTS`
+
+`21`: the most rows a `get` fetches, as Django's `get()`; with that many it reports `it returned more than 20!`.
+
+### `adorm.drivers.asyncpg.server_version_num(version)`
+
+Returns PostgreSQL's `server_version_num` for an asyncpg `ServerVersion` (`Connection.get_server_version()`):
+`170006` for 17.6, `90624` for 9.6.24. asyncpg reads a version from 10 on as `major`, `0`, `micro` (17.6 is
+`ServerVersion(17, 0, 6, ...)`).
+
 ## SQL statements
 
 `adorm.drivers.sql` holds what a driver that executes SQL itself needs regardless of where the SQL comes from. It
@@ -556,8 +682,8 @@ numbered_placeholders("SELECT %s, %s", ["int4", None])
 
 ## Django's compiler for asyncpg
 
-`adorm.drivers.asyncpg.compiler` compiles Django queries into SQL for asyncpg, without a database connection. It
-imports Django, psycopg 3 (Django's PostgreSQL backend must run on it) and asyncpg, which the `asyncpg` extra
+`adorm.drivers.asyncpg.compiler` compiles Django queries into SQL for asyncpg, without a database connection; the
+[native PostgreSQL driver](#native-postgresql-driver) builds its statements with it. It imports Django, psycopg 3 (Django's PostgreSQL backend must run on it) and asyncpg, which the `asyncpg` extra
 installs (`pip install "adorm[asyncpg]"`). [SQL compilation for asyncpg](/topics/sql-compilation) describes the
 behaviour it relies on.
 
@@ -565,7 +691,7 @@ behaviour it relies on.
 from adorm.drivers.asyncpg.compiler import bind_param, DjangoCompiler, DjangoStatement, MAX_QUERY_PARAMS
 ```
 
-### `adorm.drivers.asyncpg.compiler.DjangoCompiler(alias="default", *, server_version)`
+### `adorm.drivers.asyncpg.compiler.DjangoCompiler(alias="default", *, server_version, params=None)`
 
 Compiles Django queries for the `DATABASES` entry `alias` into [`DjangoStatement`](#adorm-drivers-asyncpg-compiler-djangostatement)
 objects. It compiles on a database wrapper of its own (`connection`), built from that entry and never connected,
@@ -574,8 +700,9 @@ running event loop. One instance can be shared by threads and tasks.
 
 `server_version` is PostgreSQL's `server_version_num` (`170006` for 17.6). Django reads it to choose the SQL for
 `AnyValue`, `JSONObject`, `JSONArray` and `UUID7`; a version that lacks a construct raises Django's
-`NotSupportedError` for it, as Django does. Parameters are bound for the entry's `OPTIONS["server_side_binding"]`
-(attribute `server_side_binding`). The wrapper's `features.max_query_params` is
+`NotSupportedError` for it, as Django does. `params` replace keys of the entry for this compiler, as a connection
+profile's `params` do; the resulting entry is the attribute `settings_dict`. Parameters are bound for the entry's
+`OPTIONS["server_side_binding"]` (attribute `server_side_binding`). The wrapper's `features.max_query_params` is
 [`MAX_QUERY_PARAMS`](#adorm-drivers-asyncpg-compiler-max-query-params), so
 `compiler.connection.ops.bulk_batch_size(fields, objs)` returns batch sizes asyncpg accepts.
 
@@ -585,6 +712,7 @@ An entry whose backend is not PostgreSQL, or whose PostgreSQL backend runs on ps
 ```python
 server_version = int(await conn.fetchval("SHOW server_version_num"))
 compiler = DjangoCompiler("default", server_version=server_version)
+reports = DjangoCompiler("default", server_version=server_version, params={"TIME_ZONE": "Europe/Ljubljana"})
 ```
 
 #### `compile(query, *, in_transaction=False)`
@@ -612,6 +740,20 @@ statement.params   # (100, '%war%')
 records = await conn.fetch(statement.sql, *statement.params)
 ```
 
+#### `compile_count(query, *, in_transaction=False)`
+
+Compiles the number of rows of `query`, a Django select `QuerySet` or `Query`, into a `DjangoStatement` that returns
+one row with one `bigint` column: `SELECT COUNT(*) FROM (<query>) subquery`, the inner query with column aliases. It
+counts the rows the query returns, after its `distinct()`, slice and annotations; the inner query keeps its ordering
+only when a slice or `distinct()` on fields needs it, as Django's `count()` does. A query that matches nothing counts
+0. `query` is not changed. `in_transaction` and the errors are those of `compile()`.
+
+```python
+statement = compiler.compile_count(Book.objects.order_by("isbn")[1:])
+statement.sql      # 'SELECT COUNT(*) FROM (SELECT "library_book"."isbn" AS "col1", ... OFFSET 1) subquery'
+await conn.fetchval(statement.sql, *statement.params)
+```
+
 ### `adorm.drivers.asyncpg.compiler.DjangoStatement`
 
 A [`Statement`](#adorm-drivers-sql-statement) compiled by `DjangoCompiler`. Its `compiler` field holds Django's
@@ -631,7 +773,9 @@ count = 0 if statement.empty else int((await conn.execute(statement.sql, *statem
 Returns `records`, the asyncpg `Record` objects (or tuples) the statement fetched, as a list of tuples in select
 order: the values Django's own evaluation of the query returns on psycopg. It drops the columns Django adds only
 for ordering or `extra(select=)`, returns `inet` / `cidr` values as text and `uuid` values as `uuid.UUID` (in arrays
-too), as psycopg loads them, and applies the fields' `from_db_value()` converters, JSON decoding included.
+too), as psycopg loads them, gives `timestamptz` values the time zone of the compiler's connection (`UTC`, or the
+entry's `TIME_ZONE`; under `USE_TZ = False` naive values in Django's `TIME_ZONE`, as Django's psycopg loader returns
+them), and applies the fields' `from_db_value()` converters, JSON decoding included.
 
 ```python
 statement = compiler.compile(Book.objects.values("isbn", "extra"))

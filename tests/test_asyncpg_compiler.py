@@ -605,3 +605,89 @@ def test_asyncpg_parameter_limit(test_database_url):
     assert asyncio.run(probe(MAX_QUERY_PARAMS)) == MAX_QUERY_PARAMS
     with pytest.raises(asyncpg.InterfaceError, match="cannot exceed 32767"):
         asyncio.run(probe(MAX_QUERY_PARAMS + 1))
+
+
+# Counting
+
+
+def counted():
+    """Querysets whose count needs the distinct, the slice or the ordering kept in a subquery."""
+    return {
+        "plain": Book.objects.filter(genre="fiction"),
+        "ordered": Book.objects.order_by("-pages"),
+        "join": Book.objects.filter(authors__isnull=False),
+        "distinct": Book.objects.filter(authors__isnull=False).distinct(),
+        "distinct_values": Book.objects.values_list("genre", flat=True).distinct(),
+        "distinct_on": Book.objects.order_by("genre", "-pages").distinct("genre"),
+        "sliced": Book.objects.order_by("isbn")[1:],
+        "sliced_window": Book.objects.order_by("isbn")[:2],
+        "empty": Book.objects.filter(pk__in=[]),
+        "annotated": Book.objects.annotate(lower=Lower("title")).filter(lower__startswith="w"),
+        "duplicate_column_names": Book.objects.values_list("authors__name", "tags__name"),
+    }
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("name", list(counted()))
+def test_count_matches_djangos_count(test_database_url, name):
+    seed()
+    queryset = counted()[name]
+    statement = DjangoCompiler(server_version=connection.pg_version).compile_count(queryset)
+    assert statement.sql.startswith("SELECT COUNT(*) FROM (")
+    assert asyncio.run(fetch(test_database_url, statement))[0][0] == queryset.count()
+
+
+def test_count_keeps_the_ordering_only_where_it_decides_the_rows(compiler):
+    assert "ORDER BY" not in compiler.compile_count(Book.objects.order_by("-pages")).sql
+    assert "ORDER BY" in compiler.compile_count(Book.objects.order_by("-pages")[:2]).sql
+    assert "ORDER BY" in compiler.compile_count(Book.objects.order_by("genre", "-pages").distinct("genre")).sql
+
+
+def test_count_refuses_select_for_update_outside_a_transaction(compiler):
+    with pytest.raises(TransactionManagementError):
+        compiler.compile_count(Book.objects.select_for_update())
+    assert "FOR UPDATE" in compiler.compile_count(Book.objects.select_for_update(), in_transaction=True).sql
+
+
+def test_count_leaves_the_query_unchanged(compiler):
+    queryset = Book.objects.order_by("-pages")
+    before = str(queryset.query)
+    compiler.compile_count(queryset)
+    assert str(queryset.query) == before
+
+
+# Profile parameters and result time zones
+
+
+def test_params_replace_keys_of_the_entry(monkeypatch):
+    queryset = Book.objects.annotate(x=RawSQL("%s", (7,))).values("x")
+    assert "$1::int4" in DjangoCompiler(server_version=SERVER_VERSION).compile(queryset).sql
+    server_side = DjangoCompiler(server_version=SERVER_VERSION, params={"OPTIONS": {"server_side_binding": True}})
+    assert server_side.server_side_binding
+    assert "$1::int2" in server_side.compile(queryset).sql
+    assert server_side.settings_dict["OPTIONS"] == {"server_side_binding": True}
+    assert "server_side_binding" not in connections.settings["default"].get("OPTIONS", {})
+    with pytest.raises(NotSupportedError, match="sqlite"):
+        DjangoCompiler(server_version=SERVER_VERSION, params={"ENGINE": "django.db.backends.sqlite3"})
+    monkeypatch.setitem(connections.settings["default"], "TIME_ZONE", None)
+    zoned = DjangoCompiler(server_version=SERVER_VERSION, params={"TIME_ZONE": "Europe/Ljubljana"})
+    assert zoned.connection.timezone_name == "Europe/Ljubljana"
+
+
+def published_row(compiler):
+    statement = compiler.compile(Book.objects.values_list("published"))
+    return statement.rows([(PUBLISHED,)])[0][0]
+
+
+def test_rows_give_timestamps_the_connections_time_zone(settings):
+    assert published_row(DjangoCompiler(server_version=SERVER_VERSION)) == PUBLISHED
+    assert published_row(DjangoCompiler(server_version=SERVER_VERSION)).tzinfo == datetime.UTC
+    zoned = published_row(DjangoCompiler(server_version=SERVER_VERSION, params={"TIME_ZONE": "Europe/Ljubljana"}))
+    assert zoned == PUBLISHED
+    assert str(zoned.tzinfo) == "Europe/Ljubljana"
+    assert zoned.hour == 13
+    settings.USE_TZ = False
+    settings.TIME_ZONE = "Europe/Ljubljana"
+    naive = published_row(DjangoCompiler(server_version=SERVER_VERSION))
+    assert naive == datetime.datetime(2024, 3, 1, 13, 30)
+    assert naive.tzinfo is None
