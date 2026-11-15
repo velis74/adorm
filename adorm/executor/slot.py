@@ -383,9 +383,10 @@ class Slot:
     A task of its own runs the requests of the current lease one at a time, in order, and delivers each outcome
     to the lease's channel: a `CancelledEvent` for a request cancelled before it finished, and a `CallbackEvent`
     named `ON_COMMIT` or `ON_ROLLBACK` before the outcome of a successful ``commit`` or ``rollback``. When that task
-    fails, the queued requests fail with `InterfaceError` and the slot becomes unusable. Events the connection emits
-    go to the current lease's channel, or to the pool's `EventBus` while no lease holds the slot; only `CallbackEvent`
-    and `BackendEvent` values are accepted, and a `CallbackEvent` with a name in `RESERVED_CALLBACKS` is dropped.
+    fails, the queued requests and those sent later fail with `InterfaceError` and the slot becomes unusable. Events
+    the connection emits go to the current lease's channel, or to the pool's `EventBus` while no lease holds the slot;
+    only `CallbackEvent` and `BackendEvent` values are accepted, and a `CallbackEvent` with a name in
+    `RESERVED_CALLBACKS` is dropped.
 
     When the lease is inside a transaction and no request arrives within the lease's ``commit_timeout``, the slot
     rolls the transaction back, delivers ``CallbackEvent(ON_ROLLBACK)``, ends the lease (later requests raise

@@ -381,7 +381,7 @@ The [`DriverConnection`](/ref/drivers#adorm-drivers-driverconnection) methods a 
 
 An exclusive channel to one driver connection of a pool, created by the pool. A task of its own runs the requests
 of the current lease; for a threaded driver each connection also has its own thread. When that task fails, the
-queued requests fail with `InterfaceError` and the slot is no longer usable.
+queued requests and those sent later fail with `InterfaceError` and the slot is no longer usable.
 
 The slot delivers to its lease's channel exactly one outcome per request: `ResultEvent`, `ErrorEvent`, or
 `CancelledEvent` for a request cancelled before it finished (`started=False` when it was still queued).
@@ -472,8 +472,9 @@ Whether the slot can serve another lease: not closed, its connection usable and 
 
 #### `async close(reason=CloseReason.POOL_CLOSED)`
 
-Stops serving and closes the connection; `close_reason` becomes `reason`. Logs errors instead of raising them; a
-second call does nothing.
+Stops serving and closes the connection; `close_reason` becomes `reason`. The running request, the queued ones and
+those sent later fail with `InterfaceError`; a lease holding the slot frees the pool's capacity when it is released.
+Logs errors instead of raising them; a second call does nothing.
 
 ### `adorm.executor.CloseReason`
 
