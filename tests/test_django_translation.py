@@ -11,9 +11,35 @@ import pytest
 from django.db.models.functions import Lower as DjangoLower
 from django.utils import timezone, translation
 
-from adorm import Count, Exists, F, Length, Lower, NotSupportedError, OuterRef, ProgrammingError, Q, Subquery
+from adorm import (
+    Aggregate,
+    Case,
+    Coalesce,
+    Concat,
+    Count,
+    Exists,
+    F,
+    Func,
+    Length,
+    Lower,
+    NotSupportedError,
+    Now,
+    OuterRef,
+    ProgrammingError,
+    Q,
+    Subquery,
+    Sum,
+    Trunc,
+    TruncDate,
+    TruncMonth,
+    TruncWeek,
+    Upper,
+    Value,
+    When,
+)
 from adorm.drivers.django import adopt_context_locals, map_django_error, model_row
 from adorm.drivers.django.translation import (
+    aggregation,
     django_model,
     field_kwargs,
     instance_row,
@@ -178,21 +204,158 @@ def test_a_lookup_on_an_expression_is_filtered_through_an_alias():
     assert isinstance(queryset.query.annotations["_adorm0"], DjangoLower)
 
 
+class Unaccent(Func):
+    arity = 1
+
+
+class Median(Aggregate):
+    pass
+
+
 @pytest.mark.parametrize(
     ("query", "message"),
     [
-        (Query(AUTHOR).annotate(n=Count("books")), "Count"),
-        (Query(AUTHOR).annotate(n=Length("name")), "Length"),
-        (
-            Query(AUTHOR).filter(rating=Subquery(Query(AUTHOR).filter(pk=OuterRef("mentor")).values("rating"))),
-            "OuterRef",
-        ),
-        (Query(AUTHOR).filter(Exists(Query(AUTHOR))), "Exists"),
+        (Query(AUTHOR).annotate(n=Unaccent("name")), "Unaccent"),
+        (Query(AUTHOR).annotate(n=Median("rating")), "Median"),
     ],
 )
 def test_nodes_without_a_translation_raise_not_supported(query, message):
     with pytest.raises(NotSupportedError, match=message):
         translate(query)
+
+
+def test_an_outer_reference_outside_a_subquery_raises():
+    with pytest.raises(ProgrammingError, match="outside a subquery"):
+        translate(Query(AUTHOR).filter(rating=OuterRef("rating")))
+    with pytest.raises(ProgrammingError, match="outside a subquery"):
+        subquery(MENTOR_RATING)
+
+
+def test_a_nested_outer_reference_resolves_against_the_query_it_reaches():
+    innermost = Query("library.Book").filter(pk=OuterRef(OuterRef("copy_")))
+    note = Query("library.Note").filter(Exists(Query(AUTHOR).filter(Exists(innermost))))
+    sql = str(translate(note).queryset.query)
+    assert '"library_note"."copy_id"' in sql.split("EXISTS")[2]
+    with pytest.raises(ProgrammingError, match="outside a subquery"):
+        translate(Query(AUTHOR).filter(Exists(Query(AUTHOR).filter(pk=OuterRef(OuterRef("pk"))))))
+
+
+def test_outer_references_resolve_against_the_enclosing_query():
+    sql = str(translate(Query(AUTHOR).annotate(mentor_rating=Subquery(MENTOR_RATING))).queryset.query)
+    inner = sql[sql.index("(SELECT") :]
+    assert '= ("library_author"."mentor_id")' in inner
+    note = Query("library.Note").filter(Exists(Query("library.Book").filter(pk=OuterRef("copy_"))))
+    assert '"library_note"."copy_id"' in str(translate(note).queryset.query).split("EXISTS")[1]
+
+
+def test_exists_and_its_negation():
+    pupils = Query(AUTHOR).filter(mentor=OuterRef("pk"))
+    plain = str(translate(Query(AUTHOR).filter(Exists(pupils))).queryset.query)
+    negated = str(translate(Query(AUTHOR).filter(~Exists(pupils))).queryset.query)
+    assert "WHERE EXISTS(" in plain
+    assert "WHERE NOT EXISTS(" in negated
+
+
+@pytest.mark.parametrize(
+    ("node", "django_class", "kind"),
+    [
+        (Trunc("published", "month"), "Trunc", "month"),
+        (Trunc("published", "date"), "TruncDate", None),
+        (Trunc("published", "time"), "TruncTime", None),
+        (TruncMonth("published"), "TruncMonth", "month"),
+        (TruncWeek("published"), "TruncWeek", "week"),
+        (TruncDate("published"), "TruncDate", None),
+    ],
+)
+def test_truncations_become_djangos(node, django_class, kind):
+    annotation = translate(Query("library.Book").annotate(t=node)).queryset.query.annotations["t"]
+    assert type(annotation).__name__ == django_class
+    if kind is not None:
+        assert annotation.kind == kind
+
+
+def test_aggregates_carry_distinct_filter_default_and_output_type():
+    from django.db.models import Count as DjangoCount, FloatField, Q as DjangoQ, Sum as DjangoSum
+
+    query = Query(AUTHOR).annotate(
+        n=Count("books", distinct=True, filter=Q(books__pages__gt=100)),
+        pages=Sum("books__pages", default=0, output_type=float),
+        rows=Count("*"),
+    )
+    annotations = translate(query).queryset.query.annotations
+    assert isinstance(annotations["n"], DjangoCount)
+    assert annotations["n"].distinct
+    assert isinstance(annotations["n"].filter, DjangoQ) or annotations["n"].filter is not None
+    # Django wraps an aggregate with a default in Coalesce.
+    assert type(annotations["pages"]).__name__ == "Coalesce"
+    assert isinstance(annotations["pages"].source_expressions[0], DjangoSum)
+    assert isinstance(annotations["pages"].output_field, FloatField)
+    assert "COUNT(*)" in str(translate(query).queryset.query)
+
+
+def test_case_coalesce_concat_length_and_now_translate():
+    query = Query(AUTHOR).annotate(
+        size=Case(When(rating__gte=4, then=Value("top")), default=Value("other"), output_type=str),
+        label=Concat("name", Value(" / "), "slug", output_type=str),
+        site=Coalesce("website", Value("")),
+        n=Length("name"),
+        at=Now(),
+    )
+    sql = str(translate(query).queryset.query)
+    for fragment in ("CASE WHEN", "COALESCE(", "LENGTH(", "STATEMENT_TIMESTAMP()", "||"):
+        assert fragment in sql
+
+
+def test_a_lookup_on_an_expression_inside_an_annotation_is_aliased_first():
+    query = Query(AUTHOR).annotate(top=Case(When(Exact(Lower("name"), "ann"), then=Value(True)), default=Value(False)))
+    queryset = translate(query).queryset
+    assert "_adorm0" in queryset.query.annotations
+    assert "LOWER(" in str(queryset.query)
+
+
+def test_aliases_are_not_selected():
+    query = Query(AUTHOR).alias(n=Count("books")).filter(n__gt=1).annotate(m=F("rating") + 1)
+    translated = translate(query)
+    assert "n" not in translated.columns
+    assert "m" in translated.columns
+    assert set(translated.queryset.query.annotation_select) == {"m"}
+    assert "HAVING" in str(translated.queryset.query)
+    values = translate(query.values()).columns
+    assert "n" not in values
+    assert "m" in values
+
+
+def test_grouping_puts_aggregates_after_values():
+    query = (
+        Query("library.Book")
+        .annotate(month=TruncMonth("published"), shout=Upper("title"))
+        .values("month")
+        .annotate(n=Count("pk"), pages=Sum("pages"), double=F("pages") * 2)
+    )
+    assert query.group_by == ("month",)
+    django_query = translate(query).queryset.query
+    assert isinstance(django_query.group_by, tuple)
+    sql = str(django_query)
+    assert sql.endswith("GROUP BY 1")
+    assert sql.index("DATE_TRUNC") < sql.index("FROM")
+    assert "UPPER" not in sql
+    assert translate(query).columns == ("month", "n", "pages", "double")
+
+
+def test_a_grouped_subquery_keeps_its_grouping():
+    totals = Query("library.Book").filter(authors=OuterRef("pk")).values("genre").annotate(n=Sum("pages")).values("n")
+    queryset = translate(Query(AUTHOR).annotate(pages=Subquery(totals[:1]))).queryset
+    assert "GROUP BY" in str(queryset.query)
+
+
+def test_aggregation_translates_against_the_querys_annotations():
+    from django.db.models import Sum as DjangoSum
+
+    query = Query(AUTHOR).alias(n=Count("books")).filter(rating__gte=1)
+    queryset, expressions = aggregation(query, [("total", Sum("n")), ("lowered", Count(Lower("name")))])
+    assert set(expressions) == {"total", "lowered"}
+    assert isinstance(expressions["total"], DjangoSum)
+    assert "n" in queryset.query.annotations
 
 
 def test_select_for_update_locks_with_its_options():

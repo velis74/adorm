@@ -3,9 +3,10 @@
 ::: info Status
 The installed version of the native PostgreSQL driver executes what the [Django driver](/topics/django-driver)
 executes ([`CAPABILITIES`](/ref/drivers#adorm-drivers-django-capabilities)): the reads (`select`, `get`, `first`,
-`last`, `count`, `exists`) with their lookups, functions and clauses, the writes (`create`, `save`, `update`,
-`delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks (`select_for_update()`), transactions and
-savepoints. Connection options and driver methods raise `NotSupportedError` before anything runs.
+`last`, `count`, `exists`, `aggregate`) with their lookups, functions, aggregates, subqueries and clauses, the writes
+(`create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks
+(`select_for_update()`), transactions, savepoints and the connection options. Driver methods raise
+`NotSupportedError` before anything runs.
 :::
 
 [`AsyncpgDriver`](/ref/drivers#adorm-drivers-asyncpg-asyncpgdriver) executes adorm operations on
@@ -142,12 +143,22 @@ of the connection, which never connects, and runs one statement:
 | `first` / `last` | the query ordered as written (reversed for `last`), by the primary key without an ordering, `LIMIT 1` | the row or `None` |
 | `count` | `SELECT COUNT(*) FROM (<query>) subquery` | `int` |
 | `exists` | `SELECT 1 AS "a" … LIMIT 1`, Django's `exists()` query | `bool` |
+| `aggregate` | the statement of Django's `aggregate()`: `SELECT <aggregates> FROM …`, or `FROM (<query>) subquery` over a sliced, distinct or grouped query or one with aggregate annotations; none for a query that matches no rows | a dict by name, converted as Django converts it |
 
 `count` counts the rows the query returns, so a slice, `distinct()` and `DISTINCT ON` are applied before counting:
 
 ```python
 await Member.objects.order_by("joined")[10:].count()           # rows after the first ten
 await Activity.objects.filter(tags__isnull=False).distinct().count()
+```
+
+`aggregate` compiles the statement Django's `get_aggregation()` builds
+([`compile_aggregate()`](/ref/drivers#compile-aggregate-query-aggregates)) and returns what Django's `aggregate()`
+returns for its row:
+
+```python
+await Membership.objects.order_by("-fee")[:3].aggregate(Sum("fee"))     # {"fee__sum": Decimal("420.00")}
+await Invoice.objects.filter(status="void").aggregate(n=Count("*"))      # {"n": 0}
 ```
 
 The translation and compilation run on the event loop thread, so a Django manager's `get_queryset()` must only

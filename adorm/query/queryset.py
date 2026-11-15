@@ -51,6 +51,25 @@ def _bind_error_objects(exc: BaseException, executor: Executor) -> None:
     setattr(exc, attribute, tuple(objects))
 
 
+def _empty_aggregation(aggregations: Iterable[tuple[str, Any]]) -> dict[str, Any] | None:
+    """The result of ``aggregations`` over no rows, or ``None`` when one of them needs the database for it."""
+    from adorm.query.expressions import Aggregate, Count, Value
+
+    result: dict[str, Any] = {}
+    for name, expression in aggregations:
+        if type(expression) is Count:
+            result[name] = 0
+        elif not isinstance(expression, Aggregate):
+            return None
+        elif expression.default is None:
+            result[name] = None
+        elif isinstance(expression.default, Value):
+            result[name] = expression.default.value
+        else:
+            return None
+    return result
+
+
 class QuerySet:
     """The rows of ``query`` on ``model`` (a model class), run by ``executor`` (a session).
 
@@ -121,6 +140,10 @@ class QuerySet:
     def annotate(self, **annotations: Any) -> Self:
         """`Query.annotate()`."""
         return self._clone(self.query.annotate(**annotations))
+
+    def alias(self, **annotations: Any) -> Self:
+        """`Query.alias()`."""
+        return self._clone(self.query.alias(**annotations))
 
     def order_by(self, *keys: Any) -> Self:
         """`Query.order_by()`."""
@@ -258,6 +281,38 @@ class QuerySet:
         from adorm.operations import Exists
 
         return False if self.query.is_empty else await self._run(Exists(self.query))
+
+    async def aggregate(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """The values of aggregate expressions over the rows (an `Aggregate` operation), as a dict by name.
+
+        Keyword arguments name their expression; a positional aggregate of one field takes its `default_alias`
+        (``Sum("fee")`` → ``"fee__sum"``); a name given twice raises ``ValueError``. Without arguments the result is
+        ``{}``. On an empty query (`Query.is_empty`) of plain aggregates the result is computed without an operation:
+        ``0`` for `Count`, the ``default`` value or ``None`` for the others.
+        """
+        from adorm.operations import Aggregate
+        from adorm.query.expressions import Aggregate as AggregateExpression
+
+        aggregations: dict[str, Any] = {}
+        for expression in args:
+            if not isinstance(expression, AggregateExpression):
+                raise TypeError(f"a positional argument of aggregate() is an aggregate, not {expression!r}")
+            name = expression.default_alias
+            if name in aggregations:
+                raise ValueError(f"the aggregation {name!r} is given twice")
+            aggregations[name] = expression
+        for name, expression in kwargs.items():
+            if name in aggregations:
+                raise ValueError(f"the aggregation {name!r} is given twice")
+            aggregations[name] = expression
+        if not aggregations:
+            return {}
+        operation = Aggregate(self.query, aggregations)
+        if self.query.is_empty:
+            empty = _empty_aggregation(operation.aggregations)
+            if empty is not None:
+                return empty
+        return dict(await self._run(operation))
 
     async def update(self, **values: Any) -> int:
         """Set ``values`` on the rows (an `Update` operation); returns the number of rows."""

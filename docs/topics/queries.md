@@ -4,8 +4,9 @@
 The installed version provides the query building blocks on this page: `Q`, `F`, lookups, functions, aggregates,
 other expressions, the immutable [`Query`](/ref/query), the [operations](/ref/operations) that read and write
 with it and the [`QuerySet`](/ref/queryset) that runs them on a session. The [Django driver](/topics/django-driver) and
-the [native PostgreSQL driver](/topics/postgresql-driver) execute the reads (`select`, `get`, `first`, `last`, `count`,
-`exists`), arithmetic, the writes and `select_for_update()`.
+the [native PostgreSQL driver](/topics/postgresql-driver) execute all of them: the reads (`select`, `get`, `first`,
+`last`, `count`, `exists`, `aggregate`), annotations, aliases, grouping, functions, aggregates, subqueries, the writes
+and `select_for_update()`.
 :::
 
 A query is built from adorm's own building blocks, never from the target ORM's. Building one is plain Python: it
@@ -188,7 +189,8 @@ Query("club.Member").annotate(
 ).filter(Exists(Query("club.Payment").filter(member=OuterRef("pk"), confirmed=False)))
 ```
 
-The [expression reference](/ref/expressions) documents every class.
+The [expression reference](/ref/expressions) documents every class; [Aggregation](/topics/aggregation) shows
+`aggregate()`, per-row and per-group aggregates, `alias()` and how to port Django code that aggregates.
 
 ## Shaping the result
 

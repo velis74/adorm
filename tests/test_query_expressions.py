@@ -195,6 +195,18 @@ def test_outer_ref_construct():
     assert list(F("pk").constructs()) == []
 
 
+def test_nested_outer_refs_count_their_levels():
+    nested = OuterRef(OuterRef("pk"))
+    assert (OuterRef("pk").levels, nested.levels, OuterRef(nested).levels) == (1, 2, 3)
+    assert nested.name == "pk"
+    assert nested != OuterRef("pk")
+    assert repr(nested) == "OuterRef(OuterRef('pk'))"
+    assert list(nested.constructs()) == ["expression.OuterRef"]
+    assert OuterRef.from_dict(nested.to_dict()) == nested
+    with pytest.raises(ValueError, match="levels is a positive integer"):
+        OuterRef.from_dict(nested.to_dict() | {"levels": 0})
+
+
 # Value and Star
 
 

@@ -925,7 +925,15 @@ async def test_many_flows_write_concurrently_on_a_small_pool(library, executor):
 def test_the_connection_runs_every_write_kind():
     from adorm.drivers.asyncpg.writes import WRITES
 
-    assert set(WRITES) == AsyncpgDriver.capabilities.operations - {"select", "get", "first", "last", "count", "exists"}
+    assert set(WRITES) == AsyncpgDriver.capabilities.operations - {
+        "select",
+        "get",
+        "first",
+        "last",
+        "count",
+        "exists",
+        "aggregate",
+    }
     assert all(callable(write) for write in WRITES.values())
     assert AsyncpgConnection.__dict__.get("_savepoint") is not None
 

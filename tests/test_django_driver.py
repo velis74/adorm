@@ -179,7 +179,7 @@ async def test_a_database_other_than_postgresql_is_refused(library, monkeypatch)
 
 
 def test_capabilities():
-    assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists"}
+    assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists", "aggregate"}
     assert CAPABILITIES.operations == READ_CAPABILITIES.operations | {
         "create",
         "save",
@@ -189,9 +189,21 @@ def test_capabilities():
         "get_or_create",
         "update_or_create",
     }
-    assert {"lookup.in", "function.Lower", "expression.Subquery", "expression.CombinedExpression"} <= (
-        READ_CAPABILITIES.constructs
-    )
+    assert {
+        "lookup.in",
+        "function.Lower",
+        "function.Trunc",
+        "function.TruncMonth",
+        "aggregate.Count",
+        "aggregate.filter",
+        "clause.alias",
+        "clause.group_by",
+        "expression.Case",
+        "expression.Exists",
+        "expression.OuterRef",
+        "expression.Subquery",
+        "expression.CombinedExpression",
+    } <= READ_CAPABILITIES.constructs
     assert CAPABILITIES.constructs - READ_CAPABILITIES.constructs == {
         "clause.select_for_update",
         "clause.select_for_update.nowait",

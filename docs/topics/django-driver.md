@@ -1,10 +1,12 @@
 # The Django driver
 
 ::: info Status
-The installed version of the Django driver executes reads (`select`, `get`, `first`, `last`, `count`, `exists`),
-writes (`create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks
-(`select_for_update()`), transactions and savepoints. Connection options and driver methods raise
-`NotSupportedError` before anything runs.
+The installed version of the Django driver executes reads (`select`, `get`, `first`, `last`, `count`, `exists`,
+`aggregate`) with annotations, aliases, grouping, functions, aggregates and subqueries, writes (`create`, `save`,
+`update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks (`select_for_update()`),
+transactions, savepoints and the connection options of
+[`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options). Driver methods raise `NotSupportedError`
+before anything runs.
 :::
 
 [`DjangoDriver`](/ref/drivers#adorm-drivers-django-djangodriver) executes adorm operations with Django's ORM. It is
@@ -117,12 +119,17 @@ The driver turns an adorm [`Query`](/ref/query) into a Django query set
 | `qs1 & qs2`, `qs1 \| qs2` | the filters of both / one filter with both queries' conditions joined with OR |
 | lookups (`exact` … `iregex`) | the lookup of the same name on the field, so `contains` on an `ArrayField` or `JSONField` is Django's containment |
 | a lookup on an expression (`Exact(Lower("name"), "ann")`) | the expression as an `alias()` and the lookup on it |
-| `F`, `Value`, `Lower`, `Upper` | `F`, `Value`, `Lower`, `Upper`; a `Value` with `output_type` gets the Django field for it (`int` → `IntegerField` …) |
+| `F`, `Value`, `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc…` | the Django class of the same name; a `Value` with `output_type` gets the Django field for it (`int` → `IntegerField` …); `Trunc(x, "date")` / `"time"` is `TruncDate` / `TruncTime` |
+| `Count`, `Sum`, `Avg`, `Min`, `Max` with `distinct`, `filter`, `default` | the Django aggregate with the same options; `Count("*")` counts rows |
+| `Case`, `When` | `Case`, `When` |
+| `annotate()` / `alias()` | `annotate()` / `alias()`, in the order added |
+| `values("x").annotate(n=Count(...))` (`Query.group_by`) | `annotate()` of the annotations without an aggregate, `values("x")`, `annotate()` of the aggregates: Django's `GROUP BY` |
 | a model instance as a value | its primary key, or the value of the field a foreign key's `to_field` names |
 | a query in `in` (`pk__in=qs`, `pk__in=qs.values("x")`) | a Django query set in `__in` (one SQL statement) |
-| `Subquery(query)` | `Subquery(queryset)` |
+| `Subquery(query)`, `Exists(query)`, `~Exists(query)` | `Subquery(queryset)`, `Exists(queryset)`, `~Exists(queryset)` |
+| `OuterRef("pk")` in a subquery | `OuterRef("pk")`, the path translated on the enclosing query's model |
 | `order_by()` with `asc(nulls_first=True)` … | `order_by()` with `asc()` / `desc()` and the same NULL placement |
-| no ordering | the model's `Meta.ordering` |
+| no ordering | the model's `Meta.ordering`, except on a grouped query |
 | `distinct()`, `distinct("field")` | `distinct()`, `distinct("field")` (PostgreSQL's `DISTINCT ON`) |
 | slicing | slicing (`LIMIT` / `OFFSET`) |
 | `none()` | `none()`: no statement runs |
@@ -174,7 +181,10 @@ Every read returns rows keyed by adorm names; the core builds the instances.
 
 `get()` runs Django's `get()`: no row raises the model's `DoesNotExist`, several rows its `MultipleObjectsReturned`,
 with Django's messages. `first()` and `last()` order by the primary key when neither the query nor the model has an
-ordering; `first()` on a sliced query needs `order_by()` (the core raises `TypeError` without it). `count()` and `exists()` run Django's `count()` and `exists()`.
+ordering; `first()` on a sliced query needs `order_by()` (the core raises `TypeError` without it), and so do
+`first()` and `last()` on a grouped query. `count()` and `exists()` run Django's `count()` and `exists()`; `count()`
+of a grouped query counts its groups. `aggregate()` runs Django's `aggregate()` on the query's model rows and
+returns its dict.
 
 Relations work as on any driver: `await member.club` runs a `get`, `club.memberships` and many-to-many relations
 are queries.

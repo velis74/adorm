@@ -30,8 +30,13 @@ q = (
 |---|---|
 | `model` | the model label |
 | `filters` | a tuple of non-empty [`Q`](./expressions#adorm-q-args-kwargs) objects, one per `filter()` or `exclude()` call; empty for all rows |
+| `filter_marks` | for each filter, the number of annotations added before it |
 | `where` | the `filters` joined with AND, a `Q`; empty for all rows |
-| `annotations` | `(name, expression)` pairs in the order added |
+| `annotations` | `(name, expression)` pairs in the order added, aliases included |
+| `aliases` | the names of the annotations `alias()` added; rows do not include them |
+| `group_by` | `None`, or the selected names the rows are grouped by (`values()` followed by an aggregate annotation) |
+| `group_mark` | `None`, or the number of annotations added before the `annotate()` or `alias()` call that grouped the rows |
+| `is_grouped` | whether `group_by` is set |
 | `ordering` | a tuple of [`OrderBy`](./expressions#adorm-query-orderby-expression-descending-false-nulls-first-none-nulls-last-none) |
 | `select` | the selected field paths and annotation names; empty for all fields |
 | `row_format` | how rows are returned: `"model"` (model instances), `"dict"` (`values()`), `"tuple"`, `"flat"` or `"named"` (`values_list()`) |
@@ -68,7 +73,64 @@ empty. On a sliced query raises `TypeError`.
 
 Adds computed columns, name to expression. A name already used, a name with `__` or one that is not an identifier
 raises `ValueError`; a value that is not an expression raises `TypeError`. Later calls of `filter()`,
-`order_by()` and `values()` refer to annotations by name.
+`order_by()` and `values()` refer to annotations by name. A condition on an annotation that contains an aggregate
+filters the aggregated rows (SQL `HAVING`).
+
+On model rows an aggregate is computed per row:
+
+```python
+Query("clubs.Club").annotate(headcount=Count("memberships")).filter(headcount__gt=3)
+```
+
+After `values()` or `values_list()` with fields, the new names are added to `select`, and the first annotation that
+contains an aggregate (directly or through `F` of another such annotation) groups the rows: `group_by` becomes the
+names selected so far plus the new annotations without an aggregate, and `group_mark` the number of annotations
+before the call. Later `values()` calls keep the grouping, and an annotation without an aggregate added later joins
+`group_by`. An aggregate annotated before `values()` does not group: it stays per row.
+
+```python
+q = Query("clubs.Membership").values("role").annotate(n=Count("*"), fees=Sum("fee"))
+q.group_by     # ("role",)
+q.select       # ("role", "n", "fees")
+
+months = (
+    Query("billing.Invoice")
+    .annotate(month=TruncMonth("issued"))
+    .values("month")
+    .annotate(total=Sum("total"))
+    .filter(total__gt=100)
+    .order_by("month")
+)
+months.group_by   # ("month",)
+
+q.annotate(club=F("club__slug")).group_by   # ("role", "club")
+```
+
+A condition on a field filters the rows before they are aggregated (SQL `WHERE`), a condition on an aggregate filters
+the groups (`HAVING`). Filters and annotations apply in the order they were added (`filter_marks`), as in Django: an
+aggregate annotation added after a condition on a multi-valued relation aggregates only the related rows that matched
+it, and a condition added after the annotation joins the relation again, so each row repeats once per matching
+related row and the aggregate multiplies. An aggregate's `filter=` limits it whatever the order.
+
+```python
+Query("clubs.Club").filter(memberships__role="member").annotate(n=Count("memberships"))   # members per club
+Query("clubs.Club").annotate(n=Count("memberships")).filter(memberships__role="member")   # memberships × members
+```
+
+#### `alias(**annotations)`
+
+As `annotate()`, but the names go to `aliases`: conditions, orderings and other expressions refer to them, and the
+rows do not include them. Selecting an alias with `values()` or `values_list()` raises `ValueError`. An alias with an
+aggregate after `values()` groups the rows as an annotation does.
+
+```python
+Query("clubs.Club").alias(headcount=Count("memberships")).filter(headcount__gt=3).order_by("-headcount")
+```
+
+#### `aggregate_names()`
+
+The names of the annotations (aliases included) that contain an aggregate outside a subquery, directly or through
+`F` of another such annotation, as a frozenset.
 
 #### `order_by(*keys)`
 
@@ -155,8 +217,10 @@ Query("club.Member")[10:20][5:]      # rows 15 to 19
 #### `query | other`, `query & other`
 
 Rows matching either query (`|`) or both (`&`). Both queries are on the same model and manager, unsliced, and agree
-on distinctness, `select`, `row_format`, annotations, `only()`, `defer()` and `select_for_update()`; otherwise
-`TypeError`. `&` keeps the filters of both queries; `|` has one filter, the `where` of both joined with OR. The result
+on distinctness, `select`, `row_format`, annotations, aliases, grouping, `only()`, `defer()` and
+`select_for_update()`; otherwise
+`TypeError`. `&` keeps the filters of both queries and their `filter_marks`; `|` has one filter, the `where` of both
+joined with OR, placed after the annotations either query's filters followed. The result
 has the ordering of `other`, or of `query` when `other` has none, and the `select_related()` paths of both. A query
 without conditions matches every row, so `|` with it has no conditions;
 `|` with a `none()` query returns the other query, `&` returns the empty one.
@@ -173,10 +237,10 @@ active & guests            # where: active=True AND guest=True
 #### Construct names
 
 `constructs()` yields the construct names of the filters, the annotations and the ordering, plus
-`clause.annotate`, `clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`,
-`clause.select_related`, `clause.manager` and the names of `for_update` for the clauses in use, and
-[`path.nested`](#adorm-query-nested-path) when a field of `values()`, `values_list()`, `only()`, `defer()` or
-`distinct()` has several segments. `values()` and `values_list()` of plain fields, `none()` and slicing have none.
+`clause.annotate` (an annotation that is not an alias), `clause.alias`, `clause.group_by`, `clause.distinct` or
+`clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager` and the names of
+`for_update` for the clauses in use, and [`path.nested`](#adorm-query-nested-path) when a field of `values()`,
+`values_list()`, `group_by`, `only()`, `defer()` or `distinct()` has several segments. `values()` and `values_list()` of plain fields, `none()` and slicing have none.
 
 ```python
 set(Query("library.Loan", manager="objects").filter(archived=False).constructs())
@@ -202,7 +266,8 @@ Its construct names are `clause.select_for_update`, plus `clause.select_for_upda
 
 ### `adorm.query.CLAUSES`
 
-The construct names of `Query` clauses and `ForUpdate` options, a tuple: `clause.annotate`, `clause.distinct`,
+The construct names of `Query` clauses and `ForUpdate` options, a tuple: `clause.annotate`, `clause.alias`,
+`clause.group_by`, `clause.distinct`,
 `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`,
 `clause.select_for_update` and `clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`.
 

@@ -10,7 +10,7 @@ import functools
 import operator
 import re
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any, ClassVar
 
 from adorm.query.expressions import check_field_path, Expression, F, Node, OrderBy, Q
@@ -26,6 +26,9 @@ _SAME_WHEN_COMBINED = (
     "select",
     "row_format",
     "annotations",
+    "aliases",
+    "group_by",
+    "group_mark",
     "only_fields",
     "deferred_fields",
     "for_update",
@@ -35,6 +38,8 @@ _SAME_WHEN_COMBINED = (
 
 CLAUSES: tuple[str, ...] = (
     "clause.annotate",
+    "clause.alias",
+    "clause.group_by",
     "clause.distinct",
     "clause.distinct_on",
     "clause.only",
@@ -134,6 +139,16 @@ class ForUpdate(Node):
             check_field_path(name)
 
 
+def _outer_nodes(node: Node) -> Iterator[Node]:
+    """``node`` and its descendants outside subqueries."""
+    yield node
+    if isinstance(node, Query):
+        return
+    for child in node.get_source_expressions():
+        if not isinstance(child, Query):
+            yield from _outer_nodes(child)
+
+
 def as_query(value: Any) -> Query | None:
     """``value`` when it is a `Query`, its ``query`` attribute when that is one, else ``None``."""
     if isinstance(value, Query):
@@ -146,7 +161,11 @@ class Query(Node):
     """The rows of ``model`` (a label, ``"app_label.ModelName"``) that a read returns.
 
     Attributes: ``filters`` (one non-empty `Q` per ``filter()`` or ``exclude()`` call, empty for all rows),
-    ``annotations`` (``(name, expression)`` pairs in the order added), ``ordering`` (`OrderBy` tuple), ``select``
+    ``filter_marks`` (for each filter, the number of annotations added before it), ``annotations`` (``(name,
+    expression)`` pairs in the order added), ``aliases`` (the names of the annotations ``alias()`` added, which rows
+    do not include), ``group_by`` (``None``, or the selected names the rows are grouped by after ``values()``
+    followed by an aggregate annotation), ``group_mark`` (``None``, or the number of annotations added before the
+    ``annotate()`` or ``alias()`` call that grouped the rows), ``ordering`` (`OrderBy` tuple), ``select``
     (selected field paths or annotation names, empty for all fields), ``row_format`` (``"model"``, ``"dict"``,
     ``"tuple"``, ``"flat"`` or ``"named"``), ``is_distinct`` and ``distinct_fields``, ``low_mark`` and ``high_mark``
     (the slice; ``high_mark`` ``None`` for no limit), ``only_fields`` (``None`` unless ``only()`` limits the loaded
@@ -155,7 +174,10 @@ class Query(Node):
 
     The conditions of separate ``filter()`` calls are kept apart because, as in Django, a condition on a multi-valued
     relation (reverse foreign key, many-to-many) joins that relation once per call: with two calls, each condition
-    may match a different related row. ``where`` is all of them joined with AND.
+    may match a different related row. ``where`` is all of them joined with AND. The order of filters and
+    annotations is kept as well: as in Django, an aggregate annotation added after a filter on a multi-valued
+    relation aggregates only the related rows the filter matched, and a filter added after it joins the relation
+    again.
 
     ``manager`` names the target ORM's manager whose rows and method overrides the driver applies (Django: the
     manager attribute of the model, so its ``get_queryset()`` and its query set's ``create()``, ``delete()`` …);
@@ -166,7 +188,11 @@ class Query(Node):
     _fields = (
         "model",
         "filters",
+        "filter_marks",
         "annotations",
+        "aliases",
+        "group_by",
+        "group_mark",
         "ordering",
         "select",
         "row_format",
@@ -184,7 +210,11 @@ class Query(Node):
     ROW_FORMATS: ClassVar[tuple[str, ...]] = ROW_FORMATS
     model: str
     filters: tuple[Q, ...]
+    filter_marks: tuple[int, ...]
     annotations: tuple[tuple[str, Expression], ...]
+    aliases: tuple[str, ...]
+    group_by: tuple[str, ...] | None
+    group_mark: int | None
     ordering: tuple[OrderBy, ...]
     select: tuple[str, ...]
     row_format: str
@@ -203,7 +233,11 @@ class Query(Node):
         self._init(
             model=check_model_label(model),
             filters=(),
+            filter_marks=(),
             annotations=(),
+            aliases=(),
+            group_by=None,
+            group_mark=None,
             ordering=(),
             select=(),
             row_format="model",
@@ -242,16 +276,35 @@ class Query(Node):
         """Rows that also match the conditions; arguments as for `Q`."""
         self._check_not_sliced("filter")
         condition = Q(*args, **kwargs)
-        return self._replace(filters=self.filters + (condition,)) if condition else self
+        return self._add_filter(condition) if condition else self
 
     def exclude(self, *args: Any, **kwargs: Any) -> Query:
         """Rows that also do not match the conditions; arguments as for `Q`."""
         self._check_not_sliced("filter")
         condition = Q(*args, **kwargs)
-        return self._replace(filters=self.filters + (~condition,)) if condition else self
+        return self._add_filter(~condition) if condition else self
+
+    def _add_filter(self, condition: Q) -> Query:
+        return self._replace(
+            filters=self.filters + (condition,), filter_marks=self.filter_marks + (len(self.annotations),)
+        )
 
     def annotate(self, **annotations: Any) -> Query:
-        """Add computed columns: name → expression."""
+        """Add computed columns: name → expression.
+
+        After ``values()`` or ``values_list()`` with fields, the names are added to the selected names; the first
+        annotation that contains an aggregate there groups the rows by the names selected so far and the new
+        annotations without an aggregate (``group_by``). Annotations without an aggregate added to a grouped query
+        are added to ``group_by``.
+        """
+        return self._annotate(annotations, selected=True)
+
+    def alias(self, **annotations: Any) -> Query:
+        """Add named expressions that conditions, orderings and other expressions refer to, without returning them in
+        the rows: as `annotate`, but the names go to ``aliases`` and are not selected."""
+        return self._annotate(annotations, selected=False)
+
+    def _annotate(self, annotations: dict[str, Any], *, selected: bool) -> Query:
         existing = {name for name, _ in self.annotations}
         for name, expression in annotations.items():
             if name in existing:
@@ -260,7 +313,36 @@ class Query(Node):
                 raise ValueError(f"{name!r} is not an annotation name")
             if not isinstance(expression, Expression):
                 raise TypeError(f"the annotation {name!r} is not an expression")
-        return self._replace(annotations=self.annotations + tuple(annotations.items()))
+        if not annotations:
+            return self
+        query = self._replace(
+            annotations=self.annotations + tuple(annotations.items()),
+            aliases=self.aliases if selected else self.aliases + tuple(annotations),
+        )
+        if self.row_format == "model" or not self.select:
+            return query
+        aggregates = query.aggregate_names()
+        new = tuple(annotations)
+        changes: dict[str, Any] = {}
+        if selected:
+            changes["select"] = self.select + new
+        if self.group_by is None and any(name in aggregates for name in new):
+            plain = (name for name in (*self.select, *(new if selected else ())) if name not in aggregates)
+            changes["group_by"] = _unique(plain)
+            changes["group_mark"] = len(self.annotations)
+        elif self.group_by is not None and selected:
+            changes["group_by"] = _unique((*self.group_by, *(name for name in new if name not in aggregates)))
+        return query._replace(**changes) if changes else query
+
+    def aggregate_names(self) -> frozenset[str]:
+        """The names of the annotations that contain an aggregate, directly or through another such annotation."""
+        names: set[str] = set()
+        for name, expression in self.annotations:
+            if expression.contains_aggregate or any(
+                type(node) is F and node.path[0] in names for node in _outer_nodes(expression)
+            ):
+                names.add(name)
+        return frozenset(names)
 
     def order_by(self, *keys: Any) -> Query:
         """Replace the ordering: field paths (``"-name"`` descending), expressions or `OrderBy`. No keys clears it."""
@@ -280,7 +362,7 @@ class Query(Node):
 
     def values(self, *fields: str) -> Query:
         """Rows as dicts of ``fields`` (field paths or annotation names); no fields selects all."""
-        return self._replace(select=tuple(check_field_path(f) for f in fields), row_format="dict")
+        return self._replace(select=self._selected(fields), row_format="dict")
 
     def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> Query:
         """Rows as tuples of ``fields``; ``flat`` returns the single field's values, ``named`` named tuples."""
@@ -289,7 +371,14 @@ class Query(Node):
         if flat and len(fields) > 1:
             raise TypeError("flat needs a single field")
         row_format = "flat" if flat else "named" if named else "tuple"
-        return self._replace(select=tuple(check_field_path(f) for f in fields), row_format=row_format)
+        return self._replace(select=self._selected(fields), row_format=row_format)
+
+    def _selected(self, fields: tuple[str, ...]) -> tuple[str, ...]:
+        names = tuple(check_field_path(f) for f in fields)
+        for name in names:
+            if name in self.aliases:
+                raise ValueError(f"cannot select the alias {name!r}: use annotate() to select it")
+        return names
 
     def _check_no_values(self, action: str) -> None:
         if self.row_format != "model":
@@ -351,20 +440,29 @@ class Query(Node):
         if connector == Q.OR:
             if self.is_none or other.is_none:
                 return other if self.is_none else self
-            filters = (self.where | other.where,) if self.filters and other.filters else ()
+            both = self.filters and other.filters
+            filters = (self.where | other.where,) if both else ()
+            marks = (max(self.filter_marks + other.filter_marks),) if both else ()
         else:
             if self.is_none or other.is_none:
                 return other if other.is_none else self
             filters = self.filters + other.filters
+            marks = self.filter_marks + other.filter_marks
         if self.select_related_fields is True or other.select_related_fields is True:
             related: bool | tuple[str, ...] = True
         else:
             related = _unique((self.select_related_fields or ()) + (other.select_related_fields or ())) or False
-        return self._replace(filters=filters, ordering=other.ordering or self.ordering, select_related_fields=related)
+        return self._replace(
+            filters=filters,
+            filter_marks=marks,
+            ordering=other.ordering or self.ordering,
+            select_related_fields=related,
+        )
 
     def __or__(self, other: Any) -> Query:
         """Rows matching either query; both are on the same model and select the same way. The result has one
-        filter: the two queries' conditions joined with OR."""
+        filter: the two queries' conditions joined with OR, placed after the annotations either query's filters
+        followed."""
         return self._combine(other, Q.OR)
 
     def __and__(self, other: Any) -> Query:
@@ -395,15 +493,30 @@ class Query(Node):
             low = min(high, low + start) if high is not None else low + start
         return self._replace(low_mark=low, high_mark=high)
 
+    @property
+    def is_grouped(self) -> bool:
+        """Whether the rows are grouped by ``group_by``."""
+        return self.group_by is not None
+
     def get_source_expressions(self) -> tuple[Node, ...]:
         annotations = (expression for _, expression in self.annotations)
         children: tuple[Node, ...] = (*self.filters, *annotations, *self.ordering)
         return children if self.for_update is None else (*children, self.for_update)
 
     def _own_constructs(self) -> Iterable[str]:
-        if self.annotations:
+        if len(self.annotations) > len(self.aliases):
             yield "clause.annotate"
-        paths = (*self.select, *self.distinct_fields, *(self.only_fields or ()), *self.deferred_fields)
+        if self.aliases:
+            yield "clause.alias"
+        if self.group_by is not None:
+            yield "clause.group_by"
+        paths = (
+            *self.select,
+            *(self.group_by or ()),
+            *self.distinct_fields,
+            *(self.only_fields or ()),
+            *self.deferred_fields,
+        )
         if any("__" in path for path in paths):
             yield NESTED_PATH
         if self.distinct_fields:
@@ -457,6 +570,28 @@ class Query(Node):
         for name, _ in self.annotations:
             if "__" in name or not name.isidentifier():
                 raise ValueError(f"{name!r} is not an annotation name")
+        annotation_names = {name for name, _ in self.annotations}
+        if not isinstance(self.aliases, tuple) or not all(name in annotation_names for name in self.aliases):
+            raise ValueError("aliases are names of annotations")
+        if len(set(self.aliases)) != len(self.aliases) or any(name in self.aliases for name in self.select):
+            raise ValueError("an alias is named once and is not selected")
+        if self.group_by is not None:
+            if not isinstance(self.group_by, tuple):
+                raise ValueError("group_by is a list of selected names or null")
+            for name in self.group_by:
+                check_field_path(name)
+        count = len(self.annotations)
+        marks = self.filter_marks
+        if (
+            not isinstance(marks, tuple)
+            or len(marks) != len(self.filters)
+            or not all(_is_int(mark) and 0 <= mark <= count for mark in marks)
+        ):
+            raise ValueError("filter_marks are annotation counts, one per filter")
+        if (self.group_mark is None) != (self.group_by is None):
+            raise ValueError("group_mark is set exactly when group_by is")
+        if self.group_mark is not None and not (_is_int(self.group_mark) and 0 <= self.group_mark < count):
+            raise ValueError("group_mark is the index of an annotation")
 
     def __repr__(self) -> str:
         parts = [repr(self.model)]
@@ -477,6 +612,12 @@ class Query(Node):
             parts.append("is_none=True")
         if self.annotations:
             parts.append(f"annotations={dict(self.annotations)!r}")
+        if self.aliases:
+            parts.append(f"aliases={self.aliases!r}")
+        if any(self.filter_marks):
+            parts.append(f"filter_marks={self.filter_marks!r}")
+        if self.group_by is not None:
+            parts.append(f"group_by={self.group_by!r}, group_mark={self.group_mark!r}")
         if self.is_distinct:
             parts.append("is_distinct=True")
         if self.is_sliced:

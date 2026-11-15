@@ -29,7 +29,7 @@ from adorm import (
 )
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Call, Count as CountOperation, Select
-from adorm.query import Count, Length, Query, Subquery, Value
+from adorm.query import Aggregate as AggregateExpression, Func, Query, Subquery, Value
 from adorm.query.lookups import Exact, IStartsWith
 from demo.models.contenttypes import ContentType
 from tests.djangoproject.library import models as dj
@@ -580,17 +580,24 @@ async def test_unknown_models_managers_and_paths(library, pool):  # noqa: ARG001
     assert pool.in_use == 0
 
 
+class Unaccent(Func):
+    """A function no driver declares."""
+
+    arity = 1
+
+
+class Median(AggregateExpression):
+    """An aggregate no driver declares."""
+
+
 async def test_unsupported_operations_and_constructs_are_refused_before_execution(library, pool, record_operations):  # noqa: ARG001
     kinds = record_operations()
-    with pytest.raises(NotSupportedError, match="aggregate.Count"):
-        await Author.objects.annotate(n=Count("books")).first()
     with pytest.raises(NotSupportedError, match="'call' operation"):
         await adorm.create_session().execute(Call(Query("library.Loan", manager="objects"), "archive"))
-    with pytest.raises(NotSupportedError, match="function.Length"):
-        await Author.objects.annotate(n=Length("name")).first()
-    mentor = Author.objects.filter(pk=adorm.OuterRef("mentor")).values("rating")
-    with pytest.raises(NotSupportedError, match="expression.OuterRef"):
-        await Author.objects.filter(rating=Subquery(mentor)).first()
+    with pytest.raises(NotSupportedError, match="function.Unaccent"):
+        await Author.objects.annotate(n=Unaccent("name")).first()
+    with pytest.raises(NotSupportedError, match="aggregate.Median"):
+        await Author.objects.aggregate(m=Median("rating"))
     assert kinds == []
     assert await Author.objects.count() == 4
 

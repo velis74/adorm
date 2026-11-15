@@ -19,12 +19,18 @@ from adorm import (
     TransactionOutcome,
 )
 from adorm.drivers import is_connection_error
-from adorm.query import Length
+from adorm.query import Count, Func, Length
 from demo.models.clubs import Club, Member, Membership
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 REPEAT = range(5)
+
+
+class Unaccent(Func):
+    """A function no driver declares."""
+
+    arity = 1
 
 
 def refused(driver):
@@ -33,6 +39,7 @@ def refused(driver):
         Member.objects.filter(Exists(Membership.objects.filter(member_id=OuterRef("pk")))),
         Member.objects.annotate(n=Length("first_name")),
         Member.objects.filter(memberships__role="coach"),
+        Member.objects.annotate(n=Unaccent("first_name")),
     ]
     for queryset in candidates:
         if driver.capabilities.unsupported(_select(queryset)):
@@ -366,3 +373,73 @@ async def test_a_connection_lost_inside_a_transaction_ends_it(make_router, block
         async with adorm.atomic():
             assert await Club.objects.count() == 3
         assert (pool.size, pool.in_use) == (1, 0)
+
+
+# Aggregation
+
+
+def _aggregated(driver, slug="koper-sailing"):
+    """An aggregate over the clubs: it waits while a `TableLock` holds; skips a driver without ``aggregate``."""
+    if "aggregate" not in driver.capabilities.operations:
+        pytest.skip(f"the {driver.name} driver does not run aggregate operations")
+    return Club.objects.filter(slug=slug).aggregate(n=Count("*"), cities=Count("city", distinct=True))
+
+
+async def test_an_aggregate_cancelled_racing_completion_leaves_the_slot_usable(driver, make_router, blocker):
+    _aggregated(driver).close()
+    if not blocker.lost_connections:
+        pytest.skip("the blocker does not hold a table lock aggregates wait for")
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    outcomes = set()
+    for attempt in range(60):
+        await blocker.hold()
+        task = asyncio.create_task(_aggregated(driver))
+        await blocker.waiting()
+        await blocker.release()
+        for _ in range(attempt % 15 if attempt < 45 else (attempt % 15) ** 3):
+            if task.done():
+                break
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            outcomes.add(tuple(sorted((await task).items())))
+        except asyncio.CancelledError:
+            outcomes.add("cancelled")
+        assert pool.in_use == 0
+        await blocker.transactions_ended()
+    async with asyncio.timeout(5):
+        assert await _aggregated(driver) == {"n": 1, "cities": 1}
+    assert outcomes == {(("cities", 1), ("n", 1)), "cancelled"}
+    assert pool.size == 1
+
+
+async def test_concurrent_aggregates_in_tasks_of_one_transaction(driver, make_router):
+    _aggregated(driver).close()
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    slugs = ["koper-sailing", "ljubljana-rowing", "maribor-climbing", "nowhere"]
+    for _ in REPEAT:
+        async with adorm.atomic():
+            async with asyncio.TaskGroup() as group:
+                tasks = [group.create_task(_aggregated(driver, slugs[n % 4])) for n in range(24)]
+                counted = group.create_task(Membership.objects.aggregate(rows=Count("*")))
+            assert pool.in_use == 1
+        assert [task.result()["n"] for task in tasks] == [[1, 1, 1, 0][n % 4] for n in range(24)]
+        assert counted.result() == {"rows": 13}
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def _update_then_fail():
+    async with adorm.atomic():
+        await Club.objects.filter(slug="koper-sailing").update(city="Rolled back")
+        await Club.objects.aggregate(n=Count("no_such_field"))
+
+
+async def test_a_failing_aggregate_inside_a_transaction_rolls_back_and_frees_the_slot(driver, make_router):
+    _aggregated(driver).close()
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    for _ in REPEAT:
+        with pytest.raises(adorm.DatabaseError):
+            await _update_then_fail()
+        assert pool.in_use == 0
+        assert (await Club.objects.get(slug="koper-sailing")).city == "Koper"
+    assert pool.size <= 1

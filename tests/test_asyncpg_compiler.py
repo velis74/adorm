@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import decimal
 import ipaddress
+import random
 import threading
 import uuid
 
@@ -34,7 +35,7 @@ from django.db.models import (
 )
 from django.db.models.expressions import RawSQL
 from django.db.models.functions import Coalesce, Concat, JSONObject, Lower, Now, TruncDay
-from django.db.models.sql import DeleteQuery, InsertQuery, UpdateQuery
+from django.db.models.sql import DeleteQuery, InsertQuery, Query as SqlQuery, UpdateQuery
 from psycopg import Binary, sql as psycopg_sql
 from psycopg.types.json import Json, Jsonb
 from psycopg.types.numeric import Float8, Int2, Int4, Int8
@@ -734,3 +735,142 @@ def test_rows_give_timestamps_the_connections_time_zone(settings):
     naive = published_row(DjangoCompiler(server_version=SERVER_VERSION))
     assert naive == datetime.datetime(2024, 3, 1, 13, 30)
     assert naive.tzinfo is None
+
+
+# Aggregation
+
+
+def aggregated():
+    """Aggregations over querysets that Django's ``get_aggregation()`` runs directly or over a subquery."""
+    return {
+        "plain": (Book.objects.all(), {"n": Count("*"), "pages": Sum("pages")}),
+        "filtered": (Book.objects.filter(genre="fiction"), {"pages": Sum("pages", filter=Q(pages__gt=500))}),
+        "distinct_and_default": (
+            Book.objects.all(),
+            {"genres": Count("genre", distinct=True), "w": Sum("weight", default=Value(0.0))},
+        ),
+        "decimal_and_duration": (Book.objects.all(), {"price": Sum("price"), "time": Sum("reading_time")}),
+        "sliced": (Book.objects.order_by("-pages")[:2], {"pages": Sum("pages")}),
+        "grouped": (Book.objects.values("genre").annotate(n=Count("authors")), {"most": Count("genre")}),
+        "aggregate_annotation": (Author.objects.annotate(n=Count("books")), {"avg": Sum("n")}),
+        "datetime": (Book.objects.all(), {"latest": models.Max("published")}),
+        "no_rows": (Book.objects.filter(pages__gt=10_000), {"n": Count("*"), "s": Sum("pages", default=0)}),
+        "empty": (Book.objects.none(), {"n": Count("*"), "s": Sum("pages")}),
+    }
+
+
+@pytest.mark.parametrize("name", list(aggregated()))
+def test_aggregation_compiles_without_a_connection(compiler, name):
+    queryset, aggregates = aggregated()[name]
+    before = str(queryset.query) if name != "empty" else None
+    compiled = in_fresh_thread(lambda: compiler.compile_aggregate(queryset, aggregates))
+    if name == "empty":
+        assert compiled.statement.empty
+        assert compiled.result(None) == {"n": 0, "s": None}
+        return
+    assert compiled.statement.sql.startswith("SELECT")
+    assert "%s" not in compiled.statement.sql
+    assert str(queryset.query) == before
+    assert compiler.connection.connection is None
+
+
+def test_aggregation_leaves_no_connection_alias_behind(compiler):
+    queryset, aggregates = aggregated()["plain"]
+    compiler.compile_aggregate(queryset, aggregates)
+    with pytest.raises(Exception, match="Cannot resolve keyword"):
+        compiler.compile_aggregate(Book.objects.all(), {"n": Count("nothing")})
+    assert not [name for name in vars(connections._connections) if name.startswith("adorm-compile-")]
+    assert compiler_module._CURSOR.get() is None
+    with pytest.raises(NotSupportedError, match="needs a database connection"):
+        compiler.connection.cursor()
+
+
+@pytest.mark.parametrize("repeat", range(5))
+def test_one_compiler_compiles_aggregations_on_threads(compiler, repeat):  # noqa: ARG001 - repeated to expose races
+    cases = aggregated()
+    expected = {name: compiler.compile_aggregate(*cases[name]) for name in cases}
+    workers = 8
+    barrier = threading.Barrier(workers)
+    failures = []
+
+    def work(index):
+        barrier.wait()
+        for _ in range(10):
+            for name, (queryset, aggregates) in aggregated().items():
+                compiled = compiler.compile_aggregate(queryset, aggregates)
+                if compiled.statement != expected[name].statement:
+                    failures.append((name, compiled.statement))
+                # A row replayed on one thread never reaches another thread's result.
+                if not compiled.statement.empty and name == "plain":
+                    if compiled.result((index, index * 10)) != {"n": index, "pages": index * 10}:
+                        failures.append((name, index))
+
+    threads = [threading.Thread(target=work, args=(index,)) for index in range(workers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == []
+    assert compiler.connection.connection is None
+
+
+@pytest.mark.parametrize("repeat", range(5))
+async def test_compiled_aggregations_replay_their_own_rows_across_tasks_and_threads(compiler, repeat):
+    queryset, aggregates = aggregated()["plain"]
+    compiled = [compiler.compile_aggregate(queryset, aggregates) for _ in range(40)]
+    order = list(range(len(compiled)))
+    random.Random(repeat).shuffle(order)  # noqa: S311 - a reproducible test order
+    stop = threading.Event()
+    failures = []
+
+    def compile_on_a_thread():
+        while not stop.is_set():
+            other = compiler.compile_aggregate(queryset, aggregates)
+            if other.result((-1, -1)) != {"n": -1, "pages": -1}:
+                failures.append("thread")
+
+    async def replay(index):
+        await asyncio.sleep(0)
+        return index, compiled[index].result((index, index * 10))
+
+    thread = threading.Thread(target=compile_on_a_thread)
+    thread.start()
+    try:
+        results = await asyncio.gather(*(replay(index) for index in order))
+    finally:
+        stop.set()
+        thread.join()
+    assert failures == []
+    assert all(result == {"n": index, "pages": index * 10} for index, result in results)
+
+
+def test_a_replay_nested_in_another_replay_keeps_both_rows(compiler, monkeypatch):
+    queryset, aggregates = aggregated()["plain"]
+    outer, inner = (compiler.compile_aggregate(queryset, aggregates) for _ in range(2))
+    original = SqlQuery.get_aggregation
+    nested = []
+
+    def get_aggregation(self, using, aggregate_exprs):
+        if not nested:
+            nested.append(None)
+            nested[0] = inner.result((2, 20))
+        return original(self, using, aggregate_exprs)
+
+    monkeypatch.setattr(SqlQuery, "get_aggregation", get_aggregation)
+    assert outer.result((1, 10)) == {"n": 1, "pages": 10}
+    assert nested == [{"n": 2, "pages": 20}]
+    assert not [name for name in vars(connections._connections) if name.startswith("adorm-compile-")]
+    assert compiler_module._CURSOR.get() is None
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("name", list(aggregated()))
+def test_asyncpg_aggregation_matches_django(test_database_url, name):
+    seed()
+    queryset, aggregates = aggregated()[name]
+    expected = queryset.aggregate(**aggregates)
+    compiled = DjangoCompiler(server_version=connection.pg_version).compile_aggregate(queryset, aggregates)
+    record = None if compiled.statement.empty else asyncio.run(fetch(test_database_url, compiled.statement))[0]
+    result = compiled.result(record)
+    assert result == expected
+    assert {k: type(v) for k, v in result.items()} == {k: type(v) for k, v in expected.items()}

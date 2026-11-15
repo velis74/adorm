@@ -74,6 +74,25 @@ Django executes some queries without SQL:
 - An update or delete with such a filter raises `EmptyResultSet` regardless, and an update without values compiles
   to an empty string. `DjangoCompiler` returns an empty statement for both
   ([`DjangoStatement.empty`](/ref/drivers#empty)); it affects no rows and is not executed.
+- `aggregate()` over such a query returns each aggregate's value over no rows without SQL. The compiled aggregation
+  has an empty statement and that result.
+
+## Aggregation
+
+Django's `aggregate()` decides inside `Query.get_aggregation()` whether the aggregates run directly on the query or
+over it as a subquery (a slice, `distinct()`, a `values().annotate()` grouping or an aggregate annotation), builds
+that statement, executes it on `connections[using]` and converts the row. No public method returns the statement
+without executing it. `DjangoCompiler.compile_aggregate()` runs `get_aggregation()` on its own wrapper, registered
+under an alias of its own in the calling thread's `connections` for the duration of the call, whose cursor raises
+with the statement instead of executing it. After asyncpg has fetched the row, `DjangoAggregation.result()` runs
+`get_aggregation()` again with a cursor that returns that row, so Django's own converters and names shape the
+result. Both runs are synchronous and leave the alias and the cursor behind in no thread and no task.
+
+```python
+aggregation = compiler.compile_aggregate(Book.objects.order_by("-pages")[:2], {"pages": Sum("pages")})
+aggregation.statement.sql     # 'SELECT SUM("__col1") FROM (SELECT ... LIMIT 2) subquery'
+aggregation.result(await conn.fetchrow(aggregation.statement.sql, *aggregation.statement.params))
+```
 
 ## Placeholders
 

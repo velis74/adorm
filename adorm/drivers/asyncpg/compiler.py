@@ -7,10 +7,12 @@ gives them as an explicit cast. Django's PostgreSQL backend must run on psycopg 
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import datetime
 import decimal
 import ipaddress
+import itertools
 import json
 import math
 import uuid
@@ -36,7 +38,7 @@ from psycopg.types.range import Range
 from adorm.drivers.sql import numbered_placeholders, Statement
 from adorm.exceptions import NotSupportedError, TransactionManagementError
 
-__all__ = ["bind_param", "DjangoCompiler", "DjangoStatement", "MAX_QUERY_PARAMS"]
+__all__ = ["bind_param", "DjangoAggregation", "DjangoCompiler", "DjangoStatement", "MAX_QUERY_PARAMS"]
 
 MAX_QUERY_PARAMS = 32767
 """The most parameters asyncpg sends with one statement."""
@@ -227,6 +229,50 @@ class DjangoStatement(Statement):
         return [tuple(row) for row in rows]
 
 
+class _Captured(Exception):  # noqa: N818 - control flow inside this module only
+    def __init__(self, sql: str, params: Sequence[Any]) -> None:
+        super().__init__(sql)
+        self.sql = sql
+        self.params = params
+
+
+class _Cursor:
+    """The cursor Django's ``get_aggregation()`` runs its statement on: it captures the statement, or replays a row
+    fetched elsewhere."""
+
+    def __init__(self, row: Sequence[Any] | None = None, *, capture: bool) -> None:
+        self.row = row
+        self.capture = capture
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
+        if self.capture:
+            raise _Captured(sql, params)
+
+    def fetchone(self) -> Sequence[Any] | None:
+        return self.row
+
+    def close(self) -> None:
+        pass
+
+
+_CURSOR: contextvars.ContextVar[_Cursor | None] = contextvars.ContextVar("adorm_aggregate_cursor", default=None)
+_ALIAS_NUMBERS = itertools.count()
+
+
+@dataclass(frozen=True)
+class DjangoAggregation:
+    """An aggregation compiled from a Django query: ``statement`` returns its one row (it is empty when the query
+    matches no rows, and `result()` then takes no row); `result()` turns that row into Django's ``aggregate()`` result:
+    a dict by name, values converted as Django's own evaluation converts them."""
+
+    statement: DjangoStatement
+    replay: Any = field(repr=False, compare=False)
+
+    def result(self, record: Sequence[Any] | None) -> dict[str, Any]:
+        """The result of the aggregation over ``record``, the statement's row (``None`` for no row)."""
+        return self.replay(record)
+
+
 def _result_timezone(wrapper: Any) -> tuple[datetime.tzinfo, bool]:
     """The time zone Django's psycopg setup gives ``timestamptz`` values of ``wrapper``'s connections, and whether it
     drops it: the connection's time zone under ``USE_TZ``, else ``TIME_ZONE`` with naive values."""
@@ -258,6 +304,7 @@ class DjangoCompiler:
         wrapper.__dict__["pg_version"] = server_version
         wrapper.features.max_query_params = MAX_QUERY_PARAMS
         wrapper.ensure_connection = wrapper.connect = self._refuse_connection
+        wrapper.cursor = wrapper.chunked_cursor = self._cursor
         # select_for_update compiles as inside a transaction; compile() checks the caller's transaction state.
         wrapper.get_autocommit = lambda: False
         self.alias = alias
@@ -268,6 +315,12 @@ class DjangoCompiler:
 
     def _refuse_connection(self) -> NoReturn:
         raise NotSupportedError(f"compiling this query for {self.alias!r} needs a database connection")
+
+    def _cursor(self) -> _Cursor:
+        cursor = _CURSOR.get()
+        if cursor is None:
+            self._refuse_connection()
+        return cursor
 
     def compile(self, query: Any, *, in_transaction: bool = False, returning: Sequence[Any] = ()) -> DjangoStatement:
         """Compile ``query``, a Django ``QuerySet`` or ``Query`` (select, update, delete or aggregate), into a
@@ -323,6 +376,38 @@ class DjangoCompiler:
         compiler = self._compiler(inner, in_transaction)
         inner_sql, params = compiler.as_sql(with_col_aliases=True)
         return self._statement(f"SELECT COUNT(*) FROM ({inner_sql}) subquery", params, compiler)  # noqa: S608 - compiled
+
+    def compile_aggregate(self, query: Any, aggregates: Mapping[str, Any]) -> DjangoAggregation:
+        """Compile ``aggregate(**aggregates)`` of ``query``, a Django select ``QuerySet`` or ``Query``, into a
+        `DjangoAggregation`: the statement Django's ``get_aggregation()`` runs (one row) and the conversion of that
+        row into Django's result. Row locks of ``query`` are dropped, as Django drops them. The errors are those of
+        `compile()`."""
+        query = getattr(query, "query", query)
+
+        def run(cursor: _Cursor) -> dict[str, Any]:
+            # get_aggregation() runs on the wrapper through a thread-local alias of this call's own.
+            using = f"adorm-compile-{next(_ALIAS_NUMBERS)}"
+            connections[using] = self.connection
+            token = _CURSOR.set(cursor)
+            try:
+                return query.chain().get_aggregation(using, dict(aggregates))
+            finally:
+                _CURSOR.reset(token)
+                del connections[using]
+
+        timezone, naive = _result_timezone(self.connection)
+
+        def replay(record: Sequence[Any] | None) -> dict[str, Any]:
+            row = None if record is None else tuple(_psycopg_value(v, timezone, naive) for v in tuple(record))
+            return run(_Cursor(row, capture=False))
+
+        try:
+            empty = run(_Cursor(capture=True))
+        except _Captured as captured:
+            statement = self._statement(captured.sql, captured.params, None)
+        else:
+            return DjangoAggregation(DjangoStatement("", ()), lambda _record: dict(empty))
+        return DjangoAggregation(statement, replay)
 
     def _compiler(self, query: Any, in_transaction: bool) -> Any:
         if getattr(query, "select_for_update", False) and not in_transaction:

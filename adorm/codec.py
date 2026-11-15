@@ -330,7 +330,7 @@ class _Codec:
 
     def _expression_type(self, depth: int, expression: Any) -> Any:
         if isinstance(expression, OuterRef):
-            return self._field_type(depth - 1, expression.name)
+            return self._field_type(depth - expression.levels, expression.name)
         if isinstance(expression, F):
             return self._field_type(depth, expression.name)
         output_type = getattr(expression, "output_type", None)

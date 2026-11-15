@@ -19,7 +19,7 @@ from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
 from adorm.drivers.asyncpg.writes import Writer, WRITES
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
 from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
-from adorm.drivers.django.translation import translate
+from adorm.drivers.django.translation import aggregation, translate
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.events import Emit
 from adorm.exceptions import (
@@ -289,6 +289,13 @@ class AsyncpgConnection(DriverConnection):
 
     async def _read(self, operation: Any) -> Any:
         kind = operation.kind
+        if kind == "aggregate":
+            queryset, expressions = aggregation(operation.query, operation.aggregations)
+            compiled = self.compiler.compile_aggregate(queryset, expressions)
+            if compiled.statement.empty:
+                return compiled.result(None)
+            statement = compiled.statement
+            return compiled.result(await self._run(self.conn.fetchrow(statement.sql, *statement.params)))
         translated = translate(operation.query)
         queryset = translated.queryset
         if kind == "select":

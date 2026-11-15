@@ -7,6 +7,8 @@ data, with values encoded by the types a schema gives them (`adorm.codec`). Buil
 
 from __future__ import annotations
 
+import re
+
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, fields
 from types import MappingProxyType
@@ -20,6 +22,7 @@ from adorm.schema import SchemaSource
 
 __all__ = [
     "OPERATIONS",
+    "Aggregate",
     "Call",
     "Count",
     "Create",
@@ -59,7 +62,7 @@ def _refers_to_fields(node: Node, depth: int = 0) -> bool:
     """Whether ``node`` refers to a field of the written row: an `F` outside any query, or an `OuterRef` in a
     subquery of the value itself."""
     if isinstance(node, OuterRef):
-        return depth <= 1
+        return depth <= node.levels
     if isinstance(node, F):
         return depth == 0
     inner = depth + 1 if isinstance(node, Query) else depth
@@ -232,7 +235,7 @@ class Get(_QueryOperation):
 @dataclass(frozen=True, eq=False)
 class First(_QueryOperation):
     """The first row of ``query``, ordered by the primary key when the query and the model have no ordering.
-    Result: the row or ``None``. A sliced query has an ordering of its own (``TypeError``)."""
+    Result: the row or ``None``. A sliced or grouped query has an ordering of its own (``TypeError``)."""
 
     kind: ClassVar[str] = "first"
 
@@ -240,12 +243,18 @@ class First(_QueryOperation):
         super().__post_init__()
         if self.query.is_sliced and not self.query.ordering:
             raise TypeError("cannot take the first row of a sliced query without an ordering")
+        _check_grouped_order(self.query, "first")
+
+
+def _check_grouped_order(query: Query, which: str) -> None:
+    if query.is_grouped and not query.ordering:
+        raise TypeError(f"cannot take the {which} row of a grouped query without an ordering")
 
 
 @dataclass(frozen=True, eq=False)
 class Last(_QueryOperation):
     """The last row of ``query`` (its ordering reversed, or descending primary key without one). Result: the row or
-    ``None``. The query is not sliced (``TypeError``)."""
+    ``None``. The query is not sliced, and a grouped query has an ordering (``TypeError``)."""
 
     kind: ClassVar[str] = "last"
 
@@ -253,6 +262,7 @@ class Last(_QueryOperation):
         super().__post_init__()
         if self.query.is_sliced:
             raise TypeError("cannot reverse a query once a slice has been taken")
+        _check_grouped_order(self.query, "last")
 
 
 @dataclass(frozen=True, eq=False)
@@ -267,6 +277,68 @@ class Exists(_QueryOperation):
     """Whether ``query`` has a row. Result: a ``bool``."""
 
     kind: ClassVar[str] = "exists"
+
+
+_FORBIDDEN_NAME = re.compile(r"['`\"\]\[;\s\x00-\x1F\x7F-\x9F]|#|--|/\*|\*/")
+
+
+@dataclass(frozen=True, eq=False)
+class Aggregate(_QueryOperation):
+    """The values of ``aggregations`` (name → expression that contains an aggregate) over the rows of ``query``.
+    Result: a dict of the values by name.
+
+    ``aggregations`` is a mapping or ``(name, expression)`` pairs, at least one. A name is a non-empty string without
+    whitespace, control characters, quotes, backticks, brackets, ``;``, ``#``, ``--``, ``/*`` or ``*/``
+    (``ValueError``); it may contain ``__`` (``"fee__sum"``) and may not repeat. An expression without an aggregate
+    outside a subquery raises ``TypeError``, and so does a query distinct on fields. The expressions refer to the
+    query's fields and annotations; over a sliced, distinct or grouped query, or one with aggregate annotations, they
+    aggregate the query's rows as a subquery.
+    """
+
+    kind: ClassVar[str] = "aggregate"
+    aggregations: tuple[tuple[str, Expression], ...] = ()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.query.distinct_fields:
+            raise TypeError("cannot aggregate a query distinct on fields")
+        items = self.aggregations.items() if isinstance(self.aggregations, Mapping) else self.aggregations
+        pairs: list[tuple[str, Expression]] = []
+        for name, expression in items:
+            if not isinstance(name, str) or not name or _FORBIDDEN_NAME.search(name):
+                raise ValueError(f"{name!r} is not an aggregation name")
+            if any(n == name for n, _ in pairs):
+                raise ValueError(f"the aggregation {name!r} is given twice")
+            if not isinstance(expression, Expression) or not expression.contains_aggregate:
+                raise TypeError(f"{name!r} is not an aggregate expression")
+            pairs.append((name, expression))
+        if not pairs:
+            raise TypeError("aggregate() needs at least one aggregation")
+        object.__setattr__(self, "aggregations", tuple(pairs))
+
+    def nodes(self) -> Iterator[Node]:
+        yield self.query
+        yield from (expression for _, expression in self.aggregations)
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        data = super()._encode(encoder)
+        with encoder.scope(self.query.model, self.query.annotations):
+            data["aggregations"] = [[name, encoder.node(expression)] for name, expression in self.aggregations]
+        return data
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        query = _decode_query(decoder, data)
+        raw = _get(data, "aggregations")
+        if not isinstance(raw, list):
+            raise ValueError("the aggregations are a list of [name, expression] pairs")
+        pairs = []
+        with decoder.scope(query.model, query.annotations):
+            for item in raw:
+                if not isinstance(item, list) or len(item) != 2 or not isinstance(item[0], str):
+                    raise ValueError("an aggregation is a [name, expression] pair")
+                pairs.append((item[0], decoder.node(item[1])))
+        return cls(query, tuple(pairs))
 
 
 @dataclass(frozen=True, eq=False)
@@ -325,8 +397,8 @@ class DeleteInstance(Operation):
 class Update(_QueryOperation):
     """Set ``values`` (field name → value or expression) on the rows of ``query``. Result: the number of rows.
 
-    ``values`` is a mapping or ``(name, value)`` pairs; field names have no ``__``. The query is not sliced and not
-    distinct on fields, and an expression value contains no aggregate; otherwise ``TypeError``.
+    ``values`` is a mapping or ``(name, value)`` pairs; field names have no ``__``. The query is not sliced, not
+    distinct on fields and not grouped, and an expression value contains no aggregate; otherwise ``TypeError``.
     """
 
     kind: ClassVar[str] = "update"
@@ -338,6 +410,8 @@ class Update(_QueryOperation):
             raise TypeError("cannot update a query once a slice has been taken")
         if self.query.distinct_fields:
             raise TypeError("cannot update a query distinct on fields")
+        if self.query.is_grouped:
+            raise TypeError("cannot update a grouped query")
         object.__setattr__(self, "values", _field_values(self.values))
 
     def nodes(self) -> Iterator[Node]:

@@ -35,9 +35,11 @@ from adorm.query.lookups import build_lookup, Lookup, split_lookup
 from adorm.query.query import Query
 
 __all__ = [
+    "AGGREGATES",
     "FUNCTIONS",
     "SELECT_RELATED_DEPTH",
     "TranslatedQuery",
+    "aggregation",
     "django_model",
     "field_kwargs",
     "instance_row",
@@ -49,8 +51,33 @@ __all__ = [
     "translate",
 ]
 
-FUNCTIONS: Mapping[str, type[dj.Func]] = MappingProxyType({"Lower": djf.Lower, "Upper": djf.Upper})
-"""Django's function class for each adorm function class name the translation knows."""
+FUNCTIONS: Mapping[str, type[dj.Func]] = MappingProxyType(
+    {
+        "Lower": djf.Lower,
+        "Upper": djf.Upper,
+        "Length": djf.Length,
+        "Coalesce": djf.Coalesce,
+        "Concat": djf.Concat,
+        "Now": djf.Now,
+        "TruncYear": djf.TruncYear,
+        "TruncQuarter": djf.TruncQuarter,
+        "TruncMonth": djf.TruncMonth,
+        "TruncWeek": djf.TruncWeek,
+        "TruncDay": djf.TruncDay,
+        "TruncHour": djf.TruncHour,
+        "TruncMinute": djf.TruncMinute,
+        "TruncSecond": djf.TruncSecond,
+        "TruncDate": djf.TruncDate,
+        "TruncTime": djf.TruncTime,
+    }
+)
+"""Django's function class for each adorm function class name the translation knows; `Trunc` translates to Django's
+``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds."""
+
+AGGREGATES: Mapping[str, type[dj.Aggregate]] = MappingProxyType(
+    {"Count": dj.Count, "Sum": dj.Sum, "Avg": dj.Avg, "Min": dj.Min, "Max": dj.Max}
+)
+"""Django's aggregate class for each adorm aggregate class name the translation knows."""
 
 _OUTPUT_FIELDS: Mapping[type, type[dj.Field]] = MappingProxyType(
     {
@@ -251,26 +278,54 @@ class TranslatedQuery:
         return [self._plan.build(values) for values in records]
 
 
-class _Translator:
-    """Translates one `Query`; a subquery gets a translator of its own."""
+def _output_options(node: Any, implied: Any = None) -> dict[str, Any]:
+    """``output_field`` for a node whose ``output_type`` differs from the type its class or arguments imply."""
+    output_type = node.output_type
+    if output_type is None or output_type is implied or output_type is getattr(type(node), "default_output_type", None):
+        return {}
+    return {"output_field": output_field(output_type)}
 
-    def __init__(self, query: Query) -> None:
+
+class _Translator:
+    """Translates one `Query`; a subquery gets a translator of its own, with the outer query's as ``parent``."""
+
+    def __init__(self, query: Query, parent: _Translator | None = None) -> None:
         if not isinstance(query, Query):
             raise TypeError(f"expected a Query, not {type(query).__name__}")
         self.query = query
+        self.parent = parent
         self.model = django_model(query.model)
         self.annotation_names = tuple(name for name, _ in query.annotations)
+        self.selected_annotations = tuple(name for name in self.annotation_names if name not in query.aliases)
         self.aliases: dict[str, Any] = {}
-        self._alias_numbers = itertools.count()
+        self._applied: set[str] = set()
+        self._alias_numbers = itertools.count() if parent is None else parent._alias_numbers
 
     def path(self, name: str) -> str:
         return orm_path(self.model, name, self.annotation_names)
+
+    def subquery(self, query: Query) -> Any:
+        """The Django query set of ``query`` inside this one; its `OuterRef` refers to this query."""
+        translator = _Translator(query, self)
+        queryset = translator.base()
+        if query.row_format != "model" and query.select:
+            names = translator.annotation_names
+            queryset = queryset.values_list(*(n if n in names else translator.path(n) for n in query.select))
+        return queryset
 
     # Expressions and conditions
 
     def expression(self, node: Any) -> Any:
         if isinstance(node, ax.OuterRef):
-            raise NotSupportedError("the Django driver does not translate OuterRef")
+            target: _Translator | None = self
+            for _ in range(node.levels):
+                target = target.parent if target is not None else None
+            if target is None:
+                raise ProgrammingError(f"{node!r} is outside a subquery: it has no outer query to refer to")
+            reference: Any = target.path(node.name)
+            for _ in range(node.levels):
+                reference = dj.OuterRef(reference)
+            return reference
         if isinstance(node, ax.F):
             return dj.F(self.path(node.name))
         if isinstance(node, ax.Value):
@@ -282,18 +337,43 @@ class _Translator:
         if isinstance(node, Lookup):
             return self.lookup(node)
         if isinstance(node, ax.Exists):
-            raise NotSupportedError("the Django driver does not translate Exists")
+            exists = dj.Exists(self.subquery(node.query))
+            return ~exists if node.negated else exists
         if isinstance(node, ax.Subquery):
-            return dj.Subquery(subquery(node.query))
+            return dj.Subquery(self.subquery(node.query), **_output_options(node))
         if isinstance(node, ax.CombinedExpression):
             connector = Combinable.MOD if node.connector == "%" else node.connector
             output = None if node.output_type is None else output_field(node.output_type)
             return CombinedExpression(
                 self.expression(node.lhs), connector, self.expression(node.rhs), output_field=output
             )
-        if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate) and type(node).__name__ in FUNCTIONS:
-            return FUNCTIONS[type(node).__name__](*(self.expression(e) for e in node.expressions))
-        raise NotSupportedError(f"the Django driver does not translate {type(node).__name__}")
+        if isinstance(node, ax.Star):
+            return dj.expressions.Star()
+        if isinstance(node, ax.Case):
+            cases = [dj.When(self.expression(c.condition), then=self.expression(c.result)) for c in node.cases]
+            return dj.Case(*cases, default=self.expression(node.default), **_output_options(node))
+        name = type(node).__name__
+        if isinstance(node, ax.Aggregate) and name in AGGREGATES:
+            options = _output_options(node)
+            if node.distinct:
+                options["distinct"] = True
+            if node.filter is not None:
+                options["filter"] = self.expression(node.filter)
+            if node.default is not None:
+                options["default"] = self.expression(node.default)
+            return AGGREGATES[name](*(self.expression(e) for e in node.expressions), **options)
+        if type(node) is ax.Trunc:
+            (source,) = (self.expression(e) for e in node.expressions)
+            if node.kind in ("date", "time"):
+                function = djf.TruncDate if node.kind == "date" else djf.TruncTime
+                implied = datetime.date if node.kind == "date" else datetime.time
+                return function(source, **_output_options(node, implied))
+            return djf.Trunc(source, node.kind, **_output_options(node))
+        if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate) and name in FUNCTIONS:
+            implied = {"TruncDate": datetime.date, "TruncTime": datetime.time}.get(name)
+            arguments = (self.expression(e) for e in node.expressions)
+            return FUNCTIONS[name](*arguments, **_output_options(node, implied))
+        raise NotSupportedError(f"the Django driver does not translate {name}")
 
     def condition(self, node: ax.Q) -> dj.Q:
         children = [self.expression(child) for child in node.children]
@@ -325,7 +405,7 @@ class _Translator:
             self.aliases[key] = self.expression(lhs)
         rhs = node.rhs
         if isinstance(rhs, ax.Subquery) and not isinstance(rhs, ax.Exists) and node.lookup_name == "in":
-            value: Any = subquery(rhs.query)
+            value: Any = self.subquery(rhs.query)
         elif isinstance(rhs, tuple):
             value = tuple(self.operand(item, field) for item in rhs)
         else:
@@ -363,9 +443,67 @@ class _Translator:
 
     # The query set
 
+    def annotated(self, queryset: Any) -> Any:
+        """``queryset`` with the filters, annotations and aliases of the query in the order they were added, grouped
+        by ``group_by`` as ``values()`` followed by ``annotate()`` groups in Django.
+
+        A grouped query calls ``values()`` before the first annotation that is added at or after ``group_mark`` or
+        contains an aggregate; the filters added before that annotation, and the annotations without an aggregate
+        added before ``group_mark``, come before ``values()``, the rest after it in their order. ``values()`` takes
+        the names of ``group_by`` that are not annotations added at or after ``group_mark``; Django groups by the
+        selected annotations added after it as well.
+        """
+        query = self.query
+        count = len(query.annotations)
+        steps: list[tuple[str, int]] = []
+        for index in range(count + 1):
+            steps.extend(("filter", i) for i, mark in enumerate(query.filter_marks) if mark == index)
+            if index < count:
+                steps.append(("annotate", index))
+        if query.group_mark is None:
+            return self.replay(queryset, steps)
+        aggregates = query.aggregate_names()
+
+        def early(index: int) -> bool:
+            return index < query.group_mark and query.annotations[index][0] not in aggregates
+
+        first = next(n for n, (kind, i) in enumerate(steps) if kind == "annotate" and not early(i))
+        before = steps[:first] + [step for step in steps[first:] if step[0] == "annotate" and early(step[1])]
+        after = [step for step in steps[first:] if not (step[0] == "annotate" and early(step[1]))]
+        late = {name for name, _ in query.annotations[query.group_mark :]}
+        queryset = self.replay(queryset, before)
+        names = (n if n in self.annotation_names else self.path(n) for n in query.group_by if n not in late)
+        return self.replay(queryset.values(*names), after)
+
+    def replay(self, queryset: Any, steps: Iterable[tuple[str, int]]) -> Any:
+        """``queryset`` with the filters and annotations ``steps`` names by index, in that order. Each filter is a
+        ``filter()`` call of its own: Django joins a multi-valued relation once per call."""
+        query = self.query
+        for kind, index in steps:
+            if kind == "filter":
+                condition = self.condition(query.filters[index])
+                queryset = self.with_aliases(queryset).filter(condition)
+            else:
+                name, value = query.annotations[index]
+                queryset = self.annotate(queryset, name, value)
+        return queryset
+
+    def with_aliases(self, queryset: Any) -> Any:
+        """``queryset`` with the aliases of lookups on expressions translated since the last call."""
+        pending = {key: value for key, value in self.aliases.items() if key not in self._applied}
+        self._applied.update(pending)
+        return queryset.alias(**pending) if pending else queryset
+
+    def annotate(self, queryset: Any, name: str, value: Any) -> Any:
+        expression = self.expression(value)
+        queryset = self.with_aliases(queryset)
+        if name in self.query.aliases:
+            return queryset.alias(**{name: expression})
+        return queryset.annotate(**{name: expression})
+
     def base(self) -> Any:
-        """The Django query set of the model rows: manager, annotations, filters, ordering, distinct, slice, none and
-        row locks."""
+        """The Django query set of the model rows: manager, filters, annotations and grouping, ordering, distinct,
+        slice, none and row locks."""
         query = self.query
         if query.manager is None:
             queryset = self.model._base_manager.all()
@@ -374,15 +512,9 @@ class _Translator:
             if not isinstance(manager, dj.Manager):
                 raise ProgrammingError(f"{query.model} has no Django manager {query.manager!r}")
             queryset = manager.all()
-        if query.annotations:
-            queryset = queryset.annotate(**{name: self.expression(value) for name, value in query.annotations})
-        filters = [self.condition(condition) for condition in query.filters]
+        queryset = self.annotated(queryset)
         ordering = [self.order(order) for order in query.ordering]
-        if self.aliases:
-            queryset = queryset.alias(**self.aliases)
-        for condition in filters:
-            # One filter() call per adorm filter: Django joins a multi-valued relation once per call.
-            queryset = queryset.filter(condition)
+        queryset = self.with_aliases(queryset)
         if ordering:
             queryset = queryset.order_by(*ordering)
         if query.is_distinct:
@@ -503,10 +635,12 @@ class _Translator:
             deferred, _ = _level(query.deferred_fields)
             plan = self.model_plan(columns, self.model, "", "", only, deferred, self.related_tree())
             plan = _RowPlan(
-                (*plan.fields, *((name, columns.add(name)) for name in self.annotation_names)), plan.pk, plan.relations
+                (*plan.fields, *((name, columns.add(name)) for name in self.selected_annotations)),
+                plan.pk,
+                plan.relations,
             )
         else:
-            names = query.select or (*self.field_names(), *self.annotation_names)
+            names = query.select or (*self.field_names(), *self.selected_annotations)
             fields = [(name, columns.add(name if name in self.annotation_names else self.path(name))) for name in names]
             plan = _RowPlan(fields, None)
         return TranslatedQuery(queryset.values_list(*columns.paths), columns.paths, plan)
@@ -548,13 +682,23 @@ def translate(query: Query) -> TranslatedQuery:
 
 def subquery(query: Query) -> Any:
     """The Django query set of ``query`` used inside another query: its model rows (Django compares their primary
-    key), or the selected column after ``values()`` / ``values_list()`` with fields."""
+    key), or the selected column after ``values()`` / ``values_list()`` with fields. An `OuterRef` in ``query`` raises
+    `ProgrammingError`: the query has no outer query here; inside a translated query it refers to that query."""
     translator = _Translator(query)
     queryset = translator.base()
     if query.row_format != "model" and query.select:
         names = translator.annotation_names
         queryset = queryset.values_list(*(n if n in names else translator.path(n) for n in query.select))
     return queryset
+
+
+def aggregation(query: Query, aggregations: Iterable[tuple[str, Any]]) -> tuple[Any, dict[str, Any]]:
+    """The Django query set of ``query``'s rows, as `model_queryset()` builds it, and the Django expressions of
+    ``aggregations`` (name and adorm expression pairs) for its ``aggregate()``."""
+    translator = _Translator(query)
+    queryset = translator.base()
+    expressions = {name: translator.expression(value) for name, value in aggregations}
+    return translator.with_aliases(queryset), expressions
 
 
 def model_queryset(query: Query) -> Any:

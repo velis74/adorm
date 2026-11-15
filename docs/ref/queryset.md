@@ -69,7 +69,8 @@ executor:
 |---|---|
 | `all()` | a copy |
 | `filter(*args, **kwargs)`, `exclude(*args, **kwargs)` | conditions as for `Q` |
-| `annotate(**annotations)` | computed columns |
+| `annotate(**annotations)` | computed columns; after `values()`, an aggregate groups the rows |
+| `alias(**annotations)` | named expressions that are not returned |
 | `order_by(*keys)` | ordering |
 | `values(*fields)`, `values_list(*fields, flat=False, named=False)` | rows as dicts, tuples, values or named tuples |
 | `only(*fields)`, `defer(*fields)` | loaded fields |
@@ -96,7 +97,9 @@ Combining query sets of different executors raises `TypeError`.
 Each terminal method builds one [operation](./operations), awaits `executor.execute(operation)` and shapes the
 result. On a query set built with `none()`, `async for`, `get()`, `first()`, `last()`, `count()`, `exists()`,
 `update()` and `delete()` return an empty result (`get()` raises `DoesNotExist`) without running an operation;
-`create()`, `get_or_create()` and `update_or_create()` run their operation.
+`aggregate()` does so when the result over no rows is known without the database (see
+[`aggregate()`](#async-aggregate-args-kwargs)); `create()`, `get_or_create()` and `update_or_create()` run their
+operation.
 
 A generic `ObjectDoesNotExist` or `MultipleObjectsReturned` from the executor (not a model's own) is raised as the
 model's `DoesNotExist` or `MultipleObjectsReturned`, with the original as `__cause__`. A model's own exception, also
@@ -140,7 +143,8 @@ except Member.DoesNotExist:
 #### `async first()`, `async last()`
 
 The first or last row (`First` / `Last`), `None` when there is none. `last()` on a sliced query set raises
-`TypeError`, and so does `first()` on a sliced query set without `order_by()`.
+`TypeError`, and so does `first()` on a sliced query set without `order_by()`. On a grouped query set
+(`values()` followed by an aggregate annotation) both need `order_by()`, otherwise `TypeError`.
 
 #### `async count()`
 
@@ -149,6 +153,40 @@ The number of rows (`Count`), an `int`.
 #### `async exists()`
 
 Whether the query has a row (`Exists`), a `bool`.
+
+#### `async aggregate(*args, **kwargs)`
+
+The values of aggregate expressions over the rows, with one [`Aggregate`](./operations#adorm-operations-aggregate-query-aggregations)
+operation; returns a dict by name. A keyword argument names its expression; a positional argument is an aggregate of
+one field and takes its [`default_alias`](./expressions#default-alias) (`Sum("fee")` → `"fee__sum"`). A positional
+argument that is not an aggregate, or an aggregate without a default name (`Count("*")`, `Sum(F("a") * 2)`), raises
+`TypeError`; a name given twice, positional or keyword, `ValueError`; a query set distinct on fields
+(`distinct("role")`) `TypeError`. Without arguments the result is `{}` and no operation runs. An expression may combine
+aggregates (`Max("fee") - Min("fee")`) and refer to annotations and aliases.
+
+```python
+await Membership.objects.aggregate(Sum("fee"), rows=Count("*"))
+# {"fee__sum": Decimal("1102.00"), "rows": 13}
+
+await Membership.objects.filter(active=True).aggregate(
+    coach_fees=Sum("fee", filter=Q(role="coach"), default=0),
+    spread=Max("fee") - Min("fee"),
+)
+```
+
+Over a sliced, distinct (without fields) or grouped query set, or one whose annotations aggregate, the expressions aggregate the
+query set's rows:
+
+```python
+await Membership.objects.order_by("-fee")[:3].aggregate(Sum("fee"))          # the three highest fees
+await Club.objects.annotate(headcount=Count("memberships")).aggregate(Avg("headcount"))
+await Membership.objects.values("club_id").annotate(n=Count("*")).aggregate(largest=Max("n"))
+```
+
+Over no rows `Count` gives `0` and the other aggregates their `default`, or `None`. On a query set built with
+`none()` (or a slice that leaves no rows) whose expressions are all plain aggregates with no `default` or a
+[`Value`](./expressions#adorm-value-value-output-type-none) `default`, the result is computed without an operation;
+otherwise the operation runs.
 
 ### Writes
 

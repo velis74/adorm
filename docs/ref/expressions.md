@@ -92,7 +92,17 @@ list(F("club__name").constructs())    # ['path.nested']
 ### `adorm.OuterRef(name)`
 
 A reference to a field of the outer query, used inside a [`Subquery`](#adorm-subquery-query-output-type-none) or
-[`Exists`](#adorm-exists-query-negated-false). A subclass of `F`.
+[`Exists`](#adorm-exists-query-negated-false). A subclass of `F`. `name` is a field path, or another `OuterRef`:
+`OuterRef(OuterRef("pk"))` refers to the query that encloses the outer query. `levels` counts how many queries out
+the reference goes (`1` for a field path); the Django and PostgreSQL drivers raise `ProgrammingError` when there are not that many
+enclosing queries.
+
+```python
+invoiced = Query("billing.Invoice").filter(member=OuterRef("member"), club=OuterRef(OuterRef("pk")))
+memberships = Query("clubs.Membership").filter(Exists(invoiced), club=OuterRef("pk"))
+Query("clubs.Club").filter(Exists(memberships))
+OuterRef(OuterRef("pk")).levels   # 2
+```
 
 ### `adorm.Value(value, output_type=None)`
 
@@ -184,7 +194,8 @@ Coalesce("nick", "name", Value("?"))
 
 ### `adorm.Now()`
 
-On PostgreSQL the transaction's start time.
+The Django and native PostgreSQL drivers give the start time of the statement (`STATEMENT_TIMESTAMP()`), so
+every row of one statement gets the same value.
 
 ### `adorm.Trunc(expression, kind, output_type=None)`
 
@@ -234,6 +245,17 @@ path).
 
 An aggregate cannot take an aggregate as its argument, nor contain one in `filter` or `default` (`TypeError`); an
 aggregate inside a subquery is allowed.
+
+#### `default_alias`
+
+The name [`aggregate()`](./queryset#async-aggregate-args-kwargs) gives an aggregate passed without a name:
+`<field path>__<class name in lower case>`. An aggregate of anything but a field (`Count("*")`, an expression,
+`OuterRef`) raises `TypeError`.
+
+```python
+Sum("fee").default_alias                  # "fee__sum"
+Count("memberships__club").default_alias  # "memberships__club__count"
+```
 
 ### `adorm.Count(expression, *, distinct=False, filter=None, output_type=None)`
 

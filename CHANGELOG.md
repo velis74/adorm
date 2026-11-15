@@ -364,3 +364,22 @@
   memory driver executes `select_for_update()` with `nowait` and `skip_locked`. Tests run the write flows in process
   with the Django and the asyncpg driver active, and the end-to-end test runs them on every driver.
 - `cancellation_outcome()` of a cancellation that reaches `atomic()` while it waits for a slot is `NOT_STARTED`.
+- Annotations, expressions and aggregates on the Django and native PostgreSQL drivers: the functions `Length`,
+  `Coalesce`, `Concat`, `Now`, `Trunc` and `TruncYear` … `TruncTime`, the aggregates `Count` (also `Count("*")`),
+  `Sum`, `Avg`, `Min` and `Max` with `distinct`, `filter` and `default`, `Case` / `When`, `Exists` and `~Exists`, and
+  `OuterRef` in a `Subquery` or `Exists`, translated on the enclosing query's model; `OuterRef(OuterRef(...))`
+  (`OuterRef.levels`) refers to a query further out. `Now()` is the statement's start time.
+- `Query.alias()` / `QuerySet.alias()` (`Query.aliases`, construct `clause.alias`): named expressions that
+  conditions and orderings use, not returned in the rows; selecting one raises `ValueError`.
+- Grouping: `values()` followed by an aggregate annotation groups the rows by the selected names
+  (`Query.group_by`, `Query.is_grouped`, `Query.aggregate_names()`, construct `clause.group_by`), as Django's
+  `values().annotate()`; an annotation without an aggregate added later joins the grouping (`Query.group_mark`).
+  `First`, `Last` on a grouped query need an ordering, `Update` refuses one.
+- Filters and annotations apply in the order they were added (`Query.filter_marks`), as in Django: an aggregate
+  annotation after a filter on a multi-valued relation aggregates only the related rows the filter matched.
+- `QuerySet.aggregate(*args, **kwargs)` and the `Aggregate` operation (kind `aggregate`): aggregates over the rows,
+  over a subquery of sliced, distinct or grouped rows; a positional aggregate takes `Aggregate.default_alias`.
+  `aggregate()` without arguments is `{}`; a query distinct on fields and names Django refuses as column aliases raise
+  at construction. An empty query of plain aggregates is answered without an operation. The native PostgreSQL driver compiles it with
+  `DjangoCompiler.compile_aggregate()` (`DjangoAggregation`), the Django driver translates it with
+  `adorm.drivers.django.translation.aggregation()` (`AGGREGATES`).

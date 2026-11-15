@@ -842,7 +842,6 @@ def _django_aggregate_count():
 @case(
     "select",
     "clause.annotate",
-    "path.nested",
     "aggregate.Count",
     expected=[("koper-sailing", 3), ("ljubljana-rowing", 5), ("maribor-climbing", 5)],
     django=_django_aggregate_count,
@@ -959,6 +958,477 @@ def _django_aggregate_filter():
 async def aggregate_filter():
     inactive = Count("memberships", filter=Q(memberships__active=False))
     return await _by_slug(Club.objects.annotate(value=inactive))
+
+
+# Aggregation over the rows, grouping and aliases
+
+FEES = Decimal("1102.00")
+
+
+def _django_aggregate_operation():
+    from django.db.models import Count as DjangoCount, Q as DjangoQ, Sum as DjangoSum
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    return DjangoMembership.objects.aggregate(
+        DjangoSum("fee"),
+        rows=DjangoCount("*"),
+        coach_fees=DjangoSum("fee", filter=DjangoQ(role="coach")),
+        paying=DjangoCount("pk", filter=DjangoQ(fee__gt=0)),
+    )
+
+
+@case(
+    "aggregate",
+    "lookup.exact",
+    "lookup.gt",
+    "aggregate.Sum",
+    "aggregate.Count",
+    "aggregate.filter",
+    expected={"fee__sum": FEES, "rows": 13, "coach_fees": Decimal("0.00"), "paying": 10},
+    django=_django_aggregate_operation,
+)
+async def aggregate_operation():
+    return await Membership.objects.aggregate(
+        Sum("fee"),
+        rows=Count("*"),
+        coach_fees=Sum("fee", filter=Q(role="coach")),
+        paying=Count("pk", filter=Q(fee__gt=0)),
+    )
+
+
+def _django_aggregate_without_rows():
+    from django.db.models import Count as DjangoCount, Max as DjangoMax, Sum as DjangoSum
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    return DjangoMembership.objects.filter(role="treasurer").aggregate(
+        n=DjangoCount("*"), total=DjangoSum("fee"), zero=DjangoSum("fee", default=0), top=DjangoMax("fee")
+    )
+
+
+@case(
+    "aggregate",
+    "lookup.exact",
+    "aggregate.Count",
+    "aggregate.Sum",
+    "aggregate.Max",
+    expected={"n": 0, "total": None, "zero": 0, "top": None},
+    django=_django_aggregate_without_rows,
+)
+async def aggregate_without_rows():
+    return await Membership.objects.filter(role="treasurer").aggregate(
+        n=Count("*"), total=Sum("fee"), zero=Sum("fee", default=0), top=Max("fee")
+    )
+
+
+def _django_aggregate_over_a_slice_and_annotations():
+    from django.db.models import Avg as DjangoAvg, Count as DjangoCount, Max as DjangoMax
+
+    from demo.backend.clubs.models import Club as DjangoClub, Membership as DjangoMembership
+
+    top = DjangoMembership.objects.order_by("-fee", "pk")[:3].aggregate(DjangoMax("fee"), n=DjangoCount("*"))
+    clubs = DjangoClub.objects.annotate(headcount=DjangoCount("memberships")).aggregate(DjangoAvg("headcount"))
+    return top, round(clubs["headcount__avg"], 6)
+
+
+@case(
+    "aggregate",
+    "clause.annotate",
+    "aggregate.Max",
+    "aggregate.Count",
+    "aggregate.Avg",
+    expected=({"fee__max": Decimal("150.00"), "n": 3}, 4.333333),
+    django=_django_aggregate_over_a_slice_and_annotations,
+)
+async def aggregate_over_a_slice_and_annotations():
+    top = await Membership.objects.order_by("-fee", "pk")[:3].aggregate(Max("fee"), n=Count("*"))
+    clubs = await Club.objects.annotate(headcount=Count("memberships")).aggregate(Avg("headcount"))
+    return top, round(clubs["headcount__avg"], 6)
+
+
+def _django_values_annotate_groups_rows():
+    from django.db.models import Count as DjangoCount, Sum as DjangoSum
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    groups = DjangoMembership.objects.values("role").annotate(n=DjangoCount("*"), fees=DjangoSum("fee"))
+    return list(groups.order_by("role"))
+
+
+@case(
+    "select",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Count",
+    "aggregate.Sum",
+    expected=[
+        {"role": "board", "n": 1, "fees": Decimal("60.00")},
+        {"role": "coach", "n": 3, "fees": Decimal("0.00")},
+        {"role": "member", "n": 9, "fees": Decimal("1042.00")},
+    ],
+    django=_django_values_annotate_groups_rows,
+)
+async def values_annotate_groups_rows():
+    groups = Membership.objects.values("role").annotate(n=Count("*"), fees=Sum("fee"))
+    return await rows(groups.order_by("role"))
+
+
+def _django_grouping_by_a_truncated_month():
+    from django.db.models import Count as DjangoCount, Sum as DjangoSum
+    from django.db.models.functions import TruncMonth as DjangoTruncMonth
+
+    from demo.backend.billing.models import Invoice as DjangoInvoice
+
+    months = DjangoInvoice.objects.annotate(month=DjangoTruncMonth("issued")).values("month")
+    return list(
+        months.annotate(n=DjangoCount("pk"), total=DjangoSum("total"))
+        .order_by("month")
+        .values_list("month", "n", "total")
+    )
+
+
+@case(
+    "select",
+    "clause.annotate",
+    "clause.group_by",
+    "function.TruncMonth",
+    "aggregate.Count",
+    "aggregate.Sum",
+    expected=[
+        (datetime.date(2026, 1, 1), 10, Decimal("1102.00")),
+        (datetime.date(2026, 3, 1), 9, Decimal("165.00")),
+    ],
+    django=_django_grouping_by_a_truncated_month,
+)
+async def grouping_by_a_truncated_month():
+    months = Invoice.objects.annotate(month=TruncMonth("issued")).values("month")
+    return await rows(
+        months.annotate(n=Count("pk"), total=Sum("total")).order_by("month").values_list("month", "n", "total")
+    )
+
+
+def _django_aggregate_over_groups():
+    from django.db.models import Count as DjangoCount, Max as DjangoMax
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    groups = DjangoMembership.objects.values("club_id").annotate(n=DjangoCount("*"))
+    return groups.aggregate(largest=DjangoMax("n"), groups=DjangoCount("club_id"))
+
+
+@case(
+    "aggregate",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Count",
+    "aggregate.Max",
+    expected={"largest": 5, "groups": 3},
+    django=_django_aggregate_over_groups,
+)
+async def aggregate_over_groups():
+    groups = Membership.objects.values("club_id").annotate(n=Count("*"))
+    return await groups.aggregate(largest=Max("n"), groups=Count("club_id"))
+
+
+def _django_alias_filters_without_selecting():
+    from django.db.models import Count as DjangoCount
+
+    from demo.backend.clubs.models import Club as DjangoClub
+
+    query = DjangoClub.objects.alias(headcount=DjangoCount("memberships")).filter(headcount__gt=3).order_by("slug")
+    return [(club.slug, hasattr(club, "headcount")) for club in query]
+
+
+@case(
+    "select",
+    "lookup.gt",
+    "clause.alias",
+    "aggregate.Count",
+    expected=[("ljubljana-rowing", False), ("maribor-climbing", False)],
+    django=_django_alias_filters_without_selecting,
+)
+async def alias_filters_without_selecting():
+    query = Club.objects.alias(headcount=Count("memberships")).filter(headcount__gt=3).order_by("slug")
+    return [(club.slug, hasattr(club, "headcount")) for club in await rows(query)]
+
+
+def _django_annotations_of_functions_and_cases():
+    from django.db.models import Case as DjangoCase, Value as DjangoValue, When as DjangoWhen
+    from django.db.models.functions import Coalesce as DjangoCoalesce, Concat as DjangoConcat
+
+    from demo.backend.activities.models import Activity as DjangoActivity
+
+    query = DjangoActivity.objects.annotate(
+        label=DjangoConcat("name", DjangoValue(" ("), "kind", DjangoValue(")")),
+        coach_name=DjangoCoalesce("coach__first_name", DjangoValue("nobody")),
+        size=DjangoCase(
+            DjangoWhen(capacity__gte=20, then=DjangoValue("large")),
+            DjangoWhen(capacity__gte=10, then=DjangoValue("medium")),
+            default=DjangoValue("small"),
+        ),
+    )
+    return list(query.order_by("starts_at").values_list("label", "coach_name", "size")[:3])
+
+
+@case(
+    "select",
+    "lookup.gte",
+    "path.nested",
+    "clause.annotate",
+    "function.Concat",
+    "function.Coalesce",
+    "expression.Case",
+    expected=[
+        ("Morning sculling (training)", "Bojan", "small"),
+        ("Bouldering basics (training)", "Eva", "medium"),
+        ("Ergometer session (training)", "Bojan", "medium"),
+    ],
+    django=_django_annotations_of_functions_and_cases,
+)
+async def annotations_of_functions_and_cases():
+    query = Activity.objects.annotate(
+        label=Concat("name", Value(" ("), "kind", Value(")")),
+        coach_name=Coalesce("coach__first_name", Value("nobody")),
+        size=CaseWhen(
+            When(capacity__gte=20, then=Value("large")),
+            When(capacity__gte=10, then=Value("medium")),
+            default=Value("small"),
+        ),
+    )
+    return await rows(query.order_by("starts_at").values_list("label", "coach_name", "size")[:3])
+
+
+def _django_a_subquery_of_grouped_sums():
+    from django.db.models import OuterRef as DjangoOuterRef, Subquery as DjangoSubquery, Sum as DjangoSum
+
+    from demo.backend.billing.models import Invoice as DjangoInvoice
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    billed = (
+        DjangoInvoice.objects.filter(member_id=DjangoOuterRef("pk"))
+        .values("member_id")
+        .annotate(total=DjangoSum("total"))
+        .values("total")
+    )
+    query = DjangoMember.objects.annotate(billed=DjangoSubquery(billed)).filter(first_name__in=["Ana", "Bojan"])
+    return list(query.order_by("first_name").values_list("first_name", "billed"))
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "lookup.in",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Sum",
+    "expression.Subquery",
+    "expression.OuterRef",
+    expected=[("Ana", Decimal("145.00")), ("Bojan", None)],
+    django=_django_a_subquery_of_grouped_sums,
+)
+async def a_subquery_of_grouped_sums():
+    billed = (
+        Invoice.objects.filter(member_id=OuterRef("pk"))
+        .values("member_id")
+        .annotate(total=Sum("total"))
+        .values("total")
+    )
+    query = Member.objects.annotate(billed=Subquery(billed)).filter(first_name__in=["Ana", "Bojan"])
+    return await rows(query.order_by("first_name").values_list("first_name", "billed"))
+
+
+def _django_filter_then_annotate_counts_the_matched_rows():
+    from django.db.models import Count as DjangoCount
+
+    from demo.backend.clubs.models import Club as DjangoClub
+
+    query = DjangoClub.objects.filter(memberships__role="member").annotate(n=DjangoCount("memberships"))
+    return list(query.order_by("slug").values_list("slug", "n"))
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "path.nested",
+    "clause.annotate",
+    "aggregate.Count",
+    expected=[("koper-sailing", 2), ("ljubljana-rowing", 3), ("maribor-climbing", 4)],
+    django=_django_filter_then_annotate_counts_the_matched_rows,
+)
+async def filter_then_annotate_counts_the_matched_rows():
+    query = Club.objects.filter(memberships__role="member").annotate(n=Count("memberships"))
+    return await rows(query.order_by("slug").values_list("slug", "n"))
+
+
+def _django_annotate_then_filter_joins_again():
+    from django.db.models import Count as DjangoCount
+
+    from demo.backend.clubs.models import Club as DjangoClub
+
+    query = DjangoClub.objects.annotate(n=DjangoCount("memberships")).filter(memberships__role="member")
+    return list(query.order_by("slug").values_list("slug", "n"))
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "path.nested",
+    "clause.annotate",
+    "aggregate.Count",
+    expected=[("koper-sailing", 6), ("ljubljana-rowing", 15), ("maribor-climbing", 20)],
+    django=_django_annotate_then_filter_joins_again,
+)
+async def annotate_then_filter_joins_again():
+    query = Club.objects.annotate(n=Count("memberships")).filter(memberships__role="member")
+    return await rows(query.order_by("slug").values_list("slug", "n"))
+
+
+def _django_filter_then_grouped_count():
+    from django.db.models import Count as DjangoCount
+
+    from demo.backend.clubs.models import Club as DjangoClub
+
+    query = DjangoClub.objects.filter(memberships__active=True).values("slug").annotate(n=DjangoCount("memberships"))
+    return list(query.order_by("slug").values_list("slug", "n"))
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "path.nested",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Count",
+    expected=[("koper-sailing", 3), ("ljubljana-rowing", 4), ("maribor-climbing", 5)],
+    django=_django_filter_then_grouped_count,
+)
+async def filter_then_grouped_count():
+    query = Club.objects.filter(memberships__active=True).values("slug").annotate(n=Count("memberships"))
+    return await rows(query.order_by("slug").values_list("slug", "n"))
+
+
+def _django_annotation_after_grouping_joins_the_group():
+    from django.db.models import Count as DjangoCount, F as DjangoF
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    query = DjangoMembership.objects.values("role").annotate(n=DjangoCount("*")).annotate(c=DjangoF("club__slug"))
+    return list(query.order_by("role", "c").values_list("role", "c", "n"))
+
+
+@case(
+    "select",
+    "path.nested",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Count",
+    expected=[
+        ("board", "ljubljana-rowing", 1),
+        ("coach", "koper-sailing", 1),
+        ("coach", "ljubljana-rowing", 1),
+        ("coach", "maribor-climbing", 1),
+        ("member", "koper-sailing", 2),
+        ("member", "ljubljana-rowing", 3),
+        ("member", "maribor-climbing", 4),
+    ],
+    django=_django_annotation_after_grouping_joins_the_group,
+)
+async def annotation_after_grouping_joins_the_group():
+    query = Membership.objects.values("role").annotate(n=Count("*")).annotate(c=F("club__slug"))
+    return await rows(query.order_by("role", "c").values_list("role", "c", "n"))
+
+
+def _django_grouped_count_exists_and_get():
+    from django.db.models import Count as DjangoCount
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    groups = DjangoMembership.objects.values("role").annotate(n=DjangoCount("*"))
+    large = groups.filter(n__gte=3)
+    return (
+        large.count(),
+        large.exists(),
+        groups.filter(n__gte=100).exists(),
+        groups.filter(n__gte=100).count(),
+        groups.get(role="board"),
+    )
+
+
+@case(
+    "count",
+    "exists",
+    "get",
+    "lookup.exact",
+    "lookup.gte",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Count",
+    expected=(2, True, False, 0, {"role": "board", "n": 1}),
+    django=_django_grouped_count_exists_and_get,
+)
+async def grouped_count_exists_and_get():
+    groups = Membership.objects.values("role").annotate(n=Count("*"))
+    large = groups.filter(n__gte=3)
+    return (
+        await large.count(),
+        await large.exists(),
+        await groups.filter(n__gte=100).exists(),
+        await groups.filter(n__gte=100).count(),
+        await groups.get(role="board"),
+    )
+
+
+def _django_first_and_last_of_ordered_groups():
+    from django.db.models import Count as DjangoCount
+
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    groups = DjangoMembership.objects.values("club__slug").annotate(n=DjangoCount("*")).order_by("n", "club__slug")
+    return groups.first(), groups.last()
+
+
+@case(
+    "first",
+    "last",
+    "path.nested",
+    "clause.annotate",
+    "clause.group_by",
+    "aggregate.Count",
+    expected=({"club__slug": "koper-sailing", "n": 3}, {"club__slug": "maribor-climbing", "n": 5}),
+    django=_django_first_and_last_of_ordered_groups,
+)
+async def first_and_last_of_ordered_groups():
+    groups = Membership.objects.values("club__slug").annotate(n=Count("*")).order_by("n", "club__slug")
+    return await groups.first(), await groups.last()
+
+
+def _django_a_nested_outer_ref():
+    from django.db.models import Exists as DjangoExists, OuterRef as DjangoOuterRef
+
+    from demo.backend.billing.models import Invoice as DjangoInvoice
+    from demo.backend.clubs.models import Club as DjangoClub, Membership as DjangoMembership
+
+    invoiced = DjangoInvoice.objects.filter(
+        member_id=DjangoOuterRef("member_id"), club_id=DjangoOuterRef(DjangoOuterRef("pk")), status="open"
+    )
+    memberships = DjangoMembership.objects.filter(club_id=DjangoOuterRef("pk"), role="board")
+    memberships = memberships.filter(DjangoExists(invoiced))
+    return sorted(DjangoClub.objects.filter(DjangoExists(memberships)).values_list("slug", flat=True))
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "expression.Exists",
+    "expression.OuterRef",
+    expected=["ljubljana-rowing"],
+    django=_django_a_nested_outer_ref,
+)
+async def a_nested_outer_ref():
+    invoiced = Invoice.objects.filter(member_id=OuterRef("member_id"), club_id=OuterRef(OuterRef("pk")), status="open")
+    memberships = Membership.objects.filter(club_id=OuterRef("pk"), role="board").filter(Exists(invoiced))
+    return sorted(await rows(Club.objects.filter(Exists(memberships)).values_list("slug", flat=True)))
 
 
 # Row locks

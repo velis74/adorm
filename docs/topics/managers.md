@@ -22,7 +22,8 @@ code.
 | overrides what adorm runs as an operation: `get_queryset()`, `create()`, `delete()`, `update()`, `get_or_create()` … | on the driver, through the ORM manager | nothing: the manager gets its ORM name, and every operation it builds names that manager |
 | does other work on the database (`create_user()`, `archive()`) | on the driver, on the manager's `method_manager`, as a [`Call`](/ref/operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) | [`@expose`](/ref/codegen#adorm-expose-func) or the `ADORM_EXPOSE` setting in the Django code; [`@driver_method`](/ref/models#adorm-driver-method-func-queryset-only-false) on the adorm class |
 
-A query-building method stays in the client because building a query needs no connection: the result is a query
+A Django query set method that annotates or aggregates ports the same way; [porting Django
+code](/topics/aggregation#porting-django-code) shows it and the model properties that read the database. A query-building method stays in the client because building a query needs no connection: the result is a query
 set that further methods extend. A method of the driver side returns data, not a query set, so it is the last step
 of a chain.
 

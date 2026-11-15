@@ -193,6 +193,10 @@ class BoundModel:
         """``all().annotate(...)``."""
         return self.all().annotate(**annotations)
 
+    def alias(self, **annotations: Any) -> QuerySet:
+        """``all().alias(...)``."""
+        return self.all().alias(**annotations)
+
     def order_by(self, *keys: Any) -> QuerySet:
         """``all().order_by(...)``."""
         return self.all().order_by(*keys)
@@ -248,6 +252,10 @@ class BoundModel:
     async def exists(self) -> bool:
         """``await all().exists()``."""
         return await self.all().exists()
+
+    async def aggregate(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        """``await all().aggregate(...)``."""
+        return await self.all().aggregate(*args, **kwargs)
 
     async def create(self, **values: Any) -> Any:
         """``await all().create(...)``."""

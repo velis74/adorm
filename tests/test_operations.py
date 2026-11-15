@@ -98,6 +98,7 @@ def test_registry():
         "first": First,
         "last": Last,
         "count": operations.Count,
+        "aggregate": operations.Aggregate,
         "exists": operations.Exists,
         "delete": Delete,
         "delete_instance": operations.DeleteInstance,

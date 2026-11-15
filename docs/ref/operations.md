@@ -6,12 +6,12 @@ connection: one read or write, described without I/O, models by their label and 
 ```python
 from adorm import F, Now, Q
 from adorm.models import registry
-from adorm.operations import Call, Count, Create, Delete, Get, GetOrCreate, ModelRow, Save, Select, Update, UpdateOrCreate
+from adorm.operations import Aggregate, Call, Count, Create, Delete, Get, GetOrCreate, ModelRow, Save, Select, Update, UpdateOrCreate
 from adorm.query import Query
 ```
 
-`Count` and `Exists` in this module are operations; the aggregate `Count` and the expression `Exists` are
-`adorm.Count` and `adorm.Exists`.
+`Aggregate`, `Count` and `Exists` in this module are operations; the aggregate base class, the aggregate `Count` and
+the expression `Exists` are `adorm.Aggregate`, `adorm.Count` and `adorm.Exists`.
 
 Every operation is a frozen dataclass compared by value (`Update(q, {"age": 1}) != Update(q, {"age": True})`) and
 hashable. Plain values are copied when the operation is built, so changing the caller's list afterwards does not
@@ -25,6 +25,7 @@ expressions.
 | `qs.get(**lookups)` | `Get(query.filter(**lookups))` |
 | `qs.first()`, `qs.last()` | `First(query)`, `Last(query)` |
 | `qs.count()`, `qs.exists()` | `Count(query)`, `Exists(query)` |
+| `qs.aggregate(*args, **kwargs)` | `Aggregate(query, aggregations)` |
 | `Model.objects.create(**values)` | `Create(label, values)`, `Create(label, values, manager)` on a manager with an ORM name |
 | `obj.save(update_fields=...)` | `Save(label, pk, values, update_fields)` |
 | `qs.update(**values)` | `Update(query, values)` |
@@ -33,8 +34,9 @@ expressions.
 | `qs.update_or_create(defaults=..., create_defaults=..., **lookups)` | `UpdateOrCreate(query, lookups, defaults, create_defaults)` |
 | `qs.archive(...)`, `Model.objects.lend(...)` (driver methods) | `Call(query, "archive", "queryset", ...)`, `Call(Query(label, manager=...), "lend", "manager", ...)` |
 
-`filter()`, `exclude()`, `order_by()`, `distinct()`, slicing, `values()`, `values_list()`, `only()`, `defer()`,
-`none()`, `|`, `select_related()` and `select_for_update()` are part of the [`Query`](./query) an operation carries.
+`filter()`, `exclude()`, `annotate()`, `alias()`, `order_by()`, `distinct()`, slicing, `values()`, `values_list()`,
+`only()`, `defer()`, `none()`, `|`, `select_related()` and `select_for_update()` are part of the [`Query`](./query)
+an operation carries.
 
 ## Base class
 
@@ -81,6 +83,7 @@ A read-only mapping of kind to operation class:
 | `last` | `Last` | a row or `None` |
 | `count` | `Count` | an `int` |
 | `exists` | `Exists` | a `bool` |
+| `aggregate` | `Aggregate` | a dict of the values by name |
 | `create` | `Create` | the row as stored |
 | `save` | `Save` | the values the database set |
 | `update` | `Update` | the number of rows |
@@ -123,12 +126,13 @@ Get(Query("club.Member").filter(pk=5))
 
 The first row of `query`, or `None`. Without an ordering on the query or the model, rows are ordered by the primary
 key. A sliced query without an ordering of its own raises `TypeError`; the model's ordering does not count, as an
-adorm model does not carry it.
+adorm model does not carry it. So does a grouped query (`Query.is_grouped`) without an ordering: ordering by the
+primary key would split its groups.
 
 ### `adorm.operations.Last(query)`
 
-The last row of `query`, or `None`: the ordering reversed, or the descending primary key without one. A sliced query
-raises `TypeError`.
+The last row of `query`, or `None`: the ordering reversed, or the descending primary key without one. A sliced query,
+and a grouped query without an ordering, raise `TypeError`.
 
 ### `adorm.operations.Count(query)`
 
@@ -137,6 +141,26 @@ The number of rows of `query`, an `int`.
 ### `adorm.operations.Exists(query)`
 
 Whether `query` has a row, a `bool`.
+
+### `adorm.operations.Aggregate(query, aggregations)`
+
+The values of `aggregations` over the rows of `query`, a dict by name. `aggregations` is a mapping or
+`(name, expression)` pairs, at least one (else `TypeError`), kept as a tuple of pairs in the order given. A name is a
+non-empty string without whitespace, control characters, quotes, backticks, brackets, `;`, `#`, `--`, `/*` or `*/`
+and may contain `__` (`"fee__sum"`); anything else, or a name given twice, raises `ValueError`. An expression without
+an aggregate outside a subquery raises `TypeError`, and so does a query distinct on fields (`distinct("role")`). The
+expressions refer to the query's fields, annotations and aliases.
+
+Over a sliced, distinct (without fields) or grouped query, or one with an annotation that aggregates, the expressions aggregate the
+query's rows as a subquery. Over no rows `Count` gives `0`, the other aggregates their `default` or `None`.
+
+```python
+Aggregate(Query("clubs.Membership").filter(active=True), {"fees": Sum("fee"), "rows": Count("*")})
+Aggregate(Query("clubs.Membership").values("club_id").annotate(n=Count("*")), {"largest": Max("n")})
+```
+
+The encoded form has `"aggregations"`, a list of `[name, expression]` pairs; values in them are typed by the query's
+fields and annotations.
 
 ## Writes
 
@@ -184,8 +208,8 @@ Save("club.Member", 5, {"age": F("age") + 1}, force_update=True)
 
 ### `adorm.operations.Update(query, values=())`
 
-Sets `values` on every row of `query`. Values may refer to fields. A sliced query and a query distinct on fields
-raise `TypeError`. Result: the number of rows matched.
+Sets `values` on every row of `query`. Values may refer to fields. A sliced query, a query distinct on fields and a
+grouped query raise `TypeError`. Result: the number of rows matched.
 
 ```python
 Update(Query("club.Member").filter(club__name="Chess"), {"fee": F("fee") * 1.1, "active": True})

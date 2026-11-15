@@ -418,6 +418,17 @@ def test_subqueries_resolve_against_their_own_model_and_outer_refs_against_the_o
     )
 
 
+def test_nested_outer_refs_resolve_against_the_query_they_reach():
+    innermost = Query("club.Payment").filter(Exact(OuterRef(OuterRef("joined")), "2026-01-01T00:00:00"))
+    q = MEMBERS.filter(Exists(Query("club.Payment").filter(Exists(innermost))))
+    data = q.to_dict(SCHEMA)
+    inner = data["filters"][0]["children"][0]["query"]["filters"][0]["children"][0]["query"]
+    assert inner["filters"][0]["children"][0]["rhs"] == {"value": "2026-01-01T00:00:00"}
+    decoded = Query.from_dict(roundtrip(data), SCHEMA)
+    expected = Query("club.Payment").filter(Exact(OuterRef(OuterRef("joined")), datetime.datetime(2026, 1, 1)))
+    assert decoded == MEMBERS.filter(Exists(Query("club.Payment").filter(Exists(expected))))
+
+
 def test_outer_ref_without_an_outer_query_is_untyped():
     data = MEMBERS.filter(Exact(OuterRef("age"), 3)).to_dict(SCHEMA)
     assert data["filters"][0]["children"][0]["rhs"] == {"type": "int", "value": 3}

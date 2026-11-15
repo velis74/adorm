@@ -339,9 +339,31 @@ class F(Expression):
 
 
 class OuterRef(F):
-    """A reference to a field of the outer query, used inside a `Subquery` or `Exists`."""
+    """A reference to a field of the outer query, used inside a `Subquery` or `Exists`.
+
+    ``OuterRef(OuterRef("pk"))`` refers to the query one level further out; ``levels`` counts the levels (1 for the
+    enclosing query).
+    """
 
     construct = "expression.OuterRef"
+    _fields = ("name", "levels")
+    levels: int
+
+    def __init__(self, name: str | OuterRef) -> None:
+        if isinstance(name, OuterRef):
+            self._init(name=name.name, levels=name.levels + 1)
+        else:
+            self._init(name=check_field_path(name), levels=1)
+
+    def _check_decoded(self) -> None:
+        super()._check_decoded()
+        _require(
+            isinstance(self.levels, int) and not isinstance(self.levels, bool) and self.levels >= 1,
+            "levels is a positive integer",
+        )
+
+    def __repr__(self) -> str:
+        return "OuterRef(" * self.levels + repr(self.name) + ")" * self.levels
 
 
 class Value(Expression):
@@ -527,7 +549,8 @@ class Concat(Func):
 
 
 class Now(Func):
-    """The current date and time of the database (the transaction's start time on PostgreSQL)."""
+    """The current date and time of the database; the Django and native PostgreSQL drivers give the start time of the
+    statement (``STATEMENT_TIMESTAMP()``)."""
 
     arity = 0
     default_output_type = datetime.datetime
@@ -676,6 +699,15 @@ class Aggregate(Func):
     @property
     def contains_aggregate(self) -> bool:
         return True
+
+    @property
+    def default_alias(self) -> str:
+        """The result name of an aggregate passed to ``aggregate()`` without a name: ``<field path>__<class name in
+        lower case>`` (``Sum("fee")`` → ``"fee__sum"``). An aggregate of anything but a field raises ``TypeError``."""
+        (expression,) = self.expressions
+        if type(expression) is not F:
+            raise TypeError(f"{self!r} has no default name: pass it as a keyword argument")
+        return f"{expression.name}__{type(self).__name__.lower()}"
 
     def get_source_expressions(self) -> tuple[Node, ...]:
         return self.expressions + tuple(e for e in (self.filter, self.default) if e is not None)

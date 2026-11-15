@@ -559,9 +559,9 @@ through Django, once; writes stay in memory and are gone when the API stops.
 
 | Supported | Not supported (raises `NotSupportedError`) |
 |---|---|
-| `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create` | `call` operations, connection options |
+| `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create` | `aggregate` and `call` operations, connection options |
 | conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`, `club=club`) or column | field paths across relations (`club__slug`, construct `path.nested`), conditions on a reverse or many-to-many relation name (`clubs=club`), subqueries |
-| `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, functions, aggregates, `only()`, `defer()`, `select_related()` |
+| `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, `alias()`, grouping with `values().annotate()`, functions, aggregates, `only()`, `defer()`, `select_related()` |
 | transactions, savepoints, cancellation, `select_for_update()` with `nowait` and `skip_locked` | `select_for_update()` with `of` or `no_key`, inserting or deleting a row of an MTI child, deleting a row a foreign key references |
 
 The constructs it does not support are refused before execution; a condition on a reverse or many-to-many relation

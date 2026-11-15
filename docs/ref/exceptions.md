@@ -236,11 +236,15 @@ names, connection option names or `"savepoints"`. It raises before anything reac
 transaction it is raised in stays usable. Otherwise `driver` is `None` and `unsupported` is empty.
 
 ```python
+class Unaccent(Func):
+    arity = 1
+
+
 try:
-    await Member.objects.annotate(n=Length("first_name")).count()
+    await Member.objects.annotate(n=Unaccent("first_name")).count()
 except adorm.NotSupportedError as exc:
     exc.driver          # 'django'
-    exc.unsupported     # ('function.Length',)
+    exc.unsupported     # ('function.Unaccent',)
 ```
 
 ### `adorm.TransactionManagementError`

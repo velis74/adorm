@@ -51,6 +51,7 @@ export default defineConfig({
           { text: 'Concepts', link: '/topics/concepts' },
           { text: 'Models', link: '/topics/models' },
           { text: 'Making queries', link: '/topics/queries' },
+          { text: 'Aggregation', link: '/topics/aggregation' },
           { text: 'Managers and driver methods', link: '/topics/managers' },
           { text: 'Sessions and bound models', link: '/topics/sessions' },
           { text: 'Transactions', link: '/topics/transactions' },

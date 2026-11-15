@@ -13,8 +13,11 @@ from typing import Any
 
 from adorm.drivers.base import Capabilities, ThreadedConnection, ThreadedDriver
 from adorm.drivers.django.translation import (
+    AGGREGATES,
+    aggregation,
     django_model,
     field_kwargs,
+    FUNCTIONS,
     instance_row,
     lookup_kwargs,
     model_queryset,
@@ -68,20 +71,28 @@ _LOOKUP_NAMES = (
 )
 
 READ_CAPABILITIES = Capabilities(
-    operations={"select", "get", "first", "last", "count", "exists"},
+    operations={"select", "get", "first", "last", "count", "exists", "aggregate"},
     constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
+    | {f"function.{name}" for name in FUNCTIONS}
+    | {f"aggregate.{name}" for name in AGGREGATES}
     | {
         "path.nested",
         "clause.annotate",
+        "clause.alias",
+        "clause.group_by",
         "clause.distinct",
         "clause.distinct_on",
         "clause.only",
         "clause.defer",
         "clause.select_related",
         "clause.manager",
-        "function.Lower",
-        "function.Upper",
+        "function.Trunc",
+        "aggregate.distinct",
+        "aggregate.filter",
+        "expression.Case",
         "expression.Subquery",
+        "expression.Exists",
+        "expression.OuterRef",
         "expression.CombinedExpression",
     },
     cancellation=True,
@@ -310,6 +321,9 @@ class DjangoConnection(ThreadedConnection):
         write = _WRITES.get(kind)
         if write is not None:
             return write(self.alias, operation)
+        if kind == "aggregate":
+            queryset, expressions = aggregation(operation.query, operation.aggregations)
+            return queryset.using(self.alias).aggregate(**expressions)
         translated = translate(operation.query)
         queryset = translated.queryset.using(self.alias)
         if kind == "select":
