@@ -168,14 +168,16 @@ async def test_a_local_option_does_not_outlive_its_transaction(driver, make_rout
 
 
 async def test_an_undeclared_option_is_refused_before_a_slot_is_taken(driver, make_router):
-    undeclared = sorted({"statement_timeout", "lock_timeout"} - driver.capabilities.connection_options)
-    if not undeclared:
-        pytest.skip(f"the {driver.name} driver declares every option of the test")
+    candidates = {"statement_timeout": LIMIT, "lock_timeout": LIMIT, "work_mem": "1MB"}
+    undeclared = {
+        name: value for name, value in candidates.items() if name not in driver.capabilities.connection_options
+    }
+    assert "work_mem" in undeclared
     pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
     for _ in REPEAT:
-        with adorm.connection_options(**dict.fromkeys(undeclared, LIMIT)), pytest.raises(NotSupportedError) as raised:
+        with adorm.connection_options(**undeclared), pytest.raises(NotSupportedError) as raised:
             await Club.objects.count()
-        assert raised.value.unsupported == tuple(undeclared)
+        assert raised.value.unsupported == tuple(sorted(undeclared))
     assert pool.size == 0
     with adorm.connection_options(**dict.fromkeys(undeclared)):
         assert await Club.objects.count() == 3
