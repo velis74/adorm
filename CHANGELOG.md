@@ -68,6 +68,19 @@
   and no operation for reads, `update()` and `delete()` after `none()`. Query sets and bound models copy as themselves
   and pickle.
 - Events in `adorm.events`: `ResultEvent`, `ErrorEvent`, `CallbackEvent`, `BackendEvent` and `EventBus`.
+- Executor pool and router in `adorm.executor`: a `Pool` of slots per connection profile (`max_connections`, `0`
+  opening connections until the driver reports a refusal with `Driver.is_refusal()`, default
+  `adorm.drivers.is_refusal()` on SQLSTATE class 53; `acquire_timeout`) and a `Router` that assigns slots to
+  sessions in first-in, first-out order; a refusal also caps a pool below a non-zero `max_connections`, and a
+  request whose open was refused keeps its place. An acquisition returns a `SlotLease` with a request queue (`Request`,
+  `RequestQueue`) and an event queue (`ResultEvent` / `ErrorEvent` per request, callbacks and backend events),
+  and `call()` for one request; requests run in order, in the sender's context, and cancelling a call cancels its
+  request. Every acquisition times out with `SessionTimeout`, or `DeadlockError` with `held_sessions` when the flow
+  holds a slot (`holding()`, `held_leases()`, `Router.slot()`); when tasks wait for slots that only they hold
+  through `Router.slot()` or `Router.run()`, one holder gets `DeadlockError` (with `session` and `timeout`) at
+  once. A released slot whose connection is unusable, or that a `begin` left in a transaction, leaves the pool; a
+  failing slot fails its queued requests with `InterfaceError`. `close()` waits for slots being discarded and closes
+  slots that finish opening afterwards. The router is a `Runner`.
 - Demo application (`demo.py`, `demo/`): a Django project with clubs, members, activities (with a multi-table
   inheritance child) and billing (with a generic foreign key) on PostgreSQL, the matching adorm models with a
   `check_adorm_models` command comparing them with the Django models, and a FastAPI app whose endpoints build adorm

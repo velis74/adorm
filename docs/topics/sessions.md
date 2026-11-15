@@ -2,8 +2,8 @@
 
 ::: info Status
 The installed version provides sessions, the current session, bound models and query sets. An operation outside a
-transaction runs on the configured [runner](/ref/sessions#adorm-executor-set-runner-runner); the installed version
-has no pool that provides one.
+transaction runs on the configured [runner](/ref/sessions#adorm-executor-set-runner-runner), such as the
+[router](/topics/pool) of the slot pools.
 :::
 
 A session names where operations run: the pair `(using, session_name)`. `using` is the name of a connection

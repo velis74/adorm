@@ -34,6 +34,7 @@ __all__ = [
     "ThreadedConnection",
     "ThreadedDriver",
     "is_connection_error",
+    "is_refusal",
 ]
 
 logger = logging.getLogger("adorm.drivers")
@@ -146,12 +147,20 @@ def is_connection_error(exc: BaseException) -> bool:
     return False
 
 
+def is_refusal(exc: BaseException) -> bool:
+    """Whether ``exc``, an adorm exception raised while opening a connection, means the database refuses more
+    connections: an `OperationalError` with a SQLSTATE of class 53 (insufficient resources, such as 53300
+    ``too_many_connections``). It is the default of `Driver.is_refusal`."""
+    return isinstance(exc, OperationalError) and exc.sqlstate is not None and exc.sqlstate.startswith("53")
+
+
 class DriverConnection(ABC):
     """One connection of a driver, owned by exactly one slot.
 
     The slot awaits one call at a time from one event loop. Methods raise adorm exceptions only;
     ``asyncio.CancelledError`` passes through. Cancelling the task that awaits ``execute()`` cancels the running
-    statement; the connection stays usable and the slot rolls back an open transaction.
+    statement; the connection stays usable. A slot whose lease ends inside a transaction closes the
+    connection.
 
     ``execute()``, ``set_options()`` and the savepoint calls check the driver's `Capabilities` and raise
     `NotSupportedError` before calling the subclass's ``_execute()``, ``_set_options()`` and ``_savepoint()``
@@ -256,6 +265,15 @@ class Driver(ABC):
         mode = cls.__dict__.get("mode")
         if mode is not None and mode not in _MODES:
             raise TypeError(f"{cls.__name__}.mode must be one of {_MODES}, not {mode!r}")
+
+    def is_refusal(self, exc: BaseException) -> bool:
+        """Whether ``exc``, raised by `open_connection()`, means the database refuses more connections.
+
+        A pool with ``max_connections=0`` stops opening connections on a refusal and queues the request instead.
+        Defaults to `is_refusal`, which needs a SQLSTATE; a driver whose library reports connection failures
+        without one overrides it.
+        """
+        return is_refusal(exc)
 
     @abstractmethod
     async def open_connection(self, profile: Profile, emit: Emit) -> DriverConnection:

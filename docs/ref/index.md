@@ -30,6 +30,7 @@ the names it covers:
 | [Expressions, functions and aggregates](./expressions) | `F`, `Value`, `Q`, `Func` and its functions, aggregates, `Case`, `Subquery` |
 | [Model API](./models) | `Model`, `ModelMeta`, relation descriptors, the model registry |
 | [Sessions](./sessions) | `create_session`, `current_session`, `Session`, `BoundModel`, the active transactions of a context (`adorm.executor`) |
+| [Pool and router](./pool) | `Pool`, `Router`, slots, leases and their request and event queues, held slots (`adorm.executor`) |
 | Transactions and timeouts | `atomic`, `connection_options`, `timeout` |
 | [Exceptions](./exceptions) | the exception hierarchy |
 | Settings | pool settings and connection profiles |

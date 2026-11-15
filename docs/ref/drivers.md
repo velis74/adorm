@@ -44,6 +44,20 @@ class AsyncpgDriver(Driver):
         return AsyncpgConnection(self, conn, emit)
 ```
 
+#### `is_refusal(exc)`
+
+Returns whether `exc`, an adorm exception `open_connection()` raised, means the database refuses more connections.
+A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0) with `max_connections=0` then stops opening connections and queues the
+request. Defaults to [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc). A driver whose library reports a refused
+connection without a SQLSTATE overrides it:
+
+```python
+class DjangoDriver(ThreadedDriver):
+    def is_refusal(self, exc):
+        # psycopg raises "too many connections" without a SQLSTATE
+        return super().is_refusal(exc) or "too many connections" in str(exc.original)
+```
+
 ### `adorm.drivers.ExecutionMode`
 
 `Literal["threaded", "async"]`. `"threaded"`: each connection runs a synchronous target on its own thread.
@@ -126,6 +140,16 @@ default of [`DriverConnection.is_connection_lost()`](#adorm-drivers-driverconnec
 ```python
 is_connection_error(OperationalError(sqlstate="08006"))   # True
 is_connection_error(OperationalError(sqlstate="57014"))   # False
+```
+
+### `adorm.drivers.is_refusal(exc)`
+
+Returns whether `exc` is an `OperationalError` with a SQLSTATE of class `53` (insufficient resources, such as
+`53300` `too_many_connections`). It is the default of [`Driver.is_refusal()`](#is-refusal-exc).
+
+```python
+is_refusal(OperationalError(sqlstate="53300"))   # True
+is_refusal(OperationalError())                   # False: no SQLSTATE
 ```
 
 ## DriverConnection

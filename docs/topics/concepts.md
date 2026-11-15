@@ -142,7 +142,9 @@ Every acquisition has a timeout:
 |---|---|
 | no slot became free in time | `SessionTimeout` |
 | no slot became free in time, and the flow already holds a slot | `DeadlockError` (subclass of `SessionTimeout`), `held_sessions` lists the held slots |
-| every slot is held by a flow that itself waits for a slot | `DeadlockError`, raised at once |
+| every slot of the pool is held, through `router.slot()` or `router.run()`, by tasks that themselves wait for a slot that cannot become free | `DeadlockError`, raised at once ([deadlocks](/topics/pool#deadlocks)); otherwise `DeadlockError` at the timeout |
+
+The [pool topic](/topics/pool) describes acquisition, the request and event queues and deadlock detection.
 
 `atomic()` acquires its slot on entry, so a timeout or `DeadlockError` happens there, never in the middle of the
 block.

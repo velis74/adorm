@@ -146,3 +146,54 @@ def test_docs_package_builds_with_vitepress():
     package = json.loads((DOCS / "package.json").read_text(encoding="utf-8"))
     assert "docs:build" in package["scripts"]
     assert "vitepress-plugin-crosslinks" in package["devDependencies"]
+
+
+HEADING = re.compile(r"^#{1,6} (.+?)(?: \{#([^}]+)\})?\s*$", re.MULTILINE)
+FENCE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+FRAGMENT_LINK = re.compile(r"\]\((/[^)#\s]*)?#([^)\s]+)\)")
+SLUG_SEPARATORS = re.compile(r"""[\s~`!@#$%^&*()\-_+=\[\]{}|\;:"'“”‘’<>,.?/]+""")
+
+
+def slugify(text: str) -> str:
+    """The heading id VitePress generates."""
+    slug = SLUG_SEPARATORS.sub("-", text).strip("-").lower()
+    return f"_{slug}" if slug[:1].isdigit() else slug
+
+
+def anchors(page: Path) -> set[str]:
+    found: set[str] = set()
+    for text, explicit in HEADING.findall(FENCE.sub("", page.read_text(encoding="utf-8"))):
+        slug = explicit or slugify(text)
+        candidate, number = slug, 0
+        while candidate in found:
+            number += 1
+            candidate = f"{slug}-{number}"
+        found.add(candidate)
+    return found
+
+
+def fragment_links() -> list[tuple[str, str, str]]:
+    pages = [p for p in DOCS.rglob("*.md") if "node_modules" not in p.parts and ".vitepress" not in p.parts]
+    links = []
+    for page in pages:
+        for target, fragment in FRAGMENT_LINK.findall(FENCE.sub("", page.read_text(encoding="utf-8"))):
+            links.append((str(page.relative_to(DOCS)), target, fragment))
+    return sorted(set(links))
+
+
+@pytest.mark.parametrize(("source", "target", "fragment"), fragment_links())
+def test_fragment_links_point_at_headings(source, target, fragment):
+    page = page_for(target) if target else DOCS / source
+    assert fragment in anchors(page), f"{source}: {target}#{fragment} has no heading"
+
+
+@pytest.mark.parametrize(
+    ("heading", "expected"),
+    [
+        ("`adorm.executor.Router(pools=())`", "adorm-executor-router-pools"),
+        ("`is_refusal(exc)`", "is-refusal-exc"),
+        ("`async close()`", "async-close"),
+    ],
+)
+def test_slugify(heading, expected):
+    assert slugify(heading) == expected

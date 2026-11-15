@@ -24,7 +24,8 @@ uv run pytest
 
 The tests read the PostgreSQL server URL from `ADORM_TEST_DATABASE_URL` (default
 `postgres://postgres@127.0.0.1:5432/postgres`). They create and drop their own `adorm_test` and `adorm_test_demo`
-databases on that server and leave other databases untouched.
+databases on that server and leave other databases untouched; the pool tests also create and drop the login role
+`adorm_test_limited`.
 
 ```bash
 ADORM_TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/postgres uv run pytest

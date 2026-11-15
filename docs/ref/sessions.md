@@ -126,6 +126,7 @@ async for member in members:
 
 The protocol of what runs an operation of a session outside a transaction: `await runner.run(session, operation)`
 acquires a slot for `session`, executes the operation, releases the slot and returns the result.
+[`Router`](/ref/pool#adorm-executor-router-pools) is one.
 
 ```python
 class Direct:

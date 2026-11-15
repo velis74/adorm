@@ -1,8 +1,9 @@
 # Drivers
 
 ::: info Status
-The installed version provides the driver contract (`adorm.drivers`) and the event types (`adorm.events`). The
-Django ORM and native PostgreSQL drivers, and the slots and pool that call them, are not part of it yet.
+The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`) and the
+[slots and pool](/topics/pool) that call drivers. The Django ORM and native PostgreSQL drivers are not part of it
+yet.
 :::
 
 A driver executes adorm operations on one target: an ORM such as Django's or SQLAlchemy, or a database library

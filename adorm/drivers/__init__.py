@@ -10,6 +10,7 @@ from adorm.drivers.base import (
     DriverConnection,
     ExecutionMode,
     is_connection_error,
+    is_refusal,
     Operation,
     Profile,
     ThreadedConnection,
@@ -26,4 +27,5 @@ __all__ = [
     "ThreadedConnection",
     "ThreadedDriver",
     "is_connection_error",
+    "is_refusal",
 ]
