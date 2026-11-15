@@ -174,14 +174,16 @@ async def test_every_call_runs_on_the_event_loop_without_threads(library, run_po
     def no_thread(*_args, **_kwargs):
         raise AssertionError("a read used a thread")
 
-    monkeypatch.setattr(AsyncpgConnection, "_read", read)
-    monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", no_thread)
-    monkeypatch.setattr(threading.Thread, "start", no_thread)
-    for _ in range(3):
-        counts = await asyncio.gather(*(Author.objects.filter(rating__gte=n).count() for n in range(10)))
-        assert counts == [4, 4, 3, 3, 2, 1, 0, 0, 0, 0]
-        async with adorm.atomic():
-            assert await Author.objects.order_by("name").first() is not None
+    # Undone before the loop closes, which may start a thread to shut down its default executor.
+    with monkeypatch.context() as patched:
+        patched.setattr(AsyncpgConnection, "_read", read)
+        patched.setattr(asyncio.get_running_loop(), "run_in_executor", no_thread)
+        patched.setattr(threading.Thread, "start", no_thread)
+        for _ in range(3):
+            counts = await asyncio.gather(*(Author.objects.filter(rating__gte=n).count() for n in range(10)))
+            assert counts == [4, 4, 3, 3, 2, 1, 0, 0, 0, 0]
+            async with adorm.atomic():
+                assert await Author.objects.order_by("name").first() is not None
     assert threads == {threading.get_ident()}
     assert (pool.size, pool.in_use) == (2, 0)
 

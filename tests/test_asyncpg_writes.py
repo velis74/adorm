@@ -501,11 +501,13 @@ async def test_writes_send_no_signals_and_run_on_the_event_loop(library, pool, m
         signal.connect(receiver, weak=False)
     try:
         await requests()  # the pool opens its connections
-        monkeypatch.setattr(Writer, "__init__", init)
-        monkeypatch.setattr(asyncio.get_running_loop(), "run_in_executor", no_thread)
-        monkeypatch.setattr(threading.Thread, "start", no_thread)
-        for _ in REPEAT:
-            await requests()
+        # Undone before the loop closes, which may start a thread to shut down its default executor.
+        with monkeypatch.context() as patched:
+            patched.setattr(Writer, "__init__", init)
+            patched.setattr(asyncio.get_running_loop(), "run_in_executor", no_thread)
+            patched.setattr(threading.Thread, "start", no_thread)
+            for _ in REPEAT:
+                await requests()
     finally:
         for signal in signals:
             signal.disconnect(receiver)
