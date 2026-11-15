@@ -26,6 +26,7 @@ from adorm.drivers.django.translation import (
     instance_row,
     lookup_kwargs,
     model_queryset,
+    operation_model,
     parent_link_field,
     translate,
     validation_error,
@@ -41,7 +42,6 @@ from adorm.exceptions import (
     ProtectedError,
     RestrictedError,
     TransactionManagementError,
-    ValidationError,
     wrap_driver_error,
 )
 from adorm.operations import ModelRow
@@ -161,12 +161,7 @@ def map_django_error(exc: BaseException) -> BaseException:
     elif isinstance(exc, django_exceptions.FieldError | django_exceptions.FieldDoesNotExist):
         mapped = FieldError(str(exc), original=exc)
     elif isinstance(exc, django_exceptions.ValidationError):
-        if hasattr(exc, "error_dict"):
-            mapped = ValidationError(exc.message_dict)
-        elif hasattr(exc, "message"):
-            mapped = ValidationError(exc.message, exc.code, exc.params)
-        else:
-            mapped = ValidationError(exc.messages)
+        mapped = validation_error(None, exc)
     elif isinstance(exc, transaction.TransactionManagementError):
         mapped = TransactionManagementError(str(exc), original=exc)
     elif isinstance(exc, django_exceptions.SynchronousOnlyOperation):
@@ -335,6 +330,14 @@ class DjangoConnection(ThreadedConnection):
             return self._execute_operation(operation)
 
     def _execute_operation(self, operation: Any) -> Any:
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        try:
+            return self._run_operation(operation)
+        except DjangoValidationError as exc:
+            raise validation_error(operation_model(operation), exc) from exc
+
+    def _run_operation(self, operation: Any) -> Any:
         kind = operation.kind
         write = _WRITES.get(kind)
         if write is not None:
@@ -548,21 +551,16 @@ def _create_from_parent(alias: str, operation: Any) -> dict[str, Any]:
 
 
 def _full_clean(alias: str, operation: Any) -> dict[str, Any]:
-    from django.core.exceptions import ValidationError as DjangoValidationError
-
     model = django_model(operation.model)
     stored = None
     if clean_needs_row(operation):
         stored = model._base_manager.using(alias).filter(pk=operation.pk).first()
     instance = clean_instance(operation, alias, stored)
-    try:
-        instance.full_clean(
-            exclude=clean_exclude(operation),
-            validate_unique=operation.validate_unique,
-            validate_constraints=operation.validate_constraints,
-        )
-    except DjangoValidationError as exc:
-        raise validation_error(operation.model, exc) from exc
+    instance.full_clean(
+        exclude=clean_exclude(operation),
+        validate_unique=operation.validate_unique,
+        validate_constraints=operation.validate_constraints,
+    )
     return instance_row(instance)
 
 

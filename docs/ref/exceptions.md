@@ -134,6 +134,12 @@ Data failed validation. Mirrors `django.core.exceptions.ValidationError`. `messa
 
 Iterating a dict error yields `(field, messages)` pairs; iterating any other yields the messages.
 
+The drivers raise Django's validation errors with each error's `message`, `code` and `params`, so code can act on
+the code without parsing the text. An instance's errors (`full_clean()`, a `save()` that validates) form a dict error
+keyed by the operation model's adorm field names (see
+[`full_clean()`](/ref/models#full-clean-exclude-none-validate-unique-true-validate-constraints-true)); a value error,
+such as an invalid UUID, stays a single error.
+
 ```python
 exc = adorm.ValidationError("At most %(limit)d characters.", code="max_length", params={"limit": 30})
 exc.messages                  # ['At most 30 characters.']
@@ -141,6 +147,10 @@ exc.messages                  # ['At most 30 characters.']
 exc = adorm.ValidationError({"name": "Required.", "age": ["Too low."]})
 exc.message_dict              # {'name': ['Required.'], 'age': ['Too low.']}
 dict(exc)                     # the same
+
+for field, errors in exc.error_dict.items():
+    for error in errors:
+        error.message, error.code, error.params   # ('Required.', None, None) …
 ```
 
 ## Database errors

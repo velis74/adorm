@@ -22,6 +22,7 @@ from adorm import (
     SessionTimeout,
     ValidationError,
 )
+from adorm.codec import decode_value, encode_value
 from adorm.events import (
     BackendEvent,
     CallbackEvent,
@@ -274,6 +275,74 @@ def test_validation_errors_keep_their_messages():
     assert by_field.message_dict == {"name": ["required"], "age": ["too low"]}
     listed = round_trip(ValidationError(["one", "two"]))
     assert listed.messages == ["one", "two"]
+
+
+def test_validation_errors_keep_each_code_and_params():
+    error = ValidationError(
+        {
+            "name": [
+                ValidationError("At most %(limit_value)d.", "max_length", {"limit_value": 10, "value": "x" * 11}),
+                ValidationError("Taken.", "unique", {"unique_check": ("name",), "since": datetime.date(2026, 1, 1)}),
+            ],
+            "__all__": [ValidationError("Ends before it starts.", "ends_before_start")],
+        }
+    )
+    data = encode_error(error)
+    assert json.loads(json.dumps(data)) == data
+    decoded = round_trip(error)
+    assert {k: [(e.message, e.code, e.params) for e in v] for k, v in decoded.error_dict.items()} == {
+        "name": [
+            ("At most %(limit_value)d.", "max_length", {"limit_value": 10, "value": "x" * 11}),
+            ("Taken.", "unique", {"unique_check": ("name",), "since": datetime.date(2026, 1, 1)}),
+        ],
+        "__all__": [("Ends before it starts.", "ends_before_start", None)],
+    }
+    assert decoded.message_dict == error.message_dict
+    listed = round_trip(ValidationError([ValidationError("a", "one"), "b"]))
+    assert [(e.message, e.code) for e in listed.error_list] == [("a", "one"), ("b", None)]
+    single = round_trip(ValidationError("“%(value)s” is not valid", "invalid", {"value": "x"}))
+    assert (single.message, single.code, single.params) == ("“%(value)s” is not valid", "invalid", {"value": "x"})
+    assert single.messages == ["“x” is not valid"]
+
+
+def test_validation_params_use_the_events_codec():
+    class Point:
+        def __init__(self, x):
+            self.x = x
+
+    def encode(value):
+        return {"point": value.x} if isinstance(value, Point) else encode_value(value)
+
+    def decode(value):
+        return Point(value["point"]) if isinstance(value, dict) and "point" in value else decode_value(value)
+
+    error = ValidationError({"at": [ValidationError("Outside.", "outside", {"value": Point(3)})]})
+    data = json.loads(json.dumps(ErrorEvent(1, error).to_dict(encode)))
+    assert data["error"]["errors"]["at"][0]["params"] == {"value": {"point": 3}}
+    decoded = Event.from_dict(data, decode)
+    assert decoded.error.error_dict["at"][0].params["value"].x == 3
+
+
+def test_a_validation_param_without_a_json_form_is_encoded_as_its_text():
+    class Opaque:
+        def __str__(self):
+            return "opaque"
+
+    decoded = round_trip(ValidationError({"name": [ValidationError("bad", "invalid", {"value": Opaque()})]}))
+    assert decoded.error_dict["name"][0].params == {"value": "opaque"}
+    for errors in (
+        [{"code": "x"}],
+        [{"message": "x", "code": 1}],
+        [{"message": "x", "params": [1]}],
+        {"name": {"message": "x"}},
+        {"name": 5},
+    ):
+        with pytest.raises(ValueError, match="encoded validation error"):
+            decode_error({"class": "ValidationError", "message": ["x"], "errors": errors})
+    with pytest.raises(ValueError, match="encoded validation error"):
+        decode_error({"class": "ValidationError", "message": ["x"], "error": {"message": "x", "params": "p"}})
+    # Data without per-error entries decodes from the messages.
+    assert decode_error({"class": "ValidationError", "message": {"name": ["x"]}}).message_dict == {"name": ["x"]}
 
 
 def test_model_exceptions_decode_as_the_models_own():

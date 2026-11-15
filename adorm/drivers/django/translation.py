@@ -50,6 +50,7 @@ __all__ = [
     "instance_row",
     "lookup_kwargs",
     "model_queryset",
+    "operation_model",
     "orm_path",
     "output_field",
     "parent_link_field",
@@ -893,17 +894,79 @@ def _error_key(model: type[dj.Model], adorm: Any, key: str) -> str:
     return _adorm_name(adorm, field.name)
 
 
-def validation_error(label: str, exc: Any) -> Exception:
-    """The `adorm.ValidationError` for Django's ``ValidationError`` ``exc`` raised by validating an instance of the
-    model ``label``: messages by adorm name (a foreign key's under the adorm relation's name, when the adorm model
-    declares it), the model's errors under ``"__all__"``."""
+def validation_error(label: str | None, exc: Any) -> Exception:
+    """The `adorm.ValidationError` for Django's ``ValidationError`` ``exc``, raised for an instance of the model
+    ``label`` (``None`` when unknown).
+
+    Each error keeps its message (as text, ``%`` placeholders unfilled; a lazy plural, whose text depends on the
+    params, formatted), ``code`` and ``params``. With a model,
+    errors are keyed by adorm name (a foreign key's under the adorm relation's name, when the adorm model declares
+    it) and the field names of the ``unique_check`` param are adorm names; the model's errors stay under
+    ``"__all__"``. Params that are Django model instances or classes become the model's label, lazy translations
+    become text."""
     from adorm.exceptions import ValidationError
 
-    if not hasattr(exc, "error_dict"):
-        return ValidationError(exc.messages)
-    model = django_model(label)
-    adorm = _adorm_model(model)
-    messages: dict[str, list[str]] = {}
-    for key, items in exc.message_dict.items():
-        messages.setdefault(_error_key(model, adorm, key), []).extend(str(item) for item in items)
-    return ValidationError(messages)
+    model = adorm = None
+    if label is not None:
+        try:
+            model = django_model(label)
+        except ProgrammingError:
+            model = None
+        adorm = _adorm_model(model)
+
+    def convert(error: Any) -> ValidationError:
+        params = _error_params(model, adorm, error.params)
+        return ValidationError(_error_message(error.message, error.params, params), error.code, params)
+
+    if hasattr(exc, "error_dict"):
+        errors: dict[str, list[ValidationError]] = {}
+        for key, items in exc.error_dict.items():
+            target = errors.setdefault(key if model is None else _error_key(model, adorm, key), [])
+            target.extend(convert(leaf) for item in items for leaf in item.error_list)
+        return ValidationError(errors)
+    if hasattr(exc, "message"):
+        return convert(exc)
+    return ValidationError([convert(leaf) for leaf in exc.error_list])
+
+
+def _error_message(message: Any, params: Any, plain: Any) -> str:
+    """``message`` as text; a message whose text depends on ``params`` (a lazy plural) is formatted by Django, with
+    ``%`` doubled so that formatting it with ``plain`` again gives the same text."""
+    text = str(message)
+    if not params:
+        return text
+    formatted = str(message % params)
+    try:
+        if text % plain == formatted:
+            return text
+    except (KeyError, TypeError, ValueError):
+        pass
+    return formatted.replace("%", "%%")
+
+
+def _error_params(model: type[dj.Model] | None, adorm: Any, params: Any) -> dict[str, Any] | None:
+    if not params:
+        return params
+    from django.utils.functional import Promise
+
+    def plain(value: Any) -> Any:
+        if isinstance(value, Promise):
+            return str(value)
+        if isinstance(value, dj.Model) or (isinstance(value, type) and issubclass(value, dj.Model)):
+            return value._meta.label
+        return value
+
+    result = {key: plain(value) for key, value in params.items()}
+    unique_check = result.get("unique_check")
+    if model is not None and isinstance(unique_check, list | tuple):
+        result["unique_check"] = tuple(_error_key(model, adorm, name) for name in unique_check)
+    return result
+
+
+def operation_model(operation: Any) -> str | None:
+    """The label of the model ``operation`` works on: its ``model``, else its query's; ``None`` when it has neither."""
+    model = getattr(operation, "model", None)
+    if isinstance(model, str):
+        return model
+    model = getattr(getattr(operation, "query", None), "model", None)
+    return model if isinstance(model, str) else None

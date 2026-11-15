@@ -199,9 +199,14 @@ operation on the instance's executor. On the Django driver it is Django's `Model
   the target's defaults. A unique check of a stored instance leaves its own row out.
 - `exclude` names fields (or relations, for their column; `"pk"` for the primary key) that are not validated.
   `validate_unique` and `validate_constraints` switch the unique checks and the constraints off.
-- Errors raise [`ValidationError`](./exceptions) with `message_dict` by adorm name: a field's errors under the field
-  name, a foreign key's under its relation's name (`"club"`, not `"club_id"`), errors of the whole model (`clean()`,
-  a constraint over several fields) under `"__all__"`.
+- Errors raise [`ValidationError`](./exceptions) with `error_dict` (and `message_dict`) by adorm name: a field's
+  errors under the field name, a foreign key's under its relation's name (`"club"`, not `"club_id"`), errors of the
+  whole model (`clean()`, a constraint that is not a unique constraint over one field) under `"__all__"`.
+- Each error keeps Django's `message`, `code` and `params`: `"blank"`, `"max_length"` with `limit_value` and
+  `show_value`, `"unique"` (one field) or `"unique_together"` (several), a constraint's `violation_error_code`. The
+  field names of the `unique_check` param are adorm names; a Django model instance or class in `params` (`model`,
+  `model_class`) is the model's label, a lazy translation is text. Messages are in the caller's active language; a
+  plural message (Django's `ngettext_lazy`, as in `max_length`) is formatted.
 - Without errors, the values the validation cleaned (Django's `to_python()`, changes `clean()` made) are set on the
   instance's loaded fields; deferred fields stay deferred and `model_fields_set` does not change.
 
@@ -215,6 +220,13 @@ copy = Membership(club_id=board.club_id, member_id=board.member_id, since=today,
 await copy.full_clean()
 # ValidationError({'__all__': ['Membership with this Club and Member already exists.']})
 await copy.full_clean(exclude=["member"])          # the constraint names an excluded field: no error
+
+try:
+    await copy.full_clean()
+except adorm.ValidationError as exc:
+    [error] = exc.error_dict["__all__"]
+    error.code                    # 'unique_together'
+    error.params["unique_check"]  # ('club', 'member')
 ```
 
 Raises `ValueError` for an `exclude` name that is neither a field nor a relation, `TypeError` for a string

@@ -46,10 +46,12 @@ from adorm.drivers.django.translation import (
     instance_row,
     lookup_kwargs,
     model_queryset,
+    operation_model,
     orm_path,
     output_field,
     subquery,
     translate,
+    validation_error,
 )
 from adorm.operations import ModelRow
 from adorm.query import Query
@@ -481,6 +483,114 @@ def test_django_errors_map_to_adorm_errors():
     tme = map_django_error(transaction.TransactionManagementError("nested"))
     assert type(tme) is exceptions.TransactionManagementError
     assert type(map_django_error(KeyError("x"))) is exceptions.DatabaseError
+
+
+def _errors(error):
+    """``{key: [(message, code, params), ...]}`` of an adorm ``ValidationError`` built from a dict."""
+    return {key: [(e.message, e.code, e.params) for e in errors] for key, errors in error.error_dict.items()}
+
+
+def test_mapped_validation_errors_keep_each_code_and_params():
+    from django.core.exceptions import ValidationError
+
+    exc = ValidationError(
+        {
+            "name": [
+                ValidationError("This field cannot be blank.", code="blank"),
+                ValidationError("At least %(limit_value)d.", code="min_length", params={"limit_value": 2}),
+            ],
+            "__all__": ValidationError("Constraint “x” is violated.", code="x_violated"),
+        }
+    )
+    mapped = map_django_error(exc)
+    assert _errors(mapped) == {
+        "name": [
+            ("This field cannot be blank.", "blank", None),
+            ("At least %(limit_value)d.", "min_length", {"limit_value": 2}),
+        ],
+        "__all__": [("Constraint “x” is violated.", "x_violated", None)],
+    }
+    assert mapped.message_dict["name"] == ["This field cannot be blank.", "At least 2."]
+    assert mapped.__cause__ is exc
+    listed = map_django_error(ValidationError([ValidationError("a", code="one"), "b"]))
+    assert [(e.message, e.code) for e in listed.error_list] == [("a", "one"), ("b", None)]
+
+
+def test_mapped_validation_errors_turn_lazy_messages_and_django_objects_into_plain_values():
+    from django.core.exceptions import ValidationError
+    from django.utils.text import format_lazy
+    from django.utils.translation import gettext_lazy
+
+    tag = dj.Tag(id=1, name="rare")
+    params = {"model": tag, "model_class": dj.Tag, "field_label": gettext_lazy("Name"), "unique_check": ("name",)}
+    mapped = map_django_error(
+        ValidationError(
+            {"name": [ValidationError(gettext_lazy("%(field_label)s taken"), code="unique", params=params)]}
+        )
+    )
+    error = mapped.error_dict["name"][0]
+    assert type(error.message) is str
+    assert error.params == {
+        "model": "library.Tag",
+        "model_class": "library.Tag",
+        "field_label": "Name",
+        "unique_check": ("name",),
+    }
+    assert type(error.params["field_label"]) is str
+    assert mapped.messages == ["Name taken"]
+    single = map_django_error(ValidationError(format_lazy("{} is invalid", "x"), code="invalid"))
+    assert (type(single.message), single.code) == (str, "invalid")
+
+
+def test_validation_errors_of_a_model_are_keyed_by_adorm_names():
+    from django.core.exceptions import ValidationError
+
+    exc = ValidationError(
+        {
+            "copy": [ValidationError("too high", code="max_value", params={"limit_value": 32767})],
+            "reader": [ValidationError("missing", code="invalid", params={"field": "id", "value": 9})],
+            "__all__": [
+                ValidationError(
+                    "%(model_name)s with this %(field_labels)s already exists.",
+                    code="unique",
+                    params={
+                        "model_name": "Reservation",
+                        "field_labels": "Book and Copy",
+                        "unique_check": ("book", "copy"),
+                    },
+                )
+            ],
+        }
+    )
+    error = validation_error("library.Reservation", exc)
+    assert _errors(error) == {
+        "copy_": [("too high", "max_value", {"limit_value": 32767})],
+        "reader": [("missing", "invalid", {"field": "id", "value": 9})],
+        "__all__": [
+            (
+                "%(model_name)s with this %(field_labels)s already exists.",
+                "unique",
+                {"model_name": "Reservation", "field_labels": "Book and Copy", "unique_check": ("book", "copy_")},
+            )
+        ],
+    }
+    assert error.message_dict["__all__"] == ["Reservation with this Book and Copy already exists."]
+    # Errors under a foreign key's name and under its column share the relation's key.
+    note = validation_error("library.Note", ValidationError({"copy": ["bad"], "copy_id": ["worse"], "json": ["x"]}))
+    assert note.message_dict == {"copy_": ["bad", "worse"], "json_": ["x"]}
+    unknown = validation_error(None, ValidationError({"copy": ["bad"]}))
+    assert unknown.message_dict == {"copy": ["bad"]}
+    with pytest.raises(ProgrammingError):
+        django_model("nowhere.Thing")
+    assert validation_error("nowhere.Thing", ValidationError({"copy": ["bad"]})).message_dict == {"copy": ["bad"]}
+
+
+def test_the_model_of_an_operation():
+    from adorm import operations
+
+    assert operation_model(operations.Create(model="library.Tag", values=())) == "library.Tag"
+    assert operation_model(operations.Count(Query("library.Book"))) == "library.Book"
+    assert operation_model(object()) is None
 
 
 def test_protected_and_restricted_errors_carry_model_rows():

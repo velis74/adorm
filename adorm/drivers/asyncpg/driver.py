@@ -13,13 +13,19 @@ from urllib.parse import urlencode
 
 import asyncpg
 
-from django.core.exceptions import SynchronousOnlyOperation
+from django.core.exceptions import SynchronousOnlyOperation, ValidationError as DjangoValidationError
 
 from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
 from adorm.drivers.asyncpg.writes import Writer, WRITES
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
 from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
-from adorm.drivers.django.translation import aggregation, check_in_bulk_field, translate
+from adorm.drivers.django.translation import (
+    aggregation,
+    check_in_bulk_field,
+    operation_model,
+    translate,
+    validation_error,
+)
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.events import Emit
 from adorm.exceptions import (
@@ -285,6 +291,8 @@ class AsyncpgConnection(DriverConnection):
                 f"building the {operation.kind!r} query accessed the database, which the asyncpg driver does not do "
                 "on the event loop: a Django manager's get_queryset() must only build a query"
             ) from exc
+        except DjangoValidationError as exc:
+            raise validation_error(operation_model(operation), exc) from exc
         except Exception as exc:
             mapped = self._mapped(exc) if self._statement_failed else self.map_error(exc)
             if mapped is exc:

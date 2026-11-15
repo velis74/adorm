@@ -125,7 +125,7 @@ application                                               server
 ```
 
 Every event has a JSON-safe form: `event.to_dict()` encodes it, `Event.from_dict()` decodes it, and errors travel by
-class, message and their adorm attributes ([`encode_error()`](/ref/events#adorm-events-encode-error-error)). The
+class, message and their adorm attributes ([`encode_error()`](/ref/events#adorm-events-encode-error-error-encode-encode-value)). The
 remote connection decodes each event of the server slot and maps it onto the driver contract:
 
 | Server event | In the remote connection |

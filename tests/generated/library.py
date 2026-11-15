@@ -34,6 +34,7 @@ __all__ = [
     "LoanPolicy",
     "Loan",
     "Fine",
+    "Reservation",
 ]
 
 
@@ -110,6 +111,7 @@ class Book(Model):
     copy_notes = ReverseForeignKey("library.Note", column="copy_id")
     placements = ReverseForeignKey("library.Placement", column="book_id")
     loans = ReverseForeignKey("library.Loan", column="book_id")
+    reservations = ReverseForeignKey("library.Reservation", column="book_id")
 
 
 class Edition(Book):
@@ -183,6 +185,7 @@ class Reader(Model):
     name: str = Field(max_length=100)
     email: str = Field(default="", max_length=254)
     loans = ReverseForeignKey("library.Loan", column="reader_id")
+    reservations = ReverseForeignKey("library.Reservation", column="reader_id")
     objects = Manager("objects")
 
 
@@ -222,3 +225,17 @@ class Fine(Model):
     amount: decimal.Decimal = Field(max_digits=6, decimal_places=2)
     waived: bool = False
     loan = ForeignKey("library.Loan")
+
+
+class Reservation(Model):
+    """A hold on a copy of a book: model constraints, and a ``save()`` that validates the instance first."""
+
+    _meta = ModelMeta("library.Reservation", schema_hash="0226e06af4aa3b0d", orm_names={"copy_": "copy"})
+    id: int | None = None
+    reader_id: int
+    book_id: str
+    copy_: int = Field(default=1, alias="copy", ge=0)
+    starts: datetime.date
+    ends: datetime.date
+    reader = ForeignKey("library.Reader")
+    book = ForeignKey("library.Book")

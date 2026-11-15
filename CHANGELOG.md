@@ -71,10 +71,11 @@
   and pickle.
 - Events in `adorm.events`: `ResultEvent`, `ErrorEvent`, `CancelledEvent`, `CallbackEvent`, `BackendEvent` and
   `EventBus`, with a JSON-safe form (`Event.to_dict()` / `Event.from_dict()` with a pluggable value codec,
-  `encode_error()` / `decode_error()` keeping the adorm exception class, message, SQLSTATE, sessions, timeout and
-  phase). `EventChannel` is the client end of a slot's event queue: it settles the futures of awaited requests
-  with their outcome, runs the handlers registered for a callback name and queues the rest, handing unread
-  callbacks and backend events to a fallback `EventBus` when it closes. `from_dict()` rejects fields of the wrong
+  `encode_error()` / `decode_error()` keeping the adorm exception class, message, SQLSTATE, sessions, timeout,
+  phase and the message, code and params of each validation error, params through the event's value codec).
+  `EventChannel` is the client end of a slot's event queue: it settles the futures of awaited requests with their
+  outcome, runs the handlers registered for a callback name and queues the rest, handing unread callbacks and backend
+  events to a fallback `EventBus` when it closes. `from_dict()` rejects fields of the wrong
   type with `ValueError`.
 - Executor pool and router in `adorm.executor`: a `Pool` of slots per connection profile (`max_connections`, `0`
   opening connections until the driver reports a refusal with `Driver.is_refusal()`, default
@@ -422,6 +423,9 @@
   inserts the child's table and refuses a child model that overrides `save_base()`.
 - `Model.full_clean(*, exclude=None, validate_unique=True, validate_constraints=True)` and the `FullClean` operation
   (kind `full_clean`): Django's `full_clean()` of the instance over its stored row, errors as `ValidationError` keyed by
-  adorm names. The native PostgreSQL driver runs it as Python on the event loop with
-  `DjangoCompiler.replay()` (`StatementNeeded`, a `BaseException`; `MAX_VALIDATION_STATEMENTS`), awaiting each
-  statement the validation runs.
+  adorm names, each error with Django's message, `code` and `params` (`unique_check` in adorm names), identical on
+  both drivers. Both drivers map Django's `ValidationError` raised by any operation the same way, keyed by the
+  operation's model (`adorm.drivers.django.translation.operation_model()`); on the Django driver this includes a
+  model's `save()` that calls `full_clean()`. The native PostgreSQL driver runs `full_clean()` as Python on the event
+  loop with `DjangoCompiler.replay()` (`StatementNeeded`, a `BaseException`; `MAX_VALIDATION_STATEMENTS`), awaiting
+  each statement the validation runs.

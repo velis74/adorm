@@ -366,6 +366,7 @@ def test_introspect_selects_apps_and_models():
         "library.LoanPolicy",
         "library.Loan",
         "library.Fine",
+        "library.Reservation",
     ]
     assert [model.label for model in apps[1].models] == ["auth.Permission", "auth.Group", "auth.User"]
     assert "library.Book_authors" not in {model.label for app in introspect() for model in app.models}

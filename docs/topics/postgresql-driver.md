@@ -355,7 +355,7 @@ asyncpg's by their SQLSTATE ([`wrap_driver_error()`](/ref/exceptions#adorm-excep
 |---|---|
 | an unknown field or lookup (Django's `FieldError`, `FieldDoesNotExist`), a segment after a scalar field | [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none), which leaves a transaction usable |
 | a manager's `get_queryset()` that accesses the database | `NotSupportedError` |
-| a value Django rejects (an invalid UUID) | `ValidationError` |
+| a value Django rejects (an invalid UUID), a failed `full_clean()` | `ValidationError` with each error's message, `code` and `params`, keyed by adorm field names |
 | an invalid regular expression | `DataError`, SQLSTATE `2201B` |
 | a cancelled statement | `OperationalError`, SQLSTATE `57014` |
 | a terminated backend, a closed socket | `OperationalError` (`57P01`, `08003` …) or `InterfaceError` |

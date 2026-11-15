@@ -16,7 +16,7 @@ from adorm import ConnectionProfile, GenericPrefetch, Prefetch, prefetch_related
 from adorm.executor import Pool, Router, set_runner
 from demo.models.contenttypes import ContentType
 from tests.djangoproject.library import models as dj
-from tests.generated.library import Author, Book, Edition, Loan, Note, Reader, Tag, Tagging
+from tests.generated.library import Author, Book, Edition, Loan, Note, Reader, Reservation, Tag, Tagging
 from tests.library_data import DUNE, DUNE_2, in_thread, NOTE, PHYSICS, POEMS
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -24,6 +24,7 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 @pytest.fixture(params=["django", "asyncpg"])
 def driver_class(request):
+    """The driver class named by the parameter."""
     if request.param == "django":
         from adorm.drivers.django import DjangoDriver
 
@@ -469,6 +470,183 @@ async def test_full_clean_inside_a_transaction_sees_its_writes(library, pool):  
 async def test_full_clean_exclude_names_are_checked(library, pool):  # noqa: ARG001
     with pytest.raises(ValueError, match="'nothing' is not a field"):
         await Book(isbn=DUNE, title="x", pages=1).full_clean(exclude=["nothing"])
+
+
+# Codes and params of validation errors
+
+
+def errors(error):
+    """``{key: [(code, params), ...]}`` of an adorm ``ValidationError`` built from a dict."""
+    return {key: [(e.code, e.params) for e in found] for key, found in error.error_dict.items()}
+
+
+TODAY = datetime.date(2026, 3, 1)
+YESTERDAY = datetime.date(2026, 2, 28)
+
+
+async def reserve(reader, copy=1):
+    """A stored reservation of ``copy`` of Dune, made with the Django ORM."""
+    return await in_thread(
+        lambda: dj.Reservation.objects.create(reader_id=reader, book_id=DUNE, copy=copy, starts=TODAY, ends=TODAY).pk
+    )
+
+
+async def test_full_clean_errors_keep_their_codes_and_params(library, pool):  # noqa: ARG001
+    book = Book(isbn="9780000000777", title="x", pages=1)
+    book.isbn = "12"
+    book.pages = 0
+    book.schema_ = "x" * 11
+    with pytest.raises(ValidationError) as raised:
+        await book.full_clean()
+    assert errors(raised.value) == {
+        "isbn": [("invalid", {"value": "12"})],
+        "pages": [("min_value", {"limit_value": 1, "show_value": 0, "value": 0})],
+        "schema_": [("max_length", {"limit_value": 10, "show_value": 11, "value": "x" * 11})],
+    }
+    assert raised.value.message_dict["schema_"] == ["Ensure this value has at most 10 characters (it has 11)."]
+    assert all(type(e.message) is str for found in raised.value.error_dict.values() for e in found)
+
+
+async def test_full_clean_unique_and_blank_errors_name_their_code(library, pool):  # noqa: ARG001
+    with pytest.raises(ValidationError) as raised:
+        await Tag(name="rare").full_clean()
+    assert errors(raised.value) == {
+        "name": [
+            (
+                "unique",
+                {
+                    "model": "library.Tag",
+                    "model_class": "library.Tag",
+                    "model_name": "Tag",
+                    "unique_check": ("name",),
+                    "field_label": "Name",
+                },
+            )
+        ]
+    }
+    assert raised.value.message_dict == {"name": ["Tag with this Name already exists."]}
+    blank = Tag(name="new")
+    blank.name = ""
+    with pytest.raises(ValidationError) as raised:
+        await blank.full_clean()
+    assert errors(raised.value) == {"name": [("blank", None)]}
+    short = Tag(name="new")
+    short.name = "x"
+    with pytest.raises(ValidationError) as raised:
+        await short.full_clean()
+    assert errors(raised.value) == {"name": [("min_length", {"limit_value": 2, "show_value": 1, "value": "x"})]}
+
+
+async def test_full_clean_constraint_errors_keep_the_violation_code(library, pool):  # noqa: ARG001
+    await reserve(library["reader"])
+    clash = Reservation(reader_id=library["reader"], book_id=DUNE, copy_=1, starts=TODAY, ends=YESTERDAY)
+    with pytest.raises(ValidationError) as raised:
+        await clash.full_clean()
+    assert errors(raised.value) == {
+        "__all__": [
+            ("ends_before_start", None),
+            (
+                "unique_together",
+                {
+                    "model": "library.Reservation",
+                    "model_class": "library.Reservation",
+                    "model_name": "Reservation",
+                    "unique_check": ("book", "copy_"),
+                    "field_labels": "Book and Copy",
+                },
+            ),
+        ]
+    }
+    assert raised.value.message_dict == {
+        "__all__": ["A reservation cannot end before it starts.", "Reservation with this Book and Copy already exists."]
+    }
+    clash.copy_, clash.ends = 2, TODAY
+    await clash.full_clean()
+
+
+async def test_full_clean_messages_follow_the_callers_language(library, pool):  # noqa: ARG001
+    from django.utils import translation
+
+    with translation.override("sl"):
+        expected = str(dj.Tag._meta.get_field("name").error_messages["blank"])
+        tag = Tag(name="new")
+        tag.name = ""
+        with pytest.raises(ValidationError) as raised:
+            await tag.full_clean()
+    assert expected != "This field cannot be blank."
+    assert raised.value.message_dict == {"name": [expected]}
+    assert raised.value.error_dict["name"][0].code == "blank"
+
+
+@pytest.mark.parametrize("attempt", range(5))
+async def test_concurrent_full_cleans_keep_the_params_of_their_own_instance(library, pool, attempt):  # noqa: ARG001
+    books = []
+    for length in range(11, 17):
+        book = Book(isbn="9780000000777", title="x", pages=1)
+        book.schema_ = "x" * length
+        books.append(book)
+    results = await asyncio.gather(*(book.full_clean() for book in books), return_exceptions=True)
+    assert [errors(result)["schema_"][0][1]["show_value"] for result in results] == list(range(11, 17))
+    assert pool.in_use == 0
+
+
+@pytest.mark.parametrize("driver_class", ["django"], indirect=True)
+async def test_a_save_that_validates_reports_the_same_errors_as_full_clean(library, pool):  # noqa: ARG001
+    await reserve(library["reader"])
+    values = {"reader_id": library["reader"], "book_id": DUNE, "copy_": 1, "starts": TODAY, "ends": YESTERDAY}
+    with pytest.raises(ValidationError) as cleaned:
+        await Reservation(**values).full_clean()
+    with pytest.raises(ValidationError) as created:
+        await Reservation.objects.create(**values)
+    with pytest.raises(ValidationError) as saved:
+        await Reservation(**values).save()
+    assert errors(created.value) == errors(saved.value) == errors(cleaned.value)
+    assert set(errors(created.value)) == {"__all__"}
+    with pytest.raises(ValidationError) as field:
+        await Reservation.objects.create(**{**values, "copy_": 40000, "book_id": "9780000000999", "ends": TODAY})
+    assert errors(field.value) == {
+        "book": [("invalid", {"model": "book", "pk": "9780000000999", "field": "isbn", "value": "9780000000999"})],
+        "copy_": [("max_value", {"limit_value": 32767, "show_value": 40000, "value": 40000})],
+    }
+    assert await Reservation.objects.count() == 1
+
+
+@pytest.mark.parametrize("driver_class", ["django"], indirect=True)
+@pytest.mark.parametrize("attempt", range(3))
+async def test_failed_validating_saves_release_their_slots(library, pool, attempt):  # noqa: ARG001
+    values = {"reader_id": library["reader"], "book_id": DUNE, "starts": TODAY, "ends": YESTERDAY}
+    results = await asyncio.gather(
+        *(Reservation.objects.create(copy_=copy, **values) for copy in range(1, 7)), return_exceptions=True
+    )
+    assert all(errors(result) == {"__all__": [("ends_before_start", None)]} for result in results)
+    assert pool.in_use == 0
+    async with adorm.atomic():
+        await Reservation.objects.create(**{**values, "copy_": 1, "ends": TODAY})
+    assert pool.in_use == 0
+
+
+@pytest.mark.parametrize("driver_class", ["django"], indirect=True)
+@pytest.mark.parametrize("attempt", range(3))
+async def test_a_save_racing_an_uncommitted_duplicate_fails_in_the_database(library, pool, database, attempt):  # noqa: ARG001
+    await database.hold(
+        "INSERT INTO library_reservation (reader_id, book_id, copy, starts, ends) VALUES ($1, $2, 1, $3, $3)",
+        library["reader"],
+        DUNE,
+        TODAY,
+    )
+    values = {"reader_id": library["reader"], "book_id": DUNE, "copy_": 1, "starts": TODAY, "ends": TODAY}
+    # The duplicate is not visible to the validation; the insert waits for the holder's transaction.
+    task = asyncio.create_task(Reservation.objects.create(**values))
+    await database.waiting()
+    transaction, database.transaction = database.transaction, None
+    await transaction.commit()
+    with pytest.raises(adorm.IntegrityError) as raised:
+        await task
+    assert raised.value.sqlstate == "23505"
+    with pytest.raises(ValidationError) as again:
+        await Reservation.objects.create(**values)
+    assert [e.code for e in again.value.error_dict["__all__"]] == ["unique_together"]
+    assert pool.in_use == 0
 
 
 # Cancellation and lost connections on the asyncpg driver

@@ -2112,7 +2112,9 @@ async def create_a_multi_table_child_of_an_existing_parent():
     "lookup.exact",
     expected=(
         {"due": ["The due date cannot be before the issue date."]},
+        [(None, None)],
         {"__all__": ["Membership with this Club and Member already exists."]},
+        [("unique_together", ("club", "member"))],
         None,
     ),
 )
@@ -2124,10 +2126,12 @@ async def full_clean_runs_the_model_clean_and_constraints():
         await invoice.full_clean()
     except ValidationError as exc:
         clean = exc.message_dict
+        clean_codes = [(e.code, e.params) for e in exc.error_dict["due"]]
     board = await Membership.objects.get(role="board")
     copy = Membership(club_id=board.club_id, member_id=board.member_id, since=datetime.date(2026, 1, 1), fee=1)
     try:
         await copy.full_clean()
     except ValidationError as exc:
         unique = exc.message_dict
-    return clean, unique, await copy.full_clean(exclude=["member"])
+        unique_codes = [(e.code, e.params["unique_check"]) for e in exc.error_dict["__all__"]]
+    return clean, clean_codes, unique, unique_codes, await copy.full_clean(exclude=["member"])

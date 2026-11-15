@@ -227,7 +227,8 @@ set that loaded the instance, or else the [current session](/topics/sessions#the
 Pydantic validates the values given to the constructor. `await instance.full_clean()` validates the instance as the
 target does before a save: on the Django driver Django's `Model.full_clean()` runs the field validators, the model's
 `clean()`, the unique checks and the constraints, against the database in the current transaction. Errors raise
-`adorm.ValidationError` with the messages by field name; `exclude` leaves fields out:
+`adorm.ValidationError` with the errors by adorm field name, each with Django's message, `code` and `params`;
+`exclude` leaves fields out:
 
 ```python
 invoice.due = datetime.date(2025, 1, 1)
@@ -235,8 +236,20 @@ try:
     await invoice.full_clean()
 except adorm.ValidationError as exc:
     exc.message_dict              # {"due": ["The due date cannot be before the issue date."]}
+    [error] = exc.error_dict["due"]
+    error.code                    # None: clean() raised the error without a code
 await invoice.full_clean(exclude=["due"])
+
+club.name = "x" * 101
+try:
+    await club.full_clean()
+except adorm.ValidationError as exc:
+    [error] = exc.error_dict["name"]
+    error.code, error.params["limit_value"]       # ("max_length", 100)
 ```
+
+A model's `save()` that calls `full_clean()` raises the same errors from `save()` and `objects.create()` on the
+Django driver.
 
 See [`full_clean()`](/ref/models#full-clean-exclude-none-validate-unique-true-validate-constraints-true) in the Model
 API for the instance it validates and the error keys.

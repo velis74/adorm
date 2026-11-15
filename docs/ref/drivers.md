@@ -531,7 +531,7 @@ Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` a
 | `django.core.exceptions.ObjectDoesNotExist` (a model's `DoesNotExist`) | `ObjectDoesNotExist` with Django's message |
 | `django.core.exceptions.MultipleObjectsReturned` | `MultipleObjectsReturned` with Django's message |
 | `FieldError`, `FieldDoesNotExist` | [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) with Django's message (`original` is `exc`) |
-| Django's `ValidationError` | `ValidationError` with the same messages (by field, a list, or one message with `code` and `params`) |
+| Django's `ValidationError` | [`validation_error(None, exc)`](#adorm-drivers-django-translation-validation-error-label-exc): each error with its message, `code` and `params`, by field as Django keys them, a list, or one error |
 | `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
 | `SynchronousOnlyOperation` | `InterfaceError` |
 | `django.db.models.ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with Django's message and the objects as [`model_row()`](#adorm-drivers-django-model-row-instance) values (`protected_objects`, `restricted_objects`) |
@@ -731,10 +731,28 @@ through `ModelMeta.orm_names`); names without a Django field are left out.
 
 ### `adorm.drivers.django.translation.validation_error(label, exc)`
 
-The `adorm.ValidationError` for Django's `ValidationError` `exc` raised while validating an instance of the model
-`label`: messages by adorm name, a foreign key's under the adorm relation's name when the adorm model declares it
-(else its column field), errors of the whole model under `"__all__"`. An error without a dict of messages keeps its
-list of messages.
+The `adorm.ValidationError` for Django's `ValidationError` `exc` raised for an instance of the model `label`
+(`None` when unknown). Each error keeps Django's message as text (`%` placeholders unfilled), `code` and `params`; a
+message whose text depends on its params (a lazy plural from `ngettext_lazy`) is formatted, with `%` doubled. In
+`params`, a Django model instance or class becomes the model's label and a lazy translation text.
+
+With a model, errors are keyed by adorm name, a foreign key's under the adorm relation's name when the adorm model
+declares it (else its column field), errors of the whole model under `"__all__"`, and the names in `unique_check`
+are adorm names. Without one (or for a label Django does not know), the keys stay Django's. An error without a dict
+keeps its list of errors, or its single error. Both drivers apply it to a Django `ValidationError` raised by any
+operation, with the operation's model ([`operation_model()`](#adorm-drivers-django-translation-operation-model-operation)).
+
+```python
+from django.core.exceptions import ValidationError as DjangoValidationError
+
+exc = DjangoValidationError({"copy": [DjangoValidationError("Too high.", code="max_value")]})
+error = validation_error("library.Reservation", exc)      # adorm field copy_ (Django field copy)
+error.error_dict["copy_"][0].code                          # 'max_value'
+```
+
+### `adorm.drivers.django.translation.operation_model(operation)`
+
+The label of the model an operation works on: its `model`, else its query's `model`; `None` when it has neither.
 
 ### `adorm.drivers.django.translation.subquery(query)`
 

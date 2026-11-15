@@ -46,7 +46,8 @@ The result of the request `request_id`: rows as dicts, a scalar or a count. Kind
 ### `adorm.events.ErrorEvent(request_id, error)`
 
 The request `request_id` failed with `error`, an adorm exception. Kind `"error"`; the error is encoded with
-[`encode_error()`](#adorm-events-encode-error-error).
+[`encode_error()`](#adorm-events-encode-error-error-encode-encode-value), which encodes validation params with the
+event's `encode`.
 
 ### `adorm.events.CancelledEvent(request_id, started)`
 
@@ -103,7 +104,7 @@ through it and drops any other event with an error on the `adorm.executor` logge
 
 ## Encoded errors
 
-### `adorm.events.encode_error(error)`
+### `adorm.events.encode_error(error, encode=encode_value)`
 
 `error` as JSON-safe data, `{"class": <name>, "message": <text>, ...}`:
 
@@ -115,22 +116,36 @@ through it and drops any other event with an error on the `adorm.executor` logge
 | `Error` and its subclasses | also `sqlstate` |
 | `SessionTimeout`, `DeadlockError` | also `timeout` and the sessions as `(using, session_name)` pairs |
 | `OperationTimeout` | also `phase`, `timeout` and the session as a `(using, session_name)` pair |
-| `ValidationError` | the messages by field, or the list of messages |
+| `ValidationError` | the messages by field, or the list of messages; each error's `message`, `code` and `params` under `"errors"` (by field, or a list), or under `"error"` for a single error; `encode` encodes each param, and a param it cannot encode becomes its text |
 | any other exception | `DatabaseError`, with the message `"<class name>: <message>"` |
 
 The driver's `original` exception, the objects of a `ProtectedError` or `RestrictedError` and the operation an
 `OperationTimeout` names are not encoded.
 
-### `adorm.events.decode_error(data)`
+### `adorm.events.decode_error(data, decode=decode_value)`
 
-The exception `encode_error()` encoded. Sessions are restored with `create_session()`; a model label that is not
-registered gives the generic `ObjectDoesNotExist` or `MultipleObjectsReturned`; an unknown class gives
-`DatabaseError`. Data without a string `"class"` raises `ValueError`.
+The exception `encode_error()` encoded; `decode` decodes validation params. Sessions are restored with
+`create_session()`; a model label that is not registered gives the generic `ObjectDoesNotExist` or
+`MultipleObjectsReturned`; an unknown class gives `DatabaseError`. Data without a string `"class"`, and a validation
+error entry without a string `message`, with a `code` that is not a string or with `params` that are not a mapping,
+raise `ValueError`.
 
 ```python
 data = encode_error(IntegrityError("duplicate key", sqlstate="23505"))
 # {"class": "IntegrityError", "message": "duplicate key", "sqlstate": "23505"}
 error = decode_error(data)          # IntegrityError("duplicate key"), error.sqlstate == "23505"
+
+data = encode_error(ValidationError({"name": [ValidationError("Taken.", "unique", {"unique_check": ("name",)})]}))
+# {"class": "ValidationError", "message": {"name": ["Taken."]},
+#  "errors": {"name": [{"message": "Taken.", "code": "unique",
+#                       "params": {"unique_check": {"type": "tuple", "value": [{"type": "str", "value": "name"}]}}}]}}
+decode_error(data).error_dict["name"][0].code     # 'unique'
+
+data = encode_error(ValidationError("“%(value)s” is not a valid UUID.", "invalid", {"value": "x"}))
+# {"class": "ValidationError", "message": ["“x” is not a valid UUID."],
+#  "error": {"message": "“%(value)s” is not a valid UUID.", "code": "invalid",
+#            "params": {"value": {"type": "str", "value": "x"}}}}
+decode_error(data).code                           # 'invalid'
 ```
 
 ## The client end

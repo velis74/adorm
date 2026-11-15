@@ -377,7 +377,7 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | `Model.DoesNotExist`, `Model.MultipleObjectsReturned` | `ObjectDoesNotExist`, `MultipleObjectsReturned`; the query set raises the adorm model's own |
 | `FieldError`, `FieldDoesNotExist` (an unknown field or lookup) | `FieldError` |
 | a segment after a field that is neither a relation nor a JSON field (a Django transform such as `joined__year`), refused before Django sees it | `FieldError` |
-| `ValidationError` (a value Django rejects, such as an invalid UUID) | `ValidationError` |
+| `ValidationError` (a value Django rejects, such as an invalid UUID; a model's `save()` that calls `full_clean()`) | `ValidationError` with each error's message, `code` and `params`, keyed by the operation model's adorm field names |
 | `TransactionManagementError` | `TransactionManagementError` |
 | `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |
 | `django.db` errors | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01` |

@@ -44,7 +44,6 @@ from adorm.drivers.django.translation import (
     lookup_kwargs,
     model_queryset,
     parent_link_field,
-    validation_error,
 )
 from adorm.exceptions import (
     IntegrityError,
@@ -591,8 +590,6 @@ class Writer:
     async def full_clean(self, operation: Any) -> dict[str, Any]:
         """Django's ``Model.full_clean()``, run as Python on the event loop; the statements it runs are compiled and
         awaited one at a time, the validation run again with the rows answered (`DjangoCompiler.replay()`)."""
-        from django.core.exceptions import ValidationError as DjangoValidationError
-
         model = django_model(operation.model)
         stored = None
         if clean_needs_row(operation):
@@ -602,14 +599,11 @@ class Writer:
 
         def validate() -> dict[str, Any]:
             instance = clean_instance(operation, self.alias, copy.deepcopy(stored))
-            try:
-                instance.full_clean(
-                    exclude=exclude,
-                    validate_unique=operation.validate_unique,
-                    validate_constraints=operation.validate_constraints,
-                )
-            except DjangoValidationError as exc:
-                raise validation_error(operation.model, exc) from exc
+            instance.full_clean(
+                exclude=exclude,
+                validate_unique=operation.validate_unique,
+                validate_constraints=operation.validate_constraints,
+            )
             return instance_row(instance)
 
         compiler = self.connection.compiler

@@ -256,8 +256,9 @@ otherwise over the target's defaults. `exclude` names fields or relations that a
 `validate_unique` and `validate_constraints` switch the unique checks and the model's constraints. `adding` tells
 whether the instance is not stored yet: a unique check of a stored instance leaves its own row out.
 
-Result: the instance's fields after cleaning, as a row. Errors raise `adorm.ValidationError` with the messages by
-adorm name (a foreign key's under its relation's name, the model's under `"__all__"`). An expression as `pk` or value
+Result: the instance's fields after cleaning, as a row. Errors raise `adorm.ValidationError` with the errors by
+adorm name (a foreign key's under its relation's name, the model's under `"__all__"`), each with its message, `code`
+and `params`. An expression as `pk` or value
 and a string `exclude` raise `TypeError`, an `exclude` name that is not an identifier `ValueError`.
 
 ```python

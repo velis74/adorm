@@ -178,3 +178,28 @@ class Fine(models.Model):
     def delete(self, using=None, keep_parents=False):  # noqa: ARG002 - Django's signature
         self.waived = True
         self.save(using=using, update_fields=["waived"])
+
+
+class Reservation(models.Model):
+    """A hold on a copy of a book: model constraints, and a ``save()`` that validates the instance first."""
+
+    reader = models.ForeignKey(Reader, on_delete=models.CASCADE, related_name="reservations")
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="reservations")
+    copy = models.PositiveSmallIntegerField(default=1)
+    starts = models.DateField()
+    ends = models.DateField()
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(ends__gte=models.F("starts")),
+                name="library_reservation_ends_after_start",
+                violation_error_code="ends_before_start",
+                violation_error_message="A reservation cannot end before it starts.",
+            ),
+            models.UniqueConstraint(fields=["book", "copy"], name="library_reservation_one_per_copy"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)

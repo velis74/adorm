@@ -137,12 +137,13 @@ class ErrorEvent(Event):
     request_id: Any
     error: BaseException
 
-    def to_dict(self, encode: Encode = encode_value) -> dict[str, Any]:  # noqa: ARG002 - errors have their own form
-        return {"event": self.kind, "request_id": _check_request_id(self.request_id), "error": encode_error(self.error)}
+    def to_dict(self, encode: Encode = encode_value) -> dict[str, Any]:
+        error = encode_error(self.error, encode)
+        return {"event": self.kind, "request_id": _check_request_id(self.request_id), "error": error}
 
     @classmethod
-    def _decode(cls, data: Mapping[str, Any], decode: Decode) -> Event:  # noqa: ARG003
-        return cls(_decoded_request_id(data), decode_error(data["error"]))
+    def _decode(cls, data: Mapping[str, Any], decode: Decode) -> Event:
+        return cls(_decoded_request_id(data), decode_error(data["error"], decode))
 
 
 @dataclass(frozen=True, slots=True)
@@ -257,14 +258,14 @@ def _session(key: Any) -> Any:
     return create_session(*key)
 
 
-def encode_error(error: BaseException) -> dict[str, Any]:
+def encode_error(error: BaseException, encode: Encode = encode_value) -> dict[str, Any]:
     """``error`` as JSON-safe data: ``{"class": <name>, "message": <text>, ...}``.
 
     An adorm exception keeps its class (a model's ``DoesNotExist`` and ``MultipleObjectsReturned`` also its model
-    label), ``sqlstate``, ``timeout``, ``phase``, the sessions it names and the messages of a `ValidationError`. The
+    label), ``sqlstate``, ``timeout``, ``phase``, the sessions it names and the errors of a `ValidationError` (each
+    error's message, code and params; ``encode`` encodes a param, and a param it cannot encode becomes its text). The
     driver's ``original`` exception, the objects of a `ProtectedError` or `RestrictedError` and an operation it names
-    stay behind. Any other exception becomes a
-    `DatabaseError` whose message starts with the exception's class name.
+    stay behind. Any other exception becomes a `DatabaseError` whose message starts with the exception's class name.
     """
     cls = type(error)
     classes = _error_classes()
@@ -277,7 +278,17 @@ def encode_error(error: BaseException) -> dict[str, Any]:
         cls = next(base for base in cls.__mro__ if classes.get(base.__name__) is base)
     data: dict[str, Any] = {"class": cls.__name__, "message": str(error)}
     if isinstance(error, exceptions.ValidationError):
-        data["message"] = error.message_dict if hasattr(error, "error_dict") else error.messages
+        if hasattr(error, "error_dict"):
+            data["message"] = error.message_dict
+            data["errors"] = {
+                field: [_encode_entry(e, encode) for e in errors] for field, errors in error.error_dict.items()
+            }
+        elif hasattr(error, "message"):
+            data["message"] = error.messages
+            data["error"] = _encode_entry(error, encode)
+        else:
+            data["message"] = error.messages
+            data["errors"] = [_encode_entry(e, encode) for e in error.error_list]
     if isinstance(error, exceptions.Error) and error.sqlstate is not None:
         data["sqlstate"] = error.sqlstate
     if isinstance(error, (exceptions.SessionTimeout, exceptions.OperationTimeout)) and error.timeout is not None:
@@ -294,8 +305,40 @@ def encode_error(error: BaseException) -> dict[str, Any]:
     return data
 
 
-def decode_error(data: Mapping[str, Any]) -> BaseException:
-    """The exception `encode_error` encoded. An unknown class decodes as `DatabaseError`."""
+def _encode_entry(error: exceptions.ValidationError, encode: Encode) -> dict[str, Any]:
+    params = None
+    if error.params:
+        params = {}
+        for key, value in error.params.items():
+            try:
+                params[str(key)] = encode(value)
+            except (TypeError, ValueError):
+                params[str(key)] = encode(str(value))
+    return {"message": str(error.message), "code": error.code, "params": params}
+
+
+def _decode_entry(data: Any, decode: Decode) -> exceptions.ValidationError:
+    if not isinstance(data, Mapping) or not isinstance(data.get("message"), str):
+        raise ValueError(f"an encoded validation error is a mapping with a string 'message', not {data!r}")
+    code, params = data.get("code"), data.get("params")
+    if code is not None and not isinstance(code, str):
+        raise ValueError(f"the 'code' of an encoded validation error is a string or null, not {code!r}")
+    if params is not None:
+        if not isinstance(params, Mapping):
+            raise ValueError(f"the 'params' of an encoded validation error are a mapping or null, not {params!r}")
+        params = {key: decode(value) for key, value in params.items()}
+    return exceptions.ValidationError(data["message"], code, params)
+
+
+def _decode_entries(data: Any, decode: Decode) -> list[exceptions.ValidationError]:
+    if not isinstance(data, list):
+        raise ValueError(f"encoded validation errors are a list, not {data!r}")
+    return [_decode_entry(entry, decode) for entry in data]
+
+
+def decode_error(data: Mapping[str, Any], decode: Decode = decode_value) -> BaseException:
+    """The exception `encode_error` encoded; ``decode`` decodes validation params. An unknown class decodes as
+    `DatabaseError`."""
     if not isinstance(data, Mapping) or not isinstance(data.get("class"), str):
         raise ValueError(f"an encoded error is a mapping with 'class', not {data!r}")
     name, message = data["class"], data.get("message")
@@ -309,6 +352,14 @@ def decode_error(data: Mapping[str, Any]) -> BaseException:
         return cls(message)
     cls = _error_classes().get(name, exceptions.DatabaseError)
     if issubclass(cls, exceptions.ValidationError):
+        errors = data.get("errors")
+        if isinstance(errors, Mapping):
+            return cls({field: _decode_entries(entries, decode) for field, entries in errors.items()})
+        if errors is not None:
+            return cls(_decode_entries(errors, decode))
+        if "error" in data:
+            entry = _decode_entry(data["error"], decode)
+            return cls(entry.message, entry.code, entry.params)
         return cls(message)
     if issubclass(cls, exceptions.Error):
         return cls(message, sqlstate=data.get("sqlstate"))
