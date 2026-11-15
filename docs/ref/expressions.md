@@ -16,8 +16,9 @@ Each node has a construct name for driver [capabilities](/topics/drivers#capabil
 
 | Node | Construct name |
 |---|---|
-| `F`, `Value`, `Star`, `Q`, `When`, `OrderBy` | none |
-| `OuterRef` | `expression.OuterRef` |
+| `F` | none; [`path.nested`](./query#adorm-query-nested-path) for a path of several segments |
+| `Value`, `Star`, `Q`, `When`, `OrderBy` | none |
+| `OuterRef` | `expression.OuterRef`, plus `path.nested` for a path of several segments |
 | `CombinedExpression` | `expression.CombinedExpression` |
 | `Case`, `Subquery`, `Exists` | `expression.<class name>` |
 | a `Func` subclass | `function.<class name>` |
@@ -81,9 +82,11 @@ expression.
 
 A reference to a field of the queried model. `name` is a field path: identifiers joined with `__`, relations first
 (`"club__owner__name"`); anything else raises `ValueError`, a non-string `TypeError`. `path` is the path as a tuple.
+A path of several segments uses the construct `path.nested`.
 
 ```python
-F("club__name").path      # ('club', 'name')
+F("club__name").path                  # ('club', 'name')
+list(F("club__name").constructs())    # ['path.nested']
 ```
 
 ### `adorm.OuterRef(name)`

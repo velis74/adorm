@@ -89,7 +89,7 @@ def test_exclude_negates():
 def test_annotate():
     q = MEMBERS.annotate(lower=Lower("name")).annotate(n=Count("payments"))
     assert q.annotations == (("lower", Lower("name")), ("n", Count("payments")))
-    assert set(q.constructs()) == {"function.Lower", "aggregate.Count"}
+    assert set(q.constructs()) == {"clause.annotate", "function.Lower", "aggregate.Count"}
     assert q.filter(n__gt=1).where == Q(n__gt=1)
 
 
@@ -211,6 +211,7 @@ def test_nested_subqueries():
         .filter(club__in=Query("club.Club").filter(Exists(Query("club.Event").filter(club=OuterRef("pk")))))
     )
     assert set(q.constructs()) == {
+        "clause.annotate",
         "lookup.in",
         "lookup.exact",
         "expression.Subquery",

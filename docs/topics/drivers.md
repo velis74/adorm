@@ -80,7 +80,11 @@ and `cancellation` default to `False`, so a driver declares only what it impleme
 
 `DriverConnection` checks every call against the declaration before the driver sees it: an operation that uses an
 unsupported kind or construct, an unsupported connection option, or a savepoint call on a driver without
-savepoints raises `NotSupportedError` and nothing is executed. The checks live in the concrete `execute()`,
+savepoints raises `NotSupportedError` and nothing is executed. The router checks an operation outside a
+transaction with [`Driver.check()`](/ref/drivers#check-operation) before it acquires a slot, so an unsupported
+operation does not wait for a slot of a full pool. Inside a transaction the check in `execute()` refuses before
+anything reaches the database, so the transaction stays usable. The error names the driver and the missing names
+(`NotSupportedError.driver`, `.unsupported`). The checks live in the concrete `execute()`,
 `set_options()` and savepoint methods; a driver implements `_execute()`, `_set_options()` and the `_savepoint()`
 family, for threaded and async drivers alike.
 
@@ -96,8 +100,18 @@ Capabilities(
 Construct names have the form `<category>.<name>`: `lookup.<lookup name>`, `function.<class name>`,
 `aggregate.<class name>` (with `aggregate.distinct` and `aggregate.filter`), `expression.<class name>`
 (`expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`,
-`expression.CombinedExpression`) and `clause.<clause>` (`clause.distinct_on`, `clause.select_for_update` …). Query
-nodes report theirs through `constructs()`; the [expression reference](/ref/expressions) lists them.
+`expression.CombinedExpression`), `clause.<clause>` (`clause.annotate`, `clause.distinct_on`,
+`clause.select_for_update` …) and `path.nested`, a field path across a relation or into a transform
+(`club__name`). Query nodes report theirs through `constructs()`; the [expression reference](/ref/expressions) lists
+them, and [`construct_names()`](/ref/query#adorm-query-construct-names) returns them all.
+
+```python
+query = Member.objects.filter(memberships__club__slug="koper-sailing").query
+MemoryDriver.capabilities.unsupported(Select(query))   # ['path.nested']
+```
+
+The [driver conformance suite](/topics/conformance) runs every bundled driver over the same schema and data and
+holds each to its declaration.
 
 ## Execution mode
 
@@ -127,7 +141,8 @@ A connection belongs to one slot, which awaits one call at a time.
 ## Cancellation
 
 Cancelling the task that awaits `execute()` cancels the statement running on the target. The call raises
-`asyncio.CancelledError`; the connection stays usable and the slot rolls back an open transaction. When the
+`asyncio.CancelledError`; the slot rolls back an open transaction, and closes the connection when the driver
+reports it unusable (the native PostgreSQL driver does after every statement cancelled before it finished). When the
 statement completed just before the cancellation arrived, its effect remains and its result is discarded.
 
 `cancel()` cancels the running statement from any thread without cancelling the awaiting task: the call then

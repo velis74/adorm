@@ -352,17 +352,20 @@ through Django, once; writes stay in memory and are gone when the API stops.
 | Supported | Not supported (raises `NotSupportedError`) |
 |---|---|
 | `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `get_or_create` | `call` operations, connection options |
-| conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`) or column | field paths across relations (`club__slug`), subqueries |
-| `F` and arithmetic in update values, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, functions, aggregates, `only()`, `defer()`, `select_related()`, `select_for_update()` |
-| transactions, savepoints, cancellation | |
+| conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`, `club=club`) or column | field paths across relations (`club__slug`, construct `path.nested`), conditions on a reverse or many-to-many relation name (`clubs=club`), subqueries |
+| `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, functions, aggregates, `only()`, `defer()`, `select_related()`, `select_for_update()` |
+| transactions, savepoints, cancellation | inserting or deleting a row of an MTI child, deleting a row a foreign key references |
 
-Each model is its own table: creating an MTI child does not write its parent's row, deletes do not cascade and unique
-constraints other than the primary key are not enforced.
+The constructs it does not support are refused before execution; a condition on a reverse or many-to-many relation
+name, which reports no construct of its own, is refused while executing. Each model is its own table: an update of a row
+copies the values to the row with the same primary key of its MTI parent or child; unique constraints other than the
+primary key are not enforced. A delete checks every row before it deletes any, so a refused delete deletes nothing.
 
 A transaction reads the committed rows and its own writes. A write locks its row until the transaction ends; a
 conflicting write of another connection waits for the lock and checks the row again, and a wait that would close a
 cycle raises `OperationalError` with SQLSTATE `40P01`. Rolling back to a savepoint releases the locks taken after
-it. A NULL value makes a condition unknown, as in SQL. A lookup, arithmetic or ordering on values that do not
+it. A NULL value makes a condition unknown, as in SQL, except under a negation: there a lookup on a NULL field is
+false, so `exclude()` and `~Q()` keep the row, as in Django. A lookup, arithmetic or ordering on values that do not
 compare (a date with a datetime, text with a number) raises `ProgrammingError` with SQLSTATE `42883`.
 
 The driver records each call in the list of the enclosing `tracing()` block, from tasks created inside it too; the
@@ -418,4 +421,5 @@ server once per available driver (once without a driver when none is available),
 data endpoints on every driver and the writing ones on every driver that supports `create`. On the memory driver the
 database stays unchanged; on another driver the writes land in it and `--reset` restores the data afterwards.
 `ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated driver names) makes the suite fail when one of those drivers is not
-available. Both run in `uv run pytest`, and so in CI.
+available. Both run in `uv run pytest`, and so in CI. The [driver conformance suite](/topics/conformance) runs every
+demo driver over the demo's schema and seeded data.

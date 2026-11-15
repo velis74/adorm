@@ -44,6 +44,22 @@ class RawSQLDriver(Driver):
         return RawSQLConnection(self, conn, emit)
 ```
 
+#### `check(operation)`
+
+Raises `NotSupportedError` when the driver does not support `operation`: its kind or a construct it uses is missing
+from `capabilities` ([`Capabilities.check()`](#check-operation-driver-none) with the driver's `name`), or it is a
+`Call` of a method the registered model does not declare. Does no I/O. The
+[router](/ref/pool) calls it before it acquires a slot for an operation outside a transaction, so an unsupported
+operation neither waits for a slot nor opens one, and
+[`DriverConnection.execute()`](#adorm-drivers-driverconnection) calls it before every execution.
+
+```python
+driver = DjangoDriver()
+driver.check(Select(Member.objects.filter(first_name="Ana").query))   # supported: returns None
+driver.check(Select(Member.objects.annotate(n=Length("first_name")).query))
+# NotSupportedError: 'select' operation needs unsupported function.Length (driver 'django')
+```
+
 #### `is_refusal(exc)`
 
 Returns whether `exc`, an adorm exception `open_connection()` raised, means the database refuses more connections.
@@ -86,24 +102,26 @@ Returns the names `operation` uses that the driver does not support, as a list: 
 it is unsupported, then the unsupported constructs in sorted order. An empty list means the operation is
 supported.
 
-#### `check(operation)`
+#### `check(operation, driver=None)`
 
-Raises `NotSupportedError` naming every unsupported name, or returns `None`.
+Raises `NotSupportedError` naming every unsupported name, or returns `None`. `driver` is the driver's name: the
+message ends with it, and the error's [`driver`](/ref/exceptions#adorm-notsupportederror) is set to it; the error's
+`unsupported` holds the names `unsupported(operation)` returns.
 
-#### `check_savepoints()`
+#### `check_savepoints(driver=None)`
 
-Raises `NotSupportedError` when `savepoints` is `False`.
+Raises `NotSupportedError` (`unsupported` `("savepoints",)`) when `savepoints` is `False`.
 
-#### `check_options(options)`
+#### `check_options(options, driver=None)`
 
 Raises `NotSupportedError` naming every option in `options` (any iterable of names, e.g. a dict) the driver does
-not support.
+not support; `unsupported` holds those names, sorted.
 
 ```python
 caps = Capabilities(operations={"select"}, constructs={"lookup.exact"}, connection_options={"statement_timeout"})
 
 caps.unsupported(operation)        # ["lookup.icontains"] for a select with an icontains lookup
-caps.check(operation)              # NotSupportedError: 'select' operation needs unsupported lookup.icontains
+caps.check(operation, "raw-sql")   # NotSupportedError: 'select' operation needs unsupported lookup.icontains (driver 'raw-sql')
 caps.check_options({"work_mem": "4MB"})   # NotSupportedError: unsupported connection options: work_mem
 ```
 
@@ -184,8 +202,9 @@ The contract the slot calls:
 | `map_error(exc)` | returns the adorm exception for an exception the target raised; defaults to `wrap_driver_error(exc)` |
 | `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it |
 
-A failed check raises `NotSupportedError` before the subclass is called: an operation kind or construct the
-capabilities do not list, and a `Call` of a method the registered model does not declare. What a subclass
+A failed check raises `NotSupportedError` before the subclass is called: `execute()` runs
+[`Driver.check()`](#check-operation), and the savepoint calls and `set_options()` check `savepoints` and
+`connection_options`, each error naming the driver. What a subclass
 implements:
 
 | Method | Required | Does |
@@ -378,7 +397,7 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 | Field | Value |
 |---|---|
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`; `function.Lower`, `function.Upper`; `expression.Subquery` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `path.nested`; `clause.annotate`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`; `function.Lower`, `function.Upper`; `expression.Subquery` |
 | `cancellation` | `True` |
 | `savepoints`, `connection_options`, `backend_events` | none |
 
@@ -564,17 +583,19 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 
 | Method | Does |
 |---|---|
-| `_execute(operation)` | [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`). Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while the query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error of a statement can make the connection unusable |
+| `_execute(operation)` | [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`). Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while the query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement can make the connection unusable |
 | `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)) |
 | `commit()`, `rollback()` | `COMMIT`, `ROLLBACK` |
 | `cancel()` | cancels the statement running when it is called, from any thread; that call raises `OperationalError` with SQLSTATE `57014`, a statement that starts later is not affected. Nothing without a running statement |
-| `is_usable()` | `False` once a connection error was raised, after `close()` and when asyncpg reports the connection closed |
+| `is_usable()` | `False` once a connection error was raised, once a statement was cancelled before it finished, after `close()` and when asyncpg reports the connection closed |
 | `close()` | asyncpg's `close()` within the driver's `close_timeout` (asyncpg aborts the connection when it fails); logs errors, a second call does nothing |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc): Django's exceptions as on the Django driver, asyncpg's by their SQLSTATE; asyncpg's `InternalClientError` (its protocol in an unexpected state, as after the server ended an idle connection) is `InterfaceError` |
 
 Each statement runs in a task of its own, so `cancel()` stops it without cancelling the caller. Cancelling the
-task that awaits `execute()` cancels the statement as well (asyncpg sends a cancel request and handles it before
-the connection's next statement) and raises `asyncio.CancelledError`; the connection stays usable. A statement
+task that awaits `execute()` cancels the statement as well (asyncpg sends a cancel request) and raises
+`asyncio.CancelledError`. A statement cancelled either way before it finished makes the connection unusable: the
+server may have run it without the protocol's closing Sync message and keep its transaction and locks open until
+the connection's next message, so the slot closes the connection instead of releasing it to the pool. A statement
 inside a transaction compiles with `in_transaction=True`.
 
 ### `adorm.drivers.asyncpg.CAPABILITIES`
@@ -582,7 +603,8 @@ inside a transaction compiles with `in_transaction=True`.
 The [`Capabilities`](#adorm-drivers-capabilities) of `AsyncpgDriver`: the `operations` and `constructs` of the
 Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (`select`, `get`, `first`, `last`, `count`,
 `exists`; every lookup, `Lower`, `Upper`, `Subquery`, `distinct`, `DISTINCT ON`, `only`, `defer`,
-`select_related`, the query's manager) and `cancellation`. No `savepoints`, `connection_options` or
+`select_related`, the query's manager, field paths across relations (`path.nested`) and annotations
+(`clause.annotate`)) and `cancellation`. No `savepoints`, `connection_options` or
 `backend_events`.
 
 ### `adorm.drivers.asyncpg.connect_arguments(settings_dict, *, time_zone=None)`

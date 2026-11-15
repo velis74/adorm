@@ -313,8 +313,8 @@ async def test_cancel_from_another_thread_stops_the_running_statement(connection
         assert cancelled.value.sqlstate == "57014"
         await waiting(present=False)
         await unlock()
-        assert connection.is_usable()
-        assert await connection.execute(COUNT) == 4
+        # The server may still hold the statement's transaction, so the slot must not reuse the connection.
+        assert not connection.is_usable()
 
 
 async def test_cancel_without_a_running_statement_does_nothing(connection):
@@ -357,27 +357,28 @@ async def test_a_cancel_arriving_after_its_statement_does_not_reach_the_next_one
         assert await second == 4
 
 
-async def test_a_cancelled_caller_cancels_its_statement_and_the_connection_stays_usable(connection, locker):
+@pytest.mark.parametrize("attempt", range(10))
+async def test_a_cancelled_caller_cancels_its_statement_and_gives_the_connection_up(connection, locker, attempt):
     lock, unlock, waiting, _ = locker
-    for attempt in range(10):
-        await lock()
-        task = asyncio.create_task(connection.execute(COUNT))
-        await waiting()
-        if attempt % 2:
-            await unlock()
-            for _ in range(attempt % 4):
-                await asyncio.sleep(0)
-        task.cancel()
-        try:
-            assert await task == 4
-        except asyncio.CancelledError:
-            pass
-        if not attempt % 2:
-            await waiting(present=False)
-            await unlock()
-        # asyncpg finishes the cancel request before the next statement starts
+    await lock()
+    task = asyncio.create_task(connection.execute(COUNT))
+    await waiting()
+    if attempt % 2:
+        await unlock()
+        for _ in range(attempt % 4):
+            await asyncio.sleep(0)
+    task.cancel()
+    try:
+        finished = await task == 4
+    except asyncio.CancelledError:
+        finished = False
+    if not attempt % 2:
+        await waiting(present=False)
+        await unlock()
+    # A statement cancelled before it finished may leave its transaction open on the server.
+    assert connection.is_usable() is finished
+    if finished:
         assert await connection.execute(COUNT) == 4
-        assert connection.is_usable()
 
 
 @pytest.mark.parametrize("attempt", range(10))

@@ -224,7 +224,21 @@ affects a row twice, `RAISE EXCEPTION` in PL/pgSQL (SQLSTATE classes `42`, `21`,
 
 ### `adorm.NotSupportedError`
 
-The database or the driver does not support the requested feature (SQLSTATE class `0A`).
+`NotSupportedError(message=None, *, driver=None, unsupported=(), original=None, sqlstate=None)`
+
+The database or the driver does not support the requested feature (SQLSTATE class `0A`). A driver's capability
+check ([`Driver.check()`](/ref/drivers#check-operation), [`Capabilities`](/ref/drivers#adorm-drivers-capabilities))
+sets `driver` to the driver's name and `unsupported` to the tuple of names it lacks: an operation kind, construct
+names, connection option names or `"savepoints"`. It raises before anything reaches the connection, so a
+transaction it is raised in stays usable. Otherwise `driver` is `None` and `unsupported` is empty.
+
+```python
+try:
+    await Member.objects.annotate(n=Length("first_name")).count()
+except adorm.NotSupportedError as exc:
+    exc.driver          # 'django'
+    exc.unsupported     # ('function.Length',)
+```
 
 ### `adorm.TransactionManagementError`
 

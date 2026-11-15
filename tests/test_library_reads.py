@@ -1,4 +1,5 @@
-"""The conformance suite: adorm reads on every bundled driver, against the same PostgreSQL data."""
+"""Reads on the drivers that translate queries with Django (Django and asyncpg) over the library schema: renamed
+names, Django's field types, inheritance and proxies, generic relations and the translation's edge cases."""
 
 import asyncio
 import datetime
@@ -21,13 +22,11 @@ from adorm import (
     F,
     Lower,
     NotSupportedError,
-    OperationalError,
     ProgrammingError,
     Q,
     Upper,
     ValidationError,
 )
-from adorm.drivers import is_connection_error
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Count as CountOperation, Select, Update
 from adorm.query import Count, Query, Subquery, Value
@@ -681,131 +680,3 @@ async def test_a_manager_that_reads_the_database_while_building_a_query(executor
         assert (pool.size, pool.in_use) == (1, 0)
     assert await Author.objects.count() == 4
     assert pool.size == 1
-
-
-async def test_concurrent_reads_on_a_small_pool(library, executor):  # noqa: ARG001
-    pool = executor(max_connections=3)
-    expected = {n: sum(1 for rating in (5, 3, 1, 4) if rating >= n) for n in range(7)}
-    for _ in range(5):
-        counts = await asyncio.gather(*(Author.objects.filter(rating__gte=n % 7).count() for n in range(40)))
-        assert counts == [expected[n % 7] for n in range(40)]
-    assert pool.size <= 3
-    assert pool.in_use == 0
-
-
-async def test_concurrent_tasks_share_the_transactions_slot(library, executor):  # noqa: ARG001
-    pool = executor(max_connections=1)
-    for _ in range(5):
-        async with adorm.atomic():
-            async with asyncio.TaskGroup() as group:
-                tasks = [group.create_task(Author.objects.filter(rating__gte=n % 6).count()) for n in range(20)]
-                first = group.create_task(Author.objects.order_by("name").first())
-        assert [t.result() for t in tasks] == [[4, 4, 3, 3, 2, 1][n % 6] for n in range(20)]
-        assert first.result().name == "Ann"
-    assert (pool.size, pool.in_use) == (1, 0)
-
-
-# Cancellation and lost connections
-
-
-async def test_cancelling_a_waiting_read_cancels_its_statement(library, executor, locker):  # noqa: ARG001
-    lock, unlock, waiting, _ = locker
-    pool = executor(max_connections=1)
-    assert await Author.objects.count() == 4
-    for _ in range(3):
-        await lock()
-        task = asyncio.create_task(Author.objects.count())
-        await waiting()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await waiting(present=False)  # the statement no longer waits, though the lock is still held
-        assert (pool.size, pool.in_use) == (1, 0)
-        await unlock()
-        assert await Author.objects.count() == 4
-        assert pool.size == 1
-
-
-async def test_cancellation_racing_completion_leaves_the_slot_usable(library, executor, locker):  # noqa: ARG001
-    lock, unlock, waiting, _ = locker
-    pool = executor(max_connections=1)
-    outcomes = set()
-    for attempt in range(20):
-        await lock()
-        task = asyncio.create_task(Author.objects.count())
-        await waiting()
-        await unlock()
-        for _ in range(attempt % 4):
-            await asyncio.sleep(0)
-        task.cancel()
-        try:
-            outcomes.add(await task)
-        except asyncio.CancelledError:
-            outcomes.add("cancelled")
-        assert pool.in_use == 0
-        assert await Author.objects.filter(rating__gte=4).count() == 2
-    assert outcomes <= {4, "cancelled"}
-    assert pool.size == 1
-
-
-async def test_cancelling_a_read_inside_a_transaction_rolls_it_back(library, executor, locker):  # noqa: ARG001
-    lock, unlock, waiting, monitor = locker
-    pool = executor(max_connections=1)
-
-    async def read_in_transaction():
-        async with adorm.atomic():
-            return await Author.objects.count()
-
-    for _ in range(5):
-        await lock()
-        task = asyncio.create_task(read_in_transaction())
-        await waiting()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        await unlock()
-        assert pool.in_use == 0
-        async with asyncio.timeout(5):
-            assert await Author.objects.count() == 4
-        idle = await monitor.fetchval(
-            "SELECT count(*) FROM pg_stat_activity"
-            " WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND pid <> pg_backend_pid()"
-        )
-        assert idle == 0
-    assert pool.size <= 1
-
-
-async def test_a_connection_lost_mid_read_is_dropped(library, executor, locker):  # noqa: ARG001
-    lock, unlock, waiting, monitor = locker
-    pool = executor(max_connections=1)
-    await lock()
-    task = asyncio.create_task(Author.objects.count())
-    pid = await waiting()
-    await monitor.execute("SELECT pg_terminate_backend($1)", pid)
-    with pytest.raises(OperationalError) as lost:
-        await task
-    # psycopg reports the server's 57P01; asyncpg may see the socket close first (08003)
-    assert lost.value.sqlstate in ("57P01", "08003")
-    assert is_connection_error(lost.value)
-    assert (pool.size, pool.in_use) == (0, 0)
-    await unlock()
-    assert await Author.objects.count() == 4
-    assert pool.size == 1
-
-
-async def test_a_lost_connection_inside_a_transaction_ends_it(library, executor, locker):  # noqa: ARG001
-    lock, unlock, waiting, monitor = locker
-    pool = executor(max_connections=1)
-    await lock()
-
-    async def read_in_transaction():
-        async with adorm.atomic():
-            return await Author.objects.count()
-
-    task = asyncio.create_task(read_in_transaction())
-    await monitor.execute("SELECT pg_terminate_backend($1)", await waiting())
-    with pytest.raises(OperationalError):
-        await task
-    await unlock()
-    assert (pool.size, pool.in_use) == (0, 0)
-    assert await Author.objects.count() == 4

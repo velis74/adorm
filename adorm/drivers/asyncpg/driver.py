@@ -214,6 +214,10 @@ class AsyncpgConnection(DriverConnection):
         try:
             return await task
         except asyncio.CancelledError:
+            if not task.done() or task.cancelled():
+                # The server may have run the statement without the protocol's Sync, so it keeps the transaction
+                # and its locks open; the connection is closed instead of being reused.
+                self._usable = False
             current = asyncio.current_task()
             if self._cancelled is task and current is not None and not current.cancelling():
                 raise OperationalError("canceling statement due to user request", sqlstate="57014") from None

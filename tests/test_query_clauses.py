@@ -1,6 +1,6 @@
 import pytest
 
-from adorm.query import Count, F, ForUpdate, Lower, Q, Query
+from adorm.query import CLAUSES, construct_names, Count, F, ForUpdate, Func, Lower, NESTED_PATH, Q, Query
 
 MEMBERS = Query("club.Member")
 
@@ -216,6 +216,46 @@ def test_new_constructs():
         "clause.select_for_update.skip_locked",
     ]
     assert list(MEMBERS.none().values_list("name", flat=True).constructs()) == []
+
+
+def test_nested_paths_and_annotations_are_constructs():
+    assert list(F("club__name").constructs()) == [NESTED_PATH]
+    assert list(F("name").constructs()) == []
+    assert list(MEMBERS.filter(club__name="Rowing").constructs()) == ["lookup.exact", "path.nested"]
+    assert list(MEMBERS.order_by("-club__name").constructs()) == ["path.nested"]
+    for query in (
+        MEMBERS.values("club__name"),
+        MEMBERS.values_list("club__name", flat=True),
+        MEMBERS.only("name", "club__name"),
+        MEMBERS.defer("club__bio"),
+        MEMBERS.distinct("club__name"),
+    ):
+        assert NESTED_PATH in set(query.constructs())
+    assert NESTED_PATH not in set(MEMBERS.only("name").distinct("name").values("name").constructs())
+    assert list(MEMBERS.annotate(n=F("name")).constructs()) == ["clause.annotate"]
+
+
+def test_construct_names_list_every_construct_a_query_reports():
+    names = construct_names()
+    assert set(CLAUSES) | {NESTED_PATH, "aggregate.distinct", "aggregate.filter", "lookup.exact"} <= names
+    q = (
+        MEMBERS.annotate(n=Count("club", distinct=True, filter=Q(club__name="a")))
+        .only("name")
+        .defer("bio")
+        .select_related("club")
+        .distinct("name")
+        .select_for_update(nowait=True, of=["self"], no_key=True)
+    )
+    assert set(q.constructs()) <= names
+    assert set(MEMBERS.select_for_update(skip_locked=True).constructs()) <= names
+    assert set(Query("club.Member", manager="objects").distinct().constructs()) <= names
+
+
+def test_construct_names_include_node_classes_defined_later():
+    class Soundex(Func):
+        arity = 1
+
+    assert "function.Soundex" in construct_names()
 
 
 def test_for_update_is_a_child_node():

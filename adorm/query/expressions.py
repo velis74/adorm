@@ -312,7 +312,8 @@ class Expression(Node):
 
 
 class F(Expression):
-    """A reference to a field of the queried model, or across relations: ``F("club__name")``."""
+    """A reference to a field of the queried model, or across relations: ``F("club__name")``. A path of several
+    segments uses the construct ``path.nested``."""
 
     _fields = ("name",)
     name: str
@@ -324,6 +325,11 @@ class F(Expression):
     def path(self) -> tuple[str, ...]:
         """The field path split at ``__``: relations first, the field last."""
         return tuple(split_field_path(self.name))
+
+    def _own_constructs(self) -> Iterable[str]:
+        yield from super()._own_constructs()
+        if "__" in self.name:
+            yield "path.nested"
 
     def _check_decoded(self) -> None:
         check_field_path(self.name)

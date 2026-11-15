@@ -192,7 +192,9 @@
   of its own) for reads: the operations and constructs of the Django driver, with the same query translation, compiled
   on the event loop by `DjangoCompiler` and run as one statement each (`get` as Django's `get()`, `count` over the
   query as a subquery, `exists` as Django's `exists()`); transactions with the `DATABASES` entry's isolation level;
-  cancellation of the running statement, by the awaiting task or by `cancel()` from any thread (SQLSTATE `57014`).
+  cancellation of the running statement, by the awaiting task or by `cancel()` from any thread (SQLSTATE `57014`);
+  a statement cancelled before it finished makes the connection unusable, so the slot closes it instead of
+  returning it to the pool with a transaction and locks the server may still hold.
   Connections are opened from the profile's `DATABASES` entry and `params` (`connect_arguments()`: the libpq `OPTIONS`
   asyncpg reads through its `dsn` (`DSN_PARAMETERS`; other keys raise `NotSupportedError`), `-c` settings, connect
   timeout) with Django's session time zone and `assume_role`, or by the profile's `connect` hook; the compiler follows
@@ -200,8 +202,7 @@
   as `InterfaceError`); a manager's `get_queryset()` that accesses the database raises `NotSupportedError` and leaves
   the connection in the pool. `DjangoCompiler` gains `params` (keys replacing the entry's), `settings_dict` and
   `compile_count()`; `DjangoStatement.rows()` returns `timestamptz` values in the connection's time zone (naive
-  without `USE_TZ`), as Django's psycopg loader does. The demo runs on the driver (`--driver asyncpg`), and a
-  conformance suite (`tests/conformance`) runs the same read tests on the Django and asyncpg drivers.
+  without `USE_TZ`), as Django's psycopg loader does. The demo runs on the driver (`--driver asyncpg`).
 - Documentation: "The native PostgreSQL driver" topic.
 - Django ORM driver `adorm.drivers.django.DjangoDriver` (threaded, one Django connection per slot thread) for reads:
   `select`, `get`, `first`, `last`, `count` and `exists` with every lookup, relation paths in adorm names (renamed
@@ -220,3 +221,27 @@
 - `First` (`first()`) refuses a sliced query without an ordering of its own with `TypeError`.
 - `ThreadedConnection.prepare_call_sync()`: a hook that prepares each call's context on the connection's thread.
 - Documentation: "The Django driver" topic.
+- Driver conformance suite (`tests/conformance`, part of the test run): a catalogue of operations over the demo's
+  schema and data set that every demo driver (Django, asyncpg, memory) runs, each case with the operation kinds and
+  constructs it uses; a driver that declares them all must return the catalogue's result, any other driver must
+  refuse it with `NotSupportedError` before a connection is reached; a case may list drivers that refuse it while
+  executing, for limits that depend on the schema or the rows (`refusals`). A case no driver runs has a Django ORM
+  mirror that returns its expected result over the seeded database. Coverage checks fail when an operation kind or
+  construct has no case, or a driver declares a name adorm does not know. The same drivers run the failure tests:
+  refusals while the pool is full and inside transactions, concurrent tasks on one transaction, cancellation of a
+  waiting operation (also racing its completion; the released slot keeps no transaction or lock open) and
+  connections lost mid-operation, and the transaction tests: nested `atomic()` blocks commit and roll back on a
+  driver with savepoints and are refused on one without, and an undeclared connection option is refused.
+- `Driver.check()`: the capability check (and the `call` method check) that `DriverConnection.execute()` runs;
+  `Router.run()` runs it before acquiring a slot, so an unsupported operation neither waits for nor opens one.
+  `Capabilities.check()`, `check_savepoints()` and `check_options()` take the driver's name, and the
+  `NotSupportedError` they raise carries `driver` and `unsupported` (the missing names).
+- Construct names `path.nested` (a field path with several segments, reported by `F` and by a query's `values()`,
+  `only()`, `defer()` and `distinct()` fields; `adorm.query.NESTED_PATH`) and `clause.annotate` (a query with
+  annotations); the Django and asyncpg drivers declare both. `adorm.query.CLAUSES` lists the clause construct names
+  and `adorm.query.construct_names()` every construct name an operation can report.
+- Demo memory driver: a negated condition keeps a row whose field in a lookup is NULL, as Django's `exclude()` does;
+  a model instance in a condition stands for its primary key; an update reaches the rows a multi-table inheritance
+  parent and child share; inserting or deleting a row of a multi-table inheritance child and deleting a row a foreign
+  key references raise `NotSupportedError` (checked for every row before any is deleted); relation paths and
+  annotations are refused before execution (`path.nested`, `clause.annotate`).

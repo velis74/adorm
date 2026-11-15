@@ -49,6 +49,10 @@ INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.postgres",
     "tests.djangoproject.library",
+    # The demo's schema, for the driver conformance suite.
+    "demo.backend.clubs",
+    "demo.backend.activities",
+    "demo.backend.billing",
 ]
 
 ADORM_EXPOSE = ["auth.User.objects.create_user"]

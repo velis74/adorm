@@ -284,6 +284,32 @@ class RawSQLDriver(Driver):
 Cancelling the task that awaits `execute()` needs no code: the cancellation reaches asyncpg, which sends a cancel
 request to the server and waits for the statement to end.
 
+## 7. Run the conformance suite
+
+The repository's [driver conformance suite](/topics/conformance) runs every bundled driver over the demo's schema and
+data set. A driver joins it with an entry in `tests/conformance/drivers.py`: a factory that returns an instance over
+the seeded PostgreSQL test database, and a `Blocker` that makes one of its operations wait in the database. A driver
+over that database reuses `TableLock`:
+
+```python
+DRIVERS = (
+    ...,
+    ConformanceDriver("psycopg", lambda _url: _sql_driver("psycopg"), lambda _driver, url: TableLock(url)),
+)
+```
+
+A driver over another store loads the seeded data into it in its factory, as the memory driver does, and brings a
+`Blocker` subclass of its own.
+
+The driver must also be one of the demo's drivers (`demo.api.drivers.DRIVERS`), which a test checks. Each case of
+the catalogue then runs on it: a case whose operation kinds and constructs the driver declares must return the
+catalogue's result, any other case must raise `NotSupportedError` naming only names the driver lacks. A construct
+the driver declares but gets wrong fails the case; one it does not declare cannot reach its code.
+
+```console
+$ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycopg
+```
+
 ## Checklist
 
 - Every method raises adorm exceptions only; `asyncio.CancelledError` passes through.
@@ -292,13 +318,14 @@ request to the server and waits for the statement to end.
   returned rows is translated with the `orm_names` of the model it reaches (`ModelMeta.orm_name()`, or
   `ModelSchema.orm_names` from a schema source); a name it does not list is the same in the target.
 - `capabilities` lists exactly what the driver executes, including `savepoints` and `cancellation` when it
-  implements them.
+  implements them, and the conformance suite passes on it.
 - With `clause.manager`, a query and a `Create` that name a manager run through that manager of the target ORM; with
   the operation `call`, a `Call` runs the method on the target manager `Call.manager` or its query set and returns model instances as
   `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).
 - `connect_sync()` or `open_connection()` uses `profile.connect` when it is set.
 - `target` returns the target's connection object, which the profile's `on_acquire` and `on_release` hooks receive.
-- A cancelled statement leaves the connection usable and reports SQLSTATE `57014`, not a connection error.
+- A cancelled statement reports SQLSTATE `57014`, not a connection error. When the cancellation can leave the
+  server connection with an open transaction or locks, `is_usable()` returns `False` so that the slot closes it.
 - `is_connection_lost()` is true only for errors after which the connection cannot be used; override it when the
   target reports statement errors as `OperationalError` without a SQLSTATE.
 - `close()` never raises and can be called twice.

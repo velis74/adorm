@@ -6,7 +6,7 @@ transaction and client-side timeout failures.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from typing import Any, Literal
 
 __all__ = [
@@ -211,7 +211,19 @@ class ProgrammingError(DatabaseError):
 
 
 class NotSupportedError(DatabaseError):
-    """The database or the driver does not support the requested feature (SQLSTATE class 0A)."""
+    """The database or the driver does not support the requested feature (SQLSTATE class 0A).
+
+    A driver's capability check sets ``driver`` to the driver's name and ``unsupported`` to the names it does not
+    support (an operation kind, construct names, connection option names or ``"savepoints"``); otherwise ``driver`` is
+    ``None`` and ``unsupported`` empty.
+    """
+
+    def __init__(
+        self, message: str | None = None, *, driver: str | None = None, unsupported: Iterable[str] = (), **kwargs: Any
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.driver = driver
+        self.unsupported = tuple(unsupported)
 
 
 class TransactionManagementError(ProgrammingError):

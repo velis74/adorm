@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 
 from adorm.query.expressions import check_field_path, Expression, F, Node, OrderBy, Q
 
-__all__ = ["ForUpdate", "Query", "as_query"]
+__all__ = ["CLAUSES", "NESTED_PATH", "ForUpdate", "Query", "as_query", "construct_names"]
 
 _LABEL = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
 
@@ -31,6 +31,41 @@ _SAME_WHEN_COMBINED = (
     "for_update",
     "manager",
 )
+
+
+CLAUSES: tuple[str, ...] = (
+    "clause.annotate",
+    "clause.distinct",
+    "clause.distinct_on",
+    "clause.only",
+    "clause.defer",
+    "clause.select_related",
+    "clause.manager",
+    "clause.select_for_update",
+    "clause.select_for_update.nowait",
+    "clause.select_for_update.skip_locked",
+    "clause.select_for_update.of",
+    "clause.select_for_update.no_key",
+)
+"""The construct names of `Query` clauses and `ForUpdate` options."""
+
+NESTED_PATH = "path.nested"
+"""The construct name of a field path with several segments (``club__name``): a relation or a transform. `F` reports
+it, and `Query` for its ``values()``, ``only()``, ``defer()`` and ``distinct()`` fields."""
+
+
+def construct_names() -> frozenset[str]:
+    """Every construct name an operation can report: `CLAUSES`, ``aggregate.distinct`` and ``aggregate.filter``, and
+    `NESTED_PATH`, and the ``construct`` of every `Node` subclass defined so far (custom lookups and functions
+    included)."""
+    names = {*CLAUSES, NESTED_PATH, "aggregate.distinct", "aggregate.filter"}
+    pending: list[type[Node]] = [Node]
+    while pending:
+        cls = pending.pop()
+        if cls.construct:
+            names.add(cls.construct)
+        pending.extend(cls.__subclasses__())
+    return frozenset(names)
 
 
 def check_model_label(label: Any) -> str:
@@ -366,6 +401,11 @@ class Query(Node):
         return children if self.for_update is None else (*children, self.for_update)
 
     def _own_constructs(self) -> Iterable[str]:
+        if self.annotations:
+            yield "clause.annotate"
+        paths = (*self.select, *self.distinct_fields, *(self.only_fields or ()), *self.deferred_fields)
+        if any("__" in path for path in paths):
+            yield NESTED_PATH
         if self.distinct_fields:
             yield "clause.distinct_on"
         elif self.is_distinct:

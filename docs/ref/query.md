@@ -173,12 +173,16 @@ active & guests            # where: active=True AND guest=True
 #### Construct names
 
 `constructs()` yields the construct names of the filters, the annotations and the ordering, plus
-`clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`
-and the names of `for_update` for the clauses in use. `values()`, `values_list()`, `none()` and slicing have none.
+`clause.annotate`, `clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`,
+`clause.select_related`, `clause.manager` and the names of `for_update` for the clauses in use, and
+[`path.nested`](#adorm-query-nested-path) when a field of `values()`, `values_list()`, `only()`, `defer()` or
+`distinct()` has several segments. `values()` and `values_list()` of plain fields, `none()` and slicing have none.
 
 ```python
 set(Query("library.Loan", manager="objects").filter(archived=False).constructs())
 # {"clause.manager", "lookup.exact"}
+set(Query("clubs.Member").filter(memberships__club__slug="koper-sailing").constructs())
+# {"lookup.exact", "path.nested"}
 ```
 
 #### Encoding
@@ -195,6 +199,35 @@ string `of` raises `TypeError`.
 
 Its construct names are `clause.select_for_update`, plus `clause.select_for_update.<option>` for each option set
 (`nowait`, `skip_locked`, `of`, `no_key`).
+
+### `adorm.query.CLAUSES`
+
+The construct names of `Query` clauses and `ForUpdate` options, a tuple: `clause.annotate`, `clause.distinct`,
+`clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`,
+`clause.select_for_update` and `clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`.
+
+### `adorm.query.NESTED_PATH`
+
+`"path.nested"`: the construct name of a field path with several segments (`club__name`, `address__street`), which
+crosses a relation or applies a transform. [`F`](./expressions) reports it for such a path, and so does a query for
+its `values()`, `only()`, `defer()` and `distinct()` fields. A driver that evaluates only a model's own columns
+leaves it out of its capabilities.
+
+```python
+list(F("club__name").constructs())     # ['path.nested']
+list(F("name").constructs())           # []
+```
+
+### `adorm.query.construct_names()`
+
+Returns every construct name an operation can report, as a frozenset: `CLAUSES`, `NESTED_PATH`,
+`aggregate.distinct`, `aggregate.filter`, and the construct of every node class defined so far, custom
+[lookups](./lookups) and [functions](./expressions) included. A driver's declared constructs are a subset of it.
+
+```python
+"lookup.icontains" in construct_names()                        # True
+DjangoDriver.capabilities.constructs <= construct_names()      # True
+```
 
 ### `adorm.query.as_query(value)`
 

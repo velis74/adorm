@@ -5,11 +5,16 @@
 the demo's PostgreSQL database through Django; writes stay in memory.
 
 Supported: the operations in `CAPABILITIES` on a query of one model: conditions (`Q`, negation, the lookups listed)
-on the model's own fields and foreign key columns, arithmetic with `F` in update values, ordering by fields,
-``distinct()``, slicing and ``values()`` / ``values_list()`` of fields. Field paths across relations and annotations
-raise `NotSupportedError`; constructs outside `CAPABILITIES` are refused before execution. Each model is its own
-table: an MTI child does not write its parent's row, and deletes do not cascade. Unique constraints are not
-enforced, except the primary key.
+on the model's own fields and foreign key columns, with a model instance standing for its primary key, arithmetic
+with `F`, ordering by fields, ``distinct()``, slicing and ``values()`` / ``values_list()`` of fields. Constructs
+outside `CAPABILITIES` (``path.nested`` for field paths across relations, ``clause.annotate`` …) are refused before
+execution; a reverse relation named in a condition raises `NotSupportedError`. A negated condition keeps a row whose
+field in a lookup is NULL, as Django's ``exclude()`` does.
+
+Each model is its own table. An update of a row copies the values to the row with the same primary key of the models
+it shares rows with through multi-table inheritance; inserting or deleting a row of a multi-table inheritance child
+raises `NotSupportedError`, and so does deleting a row that a foreign key references (deletes do not cascade). Unique
+constraints are not enforced, except the primary key.
 
 Transactions read committed rows and their own writes. A write locks its row until the transaction ends; a
 conflicting write of another connection waits for the lock and re-checks the row, and a wait that would close a
@@ -220,6 +225,14 @@ def _model(label: str) -> type[Model]:
         raise ProgrammingError(f"no adorm model is registered as {label!r}") from None
 
 
+def _inheritance(label: str) -> tuple[list[str], list[str]]:
+    """The labels of the registered parents and children of ``label`` in multi-table inheritance."""
+    model = _model(label)
+    parents = [other._meta.label for other in registry if other is not model and issubclass(model, other)]
+    children = [other._meta.label for other in registry if other is not model and issubclass(other, model)]
+    return parents, children
+
+
 def _is_int_field(model: type[Model], name: str) -> bool:
     annotation = model.__pydantic_fields__[name].annotation
     args = typing.get_args(annotation) if typing.get_origin(annotation) in (typing.Union, types.UnionType) else ()
@@ -264,12 +277,17 @@ class _Rows:
                 raise _incomparable(exc) from exc
         if isinstance(node, Node):
             raise NotSupportedError(f"the memory driver does not evaluate {type(node).__name__}")
+        if isinstance(node, Model):
+            return node.pk
         return node
 
-    def condition(self, node: Any, row: Mapping[str, Any]) -> bool | None:
-        """``True``, ``False`` or ``None`` (unknown) for ``row``."""
+    def condition(self, node: Any, row: Mapping[str, Any], negated: bool = False) -> bool | None:
+        """``True``, ``False`` or ``None`` (unknown) for ``row``; ``negated`` tells whether an odd number of negations
+        encloses ``node``. There, as in Django, a lookup on a field whose value is NULL is false, not unknown, so the
+        negation keeps the row."""
         if isinstance(node, Q):
-            results = [self.condition(child, row) for child in node.children]
+            inner = negated != node.negated
+            results = [self.condition(child, row, inner) for child in node.children]
             if node.connector == Q.AND:
                 result = False if False in results else None if None in results else True
             else:
@@ -283,6 +301,8 @@ class _Rows:
                 rhs = tuple(self.value(item, row) for item in node.rhs)
             else:
                 rhs = self.value(node.rhs, row)
+            if negated and ((value is None and isinstance(node.lhs, F)) or (rhs is None and isinstance(node.rhs, F))):
+                return False
             if value is None or rhs is None:
                 return None
             try:
@@ -514,6 +534,12 @@ class MemoryConnection(DriverConnection):
         return copy.deepcopy(rows)
 
     async def _insert(self, label: str, values: Mapping[str, Any]) -> dict[str, Any]:
+        parents, _ = _inheritance(label)
+        if parents:
+            raise NotSupportedError(
+                f"the memory driver does not insert rows of {label}, a multi-table inheritance child of "
+                f"{', '.join(parents)}"
+            )
         model = _model(label)
         pk = model._meta.pk
         row: dict[str, Any] = {}
@@ -554,20 +580,65 @@ class MemoryConnection(DriverConnection):
             for name, value in values:
                 updated[rows.field(name)] = copy.deepcopy(rows.value(value, current))
             self._write(query.model, pk, updated)
+            await self._share(query.model, pk, {rows.field(name): updated[rows.field(name)] for name, _ in values})
             changed += 1
         return changed
 
+    async def _share(self, label: str, pk: Any, values: Mapping[str, Any]) -> None:
+        """Copy ``values`` of the row ``pk`` of ``label`` to the row with that primary key of each model ``label``
+        shares rows with through multi-table inheritance, for the fields that model has."""
+        parents, children = _inheritance(label)
+        for other in (*parents, *children):
+            if other not in self.database.tables:
+                continue
+            row = self._table(other).get(pk)
+            if row is None:
+                continue
+            await self._lock(other, pk)
+            model = _model(other)
+            shared = {name: value for name, value in values.items() if name in model.__pydantic_fields__}
+            shared.pop(model._meta.pk, None)
+            if shared:
+                self._write(other, pk, {**row, **copy.deepcopy(shared)})
+
+    def _reference(self, label: str, pk: Any) -> str | None:
+        """A foreign key (``label.column``) of a row this connection sees that references the row ``pk`` of
+        ``label``; ``None`` when no row does."""
+        for model in registry:
+            other = model._meta.label
+            if other not in self.database.tables:
+                continue
+            for relation in model.__adorm_relations__.values():
+                if not isinstance(relation, ForeignKey) or relation.target != label:
+                    continue
+                if any(row.get(relation.column) == pk for row in self._table(other).values()):
+                    return f"{other}.{relation.column}"
+        return None
+
     async def _delete(self, query: Query) -> tuple[int, dict[str, int]]:
         rows = _Rows(query.model)
-        deleted = 0
+        parents, _ = _inheritance(query.model)
+        matched = []
         for pk in [row[rows.pk] for row in self._select(query)]:
             await self._lock(query.model, pk)
             current = self._table(query.model).get(pk)
-            if current is None or not rows.matches(query, current):
-                continue
+            if current is not None and rows.matches(query, current):
+                matched.append(pk)
+        # Every row is checked before the first one is deleted, so a refusal deletes nothing.
+        if matched and parents:
+            raise NotSupportedError(
+                f"the memory driver does not delete rows of {query.model}, a multi-table inheritance child of "
+                f"{', '.join(parents)}"
+            )
+        for pk in matched:
+            reference = self._reference(query.model, pk)
+            if reference is not None:
+                raise NotSupportedError(
+                    f"the memory driver does not cascade deletes: {reference} references {query.model} {pk!r}"
+                )
+        for pk in matched:
             self._write(query.model, pk, None)
-            deleted += 1
-        return deleted, ({query.model: deleted} if deleted else {})
+        return len(matched), ({query.model: len(matched)} if matched else {})
 
     def _one(self, query: Query) -> dict[str, Any]:
         rows = self._read(query)

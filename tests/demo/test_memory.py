@@ -15,7 +15,7 @@ from adorm.operations import Create, Select, Update
 from adorm.query import F, Q, Query
 from adorm.settings import default_router
 from demo.api import memory
-from demo.models.activities import Activity, Attendance
+from demo.models.activities import Activity, Attendance, Competition
 from demo.models.billing import Invoice, Payment
 from demo.models.clubs import Club, Member, Membership
 from tests.demo.memory_data import executor, START, tables, until
@@ -114,11 +114,15 @@ async def test_filters_with_lookups_q_and_negation(db):  # noqa: ARG001
     assert await names(Member.objects.filter(tags__contains=["junior"])) == ["Ana"]
 
 
-async def test_null_makes_a_condition_unknown_also_under_negation(db):  # noqa: ARG001
+async def test_a_negation_keeps_rows_whose_field_is_null_as_django_does(db):  # noqa: ARG001
     born_before = Member.objects.filter(birth_date__lt=datetime.date(2000, 1, 1))
     assert await names(born_before) == ["Cvetka"]
-    # NOT unknown is unknown: members without a birth date match neither the condition nor its negation.
-    assert await names(Member.objects.exclude(birth_date__lt=datetime.date(2000, 1, 1))) == ["Ana"]
+    assert await names(Member.objects.exclude(birth_date__lt=datetime.date(2000, 1, 1))) == ["Ana", "Bojan", "David"]
+    # A NULL field on the right-hand side of a lookup counts the same.
+    regatta = [activity.name async for activity in Activity.objects.filter(~Q(club_id__lt=F("coach_id")))]
+    assert regatta == ["Regatta"]
+    # Under two negations a NULL field leaves the lookup unknown again.
+    assert await names(Member.objects.filter(~Q(~Q(birth_date__lt=datetime.date(2000, 1, 1))))) == ["Cvetka"]
     assert await names(Member.objects.filter(birth_date__isnull=True)) == ["Bojan", "David"]
     either = Member.objects.filter(Q(birth_date__isnull=True) | Q(birth_date__lt=datetime.date(2000, 1, 1)))
     assert await names(either.order_by("id")) == ["Bojan", "Cvetka", "David"]
@@ -179,9 +183,11 @@ async def test_relations_load_through_their_columns(db):  # noqa: ARG001
 
 
 async def test_relation_paths_and_annotations_are_not_supported(db):  # noqa: ARG001
-    with pytest.raises(adorm.NotSupportedError, match="does not follow relations"):
+    with pytest.raises(adorm.NotSupportedError, match="path.nested"):
         await Membership.objects.filter(club__slug="rowing").count()
-    with pytest.raises(adorm.NotSupportedError, match="annotations"):
+    with pytest.raises(adorm.NotSupportedError, match="does not follow relations"):
+        await Club.objects.filter(memberships=1).count()
+    with pytest.raises(adorm.NotSupportedError, match="clause.annotate"):
         [row async for row in Member.objects.annotate(name=F("first_name"))]
     with pytest.raises(adorm.NotSupportedError, match="function.Lower"):
         await Member.objects.filter(first_name=adorm.Lower("last_name")).count()
@@ -263,6 +269,63 @@ async def test_update_evaluates_field_arithmetic(db):
     assert db.tables["activities.Activity"][2]["price"] == Decimal("20.00")
 
 
+async def test_a_delete_of_a_referenced_row_is_refused_and_deletes_nothing(db):
+    assert await Invoice.objects.filter(status="draft").delete() == (1, {"billing.Invoice": 1})
+    # Member 4 is no longer referenced, member 2 still is (a membership, an activity's coach).
+    with pytest.raises(adorm.NotSupportedError, match="does not cascade deletes: .* references clubs.Member 2"):
+        await Member.objects.filter(pk__in=[4, 2]).delete()
+    assert [row["id"] for row in db.rows("clubs.Member")] == [1, 2, 3, 4]
+    async with adorm.atomic():
+        with pytest.raises(adorm.NotSupportedError):
+            await Member.objects.filter(pk__in=[4, 2]).delete()
+        # The refusal changed nothing, so the transaction goes on.
+        assert await Member.objects.filter(pk=4).delete() == (1, {"clubs.Member": 1})
+    assert [row["id"] for row in db.rows("clubs.Member")] == [1, 2, 3]
+
+
+@pytest.fixture
+def competition(db):
+    """Activity 2 is also a competition: the child's row repeats the parent's fields."""
+    db.tables["activities.Competition"] = {
+        2: {**db.tables["activities.Activity"][2], "activity_ptr_id": 2, "discipline": "Eights", "entry_deadline": None}
+    }
+    return db
+
+
+async def test_updates_reach_the_rows_shared_through_multi_table_inheritance(competition):
+    db = competition
+    assert await Activity.objects.filter(pk=2).update(capacity=F("capacity") + 1) == 1
+    assert db.tables["activities.Competition"][2]["capacity"] == 6
+    assert await Competition.objects.filter(pk=2).update(discipline="Pairs", price=Decimal("1.00")) == 1
+    assert db.tables["activities.Activity"][2]["price"] == Decimal("1.00")
+    assert "discipline" not in db.tables["activities.Activity"][2]
+    async with adorm.atomic():
+        regatta = await Competition.objects.get(pk=2)
+        regatta.capacity = 9
+        await regatta.save(update_fields=["capacity"])
+        assert (await Activity.objects.get(pk=2)).capacity == 9
+        assert db.tables["activities.Activity"][2]["capacity"] == 6
+    assert db.tables["activities.Activity"][2]["capacity"] == 9
+    # Activity 1 has no competition row.
+    assert await Activity.objects.filter(pk=1).update(capacity=3) == 1
+    assert list(db.tables["activities.Competition"]) == [2]
+
+
+async def test_inserting_and_deleting_multi_table_rows_is_refused(competition):
+    db = competition
+    with pytest.raises(adorm.NotSupportedError, match="multi-table inheritance child of activities.Activity"):
+        await Competition.objects.create(
+            club_id=1, name="Cup", starts_at=START, duration=datetime.timedelta(hours=1), capacity=4, discipline="X"
+        )
+    with pytest.raises(adorm.NotSupportedError, match="multi-table inheritance child"):
+        await Competition.objects.filter(pk=2).delete()
+    with pytest.raises(adorm.NotSupportedError, match="activities.Competition.activity_ptr_id references"):
+        await Activity.objects.filter(pk=2).delete()
+    assert list(db.tables["activities.Competition"]) == [2]
+    assert list(db.tables["activities.Activity"]) == [1, 2]
+    assert await Competition.objects.filter(pk=99).delete() == (0, {})
+
+
 async def test_delete_counts_the_rows_without_cascading(db):
     assert await Invoice.objects.filter(status="draft").delete() == (1, {"billing.Invoice": 1})
     assert await Invoice.objects.filter(status="draft").delete() == (0, {})
@@ -292,10 +355,12 @@ async def test_commit_publishes_and_rollback_discards(db):
     assert db.tables["clubs.Member"][1]["level"] == "advanced"
     with pytest.raises(RuntimeError):
         async with adorm.atomic():
-            await Member.objects.create(first_name="Eva", last_name="Kos", email="eva@x", joined=START)
-            await Member.objects.filter(pk=2).delete()
+            eva = await Member.objects.create(first_name="Eva", last_name="Kos", email="eva@x", joined=START)
+            await Member.objects.filter(pk=4).update(level="advanced")
+            await Member.objects.filter(pk=eva.pk).delete()
             raise RuntimeError
     assert [row["id"] for row in db.rows("clubs.Member")] == [1, 2, 3, 4]
+    assert db.tables["clubs.Member"][4]["level"] == "beginner"
     created = await Member.objects.create(first_name="Eva", last_name="Kos", email="eva@x", joined=START)
     assert created.id == 6  # a rollback does not return sequence values
 

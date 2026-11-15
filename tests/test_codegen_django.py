@@ -367,11 +367,11 @@ def test_introspect_selects_apps_and_models():
 
 
 def test_introspect_defaults_to_every_app_in_installed_apps_order():
-    assert [app.label for app in introspect()] == ["contenttypes", "auth", "library"]
+    assert [app.label for app in introspect()] == ["contenttypes", "auth", "library", "clubs", "activities", "billing"]
 
 
 def test_introspect_excludes_apps_and_models():
-    apps = introspect(exclude=["contenttypes", "library.Note", "library.Edition"])
+    apps = introspect(exclude=["contenttypes", "clubs", "activities", "billing", "library.Note", "library.Edition"])
     assert [app.label for app in apps] == ["auth", "library"]
     labels = {model.label for model in apps[1].models}
     assert "library.Note" not in labels

@@ -46,6 +46,8 @@ CAPABILITIES = Capabilities(
     operations={"select", "get", "first", "last", "count", "exists"},
     constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
     | {
+        "path.nested",
+        "clause.annotate",
         "clause.distinct",
         "clause.distinct_on",
         "clause.only",

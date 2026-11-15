@@ -73,6 +73,25 @@ def test_unsupported_construct_of_supported_kind():
 
 def test_not_supported_is_a_database_error():
     assert issubclass(NotSupportedError, DatabaseError)
+    error = NotSupportedError("no")
+    assert (error.driver, error.unsupported, error.sqlstate, error.original) == (None, (), None, None)
+
+
+def test_a_failed_check_names_the_driver_and_what_it_lacks():
+    with pytest.raises(
+        NotSupportedError, match=r"needs unsupported delete, aggregate.Count \(driver 'fake'\)$"
+    ) as raised:
+        CAPS.check(Op("delete", "aggregate.Count", "lookup.exact"), "fake")
+    assert (raised.value.driver, raised.value.unsupported) == ("fake", ("delete", "aggregate.Count"))
+    with pytest.raises(NotSupportedError, match=r"^savepoints are not supported \(driver 'fake'\)$") as raised:
+        CAPS.check_savepoints("fake")
+    assert raised.value.unsupported == ("savepoints",)
+    with pytest.raises(NotSupportedError, match="work_mem \\(driver 'fake'\\)") as raised:
+        CAPS.check_options({"work_mem": "1MB"}, "fake")
+    assert raised.value.unsupported == ("work_mem",)
+    with pytest.raises(NotSupportedError) as raised:
+        CAPS.check(Op("delete"))
+    assert raised.value.driver is None
 
 
 def test_check_options():
@@ -251,3 +270,23 @@ def test_map_error_defaults_to_wrap_driver_error():
     mapped = BareConnection(BareDriver(CAPS)).map_error(error)
     assert isinstance(mapped, IntegrityError)
     assert mapped.original is error
+
+
+async def test_driver_check_runs_before_the_connection_and_before_a_slot():
+    from adorm import ConnectionProfile, create_session
+    from adorm.executor import Pool, Router
+
+    driver = BareDriver(CAPS)
+    with pytest.raises(NotSupportedError, match=r"lookup.icontains \(driver 'bare'\)") as raised:
+        driver.check(Op("select", "lookup.icontains"))
+    assert raised.value.driver == "bare"
+    driver.check(Op("select", "lookup.exact"))
+    router = Router([Pool(driver, ConnectionProfile("default", driver), max_connections=1)])
+    try:
+        with pytest.raises(NotSupportedError, match="'delete' operation"):
+            await router.run(create_session(), Op("delete"))
+        assert router.pools[0].size == 0
+        assert await router.run(create_session(), Op("select")) == "executed"
+        assert router.pools[0].size == 1
+    finally:
+        await router.close()

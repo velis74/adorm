@@ -113,22 +113,37 @@ class Capabilities:
         missing = [] if operation.kind in self.operations else [operation.kind]
         return missing + sorted(set(operation.constructs()) - self.constructs)
 
-    def check(self, operation: Operation) -> None:
-        """Raise `NotSupportedError` when the driver does not support ``operation`` or a construct it uses."""
+    def check(self, operation: Operation, driver: str | None = None) -> None:
+        """Raise `NotSupportedError` when the driver does not support ``operation`` or a construct it uses.
+
+        ``driver`` is the driver's name, which the message and `NotSupportedError.driver` carry.
+        """
         missing = self.unsupported(operation)
         if missing:
-            raise NotSupportedError(f"{operation.kind!r} operation needs unsupported {', '.join(missing)}")
+            raise NotSupportedError(
+                f"{operation.kind!r} operation needs unsupported {', '.join(missing)}{_on(driver)}",
+                driver=driver,
+                unsupported=missing,
+            )
 
-    def check_savepoints(self) -> None:
+    def check_savepoints(self, driver: str | None = None) -> None:
         """Raise `NotSupportedError` when the driver does not implement savepoints."""
         if not self.savepoints:
-            raise NotSupportedError("savepoints are not supported")
+            raise NotSupportedError(
+                f"savepoints are not supported{_on(driver)}", driver=driver, unsupported=["savepoints"]
+            )
 
-    def check_options(self, options: Iterable[str]) -> None:
+    def check_options(self, options: Iterable[str], driver: str | None = None) -> None:
         """Raise `NotSupportedError` naming every option the driver does not support."""
         missing = sorted(set(options) - self.connection_options)
         if missing:
-            raise NotSupportedError(f"unsupported connection options: {', '.join(missing)}")
+            raise NotSupportedError(
+                f"unsupported connection options: {', '.join(missing)}{_on(driver)}", driver=driver, unsupported=missing
+            )
+
+
+def _on(driver: str | None) -> str:
+    return "" if driver is None else f" (driver {driver!r})"
 
 
 _CONNECTION_LOST_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
@@ -185,32 +200,29 @@ class DriverConnection(ABC):
     async def execute(self, operation: Operation) -> Any:
         """Execute ``operation``; return plain data: rows as dicts keyed by adorm field names, a scalar or a count.
 
-        A `adorm.operations.Call` reaches ``_execute()`` only when the registered model declares the method
-        (`adorm.models.find_driver_method()`); otherwise `NotSupportedError`.
+        `Driver.check()` runs first, so an unsupported operation never reaches ``_execute()``.
         """
-        self.driver.capabilities.check(operation)
-        if operation.kind == "call":
-            _check_call(operation)
+        self.driver.check(operation)
         return await self._execute(operation)
 
     async def savepoint(self, name: str) -> None:
         """Create the savepoint ``name`` in the open transaction."""
-        self.driver.capabilities.check_savepoints()
+        self.driver.capabilities.check_savepoints(self.driver.name)
         await self._savepoint(name)
 
     async def release_savepoint(self, name: str) -> None:
         """Release the savepoint ``name``."""
-        self.driver.capabilities.check_savepoints()
+        self.driver.capabilities.check_savepoints(self.driver.name)
         await self._release_savepoint(name)
 
     async def rollback_to_savepoint(self, name: str) -> None:
         """Roll back to the savepoint ``name``."""
-        self.driver.capabilities.check_savepoints()
+        self.driver.capabilities.check_savepoints(self.driver.name)
         await self._rollback_to_savepoint(name)
 
     async def set_options(self, options: Mapping[str, Any], local: bool) -> None:
         """Set connection options; ``local`` limits them to the open transaction (``SET LOCAL``)."""
-        self.driver.capabilities.check_options(options)
+        self.driver.capabilities.check_options(options, self.driver.name)
         await self._set_options(dict(options), local)
 
     @property
@@ -304,6 +316,14 @@ class Driver(ABC):
         mode = cls.__dict__.get("mode")
         if mode is not None and mode not in _MODES:
             raise TypeError(f"{cls.__name__}.mode must be one of {_MODES}, not {mode!r}")
+
+    def check(self, operation: Operation) -> None:
+        """Raise `NotSupportedError` when this driver does not support ``operation``: its kind or a construct it uses
+        is missing from `capabilities`, or it is an `adorm.operations.Call` of a method the registered model does not
+        declare (`adorm.models.find_driver_method()`). Does no I/O."""
+        self.capabilities.check(operation, self.name)
+        if operation.kind == "call":
+            _check_call(operation)
 
     def is_refusal(self, exc: BaseException) -> bool:
         """Whether ``exc``, raised by `open_connection()`, means the database refuses more connections.

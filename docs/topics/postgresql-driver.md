@@ -194,20 +194,23 @@ asyncpg's by their SQLSTATE ([`wrap_driver_error()`](/ref/exceptions#adorm-excep
 | a terminated backend, a closed socket | `OperationalError` (`57P01`, `08003` …) or `InterfaceError` |
 | an unknown database when connecting | `OperationalError`, SQLSTATE `3D000` |
 
-A statement error leaves the connection in the pool; a connection error takes it out
+A statement error leaves the connection in the pool; a connection error or a cancelled statement takes it out
 ([`is_connection_error()`](/ref/drivers#adorm-drivers-is-connection-error-exc)), and the next request gets a new
 connection.
 
 ## Cancellation
 
-Cancelling the task that awaits a read cancels the running statement: asyncpg sends PostgreSQL a cancel request,
-the task gets `asyncio.CancelledError`, and the connection stays in the pool. The connection's next statement starts
-only after the cancel request has been handled, so it cannot cancel a later statement. A read that completes just
-before the cancellation arrives is discarded.
+Cancelling the task that awaits a read cancels the running statement: asyncpg sends PostgreSQL a cancel request
+and the task gets `asyncio.CancelledError`. A read that completes just before the cancellation arrives is
+discarded.
 
 [`AsyncpgConnection.cancel()`](/ref/drivers#adorm-drivers-asyncpg-asyncpgconnection) may be called from any
-thread: it cancels the statement running at that moment, which then raises `OperationalError` with SQLSTATE `57014`; a statement that starts later is not
-affected.
+thread: it cancels the statement running at that moment, which then raises `OperationalError` with SQLSTATE
+`57014`; a statement that starts later is not affected.
+
+A statement cancelled either way before it finished takes its connection out of the pool: the server may have run
+the statement without the protocol's closing Sync message, and then keeps its transaction and locks open until
+the connection's next message. The slot closes the connection, and the next request gets a new one.
 
 ```python
 task = asyncio.create_task(Report.objects.filter(year=2026).count())

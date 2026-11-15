@@ -61,6 +61,7 @@ export default defineConfig({
           { text: 'The Django driver', link: '/topics/django-driver' },
           { text: 'The native PostgreSQL driver', link: '/topics/postgresql-driver' },
           { text: 'SQL compilation for asyncpg', link: '/topics/sql-compilation' },
+          { text: 'Driver conformance suite', link: '/topics/conformance' },
         ],
       },
       {

@@ -627,7 +627,12 @@ class Router:
             await lease.release()
 
     async def run(self, session: Session, operation: Operation) -> Any:
-        """Acquire a slot for ``session``, execute ``operation``, release the slot and return the result."""
+        """Acquire a slot for ``session``, execute ``operation``, release the slot and return the result.
+
+        An operation the pool's driver does not support raises `NotSupportedError` before a slot is acquired
+        (`Driver.check()`)."""
+        pool = await self.get_pool(session.using)
+        pool.driver.check(operation)
         lease = await self._acquire_bound(session, None)
         try:
             return await lease.call("execute", operation)

@@ -182,7 +182,14 @@ current task (the default), those of `held_leases()`.
 #### `async run(session, operation)`
 
 Acquires a slot for `session`, executes `operation`, releases the slot and returns the result; the slot is released
-also after an error or a cancellation.
+also after an error or a cancellation. An operation the pool's driver does not support raises `NotSupportedError`
+([`Driver.check()`](/ref/drivers#check-operation)) before a slot is acquired.
+
+```python
+await router.run(session, Select(Member.objects.annotate(n=Length("first_name")).query))
+# NotSupportedError: 'select' operation needs unsupported clause.annotate, function.Length (driver 'memory')
+# raised before a slot is acquired
+```
 
 ```python
 rows = await router.run(create_session("reports", "nightly"), operation)
