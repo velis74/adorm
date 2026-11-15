@@ -951,6 +951,23 @@ async def test_a_savepoint_whose_rollback_fails_marks_the_outer_block(setup):
     assert calls(driver)[-1] == ("rollback", None)
 
 
+async def test_an_explicit_savepoint_rollback_that_fails_raises_and_marks_the_outer_block(setup):
+    _, driver = setup.pool()
+    session = unique_session()
+    with pytest.raises(TransactionManagementError):
+        async with session.atomic():
+            async with session.atomic() as savepoint:
+                driver.connections[0].errors["rollback_to_savepoint"] = OperationalError("gone")
+                with pytest.raises(OperationalError, match="gone"):
+                    await savepoint.rollback()
+                with pytest.raises(TransactionClosed):
+                    await session.execute(Op())
+            with pytest.raises(TransactionManagementError):
+                await session.execute(Op())
+    assert calls(driver)[-1] == ("rollback", None)
+    assert ("release_savepoint", "adorm_sp_1") not in calls(driver)
+
+
 @pytest.mark.parametrize("attempt", REPEAT)
 async def test_cancelling_a_savepoint_while_it_ends_marks_the_outer_block(setup, attempt):  # noqa: ARG001
     _, driver = setup.pool()

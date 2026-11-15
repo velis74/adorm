@@ -526,6 +526,32 @@ async def test_a_slot_handed_to_a_waiter_that_is_cancelled_meanwhile_is_not_lost
 
 
 @pytest.mark.parametrize("attempt", REPEAT)
+async def test_capacity_handed_to_a_waiter_that_is_cancelled_meanwhile_is_not_lost(attempt):  # noqa: ARG001
+    router, pool, _ = make(max_connections=1)
+    lease = await router.acquire(session("holder"))
+    waiter = asyncio.create_task(router.acquire(session("waiter")))
+    await until(lambda: pool.waiting == 1)
+    freed = pool._capacity_freed
+
+    def grant_then_cancel():
+        # The waiter is cancelled after it was granted capacity to open a slot and before it resumes.
+        pool._capacity_freed = freed
+        freed()
+        assert pool._opening == 1
+        waiter.cancel()
+
+    pool._capacity_freed = grant_then_cancel
+    await lease.release(discard=True)
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    await until(lambda: pool.size == 0)
+    assert (pool._opening, pool.waiting) == (0, 0)
+    again = await router.acquire(session("again"), timeout=GUARD)
+    assert pool.size == 1
+    await again.release()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
 async def test_cancelling_a_waiter_frees_its_place(attempt):  # noqa: ARG001
     router, pool, _ = make(max_connections=1)
     lease = await router.acquire(session("holder"))
