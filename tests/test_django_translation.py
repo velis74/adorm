@@ -640,3 +640,80 @@ def test_only_asgiref_storage_is_re_tagged():
     adopt_context_locals()
     assert other.get() == {"value": 1}
     assert unrelated.get().thread_id == 0
+
+
+# pinned_alias()
+
+
+class _Elsewhere:
+    def db_for_read(self, model, **hints):  # noqa: ARG002
+        return "elsewhere"
+
+    db_for_write = db_for_read
+
+
+@pytest.fixture
+def project_routers(monkeypatch):
+    """Django's routers: one project router that sends every query to ``elsewhere``."""
+    from django.db import router
+
+    monkeypatch.setattr(router, "routers", [_Elsewhere()])
+    return router
+
+
+def test_a_pinned_alias_routes_reads_and_writes_ahead_of_the_projects_routers(project_routers):
+    from adorm.drivers.django.translation import pinned_alias
+    from tests.djangoproject.library import models as dj
+
+    before = project_routers.routers
+    with pinned_alias("second"):
+        assert project_routers.db_for_read(dj.Author) == "second"
+        assert project_routers.db_for_write(dj.Author, instance=dj.Author()) == "second"
+        with pinned_alias("third"):
+            assert project_routers.db_for_read(dj.Author) == "third"
+        assert project_routers.db_for_read(dj.Author) == "second"
+    assert project_routers.db_for_read(dj.Author) == "elsewhere"
+    assert len(before) == 1  # replaced, not changed in place, while other threads may iterate it
+    pinned = project_routers.routers
+    with pinned_alias("second"):
+        assert project_routers.routers is pinned
+
+
+def test_a_pinned_alias_stays_in_its_thread(project_routers):
+    from adorm.drivers.django.translation import pinned_alias
+    from tests.djangoproject.library import models as dj
+
+    inside, release = threading.Event(), threading.Event()
+    seen = []
+
+    def pinned():
+        with pinned_alias("second"):
+            inside.set()
+            release.wait(5)
+            seen.append(project_routers.db_for_read(dj.Author))
+
+    thread = threading.Thread(target=pinned)
+    thread.start()
+    try:
+        assert inside.wait(5)
+        assert project_routers.db_for_read(dj.Author) == "elsewhere"
+        context = contextvars.copy_context()
+        assert context.run(project_routers.db_for_read, dj.Author) == "elsewhere"
+    finally:
+        release.set()
+        thread.join()
+    assert seen == ["second"]
+
+
+def test_a_pinned_alias_survives_djangos_router_reset(project_routers):
+    from django.db.utils import ConnectionRouter
+
+    from adorm.drivers.django.translation import pinned_alias
+    from tests.djangoproject.library import models as dj
+
+    with pinned_alias("second"):
+        pass
+    project_routers.routers = ConnectionRouter().routers  # what override_settings(DATABASE_ROUTERS=...) does
+    with pinned_alias("second"):
+        assert project_routers.db_for_read(dj.Author) == "second"
+    assert project_routers.db_for_read(dj.Author) == "default"

@@ -1,7 +1,8 @@
 """Django settings for the test suite.
 
 The database comes from ``ADORM_TEST_DATABASE_URL``; pytest-django creates and drops the
-``adorm_test`` database on that server (``ADORM_TEST_DATABASE_NAME`` names another).
+``adorm_test`` database on that server (``ADORM_TEST_DATABASE_NAME`` names another). The alias ``second`` is the
+same test database.
 """
 
 import os
@@ -58,3 +59,5 @@ INSTALLED_APPS = [
 ADORM_EXPOSE = ["auth.User.objects.create_user"]
 
 DATABASES = {"default": database_from_url(os.environ.get("ADORM_TEST_DATABASE_URL", DEFAULT_DATABASE_URL))}
+# The test database under a second alias, with connections of its own.
+DATABASES["second"] = {**DATABASES["default"], "TEST": {"MIRROR": "default"}}

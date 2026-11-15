@@ -83,7 +83,24 @@ Profile hooks (`on_acquire`, `on_release`) receive the wrapper and run on the sl
 [Multiple database users](/howto/multiple-database-users).
 
 Every ORM call of the driver runs on the profile's alias: query sets with `using(alias)`, `save(using=alias)`,
-`transaction.atomic(using=alias)`.
+`transaction.atomic(using=alias)`. Inside `full_clean()` the queries Django routes itself (the unique checks, the
+constraints, foreign key validation, the queries of the model's `clean()`) go to the profile's alias too, ahead of the
+project's `DATABASE_ROUTERS` ([`pinned_alias()`](/ref/drivers#adorm-drivers-django-translation-pinned-alias-alias)),
+so they run on the slot's connection and see its open transaction:
+
+```python
+adorm.configure(profiles={"tenant": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "tenant"}})
+
+tenant = adorm.create_session("tenant")
+async with tenant.atomic():
+    await tenant.Member.create(name="Ann", email="ann@example.com")
+    with tenant.activate():
+        await Member(name="Ann 2", email="ann@example.com").full_clean()
+        # ValidationError({'email': ['Member with this Email already exists.']})
+```
+
+A `full_clean()` that a model's `save()` calls itself is not pinned: its queries go to the alias the project's routers
+choose.
 
 ## The caller's context
 
@@ -214,7 +231,7 @@ signals and the overrides of the query's manager run as in Django code, on the s
 | `obj.delete()` | the instance read with `_base_manager`, then its `delete()`: the model's `delete()` override runs, and Django's own deletes it with the collector; a missing row deletes nothing |
 | `qs.get_or_create(...)`, `qs.update_or_create(...)` | `get_or_create(...)`, `update_or_create(...)` on the query's query set |
 | `Child.objects.create_from_parent(parent, **values)` | the parent read with `_base_manager`, the child built with its values and the parent link, the child's fields' `pre_save()`, then `save_base(raw=True, force_insert=True)`: only the child's table is inserted, `pre_save` / `post_save` receive `raw=True`, and a `save()` override does not run |
-| `obj.full_clean(exclude=[...])` | `full_clean(exclude=..., validate_unique=..., validate_constraints=...)` of the instance with the adorm instance's values over its stored row; the model's `clean()` and its own queries run on the slot's connection |
+| `obj.full_clean(exclude=[...])` | `full_clean(exclude=..., validate_unique=..., validate_constraints=...)` of the instance with the adorm instance's values over its stored row; the model's `clean()` and every query of the validation, its own included, run on the slot's connection (the profile's alias, whatever the project's routers choose) |
 
 A save of an instance with a primary key that the database has no row for inserts the row when the instance was not
 loaded with every field, as Django does for a complete instance; the driver checks the row with one `exists()` query

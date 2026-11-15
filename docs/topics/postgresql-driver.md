@@ -191,7 +191,7 @@ statements Django's own method would run, one after the other on the slot's conn
 | `qs.delete()`, `obj.delete()` | Django's deletion collector: the referencing rows by `on_delete` (`CASCADE`, `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `SET()`, `DO_NOTHING`, and the `DB_*` handlers of Django 6.1, which the database applies), generic relations, multi-table inheritance parents, then the `UPDATE`s and `DELETE`s, in a transaction |
 | `qs.get_or_create(...)`, `qs.update_or_create(...)` | Django's steps: the `get()`, then the create in a savepoint (in a transaction outside one) and a second `get()` after an `IntegrityError`; `update_or_create()` reads the row with `select_for_update()` and saves it in one atomic block |
 | `Child.objects.create_from_parent(parent, **values)` | the parent's row read as Django's `get()`, then Django's insert of the child's own table only, with the parent link and the child's fields |
-| `obj.full_clean(exclude=[...])` | Django's `full_clean()` as Python on the event loop: each statement the validation runs (unique checks, constraints, queries of the model's `clean()`) is compiled and awaited, and the validation runs again with the rows until it needs no more statements |
+| `obj.full_clean(exclude=[...])` | Django's `full_clean()` as Python on the event loop: each statement the validation runs (unique checks, constraints, queries of the model's `clean()`, routed to the profile's alias whatever the project's routers choose) is compiled and awaited, and the validation runs again with the rows until it needs no more statements |
 
 ```python
 book = await Book.objects.create(isbn="9780000000099", title="New", pages=10)

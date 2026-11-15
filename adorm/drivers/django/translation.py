@@ -10,12 +10,15 @@ of the registered adorm model each segment reaches; a model without a registered
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import datetime
 import decimal
 import itertools
+import threading
 import uuid
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -55,6 +58,7 @@ __all__ = [
     "orm_path",
     "output_field",
     "parent_link_field",
+    "pinned_alias",
     "validation_error",
     "subquery",
     "table_model",
@@ -860,6 +864,39 @@ def _loaded_values(model: type[dj.Model], operation: Any) -> tuple[dict[str, Any
     kwargs = field_kwargs(operation.model, operation.values)
     opts = model._meta
     return kwargs, {opts.get_field(key).attname: value for key, value in kwargs.items()}
+
+
+class _AliasPin:
+    """A Django database router that sends every read and write in a `pinned_alias()` block to its alias."""
+
+    def db_for_read(self, model: Any, **hints: Any) -> str | None:  # noqa: ARG002
+        return _PINNED_ALIAS.get()
+
+    db_for_write = db_for_read
+
+
+_PINNED_ALIAS: contextvars.ContextVar[str | None] = contextvars.ContextVar("adorm_pinned_alias", default=None)
+_ALIAS_PIN = _AliasPin()
+_ALIAS_PIN_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def pinned_alias(alias: str) -> Iterator[None]:
+    """Route every query Django code runs in the block, in the current context, to the database ``alias``, ahead of
+    the project's ``DATABASE_ROUTERS``; other threads and contexts keep their routing."""
+    from django.db import router
+
+    if router.routers[:1] != [_ALIAS_PIN]:
+        with _ALIAS_PIN_LOCK:
+            routers = router.routers
+            if routers[:1] != [_ALIAS_PIN]:
+                # A new list: threads routing now keep iterating the old one.
+                router.routers = [_ALIAS_PIN, *(r for r in routers if r is not _ALIAS_PIN)]
+    token = _PINNED_ALIAS.set(alias)
+    try:
+        yield
+    finally:
+        _PINNED_ALIAS.reset(token)
 
 
 def clean_needs_row(operation: Any) -> bool:

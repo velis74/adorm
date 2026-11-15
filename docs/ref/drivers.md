@@ -750,6 +750,24 @@ when `clean_needs_row()` is true; `None` when there is none), over the values al
 (`Model.from_db()`), or over a new instance's defaults with the operation's primary key. Its `_state.adding` is the
 operation's `adding` and its `_state.db` is `alias`, the database Django's constraint validation reads.
 
+### `adorm.drivers.django.translation.pinned_alias(alias)`
+
+Context manager: every query that Django code in the block routes through `django.db.router` (a query set without
+`using()`, `save()` without `using`, an instance's validation) goes to the database `alias`. A router placed first in
+`router.routers`, ahead of the project's `DATABASE_ROUTERS`, answers `db_for_read()` and `db_for_write()` with the alias
+of the innermost block of the current context, and with `None` outside one, so the project's routers decide there. The
+alias is a context variable: other threads and other contexts keep their routing, and an inner block restores the
+outer block's alias. Both drivers run `full_clean()` in a block of the profile's alias.
+
+```python
+from adorm.drivers.django.translation import pinned_alias
+
+with pinned_alias("tenant"):
+    instance.full_clean()                       # unique checks query "tenant"
+    Member.objects.filter(active=True).count()  # "tenant"
+Member.objects.count()                          # the project's routers decide
+```
+
 ### `adorm.drivers.django.translation.clean_exclude(operation)`
 
 The Django field names of the `exclude` names of a `FullClean` operation (adorm field or relation names, mapped

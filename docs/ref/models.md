@@ -192,7 +192,8 @@ Coroutine: validate the instance as the target validates one before a save, with
 [`FullClean`](./operations#adorm-operations-fullclean-model-pk-values-exclude-validate-unique-true-validate-constraints-true-adding-true)
 operation on the instance's executor. On the Django driver it is Django's `Model.full_clean()`: field validation
 (`clean_fields()`), the model's `clean()`, the unique checks (`validate_unique()`) and the model's constraints
-(`validate_constraints()`).
+(`validate_constraints()`). Every query of the validation runs on the session's slot, on the profile's database
+alias, whatever the project's Django routers choose, so it sees the session's open transaction.
 
 - The instance validated is the one `save()` would write: its loaded and assigned fields over the stored row (for an
   instance with a primary key that is not `_state.adding`; the row is read when fields are missing), otherwise over

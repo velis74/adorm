@@ -472,6 +472,156 @@ async def test_full_clean_exclude_names_are_checked(library, pool):  # noqa: ARG
         await Book(isbn=DUNE, title="x", pages=1).full_clean(exclude=["nothing"])
 
 
+# full_clean() on a profile whose alias is not Django's default
+
+
+SECOND = "second"
+
+
+TWO_ALIASES = pytest.mark.django_db(transaction=True, databases=["default", SECOND])
+
+
+@pytest.fixture
+async def two_pools(driver_class):
+    """A router with the profiles ``default`` (alias ``default``) and ``second`` (the test settings' alias ``second``,
+    the test database with connections of its own)."""
+    pools = {}
+    for name, alias in (("default", "default"), (SECOND, SECOND)):
+        driver = driver_class()
+        pools[name] = Pool(driver, ConnectionProfile(name, driver, alias=alias), max_connections=2)
+    router = Router(list(pools.values()))
+    previous = set_runner(router)
+    try:
+        yield pools
+    finally:
+        set_runner(previous)
+        await router.close()
+
+
+class Elsewhere:
+    """A project router that sends every query to an alias Django does not know."""
+
+    def db_for_read(self, model, **hints):  # noqa: ARG002
+        return "nowhere"
+
+    db_for_write = db_for_read
+
+
+@TWO_ALIASES
+@pytest.mark.parametrize("attempt", range(3))
+async def test_full_clean_on_a_second_alias_sees_its_transactions_writes(library, two_pools, attempt):  # noqa: ARG001
+    second = adorm.create_session(SECOND, f"clean-{attempt}")
+    async with second.atomic() as transaction:
+        eve = await second.Author.create(name="Eve", slug="eve")
+        with second.activate():
+            with pytest.raises(ValidationError) as raised:
+                await Author(name="Eve 2", slug="eve").full_clean()
+            assert list(raised.value.message_dict) == ["slug"]
+            await Author(name="Kim", slug="kim", mentor_id=eve.id).full_clean()
+        # The default profile's connections do not see the uncommitted row.
+        await Author(name="Eve 2", slug="eve").full_clean()
+        with pytest.raises(ValidationError) as raised:
+            await Author(name="Kim", slug="kim", mentor_id=eve.id).full_clean()
+        assert list(raised.value.message_dict) == ["mentor"]
+        await transaction.rollback()
+    assert all(pool.in_use == 0 for pool in two_pools.values())
+
+
+@TWO_ALIASES
+@pytest.mark.parametrize("attempt", range(3))
+async def test_concurrent_full_cleans_on_two_aliases_check_their_own_transactions(library, two_pools, attempt):  # noqa: ARG001
+    """Each flow writes a row only its open transaction sees and validates a duplicate of the other's row as well."""
+
+    async def flow(using, mine, theirs):
+        session = adorm.create_session(using, f"race-{attempt}")
+        async with session.atomic() as transaction:
+            await session.Author.create(name=mine.title(), slug=mine)
+            outcomes = []
+            with session.activate():
+                for _ in range(5):
+                    for slug in (mine, theirs):
+                        try:
+                            await Author(name="X", slug=slug).full_clean()
+                        except ValidationError:
+                            outcomes.append((slug, "taken"))
+                        else:
+                            outcomes.append((slug, "free"))
+                        await asyncio.sleep(0)
+            await transaction.rollback()
+        return outcomes
+
+    first, second = await asyncio.gather(flow("default", "ivy", "jan"), flow(SECOND, "jan", "ivy"))
+    assert first == [("ivy", "taken"), ("jan", "free")] * 5
+    assert second == [("jan", "taken"), ("ivy", "free")] * 5
+    assert all(pool.in_use == 0 for pool in two_pools.values())
+    assert await Author.objects.filter(slug__in=["ivy", "jan"]).count() == 0
+
+
+def no_second_zed(monkeypatch):
+    """Give `dj.Author` a ``clean()`` that queries its default manager without ``using()``."""
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    def clean(self):  # noqa: ARG001
+        if dj.Author.objects.filter(name="Zed").exists():
+            raise DjangoValidationError("Zed is taken.", code="zed_taken")
+
+    monkeypatch.setattr(dj.Author, "clean", clean)
+
+
+@TWO_ALIASES
+@pytest.mark.parametrize("attempt", range(3))
+@pytest.mark.parametrize("routed", [False, True], ids=["django-routers", "project-router"])
+async def test_full_clean_runs_the_models_clean_queries_on_the_profiles_alias(
+    library,  # noqa: ARG001
+    two_pools,
+    monkeypatch,
+    attempt,
+    routed,
+):
+    from django.db import router
+
+    no_second_zed(monkeypatch)
+    if routed:
+        monkeypatch.setattr(router, "routers", [Elsewhere()])
+    second = adorm.create_session(SECOND, f"model-clean-{attempt}")
+    async with second.atomic() as transaction:
+        await second.Author.create(name="Zed", slug="zed")
+        with second.activate():
+            with pytest.raises(ValidationError, match="Zed is taken"):
+                await Author(name="Ann 2", slug="ann-2").full_clean()
+        # The default profile's connections do not see the uncommitted row.
+        await Author(name="Ann 2", slug="ann-2").full_clean()
+        await transaction.rollback()
+    with second.activate():
+        await Author(name="Ann 2", slug="ann-2").full_clean()
+    assert all(pool.in_use == 0 for pool in two_pools.values())
+
+
+@TWO_ALIASES
+async def test_full_clean_runs_on_the_profiles_alias_whatever_the_projects_routers(library, two_pools, monkeypatch):
+    from django.db import router
+
+    await reserve(library["reader"], copy=3)
+    elsewhere = Elsewhere()
+    monkeypatch.setattr(router, "routers", [elsewhere])
+    for using in ("default", SECOND):
+        with adorm.create_session(using, "routed").activate():
+            with pytest.raises(ValidationError) as raised:
+                await Author(name="New", slug="ann").full_clean()
+            assert list(raised.value.message_dict) == ["slug"]
+            clash = Reservation(reader_id=library["reader"], book_id=DUNE, copy_=3, starts=TODAY, ends=TODAY)
+            with pytest.raises(ValidationError, match="Book and Copy already exists"):
+                await clash.full_clean()
+            loan = Loan(reader_id=library["reader"], book_id="9780000000000", due=TODAY)
+            with pytest.raises(ValidationError) as raised:
+                await loan.full_clean()
+            assert list(raised.value.message_dict) == ["book"]
+    # Outside full_clean() the project's routers decide, here and on the slots' threads.
+    assert router.db_for_read(dj.Author) == "nowhere"
+    assert router.routers[1:] == [elsewhere]
+    assert all(pool.in_use == 0 for pool in two_pools.values())
+
+
 # Codes and params of validation errors
 
 

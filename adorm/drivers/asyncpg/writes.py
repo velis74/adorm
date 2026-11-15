@@ -44,6 +44,7 @@ from adorm.drivers.django.translation import (
     lookup_kwargs,
     model_queryset,
     parent_link_field,
+    pinned_alias,
 )
 from adorm.exceptions import (
     IntegrityError,
@@ -599,11 +600,12 @@ class Writer:
 
         def validate() -> dict[str, Any]:
             instance = clean_instance(operation, self.alias, copy.deepcopy(stored))
-            instance.full_clean(
-                exclude=exclude,
-                validate_unique=operation.validate_unique,
-                validate_constraints=operation.validate_constraints,
-            )
+            with pinned_alias(self.alias):
+                instance.full_clean(
+                    exclude=exclude,
+                    validate_unique=operation.validate_unique,
+                    validate_constraints=operation.validate_constraints,
+                )
             return instance_row(instance)
 
         compiler = self.connection.compiler

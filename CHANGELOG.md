@@ -426,9 +426,11 @@
   adorm names, each error with Django's message, `code` and `params` (`unique_check` in adorm names), identical on
   both drivers. Both drivers map Django's `ValidationError` raised by any operation the same way, keyed by the
   operation's model (`adorm.drivers.django.translation.operation_model()`); on the Django driver this includes a
-  model's `save()` that calls `full_clean()`. The native PostgreSQL driver runs `full_clean()` as Python on the event
-  loop with `DjangoCompiler.replay()` (`StatementNeeded`, a `BaseException`; `MAX_VALIDATION_STATEMENTS`), awaiting
-  each statement the validation runs.
+  model's `save()` that calls `full_clean()`. Every query of `Model.full_clean()` runs on the profile's alias, ahead of
+  the project's Django routers (`adorm.drivers.django.translation.pinned_alias()`); a `full_clean()` that a model's
+  `save()` calls itself queries the alias the project's routers choose. The native PostgreSQL driver runs
+  `full_clean()` as Python on the event loop with `DjangoCompiler.replay()` (`StatementNeeded`, a `BaseException`;
+  `MAX_VALIDATION_STATEMENTS`), awaiting each statement the validation runs.
 - `IntegrityError` describes the violated constraint: `constraint_name`, `table_name`, `schema_name`, `columns`,
   `values` (the key's values as PostgreSQL prints them), `detail`, the `key` property, and `model` and `fields` (the
   label of the table's model and its adorm field names of the key's columns, following `db_column` and renamed

@@ -29,6 +29,7 @@ from adorm.drivers.django.translation import (
     model_queryset,
     operation_model,
     parent_link_field,
+    pinned_alias,
     table_model,
     translate,
     validation_error,
@@ -573,11 +574,13 @@ def _full_clean(alias: str, operation: Any) -> dict[str, Any]:
     if clean_needs_row(operation):
         stored = model._base_manager.using(alias).filter(pk=operation.pk).first()
     instance = clean_instance(operation, alias, stored)
-    instance.full_clean(
-        exclude=clean_exclude(operation),
-        validate_unique=operation.validate_unique,
-        validate_constraints=operation.validate_constraints,
-    )
+    # Every query of the validation runs on the profile's alias.
+    with pinned_alias(alias):
+        instance.full_clean(
+            exclude=clean_exclude(operation),
+            validate_unique=operation.validate_unique,
+            validate_constraints=operation.validate_constraints,
+        )
     return instance_row(instance)
 
 
