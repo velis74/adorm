@@ -28,10 +28,12 @@ def driver_matrix() -> list[str | None]:
     return drivers.available() or [None]
 
 
+REQUIRED = [name.strip() for name in os.environ.get(REQUIRED_DRIVERS_ENV, "").split(",") if name.strip()]
+"""``ADORM_DEMO_REQUIRED_DRIVERS`` (comma-separated names): drivers whose absence fails the suite."""
+
+
 def test_required_drivers_are_available():
-    """``ADORM_DEMO_REQUIRED_DRIVERS`` (comma-separated names) lists drivers whose absence fails the suite."""
-    required = [name for name in os.environ.get(REQUIRED_DRIVERS_ENV, "").split(",") if name.strip()]
-    reasons = {name: drivers.get(name.strip()).unavailable_reason() for name in required}
+    reasons = {name: drivers.get(name).unavailable_reason() for name in REQUIRED}
     assert {name: reason for name, reason in reasons.items() if reason is not None} == {}
 
 
@@ -272,8 +274,18 @@ def _check_data_endpoints(driver, base, database):
         operations = {d["name"]: d["operations"] for d in http.get("/api/drivers").json()}[driver]
         members = http.get("/api/data/members", params={"limit": 100}).json()
         assert len(members["result"]) == members_before
+        assert (members["session"], members["driver"]) == ("default/default", driver)
         if driver == "memory":
             assert [call["call"] for call in members["calls"]] == ["acquire", "select clubs.Member", "release"]
+        available = [d["name"] for d in http.get("/api/drivers").json() if d["available"]]
+        assert set(REQUIRED) <= set(available)
+        for other in available:
+            switched = http.get("/api/data/members", params={"limit": 100}, headers={"X-Adorm-Driver": other}).json()
+            assert (switched["session"], switched["driver"]) == (f"{other}/default", other)
+            assert switched["result"] == members["result"]
+        comparison = http.get("/api/data/compare/members", params={"limit": 100}).json()
+        assert [(read["driver"], read["error"]) for read in comparison["reads"]] == [(name, None) for name in available]
+        assert comparison["same"] is True
         first = members["result"][0]
         assert http.get(f"/api/data/members/{first['id']}").json()["result"] == first
         assert http.get("/api/data/members/999999").status_code == 404
@@ -309,7 +321,8 @@ def _check_data_endpoints(driver, base, database):
 
         state = http.get("/api/executor").json()
         assert state["driver"] == driver
-        assert state["pools"][0]["in_use"] == 0
+        assert {pool["using"] for pool in state["pools"]} == {"default", *available}
+        assert [pool["in_use"] for pool in state["pools"]] == [0] * len(state["pools"])
     database.rollback()
     status = database.execute("SELECT status FROM billing_invoice WHERE id = %s", (invoice,)).fetchone()
     if driver == "memory" or not writes:

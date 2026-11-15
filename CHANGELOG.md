@@ -245,3 +245,10 @@
   parent and child share; inserting or deleting a row of a multi-table inheritance child and deleting a row a foreign
   key references raise `NotSupportedError` (checked for every row before any is deleted); relation paths and
   annotations are refused before execution (`path.nested`, `clause.annotate`).
+- Demo reads on two drivers: the API loads every available driver and registers each as the connection profile named
+  after it (the active driver is also `default`). The read endpoints of `/api/data` run on the driver the header
+  `X-Adorm-Driver` names (422 for a name that is not an available driver), the writes on the active driver; `Traced`
+  reports the `driver`. `GET /api/data/compare/members` reads one page of members on every available driver
+  concurrently and reports whether they agree, with an adorm error of one read in that read's `error`. Tests run the
+  reads on the Django and asyncpg drivers in one process: the same answers, concurrent reads on both, a full pool of
+  one driver not delaying the other, cancellation of a waiting read cancelling its statement, and no slot left in use.

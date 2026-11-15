@@ -64,6 +64,39 @@ with reports.activate():
 await task
 ```
 
+## Sessions on several profiles
+
+A session's `using` decides the [connection profile](/topics/profiles), and so the driver and the pool, of every
+operation that runs in it. The same query code runs on another profile when another session is current, for example
+one a request chooses:
+
+```python
+async def member(pk: int, using: str) -> Member:
+    with adorm.create_session(using, "api").activate():
+        return await Member.objects.get(pk=pk)
+
+await member(3, "django")      # a slot of the "django" profile's pool
+await member(3, "asyncpg")     # a slot of the "asyncpg" profile's pool
+```
+
+Tasks that activate different sessions run on their profiles' pools at the same time; each task's session stays its
+own:
+
+```python
+async def page(using: str) -> list[Member]:
+    with adorm.create_session(using, "compare").activate():
+        return [member async for member in Member.objects.order_by("last_name")[:20]]
+
+async with asyncio.TaskGroup() as group:
+    on_django = group.create_task(page("django"))
+    on_asyncpg = group.create_task(page("asyncpg"))
+assert [m.model_dump() for m in on_django.result()] == [m.model_dump() for m in on_asyncpg.result()]
+```
+
+Each profile has a pool of its own, so a full pool of one profile does not delay operations on another. The
+[demo](/intro/demo#choosing-the-driver-of-a-read) chooses the profile of a read from a request header and compares a
+page read on every driver.
+
 ## Bound models
 
 `Model.objects` returns a `BoundModel`: the model bound to the session that is current when `objects` is read.

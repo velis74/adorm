@@ -1,5 +1,6 @@
 """The demo API in process: every endpoint, the operations it builds and the driver matrix."""
 
+import asyncio
 import datetime
 import decimal
 
@@ -9,6 +10,7 @@ import pytest
 from adorm.drivers import Capabilities, Driver
 from adorm.models import ManyToMany, registry, ReverseForeignKey
 from adorm.operations import Create, Get, GetOrCreate, Operation, Save, Select, Update
+from adorm.settings import get_profile
 from demo.api import drivers, operations
 from demo.api.main import app
 from demo.models import MODELS
@@ -155,27 +157,57 @@ async def test_each_available_driver_reports_what_it_does_not_support(matrix, cl
     assert body["unsupported"]["fake"][0] == "update"
 
 
-async def test_only_the_active_driver_runs_its_setup(monkeypatch):
+async def test_every_available_driver_is_loaded_and_becomes_a_profile(monkeypatch):
     calls = []
     monkeypatch.setattr(
         drivers,
         "DRIVERS",
         (
             drivers.DemoDriver("fake", f"{__name__}:FakeDriver", lambda: calls.append("fake")),
+            MISSING,
             drivers.DemoDriver("other", f"{__name__}:OtherDriver", lambda: calls.append("other")),
         ),
     )
     monkeypatch.setenv(drivers.DRIVER_ENV, "other")
     async with app.router.lifespan_context(app):
-        assert calls == ["other"]
-        assert app.state.drivers["fake"] is FakeDriver
+        assert calls == ["fake", "other"]
+        assert isinstance(app.state.drivers["fake"], FakeDriver)
         assert isinstance(app.state.drivers["other"], OtherDriver)
+        assert get_profile("default").get_driver() is app.state.drivers["other"]
+        assert get_profile("other").get_driver() is app.state.drivers["other"]
+        assert get_profile("fake").get_driver() is app.state.drivers["fake"]
+        assert get_profile("missing") is None
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://demo") as http:
             body = (await http.post("/api/operations/attendances/4/cancel")).json()
             listed = (await http.get("/api/drivers")).json()
+    assert [get_profile(name) for name in ("default", "fake", "other")] == [None, None, None]
     assert body["unsupported"]["fake"][0] == body["unsupported"]["other"][0] == "update"
-    assert [(d["name"], d["active"], d["mode"]) for d in listed] == [("fake", False, "async"), ("other", True, "async")]
+    assert [(d["name"], d["active"], d["mode"]) for d in listed] == [
+        ("fake", False, "async"),
+        ("missing", False, None),
+        ("other", True, "async"),
+    ]
+
+
+def test_a_failing_setup_of_an_inactive_driver_stops_the_startup(monkeypatch):
+    def broken():
+        raise RuntimeError("no database")
+
+    monkeypatch.setattr(
+        drivers,
+        "DRIVERS",
+        (FAKE, drivers.DemoDriver("other", f"{__name__}:OtherDriver", broken)),
+    )
+    monkeypatch.delenv(drivers.DRIVER_ENV, raising=False)
+
+    async def start():
+        async with app.router.lifespan_context(app):
+            pass
+
+    with pytest.raises(RuntimeError, match="no database"):
+        asyncio.run(start())
+    assert get_profile("default") is None
 
 
 async def test_without_drivers_operations_are_built_only(monkeypatch, client):

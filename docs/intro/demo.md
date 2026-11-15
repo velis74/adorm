@@ -7,12 +7,14 @@ API has two groups of endpoints:
 - `/api/operations/...` build adorm operations and answer them encoded, together with what each available driver does
   not support; nothing is executed;
 - `/api/data/...` read and write through [sessions](/topics/sessions) and [transactions](/topics/transactions) on the
-  executor with the active driver, and answer the calls the driver received.
+  executor, and answer the calls the driver received.
 
 The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. The
 [Django driver](/topics/django-driver), the first available one, and the
 [native PostgreSQL driver](/topics/postgresql-driver) (`--driver asyncpg`) execute the reads; the demo's
-[in-memory driver](#memory-driver) (`--driver memory`) also executes the writes.
+[in-memory driver](#memory-driver) (`--driver memory`) also executes the writes. The writes run on the active driver;
+a read runs on any available driver its request names in the header `X-Adorm-Driver`
+(see [Choosing the driver of a read](#choosing-the-driver-of-a-read)).
 
 ## Running it
 
@@ -27,7 +29,7 @@ uv run python demo.py
 
 | Option | Effect |
 |---|---|
-| `--driver NAME` | run the API on that driver (`django`, `asyncpg`, `memory`); default: the first available |
+| `--driver NAME` | make that driver active (`django`, `asyncpg`, `memory`): the writes and the reads without `X-Adorm-Driver` run on it; default: the first available |
 | `--list-drivers` | list the drivers, their classes and whether each is available (with the reason when not), then exit |
 | `--reset` | replace the demo data with the fixed data set |
 | `--setup-only` | set up the database, then exit |
@@ -239,14 +241,17 @@ operation.to_dict(registry)                              # what the endpoint ans
 ## Data endpoints
 
 The endpoints under `/api/data/` run the generated models on the executor. At startup the API registers the active
-driver as the connection profile `default` (pool: `max_connections=4`, `acquire_timeout=5`); without an active
-driver they answer 503. Each request runs in the session `("default", <name>)`, where the name comes from the header
-`X-Adorm-Session` (default `default`; letters, digits, `_` and `-`, at most 40). The answer is `Traced`:
+driver as the connection profile `default` and every available driver as a profile named after it (`django`,
+`asyncpg`, `memory`); each profile has its own pool (`max_connections=4`, `acquire_timeout=5`). Without an active
+driver they answer 503. Each request runs in the session `(<using>, <name>)`: `using` is `default`, or for a read the
+profile of the driver named by the header `X-Adorm-Driver`; the name comes from the header `X-Adorm-Session`
+(default `default`; letters, digits, `_` and `-`, at most 40). The answer is `Traced`:
 
 | Field | Contents |
 |---|---|
 | `result` | what the endpoint read or wrote, as the generated models serialise it |
 | `session` | `using/session_name` of the session |
+| `driver` | the name of the driver that executed the operations |
 | `calls` | the calls the driver received, in order: `slot` (number of the slot's connection), `session` and `call` (`acquire`, `begin`, `select clubs.Member`, `savepoint adorm_sp_1`, `commit`, `release` …); only the memory driver records them |
 
 | Method and path | What runs | Shows |
@@ -259,6 +264,7 @@ driver they answer 503. Each request runs in the session `("default", <name>)`, 
 | `POST /api/data/invoices/{pk}/payments` | `exists`, `create`, `update` in a transaction | an exception in the block rolls the payment back (409 for an invoice that is not open) |
 | `POST /api/data/activities/{pk}/registrations` | a transaction that locks the activity's row, a savepoint per member | a nested `atomic()` rolled back to its savepoint when the activity is full; concurrent registrations for one activity run one after another |
 | `GET /api/data/clubs/{slug}/summary` | three `count` in an `asyncio.TaskGroup` | tasks inherit the session; with `atomic=true` also the transaction and its slot |
+| `GET /api/data/compare/members` | one `select` per available driver, in concurrent tasks | the same query set on several profiles at once (see [below](#choosing-the-driver-of-a-read)) |
 | `GET /api/data/outbox` | nothing | the messages the `on_commit` callbacks queued |
 
 Errors of the executor and the database answer an `ExecutorError` body (`detail`, `error`, `session`,
@@ -343,6 +349,84 @@ The same request again answers 409: the update matches no open invoice, the bloc
 back. Two concurrent payments of one open invoice store one payment: the second transaction's update waits for the
 first one's row lock and then finds the invoice paid.
 
+### Choosing the driver of a read
+
+The read endpoints (`GET /api/data/members`, `/members/{pk}`, `/invoices/{pk}` and `/clubs/{slug}/summary`) take the
+header `X-Adorm-Driver`: the name of an available driver, as `GET /api/drivers` lists it. The request then runs in
+the session `(<driver>, <session name>)` on that driver's profile and pool; without the header it runs on `default`.
+A name that is not an available driver answers 422 with the header in `loc`. The writing endpoints ignore the header
+and run on the active driver: the Django and asyncpg drivers execute reads only.
+
+```bash
+curl http://127.0.0.1:8000/api/data/members/3 -H 'X-Adorm-Driver: asyncpg' -H 'X-Adorm-Session: alice'
+```
+
+```json
+{
+  "result": {"id": 3, "first_name": "…", "last_name": "…", "…": "…"},
+  "session": "asyncpg/alice",
+  "driver": "asyncpg",
+  "calls": []
+}
+```
+
+The endpoint binds nothing to a driver: it makes the session of the chosen profile current, and the models' operations
+run on it.
+
+```python
+def read_target(request: Request, driver: DriverName = None) -> Target:
+    if driver is None:
+        return write_target(request)          # "default"; 503 without an active driver
+    if driver not in request.app.state.drivers:
+        raise RequestValidationError([...])          # 422
+    return Target(driver, driver)
+
+
+@router.get("/members/{pk}")
+async def get_member(pk: Id, target: ReadTarget, session_name: SessionName = "default") -> Traced[Member]:
+    with adorm.create_session(target.using, session_name).activate():
+        member = await Member.objects.get(pk=pk)
+    ...
+```
+
+`GET /api/data/compare/members` takes the parameters of `GET /api/data/members` and reads that page on every
+available driver at once: a task per driver in an `asyncio.TaskGroup`, each in the session `(<driver>, <session
+name>)`. The answer is a `Comparison`: `same` is true when every read succeeded and all answered the same members;
+`reads` has one `DriverRead` per driver (`driver`, `session`, `result`, and `error`, which is
+`<adorm exception class>: <message>` when that read raised an adorm error, such as `SessionTimeout` when its pool had
+no free slot in time; the other reads still run).
+
+```python
+async def read(name: str) -> DriverRead:
+    with adorm.create_session(name, session_name).activate():
+        try:
+            members = [member async for member in member_page(level, search, ordering, offset, limit)]
+        except adorm.AdormError as exc:
+            return DriverRead(driver=name, session=..., result=None, error=f"{type(exc).__name__}: {exc}")
+    return DriverRead(driver=name, session=..., result=members, error=None)
+
+async with asyncio.TaskGroup() as group:
+    tasks = [group.create_task(read(name)) for name in request.app.state.drivers]
+```
+
+```bash
+curl 'http://127.0.0.1:8000/api/data/compare/members?search=nov'
+```
+
+```json
+{
+  "same": true,
+  "reads": [
+    {"driver": "django", "session": "django/default", "result": ["…"], "error": null},
+    {"driver": "asyncpg", "session": "asyncpg/default", "result": ["…"], "error": null},
+    {"driver": "memory", "session": "memory/default", "result": ["…"], "error": null}
+  ]
+}
+```
+
+The memory driver keeps its writes in memory, so after a write on it (`--driver memory`) its reads differ from those
+of the Django and asyncpg drivers, and `same` is false.
+
 ## Memory driver
 
 `demo/api/memory.py` is the demo's in-memory driver (`MemoryDriver`, mode `async`). It runs every data endpoint on
@@ -384,11 +468,20 @@ with memory.tracing() as calls:
 `demo/api/drivers.py` lists the drivers by import path. A driver is available when its module imports. It is not
 available when the module does not exist or needs a package that is not installed; any other import error stops the
 demo. The active driver comes from `--driver` (environment variable `ADORM_DEMO_DRIVER`), else it is the first
-available one. At startup the API runs the active driver's setup on a worker thread (for the Django and asyncpg
-drivers, `django.setup()` with the demo settings; for the memory driver, also loading the rows), instantiates it and registers
-it as the connection profile `default` with the driver's profile hooks; at shutdown the pools close and the profile is
-removed. The other available drivers are imported without setup. For every operation endpoint the API reports what
-each available driver does not support, read from the driver class's `capabilities`.
+available one. At startup the API runs the setup of every available driver on a worker thread, in the order of
+`DRIVERS` (for the Django and asyncpg drivers, `django.setup()` with the demo settings; for the memory driver, also
+loading the rows); a setup that fails stops the startup. It instantiates each driver and registers it as the
+connection profile named after it with the driver's profile hooks; the active driver's instance is also the profile
+`default`, so `default` and the active driver's own profile share the driver but not the pool. At shutdown the pools
+close and the profiles are removed. For every operation endpoint the API reports what each available driver does not
+support, read from the driver's `capabilities`.
+
+```python
+loaded = {name: await asyncio.to_thread(drivers.get(name).load) for name in drivers.available()}
+profiles = {"default": drivers.get(active).profile(loaded[active])}
+profiles.update({name: drivers.get(name).profile(driver, name) for name, driver in loaded.items()})
+adorm.configure(profiles=profiles, pool=POOL)
+```
 
 ```python
 DRIVERS = (
@@ -411,15 +504,25 @@ builder in `demo/api/operations.py`, the round trip through `/api/operations/dec
 and the driver matrix with a fake driver. `tests/demo/test_data.py` calls every data endpoint in process on the memory
 driver with a small data set: the calls each one makes, rollback on an error, savepoints, `on_commit`, sessions,
 concurrent payments of one invoice and concurrent registrations for one activity, requests queueing for the pool, the
-503 and 409 error answers, and that no slot or lock is left behind. `tests/demo/test_memory.py` tests the memory
+503 and 409 error answers, and that no slot or lock is left behind; with a second memory driver over a database of
+its own, the choice of a read's driver, the comparison (a difference, a failing read, a slot timeout of one driver),
+its two reads running at once, a cancelled comparison returning both slots, and concurrent reads on three profiles.
+`tests/demo/test_reads_on_two_drivers.py` runs the read endpoints in process on the Django and asyncpg drivers over
+the demo's data set in the test database: the same answers on both drivers and the database's values, the comparison
+with both reads waiting for a table lock at once, a full pool of one driver answering 503 while the other driver
+serves, cancellation of a read waiting for a lock cancelling its statement and freeing the slot, and concurrent reads
+and transactions on three profiles leaving no slot in use; each concurrency test runs three times.
+`tests/demo/test_memory.py` tests the memory
 driver on the executor: lookups and NULL logic, ordering, writes, transactions, waiting for row locks (also by an
 insert of a taken primary key and after a rollback to a savepoint), deadlock detection, cancellation of a wait and the
 trace; each concurrency test runs five times. `tests/demo/test_smoke.py` runs `demo.py` against the database
 `adorm_test_demo`: the setup, its repetition and `--reset`, the generated models check and a stale copy failing it,
 the club report's aggregates on the seeded data, the model check and the `check_adorm_models` exit status, then the
 server once per available driver (once without a driver when none is available), driven over HTTP, with the reading
-data endpoints on every driver and the writing ones on every driver that supports `create`. On the memory driver the
+data endpoints on every driver, the member list once more on every available driver through `X-Adorm-Driver` and
+through the comparison, and the writing ones on every driver that supports `create`. On the memory driver the
 database stays unchanged; on another driver the writes land in it and `--reset` restores the data afterwards.
 `ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated driver names) makes the suite fail when one of those drivers is not
-available. Both run in `uv run pytest`, and so in CI. The [driver conformance suite](/topics/conformance) runs every
+available; CI sets it to `django,asyncpg,memory`, so the smoke test runs on both real drivers. Both run in
+`uv run pytest`, and so in CI. The [driver conformance suite](/topics/conformance) runs every
 demo driver over the demo's schema and seeded data.

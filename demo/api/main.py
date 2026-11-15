@@ -3,7 +3,8 @@
 Every ``/api/operations/...`` endpoint builds an operation without executing it and answers an `OperationPlan`
 (``POST .../payments`` answers a list of two): the operation, encoded as JSON with the models' types, the construct
 names it uses and, for every available driver, the names that driver does not support. The ``/api/data/...``
-endpoints (`demo.api.data`) execute operations through sessions and transactions on the active driver.
+endpoints (`demo.api.data`) execute operations through sessions and transactions: the writes on the active driver,
+the reads on the active driver or on the available driver a request names.
 
     uv run python demo.py
 """
@@ -75,23 +76,25 @@ def unprocessable(description: str) -> dict[str, Any]:
 
 
 POOL = PoolSettings(max_connections=4, acquire_timeout=5.0)
-"""The pool settings of the demo's connection profile."""
+"""The pool settings of every demo connection profile; each profile has a pool of its own."""
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Selects the active driver and loads it (its ``setup`` runs on a worker thread); the other available drivers are
-    imported only, to read their capabilities. The active driver becomes adorm's connection profile ``default``; at
-    shutdown the pools close and the profile is removed."""
+    """Selects the active driver and loads every available driver (each one's ``setup`` runs on a worker thread, in
+    the order of `drivers.DRIVERS`). The active driver becomes adorm's connection profile ``default``, and every
+    loaded driver also a profile named after it, which the read endpoints run on when a request names that driver. At
+    shutdown the pools close and the profiles are removed."""
     active = drivers.selected()
     app.state.driver = active
-    loaded: dict[str, Driver | type[Driver]] = {}
+    loaded: dict[str, Driver] = {}
     for name in drivers.available():
-        demo_driver = drivers.get(name)
-        loaded[name] = await asyncio.to_thread(demo_driver.load) if name == active else demo_driver.driver_class()
+        loaded[name] = await asyncio.to_thread(drivers.get(name).load)
     app.state.drivers = loaded
     if active is not None:
-        adorm.configure(profiles={"default": drivers.get(active).profile(loaded[active])}, pool=POOL)
+        profiles = {"default": drivers.get(active).profile(loaded[active])}
+        profiles.update({name: drivers.get(name).profile(driver, name) for name, driver in loaded.items()})
+        adorm.configure(profiles=profiles, pool=POOL)
     try:
         yield
     finally:
@@ -111,8 +114,8 @@ app.include_router(data.executor_router)
 data.install_error_handlers(app)
 
 
-def loaded_drivers(request: Request) -> dict[str, Driver | type[Driver]]:
-    """The available drivers by name: the active one as an instance, the others as classes."""
+def loaded_drivers(request: Request) -> dict[str, Driver]:
+    """The available drivers by name, loaded."""
     return request.app.state.drivers
 
 

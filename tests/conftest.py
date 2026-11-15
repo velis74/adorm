@@ -110,3 +110,21 @@ async def locker(test_database_url):
             await unlock()
         await holder.close()
         await monitor.close()
+
+
+def _seed_demo() -> None:
+    from django.db import transaction
+
+    from demo.backend.clubs.management.commands.seed_demo import Command
+
+    with transaction.atomic():
+        Command().seed()
+
+
+@pytest.fixture
+async def demo_data(test_database_url):
+    """The demo's data set (``manage.py seed_demo``) in the test database; returns the database URL."""
+    from tests.library_data import in_thread
+
+    await in_thread(_seed_demo)
+    return test_database_url

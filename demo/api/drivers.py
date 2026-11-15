@@ -4,8 +4,9 @@ Each entry names an adorm driver class by import path. A driver is available whe
 class; it is not available when the module does not exist, needs a third-party package that is not installed or lacks
 the class, and any other import error propagates. The active driver comes from ``ADORM_DEMO_DRIVER``
 (``demo.py --driver``); without one the first available driver is active, and with none available there is no active
-driver. The API registers the active driver as adorm's connection profile ``default`` (`DemoDriver.profile()`) and
-executes the ``/api/data`` endpoints on it.
+driver. The API loads every available driver and registers it as adorm's connection profile named after it
+(`DemoDriver.profile()`); the active driver is also the profile ``default``. The ``/api/data`` endpoints execute on
+``default``, a read endpoint on the profile of the driver its request names.
 """
 
 from __future__ import annotations

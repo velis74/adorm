@@ -7,23 +7,6 @@ import pytest
 from adorm import ConnectionProfile
 from adorm.executor import Pool, Router, Session, set_runner
 from tests.conformance.drivers import DRIVERS
-from tests.library_data import in_thread
-
-
-def _seed() -> None:
-    from django.db import transaction
-
-    from demo.backend.clubs.management.commands.seed_demo import Command
-
-    with transaction.atomic():
-        Command().seed()
-
-
-@pytest.fixture
-async def demo_data(test_database_url):
-    """The demo's data set (``manage.py seed_demo``) in the test database; returns the database URL."""
-    await in_thread(_seed)
-    return test_database_url
 
 
 @pytest.fixture(params=[driver.name for driver in DRIVERS])

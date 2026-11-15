@@ -1,10 +1,12 @@
 """The demo's executed endpoints: the generated models read and write through sessions and transactions on the
-executor, with the active driver.
+executor.
 
-Each endpoint runs in the session ``("default", <X-Adorm-Session header>)`` and answers `Traced`: its result, the
-session and the calls the driver received (recorded by the memory driver; empty with another driver). Executor and
-lock errors answer `ExecutorError` (`install_error_handlers()`): 503 when no slot becomes free in time, 409 when the
-database detects a deadlock.
+Each endpoint runs in the session ``(<using>, <X-Adorm-Session header>)`` and answers `Traced`: its result, the
+session, the driver and the calls the driver received (recorded by the memory driver; empty with another driver).
+``using`` is ``default``, the profile of the active driver; a read endpoint runs on the profile of the available
+driver the ``X-Adorm-Driver`` header names. ``/api/data/compare/members`` reads one page of members on every
+available driver concurrently. Executor and lock errors answer `ExecutorError` (`install_error_handlers()`): 503
+when no slot becomes free in time, 409 when the database detects a deadlock.
 """
 
 from __future__ import annotations
@@ -16,9 +18,11 @@ import decimal
 from collections import deque
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Annotated, Generic, TypeVar
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -41,7 +45,27 @@ SessionName = Annotated[
     ),
 ]
 
+DRIVER_HEADER = "X-Adorm-Driver"
+DriverName = Annotated[
+    str | None,
+    Header(
+        alias=DRIVER_HEADER,
+        description=(
+            "Name of an available driver (`GET /api/drivers`) to read on: the session's `using` is that driver's "
+            "profile. Without it the read runs on the active driver's profile `default`."
+        ),
+    ),
+]
+
 T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Target:
+    """Where an endpoint runs: the connection profile ``using`` and the name of its driver."""
+
+    using: str
+    driver: str
 
 
 class Call(BaseModel):
@@ -57,6 +81,7 @@ class Traced(BaseModel, Generic[T]):
 
     result: T = Field(description="What the endpoint read or wrote.")
     session: str = Field(description="`using/session_name` of the session the request ran in.")
+    driver: str = Field(description="Name of the driver that executed the operations.")
     calls: list[Call] = Field(description="The calls the driver received, in order; empty unless it records them.")
 
 
@@ -115,6 +140,22 @@ class ClubSummary(BaseModel):
     open_invoices: int = Field(description="Its open invoices.")
 
 
+class DriverRead(BaseModel):
+    """One driver's read of a `Comparison`."""
+
+    driver: str = Field(description="Name of the driver.")
+    session: str = Field(description="`using/session_name` of the session the read ran in.")
+    result: list[Member] | None = Field(description="The members read; `null` when the read failed.")
+    error: str | None = Field(description="`<adorm exception class>: <message>` when the read failed; else `null`.")
+
+
+class Comparison(BaseModel):
+    """The same page of members read on every available driver."""
+
+    same: bool = Field(description="Whether every read succeeded and all of them answered the same members.")
+    reads: list[DriverRead] = Field(description="One read per available driver, in the order of `GET /api/drivers`.")
+
+
 class ExecutorError(BaseModel):
     """An error answer. Executor errors fill every field; other errors (no active driver, an invoice that is not
     open) answer `detail` only."""
@@ -167,6 +208,35 @@ def require_driver(request: Request) -> str:
     return driver
 
 
+def write_target(request: Request) -> Target:
+    """The profile ``default`` of the active driver."""
+    return Target("default", require_driver(request))
+
+
+def read_target(request: Request, driver: DriverName = None) -> Target:
+    """The profile of the driver the ``X-Adorm-Driver`` header names, or `write_target()` without the header; 422 for
+    a name that is not an available driver."""
+    if driver is None:
+        return write_target(request)
+    if driver not in request.app.state.drivers:
+        names = ", ".join(request.app.state.drivers)
+        raise RequestValidationError(
+            [
+                {
+                    "type": "value_error",
+                    "loc": ("header", DRIVER_HEADER),
+                    "msg": f"{driver!r} is not an available driver; the available drivers are {names}",
+                    "input": driver,
+                }
+            ]
+        )
+    return Target(driver, driver)
+
+
+ReadTarget = Annotated[Target, Depends(read_target)]
+WriteTarget = Annotated[Target, Depends(write_target)]
+
+
 router = APIRouter(prefix="/api/data", tags=["data"], dependencies=[Depends(require_driver)])
 executor_router = APIRouter(tags=["demo"])
 
@@ -183,6 +253,16 @@ EXECUTOR_ERRORS = {
     },
 }
 """Error responses of every endpoint that executes operations; extends `NO_DRIVER`."""
+UNKNOWN_DRIVER = {
+    "responses": {
+        "422": {
+            "description": (
+                f"Validation error: the request does not validate, or `{DRIVER_HEADER}` names no available driver."
+            )
+        }
+    }
+}
+"""``openapi_extra`` of the read endpoints."""
 
 
 def _session_name(session: object) -> str | None:
@@ -216,63 +296,114 @@ def install_error_handlers(app: FastAPI) -> None:
 
 
 @contextmanager
-def run(session_name: str) -> Iterator[list[memory.TraceEntry]]:
-    """Make ``("default", session_name)`` the current session and collect the driver's calls."""
-    session = adorm.create_session("default", session_name)
+def run(target: Target, session_name: str) -> Iterator[list[memory.TraceEntry]]:
+    """Make ``(target.using, session_name)`` the current session and collect the driver's calls."""
+    session = adorm.create_session(target.using, session_name)
     with session.activate(), memory.tracing() as calls:
         yield calls
 
 
-def traced(result: T, session_name: str, calls: list[memory.TraceEntry]) -> Traced[T]:
+def traced(result: T, target: Target, session_name: str, calls: list[memory.TraceEntry]) -> Traced[T]:
     return Traced(
         result=result,
-        session=f"default/{session_name}",
+        session=f"{target.using}/{session_name}",
+        driver=target.driver,
         calls=[Call(slot=entry.slot, session=entry.session, call=entry.call) for entry in calls],
     )
+
+
+def member_page(
+    level: Level | None, search: str | None, ordering: operations.MemberOrdering, offset: int, limit: int
+) -> adorm.QuerySet:
+    """A page of members on the current session."""
+    members = Member.objects.all()
+    if level is not None:
+        members = members.filter(level=level)
+    if search:
+        members = members.filter(adorm.Q(first_name__icontains=search) | adorm.Q(last_name__icontains=search))
+    return members.order_by(*operations.MEMBER_ORDERING[ordering])[offset : offset + limit]
 
 
 def not_found(exc: adorm.ObjectDoesNotExist) -> HTTPException:
     return HTTPException(404, str(exc))
 
 
-@router.get("/members", summary="List members", responses=EXECUTOR_ERRORS)
+MemberLevel = Annotated[Level | None, Query(description="Skill level.")]
+MemberSearch = Annotated[str | None, Query(description="Fragment of the first or last name, any case.")]
+MemberOrder = Annotated[operations.MemberOrdering, Query(description="Sort order; `-` reverses.")]
+Offset = Annotated[int, Query(ge=0, description="Rows to skip.")]
+Limit = Annotated[int, Query(ge=1, le=100, description="Page size.")]
+
+
+@router.get("/members", summary="List members", responses=EXECUTOR_ERRORS, openapi_extra=UNKNOWN_DRIVER)
 async def list_members(
+    target: ReadTarget,
     session_name: SessionName = "default",
-    level: Annotated[Level | None, Query(description="Skill level.")] = None,
-    search: Annotated[str | None, Query(description="Fragment of the first or last name, any case.")] = None,
-    ordering: Annotated[operations.MemberOrdering, Query(description="Sort order; `-` reverses.")] = "name",
-    offset: Annotated[int, Query(ge=0, description="Rows to skip.")] = 0,
-    limit: Annotated[int, Query(ge=1, le=100, description="Page size.")] = 20,
+    level: MemberLevel = None,
+    search: MemberSearch = None,
+    ordering: MemberOrder = "name",
+    offset: Offset = 0,
+    limit: Limit = 20,
 ) -> Traced[list[Member]]:
     """A page of members: one `select`, run on a slot acquired for it and released after it."""
-    with run(session_name) as calls:
-        members = Member.objects.all()
-        if level is not None:
-            members = members.filter(level=level)
-        if search:
-            members = members.filter(adorm.Q(first_name__icontains=search) | adorm.Q(last_name__icontains=search))
-        members = members.order_by(*operations.MEMBER_ORDERING[ordering])[offset : offset + limit]
-        result = [member async for member in members]
-    return traced(result, session_name, calls)
+    with run(target, session_name) as calls:
+        result = [member async for member in member_page(level, search, ordering, offset, limit)]
+    return traced(result, target, session_name, calls)
 
 
-@router.get("/members/{pk}", summary="Get a member", responses=NOT_FOUND | EXECUTOR_ERRORS)
-async def get_member(pk: Id, session_name: SessionName = "default") -> Traced[Member]:
+@router.get("/compare/members", summary="Compare a page of members on every driver", responses=NO_DRIVER)
+async def compare_members(
+    request: Request,
+    session_name: SessionName = "default",
+    level: MemberLevel = None,
+    search: MemberSearch = None,
+    ordering: MemberOrder = "name",
+    offset: Offset = 0,
+    limit: Limit = 20,
+) -> Comparison:
+    """The page of `GET /api/data/members`, read on every available driver by concurrent tasks of an
+    `asyncio.TaskGroup`, each in the session `(<driver>, <session name>)` on a slot of that driver's profile. An adorm
+    error of one read is reported in its `error` and does not stop the others."""
+    names = list(request.app.state.drivers)
+
+    async def read(name: str) -> DriverRead:
+        session = f"{name}/{session_name}"
+        with adorm.create_session(name, session_name).activate():
+            try:
+                members = [member async for member in member_page(level, search, ordering, offset, limit)]
+            except adorm.AdormError as exc:
+                return DriverRead(driver=name, session=session, result=None, error=f"{type(exc).__name__}: {exc}")
+        return DriverRead(driver=name, session=session, result=members, error=None)
+
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(read(name)) for name in names]
+    reads = [task.result() for task in tasks]
+    dumped = [None if r.result is None else [m.model_dump(mode="json") for m in r.result] for r in reads]
+    same = None not in dumped and all(page == dumped[0] for page in dumped)
+    return Comparison(same=same, reads=reads)
+
+
+@router.get(
+    "/members/{pk}", summary="Get a member", responses=NOT_FOUND | EXECUTOR_ERRORS, openapi_extra=UNKNOWN_DRIVER
+)
+async def get_member(pk: Id, target: ReadTarget, session_name: SessionName = "default") -> Traced[Member]:
     """One member, with `get`."""
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         try:
             member = await Member.objects.get(pk=pk)
         except Member.DoesNotExist as exc:
             raise not_found(exc) from None
-    return traced(member, session_name, calls)
+    return traced(member, target, session_name, calls)
 
 
 @router.patch("/members/{pk}", summary="Change a member", responses=NOT_FOUND | EXECUTOR_ERRORS)
-async def change_member(pk: Id, changes: MemberChanges, session_name: SessionName = "default") -> Traced[Member]:
+async def change_member(
+    pk: Id, changes: MemberChanges, target: WriteTarget, session_name: SessionName = "default"
+) -> Traced[Member]:
     """Load the member, assign the fields in the body and `save()` only those (`update_fields`), in one
     transaction."""
     values = changes.model_dump(exclude_unset=True)
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         async with adorm.atomic():
             try:
                 member = await Member.objects.get(pk=pk)
@@ -281,16 +412,18 @@ async def change_member(pk: Id, changes: MemberChanges, session_name: SessionNam
             for name, value in values.items():
                 setattr(member, name, value)
             await member.save(update_fields=tuple(values))
-    return traced(member, session_name, calls)
+    return traced(member, target, session_name, calls)
 
 
 @router.post(
     "/clubs/{slug}/members", summary="Enrol a new member", status_code=201, responses=NOT_FOUND | EXECUTOR_ERRORS
 )
-async def enrol_member(slug: Slug, enrolment: Enrolment, session_name: SessionName = "default") -> Traced[Enrolled]:
+async def enrol_member(
+    slug: Slug, enrolment: Enrolment, target: WriteTarget, session_name: SessionName = "default"
+) -> Traced[Enrolled]:
     """Create a member and their membership of the club in one transaction. A welcome message goes to the outbox
     when the transaction commits (`on_commit`)."""
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         async with adorm.atomic() as tx:
             try:
                 club = await Club.objects.get(slug=slug)
@@ -308,19 +441,24 @@ async def enrol_member(slug: Slug, enrolment: Enrolment, session_name: SessionNa
             )
             text = f"Welcome to {club.name}, {member.first_name}!"
             tx.on_commit(lambda: OUTBOX.append(OutboxMessage(queued_at=datetime.datetime.now(datetime.UTC), text=text)))
-    return traced(Enrolled(member=member, membership=membership), session_name, calls)
+    return traced(Enrolled(member=member, membership=membership), target, session_name, calls)
 
 
-@router.get("/invoices/{pk}", summary="Get an invoice and its payments", responses=NOT_FOUND | EXECUTOR_ERRORS)
-async def get_invoice(pk: Id, session_name: SessionName = "default") -> Traced[InvoiceDetail]:
+@router.get(
+    "/invoices/{pk}",
+    summary="Get an invoice and its payments",
+    responses=NOT_FOUND | EXECUTOR_ERRORS,
+    openapi_extra=UNKNOWN_DRIVER,
+)
+async def get_invoice(pk: Id, target: ReadTarget, session_name: SessionName = "default") -> Traced[InvoiceDetail]:
     """The invoice with `get`, its payments through the reverse relation `Invoice.payments`."""
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         try:
             invoice = await Invoice.objects.get(pk=pk)
         except Invoice.DoesNotExist as exc:
             raise not_found(exc) from None
         payments = [payment async for payment in invoice.payments.order_by("paid_at")]
-    return traced(InvoiceDetail(invoice=invoice, payments=payments), session_name, calls)
+    return traced(InvoiceDetail(invoice=invoice, payments=payments), target, session_name, calls)
 
 
 @router.post(
@@ -339,10 +477,12 @@ async def get_invoice(pk: Id, session_name: SessionName = "default") -> Traced[I
         }
     },
 )
-async def pay_invoice(pk: Id, payment: PaymentIn, session_name: SessionName = "default") -> Traced[Payment]:
+async def pay_invoice(
+    pk: Id, payment: PaymentIn, target: WriteTarget, session_name: SessionName = "default"
+) -> Traced[Payment]:
     """Store the payment and mark the invoice paid in one transaction. The update matches only an open invoice; when
     it matches none, the block raises and the payment is rolled back."""
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         async with adorm.atomic():
             if not await Invoice.objects.filter(pk=pk).exists():
                 raise HTTPException(404, f"no invoice has the primary key {pk}")
@@ -351,12 +491,12 @@ async def pay_invoice(pk: Id, payment: PaymentIn, session_name: SessionName = "d
             )
             if not await Invoice.objects.filter(pk=pk, status="open").update(status="paid"):
                 raise HTTPException(409, f"invoice {pk} is not open")
-    return traced(stored, session_name, calls)
+    return traced(stored, target, session_name, calls)
 
 
 @router.post("/activities/{pk}/registrations", summary="Register members", responses=NOT_FOUND | EXECUTOR_ERRORS)
 async def register_members(
-    pk: Id, registrations: Registrations, session_name: SessionName = "default"
+    pk: Id, registrations: Registrations, target: WriteTarget, session_name: SessionName = "default"
 ) -> Traced[Registered]:
     """Register members for the activity in one transaction, each in a nested `atomic()` block (a savepoint): a
     registration that would exceed the capacity is rolled back to its savepoint, the others stay. The transaction
@@ -364,7 +504,7 @@ async def register_members(
     after another."""
     registered: list[int] = []
     skipped: dict[int, str] = {}
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         async with adorm.atomic():
             try:
                 activity = await Activity.objects.get(pk=pk)
@@ -394,16 +534,19 @@ async def register_members(
                     skipped[member_id] = "full"
                     continue
                 registered.append(member_id)
-    return traced(Registered(registered=registered, skipped=skipped), session_name, calls)
+    return traced(Registered(registered=registered, skipped=skipped), target, session_name, calls)
 
 
 class _Full(Exception):  # noqa: N818 - control flow only
     """Rolls a registration back to its savepoint."""
 
 
-@router.get("/clubs/{slug}/summary", summary="Club summary", responses=NOT_FOUND | EXECUTOR_ERRORS)
+@router.get(
+    "/clubs/{slug}/summary", summary="Club summary", responses=NOT_FOUND | EXECUTOR_ERRORS, openapi_extra=UNKNOWN_DRIVER
+)
 async def club_summary(
     slug: Slug,
+    target: ReadTarget,
     session_name: SessionName = "default",
     atomic: Annotated[bool, Query(description="Read in one transaction (one slot), not a slot per read.")] = False,
 ) -> Traced[ClubSummary]:
@@ -423,7 +566,7 @@ async def club_summary(
             open_invoices=invoices.result(),
         )
 
-    with run(session_name) as calls:
+    with run(target, session_name) as calls:
         try:
             if atomic:
                 async with adorm.atomic():
@@ -432,7 +575,7 @@ async def club_summary(
                 summary = await counts(await Club.objects.get(slug=slug))
         except Club.DoesNotExist as exc:
             raise not_found(exc) from None
-    return traced(summary, session_name, calls)
+    return traced(summary, target, session_name, calls)
 
 
 @router.get("/outbox", summary="Messages queued on commit", responses=NO_DRIVER)

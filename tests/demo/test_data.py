@@ -1,6 +1,7 @@
 """The demo's executed endpoints in process, on the memory driver with a small data set."""
 
 import asyncio
+import sys
 
 import httpx
 import pytest
@@ -390,11 +391,14 @@ async def test_a_deadlock_answers_409(client, monkeypatch):
     }
 
 
-def _pool():
+def _pool(using="default"):
+    """The pool of the profile ``using``; ``None`` before its first use."""
     from adorm.settings import default_router
 
     router = default_router(create=False)
-    return router.pools[0] if router is not None and router.pools else None
+    if router is None:
+        return None
+    return next((pool for pool in router.pools if pool.name == using), None)
 
 
 # Schema
@@ -403,14 +407,280 @@ def _pool():
 async def test_openapi_documents_the_data_endpoints(client):
     paths = (await client.get("/openapi.json")).json()["paths"]
     data_paths = [path for path in paths if path.startswith("/api/data/")]
-    assert len(data_paths) == 8
+    assert len(data_paths) == 9
     member = paths["/api/data/members/{pk}"]["get"]
     assert {"404", "503"} <= set(member["responses"])
-    header = next(p for p in member["parameters"] if p["in"] == "header")
-    assert header["name"] == data.SESSION_HEADER
+    headers = {p["name"] for p in member["parameters"] if p["in"] == "header"}
+    assert headers == {data.SESSION_HEADER, data.DRIVER_HEADER}
     assert "409" in paths["/api/data/invoices/{pk}/payments"]["post"]["responses"]
     assert "503" in paths["/api/data/outbox"]["get"]["responses"]
+    assert "503" in paths["/api/data/compare/members"]["get"]["responses"]
     for path, methods in paths.items():
-        if path.startswith("/api/data/") and path != "/api/data/outbox":
-            for operation in methods.values():
+        if path.startswith("/api/data/") and path not in {"/api/data/outbox", "/api/data/compare/members"}:
+            for method, operation in methods.items():
                 assert {"409", "503"} <= set(operation["responses"]), path
+                names = {p["name"] for p in operation.get("parameters", ()) if p["in"] == "header"}
+                assert (data.DRIVER_HEADER in names) == (method == "get"), path
+                if method == "get":
+                    assert data.DRIVER_HEADER in operation["responses"]["422"]["description"], path
+
+
+# Choosing the driver of a read
+
+
+_second: memory.MemoryDatabase | None = None
+
+
+class SecondDriver(memory.MemoryDriver):
+    """A memory driver over a database of its own, the demo's second driver in these tests."""
+
+    name = "second"
+
+    def __init__(self) -> None:
+        super().__init__(_second)
+
+
+@pytest.fixture
+def two_drivers(monkeypatch, database):
+    """The memory driver (active) and `SecondDriver`, each over its own copy of the small data set."""
+    second = memory.MemoryDatabase()
+    monkeypatch.setattr(sys.modules[__name__], "_second", second)
+    demo_drivers = (
+        drivers.get("memory"),
+        drivers.DemoDriver(
+            "second",
+            f"{__name__}:SecondDriver",
+            lambda: second.load(tables()),
+            on_acquire=memory.on_acquire,
+            on_release=memory.on_release,
+        ),
+    )
+    monkeypatch.setattr(drivers, "DRIVERS", demo_drivers)
+    return database, second
+
+
+@pytest.fixture
+async def two_clients(two_drivers):  # noqa: ARG001 - the drivers' databases
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://demo") as http:
+            yield http
+
+
+def on(driver: str) -> dict[str, str]:
+    return {data.DRIVER_HEADER: driver}
+
+
+async def test_every_loaded_driver_is_a_profile_named_after_it(two_drivers, two_clients):  # noqa: ARG001
+    first, second = two_drivers
+    assert get_profile("default").get_driver().database is first
+    assert get_profile("memory").get_driver() is get_profile("default").get_driver()
+    assert get_profile("second").get_driver().database is second
+
+
+@pytest.mark.parametrize(
+    ("path", "call"),
+    [
+        ("/api/data/members", "select clubs.Member"),
+        ("/api/data/members/2", "get clubs.Member"),
+        ("/api/data/invoices/1", "get billing.Invoice"),
+        ("/api/data/clubs/rowing/summary", "get clubs.Club"),
+    ],
+)
+async def test_a_read_runs_on_the_profile_the_driver_header_names(two_clients, path, call):
+    default = (await two_clients.get(path)).json()
+    assert (default["session"], default["driver"]) == ("default/default", "memory")
+    for driver in ("memory", "second"):
+        body = (await two_clients.get(path, headers=on(driver) | {data.SESSION_HEADER: "alice"})).json()
+        assert (body["session"], body["driver"]) == (f"{driver}/alice", driver)
+        assert {entry["session"] for entry in body["calls"]} == {f"{driver}/alice"}
+        assert call in calls(body)
+        assert body["result"] == default["result"]
+    state = (await two_clients.get("/api/executor")).json()
+    assert {pool["using"]: pool["in_use"] for pool in state["pools"]} == {"default": 0, "memory": 0, "second": 0}
+
+
+async def test_each_driver_reads_its_own_database(two_drivers, two_clients):
+    first, second = two_drivers
+    first.tables["clubs.Member"][1]["first_name"] = "Changed"
+    assert (await two_clients.get("/api/data/members/1")).json()["result"]["first_name"] == "Changed"
+    assert (await two_clients.get("/api/data/members/1", headers=on("memory"))).json()["result"]["first_name"] == (
+        "Changed"
+    )
+    assert (await two_clients.get("/api/data/members/1", headers=on("second"))).json()["result"]["first_name"] == "Ana"
+    assert second.tables["clubs.Member"][1]["first_name"] == "Ana"
+
+
+@pytest.mark.parametrize("name", ["nope", "", "default"])
+async def test_a_driver_header_naming_no_available_driver_answers_422(two_clients, name):
+    response = await two_clients.get("/api/data/members/1", headers=on(name))
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+    assert error["loc"] == ["header", data.DRIVER_HEADER]
+    assert error["msg"] == f"{name!r} is not an available driver; the available drivers are memory, second"
+
+
+async def test_writes_run_on_the_active_driver_whatever_the_driver_header(two_drivers, two_clients):
+    first, second = two_drivers
+    response = await two_clients.patch("/api/data/members/1", json={"level": "advanced"}, headers=on("second"))
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["session"], body["driver"]) == ("default/default", "memory")
+    assert first.tables["clubs.Member"][1]["level"] == "advanced"
+    assert second.tables["clubs.Member"][1]["level"] == "beginner"
+
+
+async def test_a_driver_that_is_not_available_is_no_profile(monkeypatch, database):  # noqa: ARG001
+    monkeypatch.setattr(
+        drivers, "DRIVERS", (drivers.get("memory"), drivers.DemoDriver("missing", "adorm.drivers.nonexistent:Driver"))
+    )
+    async with app.router.lifespan_context(app):
+        assert get_profile("missing") is None
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://demo") as http:
+            assert (await http.get("/api/data/members", headers=on("missing"))).status_code == 422
+            body = (await http.get("/api/data/compare/members")).json()
+    assert [read["driver"] for read in body["reads"]] == ["memory"]
+    assert body["same"] is True
+
+
+async def test_compare_reads_the_same_page_on_every_driver(two_clients):
+    body = (await two_clients.get("/api/data/compare/members", params={"search": "nov"})).json()
+    assert body["same"] is True
+    assert [(read["driver"], read["session"], read["error"]) for read in body["reads"]] == [
+        ("memory", "memory/default", None),
+        ("second", "second/default", None),
+    ]
+    assert [member["first_name"] for member in body["reads"][0]["result"]] == ["Ana", "David"]
+    assert body["reads"][0]["result"] == body["reads"][1]["result"]
+
+
+async def test_compare_reports_a_difference_between_the_databases(two_drivers, two_clients):
+    first, _ = two_drivers
+    first.tables["clubs.Member"][2]["last_name"] = "Zupan"
+    body = (await two_clients.get("/api/data/compare/members", params={"ordering": "name"})).json()
+    assert body["same"] is False
+    assert [m["last_name"] for m in body["reads"][0]["result"]][-1] == "Zupan"
+    assert "Zupan" not in [m["last_name"] for m in body["reads"][1]["result"]]
+
+
+async def test_a_failing_read_of_one_driver_does_not_stop_the_other(two_clients, monkeypatch):
+    original = memory.MemoryConnection._execute
+
+    async def failing(self, operation):
+        if isinstance(self.driver, SecondDriver):
+            raise adorm.OperationalError("server closed the connection unexpectedly")
+        return await original(self, operation)
+
+    monkeypatch.setattr(memory.MemoryConnection, "_execute", failing)
+    response = await two_clients.get("/api/data/compare/members")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["same"] is False
+    assert len(body["reads"][0]["result"]) == 4
+    assert body["reads"][1] == {
+        "driver": "second",
+        "session": "second/default",
+        "result": None,
+        "error": "OperationalError: server closed the connection unexpectedly",
+    }
+    assert [_pool(using).in_use for using in ("memory", "second")] == [0, 0]
+
+
+async def test_a_slot_timeout_of_one_driver_is_reported_in_its_read(two_drivers, monkeypatch):  # noqa: ARG001
+    monkeypatch.setattr(main, "POOL", adorm.PoolSettings(max_connections=1, acquire_timeout=0.05))
+    hold = asyncio.Event()
+    original = memory.MemoryConnection.begin
+
+    async def slow_begin(self):
+        await original(self)
+        if isinstance(self.driver, SecondDriver):
+            await hold.wait()
+
+    monkeypatch.setattr(memory.MemoryConnection, "begin", slow_begin)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://demo") as http:
+            holding = asyncio.create_task(
+                http.get("/api/data/clubs/rowing/summary", params={"atomic": True}, headers=on("second"))
+            )
+            await until(lambda: (pool := _pool("second")) is not None and pool.in_use == 1)
+            body = (await http.get("/api/data/compare/members")).json()
+            hold.set()
+            assert (await holding).status_code == 200
+            assert _pool("second").in_use == 0
+    assert len(body["reads"][0]["result"]) == 4
+    assert body["reads"][1]["result"] is None
+    assert body["reads"][1]["error"].startswith("SessionTimeout: ")
+    assert body["same"] is False
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_compare_reads_on_both_drivers_at_once(two_clients, monkeypatch, attempt):  # noqa: ARG001
+    """Each read waits until both are executing: the reads run concurrently, not one after the other."""
+    executing: set[str] = set()
+    both = asyncio.Event()
+    original = memory.MemoryConnection._execute
+
+    async def rendezvous(self, operation):
+        if operation.kind == "select":
+            executing.add(self.driver.name)
+            if len(executing) == 2:
+                both.set()
+            await both.wait()
+        return await original(self, operation)
+
+    monkeypatch.setattr(memory.MemoryConnection, "_execute", rendezvous)
+    try:
+        async with asyncio.timeout(5):
+            body = (await two_clients.get("/api/data/compare/members")).json()
+    finally:
+        both.set()
+    assert executing == {"memory", "second"}
+    assert body["same"] is True
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_cancelled_comparison_returns_both_slots(two_drivers, two_clients, monkeypatch, attempt):  # noqa: ARG001
+    """The client goes away while both reads execute: both are cancelled and both slots go back to their pools."""
+    executing: set[str] = set()
+    never = asyncio.Event()
+    original = memory.MemoryConnection._execute
+
+    async def stuck(self, operation):
+        if operation.kind == "select":
+            executing.add(self.driver.name)
+            await never.wait()
+        return await original(self, operation)
+
+    monkeypatch.setattr(memory.MemoryConnection, "_execute", stuck)
+    request = asyncio.create_task(two_clients.get("/api/data/compare/members"))
+    try:
+        await until(lambda: executing == {"memory", "second"})
+    finally:
+        request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await until(lambda: all((pool := _pool(u)) is not None and pool.in_use == 0 for u in ("memory", "second")))
+    monkeypatch.setattr(memory.MemoryConnection, "_execute", original)
+    body = (await two_clients.get("/api/data/compare/members")).json()
+    assert body["same"] is True
+    assert [_pool(using).in_use for using in ("memory", "second")] == [0, 0]
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_concurrent_reads_on_both_drivers_leave_no_slot_behind(two_clients, attempt):  # noqa: ARG001
+    """More concurrent reads than either pool has slots, spread over three profiles of two drivers."""
+    paths = ["/api/data/members", "/api/data/members/3", "/api/data/invoices/1", "/api/data/clubs/rowing/summary"]
+    headers = [{}, on("memory"), on("second")]
+    requests = [(path, header) for n in range(4) for path in paths for header in headers[n % 3 :] + headers[: n % 3]]
+    responses = await asyncio.gather(*(two_clients.get(path, headers=header) for path, header in requests))
+    assert [response.status_code for response in responses] == [200] * len(requests)
+    results: dict[str, list] = {}
+    for (path, _), response in zip(requests, responses, strict=True):
+        results.setdefault(path, []).append(response.json()["result"])
+    for path, found in results.items():
+        assert all(result == found[0] for result in found), path
+    for using in ("default", "memory", "second"):
+        assert (_pool(using).in_use, _pool(using).waiting) == (0, 0)
+        assert _pool(using).size <= main.POOL.max_connections
