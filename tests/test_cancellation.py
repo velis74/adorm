@@ -307,7 +307,8 @@ async def test_asyncio_timeout_keeps_the_outcome_on_its_cause(setup):
     limits[0].reschedule(asyncio.get_running_loop().time())
     with pytest.raises(TimeoutError) as timed_out:
         await task
-    assert isinstance(timed_out.value.__cause__, asyncio.CancelledError)
+    # Python 3.11 puts the CancelledError on __context__, later versions on __cause__ as well.
+    assert isinstance(timed_out.value.__cause__ or timed_out.value.__context__, asyncio.CancelledError)
     assert cancellation_outcome(timed_out.value) is CancellationOutcome.UNKNOWN
 
 

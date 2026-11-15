@@ -175,7 +175,15 @@ def cancellation_outcome(exc: BaseException) -> CancellationOutcome | None:
         record = getattr(current, _OUTCOME, None)
         if record is not None:
             return record.value
-        current = current.__cause__
+        cause = current.__cause__
+        if (
+            cause is None
+            and isinstance(current, TimeoutError)
+            and isinstance(current.__context__, asyncio.CancelledError)
+        ):
+            # Python 3.11's asyncio.timeout() leaves the CancelledError on __context__ only.
+            cause = current.__context__
+        current = cause
     return None
 
 
