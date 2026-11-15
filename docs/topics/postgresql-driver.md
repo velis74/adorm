@@ -349,7 +349,7 @@ book.published         # datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.t
 
 Errors become adorm's [exceptions](/ref/exceptions): those of the translation (an unknown field, an invalid value)
 through [`map_django_error()`](/ref/drivers#adorm-drivers-django-map-django-error-exc) as on the Django driver,
-asyncpg's by their SQLSTATE ([`wrap_driver_error()`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc)):
+asyncpg's by their SQLSTATE ([`wrap_driver_error()`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none)):
 
 | Error | adorm |
 |---|---|
@@ -360,7 +360,7 @@ asyncpg's by their SQLSTATE ([`wrap_driver_error()`](/ref/exceptions#adorm-excep
 | a cancelled statement | `OperationalError`, SQLSTATE `57014` |
 | a terminated backend, a closed socket | `OperationalError` (`57P01`, `08003` …) or `InterfaceError` |
 | an unknown database when connecting | `OperationalError`, SQLSTATE `3D000` |
-| a duplicate key, a violated foreign key (also at `COMMIT`) | `IntegrityError`, SQLSTATE `23505`, `23503` |
+| a duplicate key, a violated foreign key (also at `COMMIT`) | [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs), SQLSTATE `23505`, `23503`, with the constraint, table, columns and values from asyncpg's error, the model of the table and its adorm field names of the columns |
 | a delete a `PROTECT` or `RESTRICT` reference forbids | `ProtectedError`, `RestrictedError` with the referencing rows as instances of the registered models |
 | a save with `force_update` or `update_fields` that updated no row | `DatabaseError` |
 | an override of a Django method the write would call, an `on_delete` handler other than Django's | `NotSupportedError` |

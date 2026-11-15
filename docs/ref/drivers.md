@@ -535,11 +535,15 @@ Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` a
 | `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
 | `SynchronousOnlyOperation` | `InterfaceError` |
 | `django.db.models.ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with Django's message and the objects as [`model_row()`](#adorm-drivers-django-model-row-instance) values (`protected_objects`, `restricted_objects`) |
-| anything else | [`wrap_driver_error(exc)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name, else `DatabaseError` |
+| anything else | [`wrap_driver_error(exc, details)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name, else `DatabaseError`; an `IntegrityError` with the violation [`integrity_details(exc)`](#adorm-drivers-postgresql-integrity-details-exc) reads, the label of the model whose table it names as `model` ([`table_model()`](#adorm-drivers-django-translation-table-model-table)) and that model's adorm field names of the key's columns as `fields` ([`column_fields()`](#adorm-drivers-django-translation-column-fields-model-columns)), except for the key of a referenced row ([`references_key()`](#adorm-drivers-postgresql-references-key-detail)) |
 
 ```python
 map_django_error(Author.DoesNotExist("Author matching query does not exist."))
 # ObjectDoesNotExist('Author matching query does not exist.')
+
+exc = map_django_error(unique_violation)  # django.db.IntegrityError of library_reservation_one_per_copy
+(exc.model, exc.columns, exc.fields)
+# ('library.Reservation', ('book_id', 'copy'), ('book_id', 'copy_'))
 ```
 
 ### `adorm.drivers.django.adopt_context_locals()`
@@ -685,6 +689,28 @@ instance_row(Note.objects.only("json").get(pk=code))      # {"code": code, "json
 
 Returns the installed Django model with the label `label` (`"app_label.ModelName"`), auto-created many-to-many
 through models included (`"library.Book_authors"`). Raises `ProgrammingError` when there is none.
+
+### `adorm.drivers.django.translation.table_model(table)`
+
+Returns the installed concrete Django model (no proxy) whose `db_table` is `table`, auto-created many-to-many through
+models included; a model registered with adorm comes first when several share the table. `None` when there is none.
+
+```python
+table_model("library_tagging")      # Tagging
+table_model("pg_temp_parent")       # None
+```
+
+### `adorm.drivers.django.translation.column_fields(model, columns)`
+
+Returns the adorm field names of the columns of the Django model `model`'s own table, in the order of `columns`: the
+fields of the registered adorm model, or the Django attnames when no adorm model is registered. A column that is no
+field of that table (an index expression, a column of a parent's table) is left out.
+
+```python
+column_fields(dj.Tagging, ["book_isbn"])                     # ('book_id',): db_column="book_isbn"
+column_fields(dj.Reservation, ["book_id", "copy"])           # ('book_id', 'copy_')
+column_fields(dj.Author, ["lower((slug)::text)", "name"])    # ('name',)
+```
 
 ### `adorm.drivers.django.translation.check_in_bulk_field(operation)`
 
@@ -1079,6 +1105,67 @@ Raises `ValueError` for a name outside `POSTGRESQL_OPTIONS` and for any other va
 ```python
 set_options_sql({"statement_timeout": 5, "lock_timeout": None}, local=True)
 # 'SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout TO DEFAULT'
+```
+
+## PostgreSQL errors
+
+`adorm.drivers.postgresql` reads what PostgreSQL reports about a violated constraint from the errors of psycopg 3,
+psycopg 2 and asyncpg. It imports no ORM or database library. The Django and the native PostgreSQL drivers pass
+[`integrity_details`](#adorm-drivers-postgresql-integrity-details-exc) to
+[`wrap_driver_error()`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none) through
+[`map_django_error()`](#adorm-drivers-django-map-django-error-exc).
+
+```python
+from adorm.drivers.postgresql import integrity_details, parse_key_detail, references_key
+```
+
+### `adorm.drivers.postgresql.integrity_details(exc)`
+
+The keyword arguments of [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs)
+that describe a violation (`constraint_name`, `table_name`, `schema_name`, `columns`, `values`, `detail`), read
+from the first exception with a SQLSTATE in the `__cause__` chain of `exc`: the `diag` object of psycopg 3 and
+psycopg 2 (`message_detail` is the detail), or the attributes of an asyncpg error. `columns` and `values` come from
+[`parse_key_detail()`](#adorm-drivers-postgresql-parse-key-detail-detail) of the detail; without a key there,
+`columns` is the reported column (a not-null violation). An attribute that is not text counts as not reported. `{}`
+when the chain has no SQLSTATE.
+
+```python
+from adorm.exceptions import IntegrityError, wrap_driver_error
+
+wrapped = wrap_driver_error(exc, details=integrity_details)
+raise IntegrityError(str(exc), original=exc, sqlstate=exc.sqlstate, **integrity_details(exc)) from exc
+```
+
+### `adorm.drivers.postgresql.parse_key_detail(detail)`
+
+The columns and values of the key in PostgreSQL's detail message, as two tuples; `((), ())` for a detail without a
+key. The value of a key of one column is the whole text; the values of a key of several columns are `()` when they
+do not split at `", "` into one part per column.
+
+```python
+parse_key_detail('Key (club_id, member_id)=(3, 17) already exists.')
+# (('club_id', 'member_id'), ('3', '17'))
+parse_key_detail('Key ("Code", lower(name::text))=(A1, ana) already exists.')
+# (('Code', 'lower(name::text)'), ('A1', 'ana'))
+parse_key_detail('Key (club_id)=(9) is not present in table "clubs_club".')
+# (('club_id',), ('9',))
+parse_key_detail('Key (name)=(Koper, Sailing) already exists.')
+# (('name',), ('Koper, Sailing',))
+parse_key_detail('Key (name, city)=(Koper, Sailing, Koper) already exists.')
+# (('name', 'city'), ())
+parse_key_detail('Failing row contains (3, null).')
+# ((), ())
+```
+
+### `adorm.drivers.postgresql.references_key(detail)`
+
+Whether the key in PostgreSQL's detail message is a referenced row's (`Key (…)=(…) is still referenced from table
+…`, a delete or update of the row). Its columns are then the referenced table's, not those of the violated
+constraint's `table_name`.
+
+```python
+references_key('Key (id)=(1) is still referenced from table "clubs_membership".')   # True
+references_key('Key (club_id)=(9) is not present in table "clubs_club".')           # False
 ```
 
 ## Django's compiler for asyncpg

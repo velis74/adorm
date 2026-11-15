@@ -161,7 +161,7 @@ connection unusable: `is_usable()` returns `False` and the slot drops it. A driv
 
 Every error a connection raises is an adorm [exception](/ref/exceptions); `asyncio.CancelledError` passes
 through. `DriverConnection.map_error()` converts the target's exceptions, by default with
-[`wrap_driver_error`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc): SQLSTATE first, then the PEP 249
+[`wrap_driver_error`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): SQLSTATE first, then the PEP 249
 class name. A driver overrides it where the target reports an error without a SQLSTATE that adorm classifies
 differently, for example a cancelled statement.
 

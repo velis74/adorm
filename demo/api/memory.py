@@ -15,7 +15,10 @@ does.
 Each model is its own table. An update of a row copies the values to the row with the same primary key of the models
 it shares rows with through multi-table inheritance; inserting or deleting a row of a multi-table inheritance child
 raises `NotSupportedError`, and so does deleting a row that a foreign key references (deletes do not cascade). Unique
-constraints are not enforced, except the primary key.
+constraints are not enforced, except the primary key. An `IntegrityError` for a duplicate primary key or a missing
+value names the model (``model``) and the field (``fields``, also ``columns``, with ``values`` and ``detail`` in
+PostgreSQL's format for a duplicate key); with no tables, it has no ``constraint_name``, ``table_name`` or
+``schema_name``.
 
 Transactions read committed rows and their own writes. A write locks its row until the transaction ends, and so
 does a read with ``select_for_update()`` (also ``nowait`` and ``skip_locked``, not ``of`` and ``no_key``); a
@@ -396,6 +399,16 @@ class _Rows:
         return rows
 
 
+def _violation(
+    message: str, sqlstate: str, label: str, name: str, value: str | None = None, detail: str | None = None
+) -> IntegrityError:
+    """The `IntegrityError` of the field ``name`` of ``label``; with no tables, the field name is also the column."""
+    values = () if value is None else (value,)
+    return IntegrityError(
+        message, sqlstate=sqlstate, model=label, fields=(name,), columns=(name,), values=values, detail=detail
+    )
+
+
 class MemoryConnection(DriverConnection):
     """A connection to a `MemoryDatabase`. ``number`` identifies it in the trace; ``session`` is set by the profile
     hooks `on_acquire` and `on_release`."""
@@ -627,14 +640,21 @@ class MemoryConnection(DriverConnection):
                 elif field.default_factory is not None:
                     row[name] = field.get_default(call_default_factory=True)
                 else:
-                    raise IntegrityError(f"{label}: the primary key {name!r} has no value", sqlstate="23502")
+                    raise _violation(f"{label}: the primary key {name!r} has no value", "23502", label, name)
             elif field.is_required():
-                raise IntegrityError(f"{label}: the field {name!r} has no value", sqlstate="23502")
+                raise _violation(f"{label}: the field {name!r} has no value", "23502", label, name)
             else:
                 row[name] = field.get_default(call_default_factory=True)
         await self._lock(label, row[pk])
         if row[pk] in self._table(label):
-            raise IntegrityError(f"{label}: a row with the primary key {row[pk]!r} exists", sqlstate="23505")
+            raise _violation(
+                f"{label}: a row with the primary key {row[pk]!r} exists",
+                "23505",
+                label,
+                pk,
+                str(row[pk]),
+                f"Key ({pk})=({row[pk]}) already exists.",
+            )
         row = copy.deepcopy(row)
         self._write(label, row[pk], row)
         return copy.deepcopy(row)

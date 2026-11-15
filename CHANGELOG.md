@@ -429,3 +429,12 @@
   model's `save()` that calls `full_clean()`. The native PostgreSQL driver runs `full_clean()` as Python on the event
   loop with `DjangoCompiler.replay()` (`StatementNeeded`, a `BaseException`; `MAX_VALIDATION_STATEMENTS`), awaiting
   each statement the validation runs.
+- `IntegrityError` describes the violated constraint: `constraint_name`, `table_name`, `schema_name`, `columns`,
+  `values` (the key's values as PostgreSQL prints them), `detail`, the `key` property, and `model` and `fields` (the
+  label of the table's model and its adorm field names of the key's columns, following `db_column` and renamed
+  fields). The Django and the native PostgreSQL drivers report the same values: `map_django_error()` passes
+  `adorm.drivers.postgresql.integrity_details` to `wrap_driver_error(exc, details=...)` and maps the columns with
+  `adorm.drivers.django.translation.table_model()` and `column_fields()`. `adorm.drivers.postgresql` also has
+  `parse_key_detail()` and `references_key()`. The memory driver fills `model`, `fields`, `columns` and, for a
+  duplicate primary key, `values` and `detail`. Encoded errors carry them, and `decode_error()` rejects malformed
+  ones.

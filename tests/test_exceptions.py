@@ -208,6 +208,9 @@ def test_protected_and_restricted_objects():
     "exc",
     [
         DatabaseError("boom", original=ValueError("v"), sqlstate="22000"),
+        IntegrityError(
+            "dup", sqlstate="23505", constraint_name="c", columns=["a"], values=["1"], model="m.M", fields=["b"]
+        ),
         ProtectedError("refused", protected_objects=[1]),
         RestrictedError("refused", restricted_objects=[2]),
         TransactionClosed("late"),
@@ -350,6 +353,54 @@ def test_wrap_unknown_error_becomes_database_error():
 def test_wrap_returns_adorm_errors_unchanged():
     exc = Member.DoesNotExist("missing")
     assert wrap_driver_error(exc) is exc
+
+
+# IntegrityError details
+
+
+def test_integrity_error_defaults():
+    exc = IntegrityError("dup")
+    assert (exc.constraint_name, exc.table_name, exc.schema_name, exc.detail, exc.model) == (None,) * 5
+    assert (exc.columns, exc.values, exc.fields, exc.key) == ((), (), (), {})
+
+
+def test_integrity_error_key():
+    exc = IntegrityError(columns=iter(["club_id", "member_id"]), values=iter(["3", "17"]), fields=iter(["club_id"]))
+    assert exc.fields == ("club_id",)
+    assert exc.columns == ("club_id", "member_id")
+    assert exc.values == ("3", "17")
+    assert exc.key == {"club_id": "3", "member_id": "17"}
+    assert IntegrityError(columns=["name"]).key == {}
+    assert IntegrityError(columns=["a", "b"], values=["1"]).key == {}
+
+
+def test_protected_error_takes_integrity_details():
+    exc = ProtectedError("refused", [1], constraint_name="c", columns=["id"], values=["1"])
+    assert (exc.protected_objects, exc.constraint_name, exc.key) == ([1], "c", {"id": "1"})
+
+
+def test_wrap_describes_integrity_errors_with_details():
+    def details(exc):
+        return {"constraint_name": f"c{exc.args[0]}", "columns": ["id"], "values": ["1"]}
+
+    wrapped = wrap_driver_error(FakeError("23505", "7"), details=details)
+    assert (wrapped.constraint_name, wrapped.key) == ("c7", {"id": "1"})
+    assert type(wrap_driver_error(FakeError("22001", "7"), details=details)) is DataError
+    plain = wrap_driver_error(FakeError("23505", "7"))
+    assert (plain.constraint_name, plain.columns) == (None, ())
+
+
+class FakeError(Exception):
+    def __init__(self, sqlstate, *args):
+        super().__init__(*args)
+        self.sqlstate = sqlstate
+
+
+def test_wrap_describes_an_integrity_error_found_by_class_name():
+    unnamed_error = type("IntegrityError", (Exception,), {})
+    wrapped = wrap_driver_error(unnamed_error("x"), details=lambda exc: {"constraint_name": str(exc)})
+    assert type(wrapped) is IntegrityError
+    assert wrapped.constraint_name == "x"
 
 
 async def test_wrap_asyncpg_errors(test_database_url):

@@ -9,7 +9,7 @@ whose connections raise these exceptions, the [pool and router](/ref/pool), [`at
 
 adorm has its own exceptions, modelled on Django's. Applications catch adorm's classes, never the target ORM's or
 the database library's: a driver converts the errors it gets with
-[`wrap_driver_error`](#adorm-exceptions-wrap-driver-error-exc). Every class in the tree below is importable from
+[`wrap_driver_error`](#adorm-exceptions-wrap-driver-error-exc-details-none). Every class in the tree below is importable from
 `adorm` and from `adorm.exceptions`; `ModelExceptionsMixin`, `wrap_driver_error` and `TimeoutPhase` only from
 `adorm.exceptions`.
 
@@ -208,9 +208,74 @@ available. An `OSError` from the driver, such as an unknown host or a connect ti
 detects is an `OperationalError`; `DeadlockError` (see [Executor errors](#executor-errors)) is a different
 condition, between slots of adorm's pool.
 
-### `adorm.IntegrityError`
+### `adorm.IntegrityError(message=None, *, constraint_name=None, table_name=None, schema_name=None, columns=(), values=(), detail=None, model=None, fields=(), **kwargs)`
 
-A constraint was violated: unique, foreign key, not null, check, exclusion (SQLSTATE class `23`).
+A constraint was violated: unique, foreign key, not null, check, exclusion (SQLSTATE class `23`). Besides `original`
+and `sqlstate` it describes the violation, with the same values from every driver over PostgreSQL:
+
+| Attribute | Value |
+|---|---|
+| `constraint_name` | the name of the violated constraint or unique index; `None` for a not-null violation |
+| `table_name` | the table of the constraint; for a foreign key, the referencing table |
+| `schema_name` | the schema of that table |
+| `columns` | the database columns of the violated key, or the column of a not-null violation; `()` for a check violation |
+| `values` | the values of the key as text, in the order of `columns`, as PostgreSQL prints them; `()` when unknown |
+| `detail` | PostgreSQL's detail message, e.g. `Key (email)=(ana@example.com) already exists.` |
+| `model` | the label of the model whose table is `table_name`, e.g. `clubs.Membership` |
+| `fields` | the adorm field names of `columns` on `model`, in their order; a column that is no field (an index expression) is left out |
+| `key` | property: `dict(zip(columns, values))`, `{}` when `values` is empty |
+
+What is not known is `None`, or `()` for `columns`, `values` and `fields`. What PostgreSQL reports for each
+violation:
+
+| Violation | SQLSTATE | `constraint_name` | `columns` | `values` |
+|---|---|---|---|---|
+| unique, primary key | `23505` | constraint or index | key columns | key values |
+| foreign key, inserting or updating the referencing row | `23503` | constraint | referencing columns | their values |
+| foreign key, deleting or updating the referenced row | `23503` | constraint | referenced columns | their values |
+| exclusion | `23P01` | constraint | constraint columns | the new row's values |
+| not null | `23502` | `None` | the column | `()` |
+| check | `23514` | constraint | `()` | `()` |
+
+`columns` and `values` are read from the `Key (…)=(…)` part of `detail`. Quoted column names are unquoted; a column of
+an expression index is the expression as PostgreSQL prints it (`lower((email)::text)`). PostgreSQL does not quote
+values: the value of a key of one column is the whole text, and `values` of a key of several columns is `()` when a
+value contains `", "` and the text splits into more parts than there are columns. `detail` is `None` when PostgreSQL
+leaves the detail out (the user may not read the key's columns). `columns` and `values` are then empty, and so are
+they when PostgreSQL prints the detail in another language (`lc_messages`), except the column of a not-null
+violation, which PostgreSQL reports on its own.
+
+`columns` are database column names: a foreign key's column is `club_id`, a field with `db_column="book_isbn"` is
+`book_isbn`. `fields` are the names adorm models use: `book_id` for that foreign key, `copy_` for a field
+[renamed](/howto/generating-models#name-clashes) from `copy`. The Django and the native PostgreSQL drivers find `model` among the installed
+Django models by their table, a model registered with adorm first; `model` is `None` and `fields` empty when no
+installed model has the table. For the key of a referenced row (a delete or update of the row), `fields` is empty:
+its columns are the referenced table's, which PostgreSQL does not name.
+
+```python
+try:
+    await Membership.objects.create(club_id=club.pk, member_id=member.pk, since=today, fee=0)
+except adorm.IntegrityError as exc:
+    if exc.constraint_name == "clubs_membership_unique":
+        raise adorm.ValidationError("Already a member.", code="unique") from exc
+    if exc.sqlstate == "23503" and exc.fields:  # foreign_key_violation
+        raise adorm.ValidationError({exc.fields[0]: "Does not exist."}) from exc
+    raise
+```
+
+```python
+exc.constraint_name    # 'clubs_member_email_key'
+exc.table_name         # 'clubs_member'
+exc.columns            # ('email',)
+exc.values             # ('ana@example.com',)
+exc.key                # {'email': 'ana@example.com'}
+exc.detail             # 'Key (email)=(ana@example.com) already exists.'
+exc.model              # 'clubs.Member'
+exc.fields             # ('email',)
+```
+
+`ProtectedError` and `RestrictedError` carry none of these values: drivers raise them from their check of the
+references, before any statement runs.
 
 ### `adorm.ProtectedError(message=None, protected_objects=(), **kwargs)`
 
@@ -241,7 +306,7 @@ The database reported an internal error or an invalid cursor or transaction stat
 
 The statement is wrong: missing table or column, syntax error, insufficient privilege, an `ON CONFLICT` that
 affects a row twice, `RAISE EXCEPTION` in PL/pgSQL (SQLSTATE classes `42`, `21`, `P0` and others, see
-[the mapping](#adorm-exceptions-wrap-driver-error-exc)).
+[the mapping](#adorm-exceptions-wrap-driver-error-exc-details-none)).
 
 ### `adorm.FieldError(message=None, *, model=None, key=None, original=None, sqlstate=None)`
 
@@ -409,7 +474,7 @@ except adorm.OperationTimeout as exc:
 
 ## For driver authors
 
-### `adorm.exceptions.wrap_driver_error(exc)`
+### `adorm.exceptions.wrap_driver_error(exc, details=None)`
 
 Returns the adorm exception for an exception a driver got from its ORM or database library. The caller raises the
 result:
@@ -454,7 +519,10 @@ The class is chosen in this order:
 4. An `OSError` (including `ConnectionError`, `TimeoutError` and `socket.gaierror`) becomes `OperationalError`.
 5. Anything else becomes `DatabaseError`.
 
-The result carries the exception in `original` and `__cause__`, and the SQLSTATE in `sqlstate`. Errors with data
+The result carries the exception in `original` and `__cause__`, and the SQLSTATE in `sqlstate`. For an
+`IntegrityError`, `details(exc)` returns the keyword arguments that describe the violation; the drivers over
+PostgreSQL pass [`adorm.drivers.postgresql.integrity_details`](/ref/drivers#adorm-drivers-postgresql-integrity-details-exc),
+without `details` the violation is not described. Errors with data
 of their own, such as Django's `ProtectedError` and `ValidationError`, are converted by the driver before it calls
 `wrap_driver_error`, because their objects must become adorm data.
 

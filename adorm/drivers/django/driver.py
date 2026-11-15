@@ -20,6 +20,7 @@ from adorm.drivers.django.translation import (
     clean_exclude,
     clean_instance,
     clean_needs_row,
+    column_fields,
     django_model,
     field_kwargs,
     FUNCTIONS,
@@ -28,9 +29,11 @@ from adorm.drivers.django.translation import (
     model_queryset,
     operation_model,
     parent_link_field,
+    table_model,
     translate,
     validation_error,
 )
+from adorm.drivers.postgresql import integrity_details, references_key
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.exceptions import (
     FieldError,
@@ -143,8 +146,10 @@ def model_row(instance: Any) -> ModelRow:
 
 def map_django_error(exc: BaseException) -> BaseException:
     """The adorm exception for ``exc``, raised by Django or its database library; what has no Django-specific mapping
-    goes to `wrap_driver_error`. The objects of Django's ``ProtectedError`` and ``RestrictedError`` become
-    `model_row()` values. The result carries ``exc`` as ``__cause__``."""
+    goes to `wrap_driver_error`, an `IntegrityError` with the violation PostgreSQL reports
+    (`adorm.drivers.postgresql.integrity_details()`), the label of the model whose table it names as ``model`` and
+    that model's adorm field names of the key's columns as ``fields``. The objects of Django's ``ProtectedError`` and
+    ``RestrictedError`` become `model_row()` values. The result carries ``exc`` as ``__cause__``."""
     from django.core import exceptions as django_exceptions
     from django.db import transaction
     from django.db.models import deletion
@@ -167,9 +172,21 @@ def map_django_error(exc: BaseException) -> BaseException:
     elif isinstance(exc, django_exceptions.SynchronousOnlyOperation):
         mapped = InterfaceError(str(exc), original=exc)
     else:
-        return wrap_driver_error(exc)
+        return wrap_driver_error(exc, details=_violation)
     mapped.__cause__ = exc
     return mapped
+
+
+def _violation(exc: BaseException) -> dict[str, Any]:
+    details = integrity_details(exc)
+    table = details.get("table_name")
+    model = None if table is None else table_model(table)
+    if model is not None:
+        details["model"] = model._meta.label
+        # The key of a referenced row is the referenced table's, which PostgreSQL does not name.
+        if not references_key(details["detail"]):
+            details["fields"] = column_fields(model, details["columns"])
+    return details
 
 
 def adopt_context_locals() -> None:

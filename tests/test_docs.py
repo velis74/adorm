@@ -137,6 +137,7 @@ SUBMODULES = (
     "adorm.drivers.base",
     "adorm.drivers.django.driver",
     "adorm.drivers.django.translation",
+    "adorm.drivers.postgresql",
     "adorm.drivers.sql",
     "adorm.exceptions",
     "adorm.executor.debug",

@@ -140,6 +140,20 @@ async def test_a_models_save_override(conformance_driver, router, calls):
             await Tag.objects.create(name="night")
 ```
 
+## Integrity errors
+
+`tests/conformance/test_integrity.py` runs every driver into violated constraints. The constraint names are read from
+`pg_constraint`, not written into the tests. The memory driver, which enforces only the primary key, runs only the
+first test:
+
+| Test | What holds |
+|---|---|
+| a duplicate primary key, repeated | `IntegrityError` with SQLSTATE `23505`, `columns`, `values`, `key`, `detail`, `model` and `fields` the same on every driver; `constraint_name`, `table_name` and `schema_name` on the SQL drivers; no slot in use, nothing written |
+| a duplicate unique field in a nested `atomic()`, repeated | `IntegrityError` `23505` with the constraint, the table and the key; the outer transaction stays usable and commits |
+| a duplicate composite key | the constraint `clubs_membership_unique`, the key of both columns and their adorm field names |
+| a deferred foreign key, repeated | `IntegrityError` `23503` at the `COMMIT` of `adorm.atomic()` with the constraint, the key and the detail; the slot is dropped, nothing written |
+| a concurrent insert of the same key, repeated, 2 slots | the second insert waits for the first transaction (seen in `pg_stat_activity`, not by sleeping); `IntegrityError` with the key when the first transaction commits, success when it rolls back; one row, `in_use == 0` |
+
 ## Failures
 
 `tests/conformance/test_failures.py` runs every driver through what goes wrong in production, each concurrency test

@@ -19,6 +19,7 @@ from adorm import (
     ObjectDoesNotExist,
     OperationalError,
     OperationTimeout,
+    ProtectedError,
     SessionTimeout,
     ValidationError,
 )
@@ -233,6 +234,77 @@ def test_database_errors_keep_class_message_and_sqlstate_but_not_the_original():
     decoded = round_trip(OperationalError("lost", original=original, sqlstate="08006"))
     assert type(decoded) is OperationalError
     assert (str(decoded), decoded.sqlstate, decoded.original) == ("lost", "08006", None)
+
+
+INTEGRITY = {
+    "constraint_name": "clubs_membership_unique",
+    "table_name": "clubs_membership",
+    "schema_name": "public",
+    "columns": ("club_id", "member_id"),
+    "values": ("3", "17"),
+    "detail": "Key (club_id, member_id)=(3, 17) already exists.",
+    "model": "clubs.Membership",
+    "fields": ("club_id", "member_id"),
+}
+
+
+def test_integrity_errors_keep_the_violation():
+    data = encode_error(IntegrityError("duplicate key", sqlstate="23505", **INTEGRITY))
+    assert data["columns"] == ["club_id", "member_id"]
+    assert data["values"] == ["3", "17"]
+    assert (data["model"], data["fields"]) == ("clubs.Membership", ["club_id", "member_id"])
+    decoded = decode_error(json.loads(json.dumps(data)))
+    assert type(decoded) is IntegrityError
+    assert {name: getattr(decoded, name) for name in INTEGRITY} == INTEGRITY
+    assert decoded.key == {"club_id": "3", "member_id": "17"}
+    assert decoded.sqlstate == "23505"
+
+
+def test_integrity_errors_encode_only_what_they_know():
+    data = encode_error(IntegrityError("null value", sqlstate="23502", table_name="clubs_member", columns=["email"]))
+    assert data == {
+        "class": "IntegrityError",
+        "message": "null value",
+        "sqlstate": "23502",
+        "table_name": "clubs_member",
+        "columns": ["email"],
+    }
+    decoded = decode_error(data)
+    assert (decoded.constraint_name, decoded.columns, decoded.values, decoded.detail) == (None, ("email",), (), None)
+
+
+def test_an_integrity_error_naming_a_registered_model_stays_an_integrity_error():
+    label = Gadget._meta.label
+    decoded = round_trip(IntegrityError("dup", sqlstate="23505", model=label, fields=["name"]))
+    assert type(decoded) is IntegrityError
+    assert (decoded.model, decoded.fields) == (label, ("name",))
+
+
+@pytest.mark.parametrize(
+    "violation",
+    [
+        {"columns": "email"},
+        {"values": ["1", 2]},
+        {"fields": None},
+        {"constraint_name": 5},
+        {"table_name": ["t"]},
+        {"schema_name": {}},
+        {"detail": 1.5},
+        {"model": 3},
+    ],
+)
+def test_decode_rejects_a_malformed_violation(violation):
+    with pytest.raises(ValueError, match="encoded integrity error"):
+        decode_error({"class": "IntegrityError", "message": "dup"} | violation)
+
+
+def test_integrity_subclasses_keep_the_violation():
+    decoded = round_trip(CustomIntegrityError("custom", sqlstate="23503", **INTEGRITY))
+    assert type(decoded) is IntegrityError
+    assert decoded.constraint_name == "clubs_membership_unique"
+    protected = round_trip(ProtectedError("refused", [1], constraint_name="c"))
+    assert type(protected) is ProtectedError
+    assert (protected.constraint_name, protected.protected_objects) == ("c", ())
 
 
 def test_an_adorm_subclass_outside_the_hierarchy_decodes_as_its_nearest_adorm_class():

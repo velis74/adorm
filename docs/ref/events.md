@@ -114,6 +114,7 @@ through it and drops any other event with an error on the `adorm.executor` logge
 | a subclass defined elsewhere | the nearest class of `adorm.exceptions` it derives from |
 | a model's `DoesNotExist` or `MultipleObjectsReturned` | `"class"` plus `"model"`, the model's label |
 | `Error` and its subclasses | also `sqlstate` |
+| `IntegrityError` and its subclasses | also `constraint_name`, `table_name`, `schema_name`, `detail` and `model` when set, and `columns`, `values` and `fields` as lists when not empty |
 | `SessionTimeout`, `DeadlockError` | also `timeout` and the sessions as `(using, session_name)` pairs |
 | `OperationTimeout` | also `phase`, `timeout` and the session as a `(using, session_name)` pair |
 | `ValidationError` | the messages by field, or the list of messages; each error's `message`, `code` and `params` under `"errors"` (by field, or a list), or under `"error"` for a single error; `encode` encodes each param, and a param it cannot encode becomes its text |
@@ -128,12 +129,20 @@ The exception `encode_error()` encoded; `decode` decodes validation params. Sess
 `create_session()`; a model label that is not registered gives the generic `ObjectDoesNotExist` or
 `MultipleObjectsReturned`; an unknown class gives `DatabaseError`. Data without a string `"class"`, and a validation
 error entry without a string `message`, with a `code` that is not a string or with `params` that are not a mapping,
-raise `ValueError`.
+raise `ValueError`, and so does an `IntegrityError` whose `constraint_name`, `table_name`, `schema_name`, `detail` or
+`model` is not a string or whose `columns`, `values` or `fields` are not a list of strings.
 
 ```python
 data = encode_error(IntegrityError("duplicate key", sqlstate="23505"))
 # {"class": "IntegrityError", "message": "duplicate key", "sqlstate": "23505"}
 error = decode_error(data)          # IntegrityError("duplicate key"), error.sqlstate == "23505"
+
+data = encode_error(map_django_error(unique_violation))
+# {"class": "IntegrityError", "message": "duplicate key value violates unique constraint \"clubs_member_email_key\"…",
+#  "sqlstate": "23505", "constraint_name": "clubs_member_email_key", "table_name": "clubs_member",
+#  "schema_name": "public", "detail": "Key (email)=(ana@example.com) already exists.", "model": "clubs.Member",
+#  "columns": ["email"], "values": ["ana@example.com"], "fields": ["email"]}
+decode_error(data).key              # {'email': 'ana@example.com'}
 
 data = encode_error(ValidationError({"name": [ValidationError("Taken.", "unique", {"unique_check": ("name",)})]}))
 # {"class": "ValidationError", "message": {"name": ["Taken."]},

@@ -43,6 +43,7 @@ __all__ = [
     "check_in_bulk_field",
     "child_instance",
     "clean_exclude",
+    "column_fields",
     "clean_instance",
     "clean_needs_row",
     "django_model",
@@ -56,6 +57,7 @@ __all__ = [
     "parent_link_field",
     "validation_error",
     "subquery",
+    "table_model",
     "translate",
 ]
 
@@ -117,6 +119,33 @@ def django_model(label: str) -> type[dj.Model]:
         return apps.get_model(app_label, name)
     except LookupError:
         raise ProgrammingError(f"no Django model is installed as {label!r}") from None
+
+
+def table_model(table: str) -> type[dj.Model] | None:
+    """The installed concrete Django model whose table is ``table``, one registered with adorm first; ``None`` when
+    there is none."""
+    models = [
+        model
+        for model in apps.get_models(include_auto_created=True)
+        if not model._meta.proxy and model._meta.db_table == table
+    ]
+    return next((model for model in models if _adorm_model(model) is not None), models[0] if models else None)
+
+
+def column_fields(model: type[dj.Model], columns: Iterable[str]) -> tuple[str, ...]:
+    """The adorm field names of the columns of ``model``'s own table, in the order of ``columns``: the fields of the
+    registered adorm model (the attnames without one). A column that is no field of the table is left out."""
+    adorm = _adorm_model(model)
+    local = model._meta.local_concrete_fields
+    names: dict[str, str] = {}
+    if adorm is None:
+        names = {field.column: field.attname for field in local}
+    else:
+        for name in adorm.__pydantic_fields__:
+            field = _field(model, _orm_name(adorm, name))
+            if field in local:
+                names.setdefault(field.column, name)
+    return tuple(names[column] for column in columns if column in names)
 
 
 def _adorm_model(model: type[dj.Model] | None) -> Any:

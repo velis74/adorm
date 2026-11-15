@@ -380,7 +380,7 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | `ValidationError` (a value Django rejects, such as an invalid UUID; a model's `save()` that calls `full_clean()`) | `ValidationError` with each error's message, `code` and `params`, keyed by the operation model's adorm field names |
 | `TransactionManagementError` | `TransactionManagementError` |
 | `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |
-| `django.db` errors | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01` |
+| `django.db` errors | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01`; an [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs) carries the constraint, table, columns and values from the psycopg error's `diag`, the model of the table and its adorm field names of the columns |
 | anything else (Django's `ValueError` for a value of the wrong type) | `DatabaseError` with the original exception in `original` |
 
 An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is

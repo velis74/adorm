@@ -6,7 +6,7 @@ transaction and client-side timeout failures.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any, Literal
 
 __all__ = [
@@ -185,7 +185,44 @@ class OperationalError(DatabaseError):
 
 
 class IntegrityError(DatabaseError):
-    """A constraint was violated: unique, foreign key, not null, check (SQLSTATE class 23)."""
+    """A constraint was violated: unique, foreign key, not null, check, exclusion (SQLSTATE class 23).
+
+    ``constraint_name``, ``table_name`` and ``schema_name`` name the violated constraint and its table (for a foreign
+    key, the referencing table), ``detail`` is the database's detail message. ``columns`` are the database columns of
+    the violated key, or the column of a not-null violation; ``values`` are the key's values as text, in the order of
+    ``columns``, as the database prints them. ``model`` is the label of the model whose table is ``table_name``, and
+    ``fields`` are that model's adorm field names of ``columns``, in their order, without a column that is no field
+    (an index expression). What is not known is ``None``, or empty for ``columns``, ``values`` and ``fields``.
+    """
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        constraint_name: str | None = None,
+        table_name: str | None = None,
+        schema_name: str | None = None,
+        columns: Iterable[str] = (),
+        values: Iterable[str] = (),
+        detail: str | None = None,
+        model: str | None = None,
+        fields: Iterable[str] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.constraint_name = constraint_name
+        self.table_name = table_name
+        self.schema_name = schema_name
+        self.columns = tuple(columns)
+        self.values = tuple(values)
+        self.detail = detail
+        self.model = model
+        self.fields = tuple(fields)
+
+    @property
+    def key(self) -> dict[str, str]:
+        """The violated key, column to value; empty when the values are not known."""
+        return dict(zip(self.columns, self.values, strict=True)) if len(self.values) == len(self.columns) else {}
 
 
 class ProtectedError(IntegrityError):
@@ -310,7 +347,8 @@ _PEP249_NAMES: dict[str, type[Error]] = {
 }
 
 
-def _sqlstate(exc: BaseException) -> str | None:
+def _sqlstate(exc: BaseException) -> tuple[BaseException, str] | None:
+    """The first exception on ``exc``'s ``__cause__`` chain that carries a SQLSTATE, and the SQLSTATE."""
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
@@ -318,23 +356,27 @@ def _sqlstate(exc: BaseException) -> str | None:
         for attribute in ("sqlstate", "pgcode"):
             value = getattr(current, attribute, None)
             if isinstance(value, str) and len(value) == 5:
-                return value
+                return current, value
         current = current.__cause__
     return None
 
 
-def wrap_driver_error(exc: BaseException) -> BaseException:
+def wrap_driver_error(
+    exc: BaseException, details: Callable[[BaseException], Mapping[str, Any]] | None = None
+) -> BaseException:
     """Return the adorm exception for an exception raised by a driver's ORM or database library.
 
     An adorm exception, and an exception that is not an `Exception` (``asyncio.CancelledError``,
     ``KeyboardInterrupt``), is returned unchanged. Otherwise a SQLSTATE found on the exception or its ``__cause__``
     chain (``sqlstate`` or ``pgcode``) decides the class, `DatabaseError` for an unknown SQLSTATE class. Without a
     SQLSTATE, a PEP 249 class name in the MRO decides, then an `OSError` becomes `OperationalError`; anything else
-    becomes `DatabaseError`. The result carries the exception in ``original`` and ``__cause__``.
+    becomes `DatabaseError`. The result carries the exception in ``original`` and ``__cause__``. For an
+    `IntegrityError`, ``details(exc)`` returns the keyword arguments that describe the violation.
     """
     if isinstance(exc, AdormError) or not isinstance(exc, Exception):
         return exc
-    sqlstate = _sqlstate(exc)
+    found = _sqlstate(exc)
+    sqlstate = found[1] if found is not None else None
     cls: type[Error] | None
     if sqlstate is not None:
         cls = _SQLSTATE_CLASSES.get(sqlstate[:2]) or _SQLSTATE_CLASSES.get(sqlstate[:1]) or DatabaseError
@@ -342,7 +384,8 @@ def wrap_driver_error(exc: BaseException) -> BaseException:
         cls = next((_PEP249_NAMES[k.__name__] for k in type(exc).__mro__ if k.__name__ in _PEP249_NAMES), None)
     if cls is None:
         cls = OperationalError if isinstance(exc, OSError) else DatabaseError
-    wrapped = cls(original=exc, sqlstate=sqlstate)
+    described = details(exc) if details is not None and issubclass(cls, IntegrityError) else {}
+    wrapped = cls(original=exc, sqlstate=sqlstate, **described)
     wrapped.__cause__ = exc
     return wrapped
 

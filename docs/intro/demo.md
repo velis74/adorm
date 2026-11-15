@@ -568,6 +568,9 @@ The constructs it does not support are refused before execution; a condition on 
 name, which reports no construct of its own, is refused while executing. Each model is its own table: an update of a row
 copies the values to the row with the same primary key of its MTI parent or child; unique constraints other than the
 primary key are not enforced. A delete checks every row before it deletes any, so a refused delete deletes nothing.
+The `IntegrityError` of a duplicate primary key or a missing value names the model (`model`) and the field
+(`fields`, also `columns`, with `values` and `detail` in PostgreSQL's format for a duplicate key); with no tables, it
+has no `constraint_name`, `table_name` or `schema_name`.
 
 A transaction reads the committed rows and its own writes. A write locks its row until the transaction ends, and so
 does a read with `select_for_update()`; a conflicting write or locking read of another connection waits for the lock

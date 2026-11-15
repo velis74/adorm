@@ -339,6 +339,12 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
   passed on as a transform of the target ORM) and a lookup on a relation whose `on_relations` is false. The
   transaction it is raised in stays usable; an error the database reports for a missing column keeps its SQLSTATE
   (`42703`, a `ProgrammingError`).
+- An `IntegrityError` describes the violation (`constraint_name`, `table_name`, `schema_name`, `columns`, `values`,
+  `detail`) as the database reports it, and names the model of the table (`model`) and its adorm field names of the
+  key's columns (`fields`). A driver over PostgreSQL passes
+  [`integrity_details`](/ref/drivers#adorm-drivers-postgresql-integrity-details-exc) to
+  `wrap_driver_error(exc, details=...)` and maps the columns to field names with the target ORM's column mapping and
+  `orm_names`.
 - Results are plain data keyed by adorm field names.
 - Every segment of a field path (`copy___title` is `copy_`, then `title`), every key of written values and every key of
   returned rows is translated with the `orm_names` of the model it reaches (`ModelMeta.orm_name()`, or
