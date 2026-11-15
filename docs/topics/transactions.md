@@ -245,7 +245,8 @@ connection. The end raises `CancelledError` once the slot has finished the commi
 `outcome` tells how the transaction ended: `COMMITTED` when the commit completed first, `UNKNOWN` when it was
 cancelled while it ran (the slot then closes its connection and leaves the pool), `ROLLED_BACK` when the cancellation
 came before the commit was sent. After a confirmed commit the block's `on_commit()` callbacks run in a task of their
-own; otherwise they are dropped.
+own; otherwise they are dropped. A block cancelled while it waits for a slot on entry raises `CancelledError` with
+the [cancellation outcome](/ref/pool#adorm-cancellation-outcome-exc) `NOT_STARTED`.
 
 ```python
 block = adorm.atomic()

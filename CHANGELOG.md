@@ -356,3 +356,11 @@
   connections of their own to the process's test database; `manage.py test --parallel` and pytest-django work
   unchanged. A connection opened in a `TestCase` test is unusable after that test, one opened in another Django test
   while a `TestCase` transaction is open. The native PostgreSQL driver raises `NotSupportedError` inside a `TestCase`.
+- Demo writes and transactions on every driver: registrations lock the activity with `select_for_update()` and take
+  `nowait`, `lock_timeout` (`adorm.connection_options()`) and `timeout` (`adorm.timeout()`);
+  `POST /api/data/invoices/settlements` pays the earliest due open invoices, read with
+  `select_for_update(skip_locked=True)`. `ExecutorError` gains `sqlstate`, `phase`, `operation` and `outcome`; a lock
+  that is not available (SQLSTATE `55P03`) answers 409, `OperationTimeout` 504 and `NotSupportedError` 501. The demo
+  memory driver executes `select_for_update()` with `nowait` and `skip_locked`. Tests run the write flows in process
+  with the Django and the asyncpg driver active, and the end-to-end test runs them on every driver.
+- `cancellation_outcome()` of a cancellation that reaches `atomic()` while it waits for a slot is `NOT_STARTED`.

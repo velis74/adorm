@@ -305,7 +305,8 @@ once it has. After the first call, the lease takes no requests (`InterfaceError`
 The [`CancellationOutcome`](#adorm-cancellationoutcome) of the adorm operation or request whose cancellation raised
 `exc`: the `CancelledError` itself, or an exception it caused through `__cause__`, such as the `TimeoutError` of
 `asyncio.timeout()`. `None` for any other exception. Set by [`call()`](#async-call-method-args-options-none), by
-[`Router.run()`](#async-run-session-operation) (`NOT_STARTED` while it waits for a slot) and by
+[`Router.run()`](#async-run-session-operation) (`NOT_STARTED` while it waits for a slot), by entering
+[`atomic()`](/ref/transactions#adorm-atomic) (`NOT_STARTED` while it waits for a slot) and by
 [`Atomic.execute()`](/ref/transactions#async-execute-operation) (`NOT_STARTED` while it waits for a savepoint of another
 task). `UNKNOWN` turns into the request's outcome when the slot delivers it later; the value is final once the slot has
 finished the request, which releasing its lease waits for. See [cancellation](/topics/cancellation).

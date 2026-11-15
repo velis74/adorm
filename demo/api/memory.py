@@ -16,12 +16,14 @@ it shares rows with through multi-table inheritance; inserting or deleting a row
 raises `NotSupportedError`, and so does deleting a row that a foreign key references (deletes do not cascade). Unique
 constraints are not enforced, except the primary key.
 
-Transactions read committed rows and their own writes. A write locks its row until the transaction ends; a
-conflicting write of another connection waits for the lock and re-checks the row, and a wait that would close a
-cycle raises `OperationalError` with SQLSTATE ``40P01``. Rolling back to a savepoint releases the locks taken
-after it. A lookup, arithmetic or ordering on values that do not compare raises `ProgrammingError` with SQLSTATE
-``42883``. Every call is recorded in the trace of the calling
-context (`tracing()`).
+Transactions read committed rows and their own writes. A write locks its row until the transaction ends, and so
+does a read with ``select_for_update()`` (also ``nowait`` and ``skip_locked``, not ``of`` and ``no_key``); a
+conflicting write or locking read of another connection waits for the lock and re-checks the row, and a wait that
+would close a cycle raises `OperationalError` with SQLSTATE ``40P01``. A locking read with ``nowait`` raises
+`OperationalError` with SQLSTATE ``55P03`` for a locked row; one with ``skip_locked`` leaves locked rows out before
+slicing. Rolling back to a savepoint releases the locks taken after it. A lookup, arithmetic or ordering on values
+that do not compare raises `ProgrammingError` with SQLSTATE ``42883``. Every call is recorded in the trace of the
+calling context (`tracing()`).
 """
 
 from __future__ import annotations
@@ -51,6 +53,7 @@ from adorm.exceptions import (
     ObjectDoesNotExist,
     OperationalError,
     ProgrammingError,
+    TransactionManagementError,
 )
 from adorm.models import ForeignKey, Model, registry
 from adorm.operations import (
@@ -140,7 +143,13 @@ CAPABILITIES = Capabilities(
         "update_or_create",
     },
     constructs={f"lookup.{name}" for name in (*LOOKUPS, "isnull")}
-    | {"clause.distinct", "expression.CombinedExpression"},
+    | {
+        "clause.distinct",
+        "clause.select_for_update",
+        "clause.select_for_update.nowait",
+        "clause.select_for_update.skip_locked",
+        "expression.CombinedExpression",
+    },
     savepoints=True,
     cancellation=True,
 )
@@ -499,12 +508,19 @@ class MemoryConnection(DriverConnection):
                     rows[pk] = row
         return rows
 
+    def _locked_by_other(self, key: tuple[str, Any]) -> MemoryConnection | None:
+        """The open transaction of another connection that holds the lock ``key``; ``None`` when there is none."""
+        owner = self.database.locks.get(key)
+        if owner is None or owner is self or owner.closed or owner._overlay is None:
+            return None
+        return owner
+
     async def _lock(self, label: str, pk: Any) -> None:
         """Wait until no other transaction holds the lock of the row; inside a transaction, take it."""
         key = (label, pk)
         while True:
-            owner = self.database.locks.get(key)
-            if owner is None or owner is self or owner.closed or owner._overlay is None:
+            owner = self._locked_by_other(key)
+            if owner is None:
                 if self._overlay is not None:
                     self.database.locks[key] = self
                 return
@@ -548,6 +564,33 @@ class MemoryConnection(DriverConnection):
         rows = _Rows(query.model).project(query, self._select(query))
         rows = rows[query.low_mark : query.high_mark]
         return copy.deepcopy(rows)
+
+    async def _fetch(self, query: Query) -> list[dict[str, Any]]:
+        """The rows of ``query``; with ``select_for_update()`` the rows are locked as PostgreSQL locks them."""
+        lock = query.for_update
+        if lock is None:
+            return self._read(query)
+        if self._overlay is None:
+            raise TransactionManagementError("select_for_update cannot be used outside of a transaction.")
+        rows = _Rows(query.model)
+        wanted = query.high_mark
+        locked: list[dict[str, Any]] = []
+        for pk in [row[rows.pk] for row in self._select(query)]:
+            if wanted is not None and len(locked) >= wanted:
+                break
+            if self._locked_by_other((query.model, pk)) is not None:
+                if lock.nowait:
+                    raise OperationalError(
+                        f'could not obtain lock on row in relation "{query.model}"', sqlstate="55P03"
+                    )
+                if lock.skip_locked:
+                    continue
+            await self._lock(query.model, pk)
+            current = self._table(query.model).get(pk)
+            if current is not None and rows.matches(query, current):
+                locked.append(current)
+        # Rows skipped by the offset are locked too, as in PostgreSQL.
+        return copy.deepcopy(rows.project(query, locked)[query.low_mark :])
 
     async def _insert(self, label: str, values: Mapping[str, Any]) -> dict[str, Any]:
         parents, _ = _inheritance(label)
@@ -656,8 +699,8 @@ class MemoryConnection(DriverConnection):
             self._write(query.model, pk, None)
         return len(matched), ({query.model: len(matched)} if matched else {})
 
-    def _one(self, query: Query) -> dict[str, Any]:
-        rows = self._read(query)
+    async def _one(self, query: Query) -> dict[str, Any]:
+        rows = await self._fetch(query)
         name = query.model.partition(".")[2]
         if not rows:
             raise ObjectDoesNotExist(f"{name} matching query does not exist.")
@@ -687,7 +730,7 @@ class MemoryConnection(DriverConnection):
     async def _get_or_create(self, operation: GetOrCreate) -> tuple[dict[str, Any], bool]:
         lookups = dict(operation.lookups)
         try:
-            return self._one(operation.query.filter(**lookups)), False
+            return await self._one(operation.query.filter(**lookups)), False
         except ObjectDoesNotExist:
             pass
         values = {name: value for name, value in lookups.items() if "__" not in name}
@@ -698,25 +741,25 @@ class MemoryConnection(DriverConnection):
         lookups = dict(operation.lookups)
         query = operation.query.filter(**lookups)
         try:
-            row = self._one(query)
+            row = await self._one(query)
         except ObjectDoesNotExist:
             values = {name: value for name, value in lookups.items() if "__" not in name}
             values.update(operation.defaults if operation.create_defaults is None else operation.create_defaults)
             return await self._insert(operation.query.model, values), True
         pk = row[_model(operation.query.model)._meta.pk]
         await self._update(Query(operation.query.model).filter(pk=pk), operation.defaults)
-        return self._one(Query(operation.query.model).filter(pk=pk)), False
+        return await self._one(Query(operation.query.model).filter(pk=pk)), False
 
     async def _execute(self, operation: Any) -> Any:
         self._check_open()
         self.record(f"{operation.kind} {operation.model}")
         match operation:
             case Select():
-                return self._read(operation.query)
+                return await self._fetch(operation.query)
             case Get():
-                return self._one(operation.query)
+                return await self._one(operation.query)
             case First():
-                rows = self._read(operation.query[:1])
+                rows = await self._fetch(operation.query[:1])
                 return rows[0] if rows else None
             case Last():
                 ordering = operation.query.ordering or (OrderBy(F("pk")),)
@@ -729,12 +772,12 @@ class MemoryConnection(DriverConnection):
                     )
                     for order in ordering
                 )
-                rows = self._read(operation.query.order_by(*reversed_ordering)[:1])
+                rows = await self._fetch(operation.query.order_by(*reversed_ordering)[:1])
                 return rows[0] if rows else None
             case Count():
-                return len(self._read(operation.query))
+                return len(await self._fetch(operation.query))
             case Exists():
-                return bool(self._read(operation.query))
+                return bool(await self._fetch(operation.query))
             case Create():
                 return await self._insert(operation.model, dict(operation.values))
             case Save():

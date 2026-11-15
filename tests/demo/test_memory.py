@@ -11,7 +11,7 @@ import pytest
 import adorm
 
 from adorm.drivers import Capabilities
-from adorm.operations import Create, Select, Update
+from adorm.operations import Count, Create, Get, Select, Update
 from adorm.query import F, Q, Query
 from adorm.settings import default_router
 from demo.api import memory
@@ -636,6 +636,186 @@ async def test_closing_a_connection_in_a_transaction_releases_its_locks():
     await connection.close()
     assert database.locks == {}
     assert database.tables["clubs.Member"][1]["level"] == "beginner"
+
+
+# select_for_update
+
+
+def _locking(**options):
+    return Query("clubs.Member").select_for_update(**options).order_by("pk")
+
+
+async def _connections(count=2):
+    database = memory.MemoryDatabase(tables())
+    driver = memory.MemoryDriver(database)
+    return database, [await driver.open_connection(None, ignore) for _ in range(count)]
+
+
+def test_select_for_update_is_supported_without_of_and_no_key():
+    constructs = memory.MemoryDriver.capabilities.constructs
+    assert {"clause.select_for_update.nowait", "clause.select_for_update.skip_locked"} <= constructs
+    assert not {"clause.select_for_update.of", "clause.select_for_update.no_key"} & constructs
+
+
+async def test_select_for_update_needs_a_transaction(db):  # noqa: ARG001
+    with pytest.raises(adorm.TransactionManagementError, match="outside of a transaction"):
+        await Member.objects.select_for_update().get(pk=1)
+    with pytest.raises(adorm.NotSupportedError, match="clause.select_for_update.of"):
+        async with adorm.atomic():
+            await Member.objects.select_for_update(of=["self"]).get(pk=1)
+
+
+async def test_select_for_update_locks_the_selected_rows_until_the_transaction_ends():
+    database, (holder, _) = await _connections()
+    await holder.begin()
+    rows = await holder.execute(Select(_locking().filter(level="beginner")))
+    assert [row["id"] for row in rows] == [1, 4]
+    assert database.locks == {("clubs.Member", 1): holder, ("clubs.Member", 4): holder}
+    await holder.rollback()
+    assert database.locks == {}
+
+
+async def test_a_slice_locks_the_rows_up_to_its_end_and_the_offset_rows_too():
+    database, (holder, _) = await _connections()
+    await holder.begin()
+    rows = await holder.execute(Select(_locking()[1:3]))
+    assert [row["id"] for row in rows] == [2, 3]
+    assert set(database.locks) == {("clubs.Member", 1), ("clubs.Member", 2), ("clubs.Member", 3)}
+    await holder.commit()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_locking_read_waits_for_the_lock_and_sees_the_committed_row(attempt):  # noqa: ARG001
+    database, (holder, waiter) = await _connections()
+    await holder.begin()
+    await holder.execute(_member_update(1, "advanced"))
+    await waiter.begin()
+    reading = asyncio.create_task(waiter.execute(Get(_locking().filter(pk=1))))
+    await until(lambda: len(database.waiters) == 1)
+    assert not reading.done()
+    await holder.commit()
+    async with asyncio.timeout(5):
+        row = await reading
+    assert row["level"] == "advanced"
+    assert database.locks == {("clubs.Member", 1): waiter}
+    await waiter.commit()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_locking_read_drops_a_row_that_no_longer_matches_after_the_wait(attempt):  # noqa: ARG001
+    database, (holder, waiter) = await _connections()
+    await holder.begin()
+    await holder.execute(_member_update(1, "advanced"))
+    await waiter.begin()
+    reading = asyncio.create_task(waiter.execute(Select(_locking().filter(level="beginner"))))
+    await until(lambda: len(database.waiters) == 1)
+    await holder.commit()
+    async with asyncio.timeout(5):
+        rows = await reading
+    assert [row["id"] for row in rows] == [4]
+    await waiter.rollback()
+
+
+async def test_nowait_raises_lock_not_available_for_a_locked_row():
+    database, (holder, other) = await _connections()
+    await holder.begin()
+    await holder.execute(Select(_locking().filter(pk=2)))
+    await other.begin()
+    with pytest.raises(adorm.OperationalError) as raised:
+        await other.execute(Select(_locking(nowait=True)))
+    assert raised.value.sqlstate == "55P03"
+    assert database.waiters == {}
+    # The rows before the locked one were locked before the refusal; the transaction's end releases them.
+    await other.rollback()
+    assert database.locks == {("clubs.Member", 2): holder}
+    await other.begin()
+    assert [row["id"] for row in await other.execute(Select(_locking(nowait=True).filter(pk=1)))] == [1]
+    await other.commit()
+    await holder.rollback()
+
+
+async def test_skip_locked_leaves_locked_rows_out_before_slicing():
+    database, (holder, other) = await _connections()
+    await holder.begin()
+    await holder.execute(Select(_locking().filter(pk__in=[1, 3])))
+    await other.begin()
+    rows = await other.execute(Select(_locking(skip_locked=True)[:2]))
+    assert [row["id"] for row in rows] == [2, 4]
+    assert database.waiters == {}
+    assert {key: owner is other for key, owner in database.locks.items() if owner is not holder} == {
+        ("clubs.Member", 2): True,
+        ("clubs.Member", 4): True,
+    }
+    assert await other.execute(Count(_locking(skip_locked=True))) == 2
+    await other.commit()
+    await holder.commit()
+    assert database.locks == {}
+
+
+async def test_rolling_back_to_a_savepoint_releases_a_lock_a_locking_read_took_after_it():
+    database, (holder, _) = await _connections()
+    await holder.begin()
+    await holder.savepoint("s1")
+    await holder.execute(Select(_locking().filter(pk=1)))
+    assert ("clubs.Member", 1) in database.locks
+    await holder.rollback_to_savepoint("s1")
+    assert database.locks == {}
+    await holder.commit()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_locking_reads_in_opposite_order_raise_a_deadlock_error(db, attempt):  # noqa: ARG001
+    first_locked = asyncio.Barrier(2)
+
+    async def lock(first_pk, second_pk, session_name):
+        with adorm.create_session("default", session_name).activate():
+            async with adorm.atomic():
+                await Member.objects.select_for_update().get(pk=first_pk)
+                await first_locked.wait()
+                await Member.objects.select_for_update().get(pk=second_pk)
+
+    one = asyncio.create_task(lock(1, 2, "one"))
+    await until(lambda: first_locked.n_waiting == 1)
+    two = asyncio.create_task(lock(2, 1, "two"))
+    results = await asyncio.gather(one, two, return_exceptions=True)
+    errors = [result for result in results if isinstance(result, BaseException)]
+    assert [(type(error), error.sqlstate) for error in errors] == [(adorm.OperationalError, "40P01")]
+    assert db.locks == {}
+    assert db.waiters == {}
+    assert pool().in_use == 0
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_cancelling_a_locking_read_leaves_no_waiter_and_frees_the_slot(db, attempt):  # noqa: ARG001
+    locked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder():
+        async with adorm.atomic():
+            await Member.objects.select_for_update().get(pk=1)
+            locked.set()
+            await release.wait()
+
+    async def waiter():
+        with other_session().activate():
+            async with adorm.atomic():
+                await Member.objects.filter(pk=3).update(level="advanced")
+                await Member.objects.select_for_update().get(pk=1)
+
+    held = asyncio.create_task(holder())
+    await locked.wait()
+    waiting = asyncio.create_task(waiter())
+    await until(lambda: len(db.waiters) == 1)
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert db.waiters == {}
+    assert list(db.locks) == [("clubs.Member", 1)]
+    release.set()
+    await held
+    assert db.tables["clubs.Member"][3]["level"] == "intermediate"
+    assert db.locks == {}
+    await until(lambda: pool().in_use == 0)
 
 
 # Trace

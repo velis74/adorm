@@ -6,7 +6,8 @@ session, the driver and the calls the driver received (recorded by the memory dr
 ``using`` is ``default``, the profile of the active driver; a read endpoint runs on the profile of the available
 driver the ``X-Adorm-Driver`` header names. ``/api/data/compare/members`` reads one page of members on every
 available driver concurrently. Executor and lock errors answer `ExecutorError` (`install_error_handlers()`): 503
-when no slot becomes free in time, 409 when the database detects a deadlock.
+when no slot becomes free in time, 409 when the database detects a deadlock or a row lock is not available, 504 when
+the request's `adorm.timeout()` expires and 501 when the driver does not support what the request needs.
 """
 
 from __future__ import annotations
@@ -16,8 +17,8 @@ import datetime
 import decimal
 
 from collections import deque
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from typing import Annotated, Generic, TypeVar
 
@@ -28,6 +29,7 @@ from pydantic import BaseModel, Field
 
 import adorm
 
+from adorm.exceptions import TimeoutPhase
 from adorm.settings import default_router
 from demo.api import memory, operations
 from demo.api.schemas import Id, Level, MemberChanges, PaymentIn, Slug
@@ -124,6 +126,14 @@ class Registered(BaseModel):
     )
 
 
+class Settlement(BaseModel):
+    """The payments a settlement stored."""
+
+    payments: list[Payment] = Field(
+        description="One payment of the full total per invoice settled, earliest due invoice first."
+    )
+
+
 class InvoiceDetail(BaseModel):
     """An invoice with its payments."""
 
@@ -162,12 +172,40 @@ class ExecutorError(BaseModel):
 
     detail: str = Field(description="The error message.")
     error: str | None = Field(
-        None, description="`SessionTimeout`, `DeadlockError` or `OperationalError`; absent in a `{detail}` answer."
+        None,
+        description=(
+            "`SessionTimeout`, `DeadlockError`, `OperationalError`, `OperationTimeout` or `NotSupportedError`; absent "
+            "in a `{detail}` answer."
+        ),
     )
-    session: str | None = Field(None, description="`using/session_name` of the session that waited, if any.")
+    session: str | None = Field(
+        None, description="`using/session_name` of the session that waited or timed out, if known."
+    )
     held_sessions: list[str] = Field(
         default_factory=list,
         description="`DeadlockError`: the sessions whose slots the waiting flow held; empty otherwise.",
+    )
+    sqlstate: str | None = Field(
+        None, description="`OperationalError`: the SQLSTATE, `40P01` (deadlock) or `55P03` (lock not available)."
+    )
+    phase: TimeoutPhase | None = Field(
+        None,
+        description=(
+            "`OperationTimeout`: `waiting_for_slot` or `executing`, what the interrupted operation was doing; `null` "
+            "when no operation was in progress."
+        ),
+    )
+    operation: str | None = Field(
+        None,
+        description="`OperationTimeout`: the interrupted operation, `<kind> <model label>` or a transaction step.",
+    )
+    outcome: adorm.CancellationOutcome | None = Field(
+        None,
+        description=(
+            "`OperationTimeout`: whether the interrupted operation took effect (`cancellation_outcome()`). The "
+            "transaction it ran in is rolled back, unless the operation is `commit` and its outcome is not "
+            "`not_started` or `failed`."
+        ),
     )
 
 
@@ -242,6 +280,27 @@ executor_router = APIRouter(tags=["demo"])
 
 NOT_FOUND = {404: {"description": "No row has that primary key or slug."}}
 NO_DRIVER = {503: {"description": "No driver is active."}}
+LOCK_ERRORS = {
+    409: {
+        "model": ExecutorError,
+        "description": (
+            "The database detected a deadlock (SQLSTATE `40P01`), or the activity's row is locked and `nowait` or "
+            "`lock_timeout` gave up waiting (SQLSTATE `55P03`); nothing is stored, retry."
+        ),
+    },
+    501: {
+        "model": ExecutorError,
+        "description": "The active driver does not support a connection option the request sets (`lock_timeout`).",
+    },
+    504: {
+        "model": ExecutorError,
+        "description": (
+            "The request's `timeout` expired (`OperationTimeout`). The transaction is rolled back, unless "
+            "`operation` is `commit`: then `outcome` tells whether the commit took effect (`succeeded`, `unknown`)."
+        ),
+    },
+}
+"""Error responses of the endpoints that lock rows, wait with limits and set connection options."""
 EXECUTOR_ERRORS = {
     409: {"model": ExecutorError, "description": "The database detected a deadlock (SQLSTATE `40P01`); retry."},
     503: {
@@ -278,21 +337,62 @@ async def _session_timeout(_request: Request, exc: adorm.SessionTimeout) -> JSON
         session=_session_name(exc.session),
         held_sessions=[_session_name(held) or "" for held in getattr(exc, "held_sessions", ())],
     )
-    return JSONResponse(body.model_dump(), status_code=503)
+    return JSONResponse(body.model_dump(mode="json"), status_code=503)
+
+
+LOCK_CONFLICTS = frozenset({"40P01", "55P03"})
+"""SQLSTATEs answered with 409: deadlock detected, lock not available."""
 
 
 async def _operational_error(_request: Request, exc: adorm.OperationalError) -> JSONResponse:
-    if exc.sqlstate != "40P01":
+    if exc.sqlstate not in LOCK_CONFLICTS:
         raise exc
+    body = ExecutorError(detail=str(exc), error=type(exc).__name__, sqlstate=exc.sqlstate)
+    return JSONResponse(body.model_dump(mode="json"), status_code=409)
+
+
+def _describe(operation: object) -> str | None:
+    if operation is None:
+        return None
+    kind, model = getattr(operation, "kind", None), getattr(operation, "model", None)
+    return f"{kind} {model}" if kind and model else str(operation)
+
+
+async def _operation_timeout(_request: Request, exc: adorm.OperationTimeout) -> JSONResponse:
+    body = ExecutorError(
+        detail=str(exc),
+        error=type(exc).__name__,
+        session=_session_name(exc.session),
+        phase=exc.phase,
+        operation=_describe(exc.operation),
+        outcome=adorm.cancellation_outcome(exc),
+    )
+    return JSONResponse(body.model_dump(mode="json"), status_code=504)
+
+
+async def _not_supported(_request: Request, exc: adorm.NotSupportedError) -> JSONResponse:
     body = ExecutorError(detail=str(exc), error=type(exc).__name__)
-    return JSONResponse(body.model_dump(), status_code=409)
+    return JSONResponse(body.model_dump(mode="json"), status_code=501)
 
 
 def install_error_handlers(app: FastAPI) -> None:
-    """Answer `adorm.SessionTimeout` (and `adorm.DeadlockError`) with 503 and a deadlock (`adorm.OperationalError`
-    with SQLSTATE ``40P01``) with 409, both with an `ExecutorError` body."""
+    """Answer with an `ExecutorError` body: `adorm.SessionTimeout` (and `adorm.DeadlockError`) with 503, a deadlock or
+    a lock that is not available (`adorm.OperationalError` with SQLSTATE ``40P01`` or ``55P03``) with 409,
+    `adorm.OperationTimeout` with 504 and `adorm.NotSupportedError` with 501."""
     app.add_exception_handler(adorm.SessionTimeout, _session_timeout)
     app.add_exception_handler(adorm.OperationalError, _operational_error)
+    app.add_exception_handler(adorm.OperationTimeout, _operation_timeout)
+    app.add_exception_handler(adorm.NotSupportedError, _not_supported)
+
+
+@asynccontextmanager
+async def limits(timeout: float | None, lock_timeout: float | None) -> AsyncIterator[None]:
+    """The request's limits: ``adorm.timeout(timeout)`` around the block and ``lock_timeout`` as a connection option
+    of its operations; ``None`` sets no limit."""
+    options = {} if lock_timeout is None else {"lock_timeout": lock_timeout}
+    with adorm.connection_options(**options):
+        async with adorm.timeout(timeout):
+            yield
 
 
 @contextmanager
@@ -329,6 +429,25 @@ def not_found(exc: adorm.ObjectDoesNotExist) -> HTTPException:
 
 
 MemberLevel = Annotated[Level | None, Query(description="Skill level.")]
+Timeout = Annotated[
+    float | None,
+    Query(
+        gt=0,
+        le=60,
+        description="Seconds the whole request may take (`adorm.timeout()`), waiting for a slot included; 504 after.",
+    ),
+]
+LockTimeout = Annotated[
+    float | None,
+    Query(
+        gt=0,
+        le=60,
+        description=(
+            "Seconds a statement may wait for a row lock (connection option `lock_timeout`); 409 after. Not supported "
+            "by the memory driver (501)."
+        ),
+    ),
+]
 MemberSearch = Annotated[str | None, Query(description="Fragment of the first or last name, any case.")]
 MemberOrder = Annotated[operations.MemberOrdering, Query(description="Sort order; `-` reverses.")]
 Offset = Annotated[int, Query(ge=0, description="Rows to skip.")]
@@ -494,23 +613,36 @@ async def pay_invoice(
     return traced(stored, target, session_name, calls)
 
 
-@router.post("/activities/{pk}/registrations", summary="Register members", responses=NOT_FOUND | EXECUTOR_ERRORS)
+@router.post(
+    "/activities/{pk}/registrations",
+    summary="Register members",
+    responses=NOT_FOUND | EXECUTOR_ERRORS | LOCK_ERRORS,
+)
 async def register_members(
-    pk: Id, registrations: Registrations, target: WriteTarget, session_name: SessionName = "default"
+    pk: Id,
+    registrations: Registrations,
+    target: WriteTarget,
+    session_name: SessionName = "default",
+    nowait: Annotated[
+        bool, Query(description="Answer 409 at once when another transaction holds the activity's row lock.")
+    ] = False,
+    timeout: Timeout = None,
+    lock_timeout: LockTimeout = None,
 ) -> Traced[Registered]:
     """Register members for the activity in one transaction, each in a nested `atomic()` block (a savepoint): a
     registration that would exceed the capacity is rolled back to its savepoint, the others stay. The transaction
-    first updates the activity's row to itself, which locks it: concurrent registrations for the activity run one
-    after another."""
+    reads the activity with `select_for_update()`, which locks its row: concurrent registrations for the activity run
+    one after another. A request that gives up (`nowait`, `lock_timeout`, `timeout`, or the client going away) before
+    the commit rolls the transaction back and stores nothing; a `timeout` during the commit answers 504 with
+    `operation` `commit`, and its `outcome` tells whether the registrations were stored."""
     registered: list[int] = []
     skipped: dict[int, str] = {}
     with run(target, session_name) as calls:
-        async with adorm.atomic():
+        async with limits(timeout, lock_timeout), adorm.atomic():
             try:
-                activity = await Activity.objects.get(pk=pk)
+                activity = await Activity.objects.select_for_update(nowait=nowait).get(pk=pk)
             except Activity.DoesNotExist as exc:
                 raise not_found(exc) from None
-            await Activity.objects.filter(pk=pk).update(capacity=adorm.F("capacity"))
             for member_id in registrations.member_ids:
                 if member_id in registered or member_id in skipped:
                     continue
@@ -539,6 +671,36 @@ async def register_members(
 
 class _Full(Exception):  # noqa: N818 - control flow only
     """Rolls a registration back to its savepoint."""
+
+
+@router.post("/invoices/settlements", summary="Settle open invoices", responses=EXECUTOR_ERRORS | LOCK_ERRORS)
+async def settle_invoices(
+    target: WriteTarget,
+    session_name: SessionName = "default",
+    limit: Annotated[int, Query(ge=1, le=20, description="The most invoices to settle.")] = 5,
+    timeout: Timeout = None,
+) -> Traced[Settlement]:
+    """Pay up to `limit` open invoices in full, earliest due first, in one transaction. The invoices are read with
+    `select_for_update(skip_locked=True)`: an invoice whose row lock another transaction holds (another settlement, or a
+    payment once it has marked the invoice paid) is left out instead of waited for, so concurrent settlements settle
+    different invoices and none is paid twice."""
+    paid_at = datetime.datetime.now(datetime.UTC)
+    with run(target, session_name) as calls:
+        async with limits(timeout, None), adorm.atomic():
+            due = Invoice.objects.select_for_update(skip_locked=True).filter(status="open").order_by("due", "id")
+            payments = []
+            async for invoice in due[:limit]:
+                payments.append(
+                    await Payment.objects.create(
+                        invoice_id=invoice.id,
+                        amount=invoice.total,
+                        reference=f"settled by {session_name}"[:40],
+                        paid_at=paid_at,
+                    )
+                )
+                invoice.status = "paid"
+                await invoice.save(update_fields=("status",))
+    return traced(Settlement(payments=payments), target, session_name, calls)
 
 
 @router.get(

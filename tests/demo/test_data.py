@@ -1,6 +1,7 @@
 """The demo's executed endpoints in process, on the memory driver with a small data set."""
 
 import asyncio
+import datetime
 import sys
 
 import httpx
@@ -11,6 +12,8 @@ import adorm
 from adorm.settings import get_profile
 from demo.api import data, drivers, main, memory
 from demo.api.main import app, POOL
+from demo.models.activities import Activity
+from demo.models.billing import Invoice
 from tests.demo.memory_data import tables, until
 
 REPEAT = range(5)
@@ -292,6 +295,267 @@ async def test_concurrent_registrations_do_not_overfill_the_activity(database, c
     assert database.locks == {}
 
 
+class RowHolder:
+    """A transaction of the session ``default/holder`` that locks rows with ``select_for_update()`` until
+    `release()`."""
+
+    def __init__(self) -> None:
+        self.held = asyncio.Event()
+        self.done = asyncio.Event()
+        self.task: asyncio.Task | None = None
+
+    async def hold(self, queryset_factory) -> None:
+        async def run():
+            with adorm.create_session("default", "holder").activate():
+                async with adorm.atomic():
+                    [row async for row in queryset_factory()]
+                    self.held.set()
+                    await self.done.wait()
+
+        self.task = asyncio.create_task(run())
+        await self.held.wait()
+
+    async def release(self) -> None:
+        self.done.set()
+        if self.task is not None:
+            await self.task
+
+
+@pytest.fixture
+async def holder(client):  # noqa: ARG001 - the executor of the app
+    row_holder = RowHolder()
+    try:
+        yield row_holder
+    finally:
+        await row_holder.release()
+
+
+def activity_one():
+    return Activity.objects.select_for_update().filter(pk=1)
+
+
+async def test_a_registration_locks_the_activity_with_select_for_update(database, client, monkeypatch):
+    """While the transaction registers a member, it holds the activity's row lock and nothing else locks it."""
+    reached = asyncio.Event()
+    proceed = asyncio.Event()
+    get_or_create = memory.MemoryConnection._get_or_create
+    held: list[set] = []
+
+    async def stall(self, operation):
+        held.append({key for key, owner in database.locks.items() if owner is self})
+        reached.set()
+        await proceed.wait()
+        return await get_or_create(self, operation)
+
+    monkeypatch.setattr(memory.MemoryConnection, "_get_or_create", stall)
+    request = asyncio.create_task(client.post("/api/data/activities/2/registrations", json={"member_ids": [2]}))
+    await reached.wait()
+    assert held == [{("activities.Activity", 2)}]
+    proceed.set()
+    body = (await request).json()
+    assert body["result"] == {"registered": [2], "skipped": {}}
+    assert calls(body)[:3] == ["acquire", "begin", "get activities.Activity"]
+    assert "update activities.Activity" not in calls(body)
+    assert database.locks == {}
+
+
+async def test_a_registration_with_nowait_answers_409_while_the_activity_is_locked(database, client, holder):
+    await holder.hold(activity_one)
+    response = await client.post("/api/data/activities/1/registrations?nowait=true", json={"member_ids": [2]})
+    assert response.status_code == 409
+    body = response.json()
+    assert (body["error"], body["sqlstate"]) == ("OperationalError", "55P03")
+    assert "activities.Activity" in body["detail"]
+    assert database.waiters == {}
+    assert len(database.rows("activities.Attendance")) == 1
+    await holder.release()
+    response = await client.post("/api/data/activities/1/registrations?nowait=true", json={"member_ids": [2]})
+    assert response.json()["result"]["registered"] == [2]
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_registration_waiting_for_the_lock_times_out_with_504(database, client, holder, attempt):  # noqa: ARG001
+    await holder.hold(activity_one)
+    response = await client.post(
+        "/api/data/activities/1/registrations",
+        params={"timeout": 0.05},
+        json={"member_ids": [2]},
+        headers={data.SESSION_HEADER: "late"},
+    )
+    assert response.status_code == 504
+    body = response.json()
+    assert (body["error"], body["phase"], body["operation"]) == (
+        "OperationTimeout",
+        "executing",
+        "get activities.Activity",
+    )
+    assert (body["session"], body["outcome"]) == ("default/late", "unknown")
+    assert database.waiters == {}
+    assert len(database.rows("activities.Attendance")) == 1
+    await until(lambda: _pool().in_use == 1)  # only the holder's slot
+    await holder.release()
+    assert database.locks == {}
+
+
+async def test_a_registration_waiting_for_a_slot_times_out_in_that_phase(database, monkeypatch):
+    monkeypatch.setattr(main, "POOL", adorm.PoolSettings(max_connections=1, acquire_timeout=5))
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://demo") as http:
+            row_holder = RowHolder()
+            await row_holder.hold(activity_one)
+            try:
+                response = await http.post(
+                    "/api/data/activities/2/registrations", params={"timeout": 0.05}, json={"member_ids": [2]}
+                )
+                assert _pool().waiting == 0
+            finally:
+                await row_holder.release()
+            assert _pool().in_use == 0
+    assert response.status_code == 504
+    body = response.json()
+    assert (body["phase"], body["operation"], body["outcome"]) == ("waiting_for_slot", "begin", "not_started")
+    assert len(database.rows("activities.Attendance")) == 1
+
+
+async def test_lock_timeout_is_refused_by_the_memory_driver_with_501(database, client):
+    response = await client.post("/api/data/activities/2/registrations?lock_timeout=1", json={"member_ids": [2]})
+    assert response.status_code == 501
+    body = response.json()
+    assert body["error"] == "NotSupportedError"
+    assert "lock_timeout" in body["detail"]
+    assert len(database.rows("activities.Attendance")) == 1
+    assert database.locks == {}
+    assert _pool().in_use == 0
+
+
+@pytest.mark.parametrize(
+    "params", [{"timeout": 0}, {"timeout": 61}, {"lock_timeout": -1}, {"nowait": "maybe"}, {"timeout": "x"}]
+)
+async def test_registration_limits_are_validated(client, params):
+    response = await client.post("/api/data/activities/2/registrations", params=params, json={"member_ids": [2]})
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_cancelled_registration_waiting_for_the_lock_stores_nothing(database, client, holder, attempt):  # noqa: ARG001
+    await holder.hold(activity_one)
+    request = asyncio.create_task(client.post("/api/data/activities/1/registrations", json={"member_ids": [2]}))
+    await until(lambda: len(database.waiters) == 1)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert database.waiters == {}
+    await until(lambda: _pool().in_use == 1)
+    await holder.release()
+    assert len(database.rows("activities.Attendance")) == 1
+    assert database.locks == {}
+    assert _pool().in_use == 0
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_registration_cancelled_after_its_writes_rolls_all_of_them_back(database, client, monkeypatch, attempt):  # noqa: ARG001
+    """The client goes away while the second member's registration runs: the first member's savepoint was released
+    but the transaction rolls back, so neither registration is stored."""
+    reached = asyncio.Event()
+    get_or_create = memory.MemoryConnection._get_or_create
+
+    async def stall_on_member_3(self, operation):
+        if dict(operation.lookups).get("member_id") == 3:
+            reached.set()
+            await asyncio.Event().wait()
+        return await get_or_create(self, operation)
+
+    monkeypatch.setattr(memory.MemoryConnection, "_get_or_create", stall_on_member_3)
+    request = asyncio.create_task(client.post("/api/data/activities/2/registrations", json={"member_ids": [2, 3]}))
+    await reached.wait()
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await until(lambda: _pool().in_use == 0)
+    assert [row["member_id"] for row in database.rows("activities.Attendance")] == [1]
+    assert database.locks == {}
+
+
+# Settlements
+
+
+def open_invoices(database, count):
+    """Replace the invoices with ``count`` open ones, due a day apart from the last to the first."""
+    base = dict(database.tables["billing.Invoice"][1])
+    database.tables["billing.Invoice"].clear()
+    for pk in range(1, count + 1):
+        due = base["due"] + datetime.timedelta(days=count - pk)
+        database.tables["billing.Invoice"][pk] = base | {"id": pk, "number": f"2026-{pk:04d}", "due": due}
+
+
+async def test_a_settlement_pays_open_invoices_earliest_due_first(database, client):
+    open_invoices(database, 3)
+    response = await client.post("/api/data/invoices/settlements", params={"limit": 2})
+    assert response.status_code == 200
+    body = response.json()
+    assert [(p["invoice_id"], p["amount"], p["reference"]) for p in body["result"]["payments"]] == [
+        (3, "120.00", "settled by default"),
+        (2, "120.00", "settled by default"),
+    ]
+    assert calls(body) == [
+        "acquire",
+        "begin",
+        "select billing.Invoice",
+        "create billing.Payment",
+        "save billing.Invoice",
+        "create billing.Payment",
+        "save billing.Invoice",
+        "commit",
+        "release",
+    ]
+    assert [row["status"] for row in database.rows("billing.Invoice")] == ["open", "paid", "paid"]
+    again = (await client.post("/api/data/invoices/settlements")).json()["result"]["payments"]
+    assert [p["invoice_id"] for p in again] == [1]
+    assert (await client.post("/api/data/invoices/settlements")).json()["result"]["payments"] == []
+    assert len(database.rows("billing.Payment")) == 3
+
+
+async def test_a_settlement_skips_an_invoice_another_transaction_locked(database, client, holder):
+    open_invoices(database, 2)
+    await holder.hold(lambda: Invoice.objects.select_for_update().filter(pk=2))
+    payments = (await client.post("/api/data/invoices/settlements")).json()["result"]["payments"]
+    assert [p["invoice_id"] for p in payments] == [1]
+    assert database.waiters == {}
+    await holder.release()
+    assert database.tables["billing.Invoice"][2]["status"] == "open"
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_concurrent_settlements_pay_each_invoice_once(database, client, monkeypatch, attempt):  # noqa: ARG001
+    """Three settlements of at most two invoices each hold their locks until all three have selected: each takes
+    the invoices the others have not locked, and none waits."""
+    open_invoices(database, 5)
+    selected = asyncio.Barrier(3)
+    commit = memory.MemoryConnection.commit
+
+    async def commit_together(self):
+        if self.session.endswith("/s0") or self.session.endswith("/s1") or self.session.endswith("/s2"):
+            await selected.wait()
+        await commit(self)
+
+    monkeypatch.setattr(memory.MemoryConnection, "commit", commit_together)
+    responses = await asyncio.gather(
+        *(
+            client.post("/api/data/invoices/settlements", params={"limit": 2}, headers={data.SESSION_HEADER: f"s{n}"})
+            for n in range(3)
+        )
+    )
+    paid = [[p["invoice_id"] for p in response.json()["result"]["payments"]] for response in responses]
+    assert sorted(len(ids) for ids in paid) == [1, 2, 2]
+    assert sorted(pk for ids in paid for pk in ids) == [1, 2, 3, 4, 5]
+    assert sorted(row["invoice_id"] for row in database.rows("billing.Payment")) == [1, 2, 3, 4, 5]
+    assert {row["status"] for row in database.rows("billing.Invoice")} == {"paid"}
+    assert database.locks == {}
+    assert database.waiters == {}
+    assert _pool().in_use == 0
+
+
 # Concurrent reads
 
 
@@ -388,6 +652,10 @@ async def test_a_deadlock_answers_409(client, monkeypatch):
         "error": "OperationalError",
         "session": None,
         "held_sessions": [],
+        "sqlstate": "40P01",
+        "phase": None,
+        "operation": None,
+        "outcome": None,
     }
 
 
@@ -407,7 +675,17 @@ def _pool(using="default"):
 async def test_openapi_documents_the_data_endpoints(client):
     paths = (await client.get("/openapi.json")).json()["paths"]
     data_paths = [path for path in paths if path.startswith("/api/data/")]
-    assert len(data_paths) == 9
+    assert len(data_paths) == 10
+    for path in ("/api/data/activities/{pk}/registrations", "/api/data/invoices/settlements"):
+        responses = paths[path]["post"]["responses"]
+        assert {"409", "501", "503", "504"} <= set(responses), path
+        assert responses["504"]["content"]["application/json"]["schema"]["$ref"].endswith("/ExecutorError")
+    registration = paths["/api/data/activities/{pk}/registrations"]["post"]
+    assert {p["name"] for p in registration["parameters"] if p["in"] == "query"} == {
+        "nowait",
+        "timeout",
+        "lock_timeout",
+    }
     member = paths["/api/data/members/{pk}"]["get"]
     assert {"404", "503"} <= set(member["responses"])
     headers = {p["name"] for p in member["parameters"] if p["in"] == "header"}

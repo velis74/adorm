@@ -447,8 +447,12 @@ class Atomic:
         self._state = _CLOSING
         try:
             slot_cm = runner.slot(self.session)
-            with tracking("waiting_for_slot", "begin", self.session):
-                lease = await slot_cm.__aenter__()
+            try:
+                with tracking("waiting_for_slot", "begin", self.session):
+                    lease = await slot_cm.__aenter__()
+            except asyncio.CancelledError as exc:
+                mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
+                raise
             try:
                 with tracking("executing", "begin", self.session):
                     await lease.call("begin", options=resolve_options(self.session, lease.pool).database)

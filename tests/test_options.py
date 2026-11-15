@@ -914,6 +914,7 @@ async def test_timeout_inside_a_transaction(setup):
 
     error, _ = await expiring(SHORT, empty)
     assert (error.phase, error.operation, error.session) == ("waiting_for_slot", "begin", session)
+    assert adorm.cancellation_outcome(error) is adorm.CancellationOutcome.NOT_STARTED
     done.set()
     await holder
     gate = asyncio.Event()

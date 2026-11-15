@@ -258,7 +258,7 @@ def test_api_executes_the_data_endpoints(server, demo_env, database):
     if driver is None:
         pytest.skip("no driver is available")
     try:
-        _check_data_endpoints(driver, base, database)
+        _check_data_endpoints(driver, base, database, demo_env["ADORM_DEMO_DATABASE_URL"])
     finally:
         if driver != "memory":
             database.rollback()
@@ -266,7 +266,7 @@ def test_api_executes_the_data_endpoints(server, demo_env, database):
             assert result.returncode == 0, result.stderr
 
 
-def _check_data_endpoints(driver, base, database):
+def _check_data_endpoints(driver, base, database, url):
     members_before = count(database, "clubs_member")
     payments_before = count(database, "billing_payment")
     invoice = database.execute("SELECT min(id) FROM billing_invoice WHERE status = 'open'").fetchone()[0]
@@ -318,6 +318,15 @@ def _check_data_endpoints(driver, base, database):
             assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 201
             assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 409
             assert http.get(f"/api/data/invoices/{invoice}").json()["result"]["invoice"]["status"] == "paid"
+            _check_registrations(driver, http, database, url)
+            settled = http.post("/api/data/invoices/settlements", params={"limit": 2})
+            assert settled.status_code == 200, settled.text
+            payments = settled.json()["result"]["payments"]
+            assert [payment["reference"] for payment in payments] == ["settled by default"] * 2
+            for payment in payments:
+                paid = http.get(f"/api/data/invoices/{payment['invoice_id']}").json()["result"]
+                assert paid["invoice"]["status"] == "paid"
+                assert payment["amount"] == paid["invoice"]["total"]
 
         state = http.get("/api/executor").json()
         assert state["driver"] == driver
@@ -331,8 +340,55 @@ def _check_data_endpoints(driver, base, database):
         assert status == ("open",)
     else:
         assert count(database, "clubs_member") == members_before + 1
-        assert count(database, "billing_payment") == payments_before + 1
+        assert count(database, "billing_payment") == payments_before + 3
         assert status == ("paid",)
+
+
+def _check_registrations(driver, http, database, url):
+    """Register every member for the first activity: the free places fill, the rest is skipped. On a driver over
+    the database, a connection of the test then holds the activity's row lock: ``nowait``, ``lock_timeout`` and
+    ``timeout`` give up waiting for it; the memory driver refuses ``lock_timeout``."""
+    activity = database.execute("SELECT min(id) FROM activities_activity").fetchone()[0]
+    capacity, taken, existing = database.execute(
+        "SELECT capacity, (SELECT count(*) FROM activities_attendance t WHERE t.activity_id = a.id"
+        " AND t.status <> 'cancelled'), (SELECT count(*) FROM activities_attendance t WHERE t.activity_id = a.id)"
+        " FROM activities_activity a WHERE a.id = %s",
+        (activity,),
+    ).fetchone()
+    database.rollback()
+    members = [m["id"] for m in http.get("/api/data/members", params={"limit": 100}).json()["result"]]
+    response = http.post(f"/api/data/activities/{activity}/registrations", json={"member_ids": members})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert len(result["registered"]) == min(capacity - taken, len(members) - existing)
+    assert len(result["registered"]) + len(result["skipped"]) == len(members)
+    assert set(result["skipped"].values()) <= {"already registered", "full"}
+    late = [members[0]]
+    if driver == "memory":
+        refused = http.post(f"/api/data/activities/{activity}/registrations?lock_timeout=1", json={"member_ids": late})
+        assert refused.status_code == 501
+        assert refused.json()["error"] == "NotSupportedError"
+        return
+    with psycopg.connect(url) as holder:
+        holder.execute("SELECT id FROM activities_activity WHERE id = %s FOR UPDATE", (activity,))
+        path = f"/api/data/activities/{activity}/registrations"
+        nowait = http.post(path, params={"nowait": True}, json={"member_ids": late})
+        assert (nowait.status_code, nowait.json()["sqlstate"]) == (409, "55P03")
+        waited = http.post(path, params={"lock_timeout": 0.2}, json={"member_ids": late})
+        assert (waited.status_code, waited.json()["sqlstate"]) == (409, "55P03")
+        timed_out = http.post(path, params={"timeout": 1}, json={"member_ids": late})
+        assert timed_out.status_code == 504
+        body = timed_out.json()
+        assert (body["error"], body["phase"], body["operation"]) == (
+            "OperationTimeout",
+            "executing",
+            "get activities.Activity",
+        )
+        holder.rollback()
+    again = http.post(
+        f"/api/data/activities/{activity}/registrations", params={"nowait": True}, json={"member_ids": late}
+    )
+    assert again.status_code == 200, again.text
 
 
 def test_stale_generated_models_fail_the_check(demo_env, tmp_path):

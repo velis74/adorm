@@ -263,26 +263,35 @@ profile of the driver named by the header `X-Adorm-Driver`; the name comes from 
 | `POST /api/data/clubs/{slug}/members` | `get`, two `create` in a transaction | `tx.on_commit()`: a welcome message is queued only after the commit |
 | `GET /api/data/invoices/{pk}` | `get`, `select` | the reverse relation `invoice.payments` |
 | `POST /api/data/invoices/{pk}/payments` | `exists`, `create`, `update` in a transaction | an exception in the block rolls the payment back (409 for an invoice that is not open) |
-| `POST /api/data/activities/{pk}/registrations` | a transaction that locks the activity's row, a savepoint per member | a nested `atomic()` rolled back to its savepoint when the activity is full; concurrent registrations for one activity run one after another |
+| `POST /api/data/activities/{pk}/registrations` | a transaction that reads the activity with `select_for_update()`, a savepoint per member | a nested `atomic()` rolled back to its savepoint when the activity is full; concurrent registrations for one activity run one after another; `nowait`, `lock_timeout` and `timeout` (see [Locks, timeouts and cancellation](#locks-timeouts-and-cancellation)) |
+| `POST /api/data/invoices/settlements` | a transaction that reads open invoices with `select_for_update(skip_locked=True)`, then a `create` and a `save` per invoice | concurrent settlements settle different invoices and never wait for each other; `limit` (1–20, default 5) and `timeout` |
 | `GET /api/data/clubs/{slug}/summary` | three `count` in an `asyncio.TaskGroup` | tasks inherit the session; with `atomic=true` also the transaction and its slot |
 | `GET /api/data/compare/members` | one `select` per available driver, in concurrent tasks | the same query set on several profiles at once (see [below](#choosing-the-driver-of-a-read)) |
 | `GET /api/data/outbox` | nothing | the messages the `on_commit` callbacks queued |
 
 Errors of the executor and the database answer an `ExecutorError` body (`detail`, `error`, `session`,
-`held_sessions`), declared on every endpoint above that executes operations:
+`held_sessions`, `sqlstate`, `phase`, `operation`, `outcome`), declared on every endpoint above that executes
+operations; the `55P03` case of 409, 504 and 501 are declared only on `POST /api/data/activities/{pk}/registrations`
+and `POST /api/data/invoices/settlements`:
 
 | Status | Error | When |
 |---|---|---|
 | 503 | `SessionTimeout` | no slot became free within the pool's `acquire_timeout` |
 | 503 | `DeadlockError` | as `SessionTimeout`, while the flow held slots; `held_sessions` names their sessions |
-| 409 | `OperationalError` | the database detected a deadlock (SQLSTATE `40P01`); the transaction is rolled back, retry it |
+| 409 | `OperationalError` | the database detected a deadlock (SQLSTATE `40P01`), or a row lock was not available to `nowait` or within `lock_timeout` (SQLSTATE `55P03`); the transaction is rolled back, retry it |
+| 504 | `OperationTimeout` | the request's `timeout` expired; the transaction is rolled back, unless `operation` is `commit`: then `outcome` tells whether the commit took effect (`succeeded`, `unknown`) |
+| 501 | `NotSupportedError` | the active driver does not support what the request needs (the memory driver and `lock_timeout`) |
 
 ```json
 {
   "detail": "no slot became free for session Session('default', 'late') within 5 s",
   "error": "SessionTimeout",
   "session": "default/late",
-  "held_sessions": []
+  "held_sessions": [],
+  "sqlstate": null,
+  "phase": null,
+  "operation": null,
+  "outcome": null
 }
 ```
 
@@ -349,6 +358,120 @@ curl -X POST http://127.0.0.1:8000/api/data/invoices/1/payments -H 'X-Adorm-Sess
 The same request again answers 409: the update matches no open invoice, the block raises and the payment is rolled
 back. Two concurrent payments of one open invoice store one payment: the second transaction's update waits for the
 first one's row lock and then finds the invoice paid.
+
+### Locks, timeouts and cancellation
+
+A registration reads the activity with `select_for_update()` inside its transaction. The row stays locked until the
+transaction ends, so concurrent registrations for one activity run one after another and the capacity check of each
+sees the registrations of the ones before it:
+
+```python
+async with adorm.atomic():
+    activity = await Activity.objects.select_for_update(nowait=nowait).get(pk=pk)
+    for member_id in member_ids:
+        ...                                     # a savepoint per member, as above
+```
+
+Three query parameters limit how long a registration waits for that lock, and one more case ends it early:
+
+| Parameter or event | Mechanism | Answer |
+|---|---|---|
+| `nowait=true` | `select_for_update(nowait=True)`: the database refuses a locked row at once | 409, `sqlstate` `55P03` |
+| `lock_timeout=<seconds>` | `adorm.connection_options(lock_timeout=...)`: the database gives up waiting for the lock (`SET LOCAL lock_timeout` inside the transaction) | 409, `sqlstate` `55P03`; 501 on the memory driver, which declares no connection options |
+| `timeout=<seconds>` | `adorm.timeout(...)` around the whole request, waiting for a slot included: the task is cancelled, the waiting statement is cancelled in the database | 504 with `phase`, `operation` and `outcome` |
+| the client goes away | the server cancels the request's task: the waiting statement is cancelled in the database | none |
+
+In every case that ends the request before its commit, the transaction rolls back, also the registrations whose
+savepoints were already released, and the slot returns to the pool or leaves it. A `timeout` that expires during the
+commit answers 504 with `operation` `commit`; its `outcome` tells whether the registrations were stored. The settlement endpoint takes `timeout` too.
+
+```python
+@asynccontextmanager
+async def limits(timeout: float | None, lock_timeout: float | None):
+    options = {} if lock_timeout is None else {"lock_timeout": lock_timeout}
+    with adorm.connection_options(**options):
+        async with adorm.timeout(timeout):          # None: no limit
+            yield
+
+
+async with limits(timeout, lock_timeout), adorm.atomic():
+    activity = await Activity.objects.select_for_update(nowait=nowait).get(pk=pk)
+```
+
+To see it, hold the activity's lock in `psql` and register while it is held:
+
+```sql
+BEGIN;
+SELECT id FROM activities_activity WHERE id = 1 FOR UPDATE;
+-- ROLLBACK; once done
+```
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/data/activities/1/registrations?timeout=1' \
+     -H 'X-Adorm-Session: late' -H 'Content-Type: application/json' -d '{"member_ids": [5]}'
+```
+
+```json
+{
+  "detail": "operation timed out after 1 s while executing on Session('default', 'late'): Get(...)",
+  "error": "OperationTimeout",
+  "session": "default/late",
+  "held_sessions": [],
+  "sqlstate": null,
+  "phase": "executing",
+  "operation": "get activities.Activity",
+  "outcome": "unknown"
+}
+```
+
+`phase` is `waiting_for_slot` when every slot of the pool was taken (`operation` is then `begin`, `outcome`
+`not_started`); `outcome` is [`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) of the interrupted
+operation. With `nowait=true` the same request answers at once:
+
+```json
+{
+  "detail": "could not obtain lock on row in relation \"activities_activity\"",
+  "error": "OperationalError",
+  "session": null,
+  "held_sessions": [],
+  "sqlstate": "55P03",
+  "phase": null,
+  "operation": null,
+  "outcome": null
+}
+```
+
+A settlement pays the earliest due open invoices in full. It reads them with `skip_locked`, so an invoice whose row
+lock another transaction holds (another settlement, or a payment once it has marked the invoice paid) is left out
+instead of waited for; concurrent
+settlements take disjoint invoices and none is paid twice:
+
+```python
+async with adorm.atomic():
+    due = Invoice.objects.select_for_update(skip_locked=True).filter(status="open").order_by("due", "id")
+    async for invoice in due[:limit]:
+        payments.append(await Payment.objects.create(invoice_id=invoice.id, amount=invoice.total, ...))
+        invoice.status = "paid"
+        await invoice.save(update_fields=("status",))
+```
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/data/invoices/settlements?limit=2' -H 'X-Adorm-Session: billing'
+```
+
+```json
+{
+  "result": {
+    "payments": [
+      {"code": "…", "invoice_id": 1, "amount": "120.00", "paid_at": "…", "reference": "settled by billing"},
+      {"code": "…", "invoice_id": 4, "amount": "95.50", "paid_at": "…", "reference": "settled by billing"}
+    ]
+  },
+  "session": "default/billing",
+  "driver": "django",
+  "calls": []
+}
+```
 
 ### Choosing the driver of a read
 
@@ -438,17 +561,19 @@ through Django, once; writes stay in memory and are gone when the API stops.
 |---|---|
 | `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create` | `call` operations, connection options |
 | conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`, `club=club`) or column | field paths across relations (`club__slug`, construct `path.nested`), conditions on a reverse or many-to-many relation name (`clubs=club`), subqueries |
-| `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, functions, aggregates, `only()`, `defer()`, `select_related()`, `select_for_update()` |
-| transactions, savepoints, cancellation | inserting or deleting a row of an MTI child, deleting a row a foreign key references |
+| `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, functions, aggregates, `only()`, `defer()`, `select_related()` |
+| transactions, savepoints, cancellation, `select_for_update()` with `nowait` and `skip_locked` | `select_for_update()` with `of` or `no_key`, inserting or deleting a row of an MTI child, deleting a row a foreign key references |
 
 The constructs it does not support are refused before execution; a condition on a reverse or many-to-many relation
 name, which reports no construct of its own, is refused while executing. Each model is its own table: an update of a row
 copies the values to the row with the same primary key of its MTI parent or child; unique constraints other than the
 primary key are not enforced. A delete checks every row before it deletes any, so a refused delete deletes nothing.
 
-A transaction reads the committed rows and its own writes. A write locks its row until the transaction ends; a
-conflicting write of another connection waits for the lock and checks the row again, and a wait that would close a
-cycle raises `OperationalError` with SQLSTATE `40P01`. Rolling back to a savepoint releases the locks taken after
+A transaction reads the committed rows and its own writes. A write locks its row until the transaction ends, and so
+does a read with `select_for_update()`; a conflicting write or locking read of another connection waits for the lock
+and checks the row again, and a wait that would close a cycle raises `OperationalError` with SQLSTATE `40P01`. With
+`nowait` a locked row raises `OperationalError` with SQLSTATE `55P03`; with `skip_locked` locked rows are left out
+before the slice applies. A locking read outside a transaction raises `TransactionManagementError`. Rolling back to a savepoint releases the locks taken after
 it. A NULL value makes a condition unknown, as in SQL, except under a negation: there a lookup on a NULL field is
 false, so `exclude()` and `~Q()` keep the row, as in Django. A lookup, arithmetic or ordering on values that do not
 compare (a date with a datetime, text with a number) raises `ProgrammingError` with SQLSTATE `42883`.
@@ -504,8 +629,11 @@ DRIVERS = (
 builder in `demo/api/operations.py`, the round trip through `/api/operations/decode`, the rejection of invalid input
 and the driver matrix with a fake driver. `tests/demo/test_data.py` calls every data endpoint in process on the memory
 driver with a small data set: the calls each one makes, rollback on an error, savepoints, `on_commit`, sessions,
-concurrent payments of one invoice and concurrent registrations for one activity, requests queueing for the pool, the
-503 and 409 error answers, and that no slot or lock is left behind; with a second memory driver over a database of
+concurrent payments of one invoice and concurrent registrations for one activity, `nowait`, `timeout` while waiting
+for a lock and while waiting for a slot, `lock_timeout` refused with 501, a registration cancelled while it waits
+and after its writes, settlements in due order, skipping a locked invoice and running concurrently without paying an
+invoice twice, requests queueing for the pool, the 503 and 409 error answers, and that no slot or lock is left
+behind; with a second memory driver over a database of
 its own, the choice of a read's driver, the comparison (a difference, a failing read, a slot timeout of one driver),
 its two reads running at once, a cancelled comparison returning both slots, and concurrent reads on three profiles.
 `tests/demo/test_reads_on_two_drivers.py` runs the read endpoints in process on the Django and asyncpg drivers over
@@ -513,6 +641,14 @@ the demo's data set in the test database: the same answers on both drivers and t
 with both reads waiting for a table lock at once, a full pool of one driver answering 503 while the other driver
 serves, cancellation of a read waiting for a lock cancelling its statement and freeing the slot, and concurrent reads
 and transactions on three profiles leaving no slot in use; each concurrency test runs three times.
+`tests/demo/test_writes_on_two_drivers.py` runs the write flows in process with the Django driver and then the
+asyncpg driver active: registrations with a savepoint rolled back when the activity is full, concurrent registrations
+never overfilling it, `nowait` and `lock_timeout` answering 409 while a connection of the test holds the activity's
+lock, `timeout` answering 504 with the waiting statement cancelled in the database (and in the phase
+`waiting_for_slot` when the pool's only slot is taken), the client going away while the registration waits for the
+lock or for another transaction's uncommitted insert (nothing stored), settlements in due order, skipping a locked
+invoice and running concurrently without paying an invoice twice, and no slot left in use; each concurrency test runs
+three times.
 `tests/demo/test_memory.py` tests the memory
 driver on the executor: lookups and NULL logic, ordering, writes, transactions, waiting for row locks (also by an
 insert of a taken primary key and after a rollback to a savepoint), deadlock detection, cancellation of a wait and the
@@ -521,7 +657,9 @@ trace; each concurrency test runs five times. `tests/demo/test_smoke.py` runs `d
 the club report's aggregates on the seeded data, the model check and the `check_adorm_models` exit status, then the
 server once per available driver (once without a driver when none is available), driven over HTTP, with the reading
 data endpoints on every driver, the member list once more on every available driver through `X-Adorm-Driver` and
-through the comparison, and the writing ones on every driver that supports `create`. On the memory driver the
+through the comparison, and the writing ones on every driver that supports `create`: enrolment, payment,
+registrations with a full activity, a settlement, and, on the Django and asyncpg drivers, a registration with
+`nowait`, `lock_timeout` and `timeout` while the test holds the activity's lock in the database. On the memory driver the
 database stays unchanged; on another driver the writes land in it and `--reset` restores the data afterwards.
 `ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated driver names) makes the suite fail when one of those drivers is not
 available; CI sets it to `django,asyncpg,memory`, so the smoke test runs on both real drivers. Both run in
