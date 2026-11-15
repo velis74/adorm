@@ -29,6 +29,7 @@ AdormError
 │       ├── InternalError
 │       ├── NotSupportedError
 │       └── ProgrammingError
+│           ├── FieldError
 │           └── TransactionManagementError
 │               ├── TransactionClosed
 │               └── TransactionOverlapError
@@ -224,6 +225,31 @@ The database reported an internal error or an invalid cursor or transaction stat
 The statement is wrong: missing table or column, syntax error, insufficient privilege, an `ON CONFLICT` that
 affects a row twice, `RAISE EXCEPTION` in PL/pgSQL (SQLSTATE classes `42`, `21`, `P0` and others, see
 [the mapping](#adorm-exceptions-wrap-driver-error-exc)).
+
+### `adorm.FieldError(message=None, *, model=None, key=None, original=None, sqlstate=None)`
+
+A field path or lookup key does not resolve on its model, as Django's `FieldError`: a segment that is neither a field
+nor a relation, a segment after a field that is neither a relation nor a JSON field (an unknown lookup name such as
+`first_name__icontain`, a Django transform such as `joined__year`), or a lookup a relation does not take
+(`club__icontains`).
+`model` is the label of the model the failing segment was resolved on and `key` the path or key; a driver that
+reports the error without them leaves them `None`.
+
+[`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) and
+[`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) raise it
+before any operation runs; every driver raises it for a path it cannot resolve while it builds the statement, and
+[`Driver.check()`](/ref/drivers#check-operation) raises it in place of `NotSupportedError` for an operation that also
+uses a construct the driver lacks. A
+`FieldError` without a SQLSTATE does not affect the [transaction](/topics/transactions#a-failed-operation) it is
+raised in.
+
+```python
+try:
+    resolve_lookup(Member, "first_name__icontain")
+except adorm.FieldError as exc:
+    exc.model, exc.key    # ('clubs.Member', 'first_name__icontain')
+    str(exc)              # "unsupported lookup 'icontain' for clubs.Member.first_name; perhaps you meant 'icontains'"
+```
 
 ### `adorm.NotSupportedError`
 

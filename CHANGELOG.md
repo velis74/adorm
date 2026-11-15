@@ -383,3 +383,16 @@
   at construction. An empty query of plain aggregates is answered without an operation. The native PostgreSQL driver compiles it with
   `DjangoCompiler.compile_aggregate()` (`DjangoAggregation`), the Django driver translates it with
   `adorm.drivers.django.translation.aggregation()` (`AGGREGATES`).
+- Lookup keys built at run time: `adorm.query.resolve_lookup(target, key)` resolves a key such as
+  `f"{field}__{op}"` against a model class, label, `Query` or `QuerySet` (annotation names included) and the model
+  registry, without an operation, and returns a `ResolvedLookup` (model, field, lookup class, field type, keys inside a
+  JSON field, `value_type` of the right-hand side); `adorm.query.check_lookups(target, condition)` checks every lookup
+  and field reference of a condition. `adorm.FieldError` (a `ProgrammingError`, with `model` and `key`) reports an
+  unknown field or relation, an unknown lookup name (with the closest name), a segment after a field that is neither
+  a relation nor a JSON field, and a lookup a relation does not take (`Lookup.on_relations`: `exact`, `gt`, `gte`,
+  `lt`, `lte`, `in`, `isnull`). Every driver raises it for such a key: the Django and native PostgreSQL drivers map
+  Django's `FieldError` and `FieldDoesNotExist` to it and refuse a path past a scalar field before Django sees it,
+  the demo's memory driver resolves keys with `resolve_lookup()`, and `Driver.check()` raises it in place of
+  `NotSupportedError` when the operation also lacks a construct. `adorm.schema.resolve_field_type()` resolves paths
+  as `resolve_lookup()` does and raises `FieldError`. A `FieldError` without a SQLSTATE leaves the transaction it is
+  raised in usable.

@@ -25,6 +25,7 @@ from adorm.drivers.django.translation import (
 )
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.exceptions import (
+    FieldError,
     InterfaceError,
     MultipleObjectsReturned,
     NotSupportedError,
@@ -141,7 +142,7 @@ def map_django_error(exc: BaseException) -> BaseException:
     elif isinstance(exc, django_exceptions.MultipleObjectsReturned):
         mapped = MultipleObjectsReturned(*exc.args)
     elif isinstance(exc, django_exceptions.FieldError | django_exceptions.FieldDoesNotExist):
-        mapped = ProgrammingError(str(exc), original=exc)
+        mapped = FieldError(str(exc), original=exc)
     elif isinstance(exc, django_exceptions.ValidationError):
         if hasattr(exc, "error_dict"):
             mapped = ValidationError(exc.message_dict)

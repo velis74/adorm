@@ -45,6 +45,7 @@ from adorm.query.expressions import (
 )
 from adorm.query.lookups import (
     build_lookup,
+    check_lookups,
     Contains,
     EndsWith,
     Exact,
@@ -64,6 +65,8 @@ from adorm.query.lookups import (
     Range,
     Regex,
     register_lookup,
+    resolve_lookup,
+    ResolvedLookup,
     split_lookup,
     StartsWith,
 )
@@ -114,6 +117,7 @@ __all__ = [
     "QuerySet",
     "Range",
     "Regex",
+    "ResolvedLookup",
     "StartsWith",
     "Star",
     "Subquery",
@@ -134,7 +138,9 @@ __all__ = [
     "When",
     "as_query",
     "build_lookup",
+    "check_lookups",
     "construct_names",
     "register_lookup",
+    "resolve_lookup",
     "split_lookup",
 ]

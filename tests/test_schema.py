@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from adorm import FieldError
 from adorm.schema import ModelSchema, resolve_field_type, Schema, SchemaSource
 from tests.club_schema import CLUB, MEMBER, SCHEMA
 
@@ -73,7 +74,6 @@ def test_schema_registry():
         ("club.Member", ["payment"], uuid.UUID),
         ("club.Member", ["payment", "amount"], decimal.Decimal),
         ("club.Club", ["member", "payment", "pk"], uuid.UUID),
-        ("club.Member", ["name", "length"], None),
         ("club.Missing", ["name"], None),
         ("club.Member", [], None),
     ],
@@ -84,10 +84,14 @@ def test_resolve_field_type(label, path, expected):
 
 @pytest.mark.parametrize(
     ("path", "message"),
-    [(["missing"], "club.Member has no field or relation 'missing'"), (["club", "missing"], "club.Club has no")],
+    [
+        (["missing"], "club.Member has no field or relation 'missing'"),
+        (["club", "missing"], "club.Club has no"),
+        (["name", "length"], "club.Member.name is neither a relation nor a JSON field; 'length' cannot follow"),
+    ],
 )
 def test_resolve_field_type_rejects_unknown_fields_of_known_models(path, message):
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(FieldError, match=message):
         resolve_field_type(SCHEMA, "club.Member", path)
 
 

@@ -46,6 +46,7 @@ from adorm.drivers import Capabilities, Driver, DriverConnection
 from adorm.events import Emit
 from adorm.exceptions import (
     DatabaseError,
+    FieldError,
     IntegrityError,
     InterfaceError,
     MultipleObjectsReturned,
@@ -73,7 +74,7 @@ from adorm.operations import (
 )
 from adorm.query import CombinedExpression, F, OrderBy, Q, Query, Value
 from adorm.query.expressions import Node, OuterRef
-from adorm.query.lookups import Lookup
+from adorm.query.lookups import Lookup, resolve_lookup
 
 __all__ = [
     "CAPABILITIES",
@@ -282,9 +283,11 @@ class _Rows:
         relation = self.model.__adorm_relations__.get(path)
         if isinstance(relation, ForeignKey):
             return relation.column
+        if relation is None:
+            resolve_lookup(self.label, f"{path}__exact")
         if "__" in path or relation is not None:
             raise NotSupportedError(f"the memory driver does not follow relations ({self.label}: {path!r})")
-        raise ProgrammingError(f"{self.label} has no field {path!r}")
+        raise FieldError(f"{self.label} has no field {path!r}", model=self.label, key=path)
 
     def value(self, node: Any, row: Mapping[str, Any]) -> Any:
         """The value of an expression for ``row``."""
@@ -319,6 +322,7 @@ class _Rows:
                 result = True if True in results else None if None in results else False
             return (None if result is None else not result) if node.negated else result
         if isinstance(node, Lookup):
+            self.check_relation_lookup(node)
             value = self.value(node.lhs, row)
             if node.lookup_name == "isnull":
                 return (value is None) is node.rhs
@@ -335,6 +339,12 @@ class _Rows:
             except TypeError as exc:
                 raise _incomparable(exc) from exc
         raise NotSupportedError(f"the memory driver does not evaluate {type(node).__name__} conditions")
+
+    def check_relation_lookup(self, node: Lookup) -> None:
+        """Raise `FieldError` for a lookup on a relation that does not apply to relations."""
+        lhs = node.lhs
+        if not node.on_relations and type(lhs) is F and lhs.name in self.model.__adorm_relations__:
+            resolve_lookup(self.label, f"{lhs.name}__{node.lookup_name}")
 
     def matches(self, query: Query, row: Mapping[str, Any]) -> bool:
         return not query.where or self.condition(query.where, row) is True

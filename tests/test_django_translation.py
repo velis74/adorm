@@ -19,6 +19,7 @@ from adorm import (
     Count,
     Exists,
     F,
+    FieldError,
     Func,
     Length,
     Lower,
@@ -78,11 +79,18 @@ MENTOR_RATING = Query(AUTHOR).filter(pk=OuterRef("mentor")).values("rating")
         (dj.Edition, "pk", "pk"),
         (dj.Tagging, "book_id", "book_id"),
         (dj.Author, "nothing__name", "nothing__name"),
-        (dj.Author, "name__nothing", "name__nothing"),
+        (dj.Book, "extra__a__b", "extra__a__b"),
     ],
 )
 def test_orm_paths_rename_each_segment_on_the_model_it_reaches(model, path, expected):
     assert orm_path(model, path) == expected
+
+
+@pytest.mark.parametrize("path", ["name__nothing", "name__lower", "pupils__name__year"])
+def test_orm_paths_refuse_segments_after_a_scalar_field(path):
+    with pytest.raises(FieldError, match=r"library\.Author\.name is neither a relation nor a JSON field") as caught:
+        orm_path(dj.Author, path)
+    assert caught.value.sqlstate is None
 
 
 def test_a_path_starting_with_an_annotation_is_kept():
@@ -451,7 +459,7 @@ def test_ordering_and_distinct_on():
 
 
 def test_django_errors_map_to_adorm_errors():
-    from django.core.exceptions import FieldError, MultipleObjectsReturned, ValidationError
+    from django.core.exceptions import FieldDoesNotExist, FieldError, MultipleObjectsReturned, ValidationError
     from django.db import transaction
 
     from adorm import exceptions
@@ -461,8 +469,11 @@ def test_django_errors_map_to_adorm_errors():
     assert str(not_found) == "Author matching query does not exist."
     assert type(map_django_error(MultipleObjectsReturned("two"))) is exceptions.MultipleObjectsReturned
     field = map_django_error(FieldError("no such field"))
-    assert type(field) is exceptions.ProgrammingError
+    assert type(field) is exceptions.FieldError
+    assert isinstance(field, exceptions.ProgrammingError)
     assert isinstance(field.original, FieldError)
+    assert (field.sqlstate, field.model, field.key) == (None, None, None)
+    assert type(map_django_error(FieldDoesNotExist("Author has no field named 'nope'"))) is exceptions.FieldError
     assert map_django_error(ValidationError({"code": ["bad"]})).message_dict == {"code": ["bad"]}
     single = map_django_error(ValidationError("“%(value)s” is not valid", code="invalid", params={"value": "x"}))
     assert (single.messages, single.code) == (["“x” is not valid"], "invalid")

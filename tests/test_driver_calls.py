@@ -9,7 +9,17 @@ from typing import Any
 
 import pytest
 
-from adorm import create_session, driver_method, Manager, Model, ModelMeta, NotSupportedError, Q, QuerySet
+from adorm import (
+    create_session,
+    driver_method,
+    FieldError,
+    Manager,
+    Model,
+    ModelMeta,
+    NotSupportedError,
+    Q,
+    QuerySet,
+)
 from adorm.drivers import Capabilities, Driver, DriverConnection
 from adorm.executor import Pool, Router, set_runner
 from adorm.models import registry
@@ -96,7 +106,7 @@ def test_create_with_a_manager_encodes_extra_values_by_inferred_type():
     }
     restored = Operation.from_dict(roundtrip(data), schema)
     assert restored == Create("calltest.Voucher", {"price": decimal.Decimal("2.50"), "username": "ann"}, "objects")
-    with pytest.raises(ValueError, match="has no field or relation 'username'"):
+    with pytest.raises(FieldError, match="has no field or relation 'username'"):
         Create("calltest.Voucher", {"username": "ann"}).to_dict(schema)
     with pytest.raises(ValueError, match="is not a manager name"):
         Create("calltest.Voucher", {}, manager="_x")

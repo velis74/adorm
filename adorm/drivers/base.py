@@ -175,6 +175,14 @@ def is_refusal(exc: BaseException) -> bool:
     return isinstance(exc, OperationalError) and exc.sqlstate is not None and exc.sqlstate.startswith("53")
 
 
+def _check_keys(operation: Operation) -> None:
+    from adorm.query import check_lookups, Query
+
+    query = getattr(operation, "query", None)
+    if isinstance(query, Query) and query.where:
+        check_lookups(query, query.where)
+
+
 def _check_call(operation: Operation) -> None:
     from adorm.models.managers import find_driver_method
     from adorm.operations import Call
@@ -348,8 +356,16 @@ class Driver(ABC):
     def check(self, operation: Operation) -> None:
         """Raise `NotSupportedError` when this driver does not support ``operation``: its kind or a construct it uses
         is missing from `capabilities`, or it is an `adorm.operations.Call` of a method the registered model does not
-        declare (`adorm.models.find_driver_method()`). Does no I/O."""
-        self.capabilities.check(operation, self.name)
+        declare (`adorm.models.find_driver_method()`). Does no I/O.
+
+        When a construct is missing and a lookup of the operation's query does not resolve against the model registry
+        (`adorm.query.check_lookups()`), raises that `adorm.FieldError` instead.
+        """
+        try:
+            self.capabilities.check(operation, self.name)
+        except NotSupportedError:
+            _check_keys(operation)
+            raise
         if operation.kind == "call":
             _check_call(operation)
 

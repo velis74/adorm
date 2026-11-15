@@ -131,12 +131,62 @@ for word in words:
 members = Query("club.Member").filter(condition)
 ```
 
-A lookup key built at run time is a `(key, value)` pair or a keyword argument:
+## Lookup keys built at run time
+
+A lookup key is a string, so a filter form, a query string or a viewset can build it at run time. It goes into
+`filter()`, `exclude()`, `get()` or `Q` as a keyword argument or as a `(key, value)` pair, and builds the same lookup
+as the literal keyword:
 
 ```python
-Q((f"{field}__{op}", value))
-Q(**{f"{field}__{op}": value})
+field, op = "club__name", "icontains"
+Member.objects.filter(**{f"{field}__{op}": "chess"})        # same as filter(club__name__icontains="chess")
+Member.objects.exclude(Q((f"{field}__{op}", "chess")))
+await Member.objects.get(**{"email__iexact": email})
 ```
+
+Pairs keep their order, keyword arguments are sorted; `_connector=Q.OR` joins them with OR instead of AND:
+
+```python
+params = {"first_name__istartswith": "e", "level__in": ["advanced"], "birth_date__gte": date(1980, 1, 1)}
+Member.objects.filter(**params)                             # all three
+Member.objects.filter(Q(*params.items(), _connector=Q.OR))  # any of them
+```
+
+Declared filters (field → allowed lookups) become a condition in a loop:
+
+```python
+DECLARED = {"first_name": ["icontains", "istartswith"], "level": ["in"], "birth_date": ["gte", "lte"]}
+
+condition = Q()
+for field, ops in DECLARED.items():
+    for op in ops:
+        key = f"{field}__{op}"
+        if key in params:
+            condition &= Q((key, params[key]))
+members = Member.objects.filter(condition)
+```
+
+Building a query checks only the key's syntax: segments are identifiers joined with `__`, and a key that is not
+(`"name__"`, `"tags__0"`) raises `ValueError`. Whether the fields exist is decided by the model's schema.
+[`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) checks one key,
+[`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) a whole condition;
+both raise [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
+without running an operation, so a key taken from user input can be refused before the query takes a slot:
+
+```python
+from adorm.query import resolve_lookup
+
+resolve_lookup(Member, "first_name__icontain")
+# FieldError: unsupported lookup 'icontain' for clubs.Member.first_name; perhaps you meant 'icontains'
+resolve_lookup(Member, "memberships__club__city__icontains").field_type   # str (with its max length)
+resolve_lookup(Member, "level__in").value_type     # Literal['beginner', 'intermediate', 'advanced']
+```
+
+A path that ends at a relation takes only `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`), and a
+path cannot continue past a scalar field: adorm has no transforms, so `joined__year` raises `FieldError` on every
+driver. A key that is not checked first and does not resolve raises `FieldError` from the driver when it builds the
+statement.
+That error does not affect the [transaction](/topics/transactions#a-failed-operation) it is raised in.
 
 ## Referring to fields with `F`
 

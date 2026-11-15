@@ -191,7 +191,7 @@ async def test_relation_paths_and_annotations_are_not_supported(db):  # noqa: AR
         [row async for row in Member.objects.annotate(name=F("first_name"))]
     with pytest.raises(adorm.NotSupportedError, match="function.Lower"):
         await Member.objects.filter(first_name=adorm.Lower("last_name")).count()
-    with pytest.raises(adorm.ProgrammingError, match="no field 'nickname'"):
+    with pytest.raises(adorm.FieldError, match="no field or relation 'nickname'"):
         await Member.objects.filter(nickname="x").count()
 
 

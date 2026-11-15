@@ -334,6 +334,11 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
 ## Checklist
 
 - Every method raises adorm exceptions only; `asyncio.CancelledError` passes through.
+- A field path or lookup key the target cannot resolve raises `FieldError` without a SQLSTATE, before any statement
+  runs: an unknown field or relation, a segment after a field that is neither a relation nor a JSON field (never
+  passed on as a transform of the target ORM) and a lookup on a relation whose `on_relations` is false. The
+  transaction it is raised in stays usable; an error the database reports for a missing column keeps its SQLSTATE
+  (`42703`, a `ProgrammingError`).
 - Results are plain data keyed by adorm field names.
 - Every segment of a field path (`copy___title` is `copy_`, then `title`), every key of written values and every key of
   returned rows is translated with the `orm_names` of the model it reaches (`ModelMeta.orm_name()`, or

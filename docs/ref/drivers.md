@@ -48,7 +48,10 @@ class RawSQLDriver(Driver):
 
 Raises `NotSupportedError` when the driver does not support `operation`: its kind or a construct it uses is missing
 from `capabilities` ([`Capabilities.check()`](#check-operation-driver-none) with the driver's `name`), or it is a
-`Call` of a method the registered model does not declare. Does no I/O. The
+`Call` of a method the registered model does not declare. When a construct is missing and a lookup of the operation's
+query does not resolve against the model registry ([`check_lookups()`](/ref/lookups#resolving-keys)), it raises that
+[`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
+instead, so an unresolvable key is a `FieldError` on every driver. Does no I/O. The
 [router](/ref/pool) calls it before it acquires a slot for an operation outside a transaction, so an unsupported
 operation neither waits for a slot nor opens one, and
 [`DriverConnection.execute()`](#adorm-drivers-driverconnection) calls it before every execution.
@@ -527,7 +530,7 @@ Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` a
 |---|---|
 | `django.core.exceptions.ObjectDoesNotExist` (a model's `DoesNotExist`) | `ObjectDoesNotExist` with Django's message |
 | `django.core.exceptions.MultipleObjectsReturned` | `MultipleObjectsReturned` with Django's message |
-| `FieldError`, `FieldDoesNotExist` | `ProgrammingError` (`original` is `exc`) |
+| `FieldError`, `FieldDoesNotExist` | [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) with Django's message (`original` is `exc`) |
 | Django's `ValidationError` | `ValidationError` with the same messages (by field, a list, or one message with `code` and `params`) |
 | `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
 | `SynchronousOnlyOperation` | `InterfaceError` |

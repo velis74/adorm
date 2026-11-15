@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
+from adorm.query.lookups import _walk
 from adorm.query.query import check_model_label
 
 __all__ = ["MethodKey", "MethodSchema", "ModelSchema", "Schema", "SchemaSource", "resolve_field_type"]
@@ -130,26 +131,12 @@ class Schema:
 def resolve_field_type(source: SchemaSource | None, label: str, path: Sequence[str]) -> Any | None:
     """The type hint of the field at ``path`` (segments of a field path) from the model ``label``.
 
-    Every segment but the last is a relation; ``pk`` stands for the primary key at any segment. A path that ends at a
-    relation resolves to the target's primary key type. ``None`` when ``source`` is ``None``, does not know a model on
-    the way, or the path continues past a field (a key of a JSON field). Raises ``ValueError`` for a segment that is
-    neither a field nor a relation of a model ``source`` knows.
+    Every segment but the last is a relation, until a JSON or record field, whose following segments are keys inside
+    its value; ``pk`` stands for the primary key at any segment. A path that ends at a relation resolves to the
+    target's primary key type. ``None`` when ``source`` is ``None``, does not know a model on the way, or the path
+    continues into a JSON field's value. Raises `adorm.FieldError` for a segment that is neither a field nor a relation
+    of a model ``source`` knows, and for segments after a field that is neither a relation nor a JSON field.
     """
     if source is None or not path:
         return None
-    model = source.model_schema(label)
-    for index, segment in enumerate(path):
-        if model is None:
-            return None
-        if segment == "pk":
-            segment = model.pk
-        last = index == len(path) - 1
-        if segment in model.fields:
-            return model.fields[segment] if last else None
-        target = model.relations.get(segment)
-        if target is None:
-            raise ValueError(f"{model.label} has no field or relation {segment!r}")
-        model = source.model_schema(target)
-        if last:
-            return None if model is None else model.fields[model.pk]
-    return None
+    return _walk(source, label, tuple(path), "__".join(path), lookup_hint=False).field_type

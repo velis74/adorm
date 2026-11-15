@@ -15,6 +15,7 @@ __all__ = [
     "DataError",
     "DeadlockError",
     "Error",
+    "FieldError",
     "IntegrityError",
     "InterfaceError",
     "InternalError",
@@ -209,6 +210,22 @@ class InternalError(DatabaseError):
 
 class ProgrammingError(DatabaseError):
     """The statement is wrong: missing table or column, syntax error, insufficient privilege, PL/pgSQL error."""
+
+
+class FieldError(ProgrammingError):
+    """A field path or lookup key does not resolve on its model (Django's ``FieldError``): a segment that is neither
+    a field nor a relation, or a segment after a field that takes none (an unknown lookup name).
+
+    ``model`` is the label of the model the failing segment was resolved on and ``key`` the field path or lookup key;
+    either is ``None`` when a driver reports the error without them.
+    """
+
+    def __init__(
+        self, message: str | None = None, *, model: str | None = None, key: str | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(message, **kwargs)
+        self.model = model
+        self.key = key
 
 
 class NotSupportedError(DatabaseError):

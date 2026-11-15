@@ -68,7 +68,8 @@ assert Operation.from_dict(data, schema) == operation
 without a schema type whose type cannot be inferred. `from_dict()` raises `ValueError` for malformed data, an unknown
 kind, or a kind that is not a subclass of the class it is called on (`Update.from_dict()` of a `select`), and
 validates the decoded operation as its constructor does, raising `ValueError` where the constructor raises
-`TypeError`. [Operation encoding](./encoding) documents the data and
+`TypeError`. Both raise [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
+for a field path the schema does not resolve. [Operation encoding](./encoding) documents the data and
 the typing of values.
 
 ### `adorm.operations.OPERATIONS`

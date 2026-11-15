@@ -101,8 +101,8 @@ Construct names have the form `<category>.<name>`: `lookup.<lookup name>`, `func
 `aggregate.<class name>` (with `aggregate.distinct` and `aggregate.filter`), `expression.<class name>`
 (`expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`,
 `expression.CombinedExpression`), `clause.<clause>` (`clause.annotate`, `clause.distinct_on`,
-`clause.select_for_update` …) and `path.nested`, a field path across a relation or into a transform
-(`club__name`). Query nodes report theirs through `constructs()`; the [expression reference](/ref/expressions) lists
+`clause.select_for_update` …) and `path.nested`, a field path across a relation or into a JSON field
+(`club__name`, `address__street`). Query nodes report theirs through `constructs()`; the [expression reference](/ref/expressions) lists
 them, and [`construct_names()`](/ref/query#adorm-query-construct-names) returns them all.
 
 ```python

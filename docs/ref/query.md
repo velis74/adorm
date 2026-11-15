@@ -274,7 +274,7 @@ The construct names of `Query` clauses and `ForUpdate` options, a tuple: `clause
 ### `adorm.query.NESTED_PATH`
 
 `"path.nested"`: the construct name of a field path with several segments (`club__name`, `address__street`), which
-crosses a relation or applies a transform. [`F`](./expressions) reports it for such a path, and so does a query for
+crosses a relation or goes into a JSON field. [`F`](./expressions) reports it for such a path, and so does a query for
 its `values()`, `only()`, `defer()` and `distinct()` fields. A driver that evaluates only a model's own columns
 leaves it out of its capabilities.
 

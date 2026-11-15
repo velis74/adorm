@@ -8,7 +8,7 @@ import pytest
 
 from adorm import operations
 from adorm.drivers import Capabilities, Operation as OperationProtocol
-from adorm.exceptions import NotSupportedError
+from adorm.exceptions import FieldError, NotSupportedError
 from adorm.operations import (
     Create,
     Delete,
@@ -429,7 +429,7 @@ def test_models_unknown_to_the_schema_carry_their_types():
     ids=repr,
 )
 def test_fields_unknown_to_the_schema_of_a_known_model_are_refused(operation):
-    with pytest.raises(ValueError, match="has no field or relation 'nmae'|has no field or relation 'nickname'"):
+    with pytest.raises(FieldError, match="has no field or relation 'nmae'|has no field or relation 'nickname'"):
         operation.to_dict(SCHEMA)
     assert operation.to_dict()
 

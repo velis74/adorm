@@ -26,7 +26,7 @@ from django.db.models import functions as djf
 from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
-from adorm.exceptions import NotSupportedError, ProgrammingError
+from adorm.exceptions import FieldError, NotSupportedError, ProgrammingError
 from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
 from adorm.query import expressions as ax
@@ -182,27 +182,45 @@ def output_field(output_type: type) -> dj.Field:
     return field()
 
 
+_CONTAINER_FIELDS = frozenset({"JSONField", "HStoreField", "ArrayField"})
+"""Internal types of the Django fields whose values a path continues into."""
+
+
+def _internal_type(field: Any) -> str | None:
+    get = getattr(field, "get_internal_type", None)
+    return None if get is None else get()
+
+
 def orm_path(model: type[dj.Model], path: str, annotations: Iterable[str] = ()) -> str:
     """Django's query path for the adorm field path ``path`` on ``model``.
 
     Each segment is renamed with the `ModelMeta.orm_names` of the adorm model registered for the Django model it is
     on, and a reverse relation's accessor name becomes its query name (``tagging_set`` → ``tagging``). A path whose
     first segment is one of ``annotations`` is returned unchanged; a segment Django does not know is kept, so Django
-    reports it.
+    reports it. Segments after a field that is neither a relation nor a JSON field raise `FieldError`: Django's
+    transforms (``joined__year``) are not adorm constructs.
     """
     segments = split_field_path(path)
     if segments[0] in annotations:
         return path
     names: list[str] = []
     current: type[dj.Model] | None = model
-    for segment in segments:
+    for index, segment in enumerate(segments):
         if current is None:
             names.append(segment)
             continue
-        name = "pk" if segment == "pk" else _orm_name(_adorm_model(current), segment)
+        adorm = _adorm_model(current)
+        name = "pk" if segment == "pk" else _orm_name(adorm, segment)
         field = _field(current, name)
         names.append(name if field is None else _query_name(field, name))
-        current = field.related_model if _follows(field, name) else None
+        follows = _follows(field, name)
+        rest = segments[index + 1 :]
+        if rest and field is not None and not follows and _internal_type(field) not in _CONTAINER_FIELDS:
+            label = current._meta.label if adorm is None else adorm._meta.label
+            following = "__".join(rest)
+            message = f"{label}.{segment} is neither a relation nor a JSON field; {following!r} cannot follow"
+            raise FieldError(message, model=label, key=path)
+        current = field.related_model if follows else None
     return "__".join(names)
 
 

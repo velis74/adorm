@@ -182,6 +182,21 @@ async with adorm.atomic():
 
 A database-level `RESTRICT` violation (SQLSTATE `23001`) is an `IntegrityError` that does.
 
+A [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
+without a SQLSTATE does not affect the transaction either: the driver raises it while it builds the statement, for a
+field path or [lookup key](/topics/queries#lookup-keys-built-at-run-time) it cannot resolve. A filter built from user
+input can fail and the block goes on:
+
+```python
+async with adorm.atomic():
+    try:
+        count = await Member.objects.filter(**{f"{field}__{op}": value}).count()
+    except adorm.FieldError:
+        count = None
+    await Report.objects.create(filter=field, count=count)
+# COMMIT
+```
+
 A read of rows with `select_for_update()` (`get()`, `first()`, `last()`, iteration) outside a transaction raises
 `TransactionManagementError` before it is sent, since the lock would end with the statement.
 

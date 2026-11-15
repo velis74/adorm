@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 
 import adorm
 
-from adorm import PoolSettings
+from adorm import FieldError, PoolSettings
 from adorm.drivers import Driver
 from adorm.models import registry
 from adorm.operations import Operation
@@ -280,7 +280,9 @@ async def delete_draft_invoices(request: Request, slug: Slug) -> OperationPlan:
     "/api/operations/decode",
     tags=["demo"],
     summary="Decode an operation",
-    openapi_extra=unprocessable("`Operation.from_dict()` rejects the body (the message is its `ValueError`)"),
+    openapi_extra=unprocessable(
+        "`Operation.from_dict()` rejects the body (the message is its `ValueError` or `FieldError`)"
+    ),
 )
 async def decode_operation(
     request: Request,
@@ -289,6 +291,6 @@ async def decode_operation(
     """Decode an encoded operation with the models' schema and encode it again; invalid data answers 422."""
     try:
         operation = Operation.from_dict(data, registry)
-    except ValueError as exc:
+    except (ValueError, FieldError) as exc:
         raise invalid(str(exc), value=data) from None
     return plan(request, operation)

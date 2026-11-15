@@ -12,6 +12,7 @@ from adorm import (
     Atomic,
     create_session,
     DeadlockError,
+    FieldError,
     IntegrityError,
     InterfaceError,
     NotSupportedError,
@@ -283,7 +284,14 @@ async def test_a_database_error_caught_in_the_block_rolls_back_and_raises(setup)
 
 
 @pytest.mark.parametrize(
-    "error", [ObjectDoesNotExist("none"), NotSupportedError("unsupported"), ValueError("client side")]
+    "error",
+    [
+        ObjectDoesNotExist("none"),
+        NotSupportedError("unsupported"),
+        ValueError("client side"),
+        FieldError("unsupported lookup 'icontain'"),
+        FieldError("Cannot resolve keyword 'nope' into field", original=KeyError("nope")),
+    ],
 )
 async def test_errors_that_leave_the_transaction_intact_do_not_mark_it(setup, error):
     _, driver = setup.pool()
@@ -293,6 +301,31 @@ async def test_errors_that_leave_the_transaction_intact_do_not_mark_it(setup, er
             await session.execute(Op(error=error))
         await session.execute(Op("after"))
     assert [c[0] for c in calls(driver)] == ["begin", "execute", "execute", "commit"]
+
+
+async def test_a_field_error_from_the_database_marks_the_transaction(setup):
+    _, driver = setup.pool()
+    session = unique_session()
+    with pytest.raises(TransactionManagementError):
+        async with session.atomic():
+            with pytest.raises(FieldError):
+                await session.execute(Op(error=FieldError("column does not exist", sqlstate="42703")))
+    assert calls(driver)[-1] == ("rollback", None)
+
+
+async def test_field_errors_racing_operations_of_other_tasks_leave_the_transaction_intact(setup):
+    pool, driver = setup.pool(max_connections=1)
+    for _ in range(10):
+        session = unique_session()
+        async with session.atomic():
+            results = await asyncio.gather(
+                *(session.execute(Op(error=FieldError("bad key")) if n % 2 else Op(f"op{n}")) for n in range(20)),
+                return_exceptions=True,
+            )
+            assert all(isinstance(result, FieldError) for result in results[1::2])
+            await session.execute(Op("after"))
+        assert calls(driver)[-1] == ("commit", None)
+    assert (pool.size, pool.in_use) == (1, 0)
 
 
 async def test_a_cancelled_operation_of_another_task_makes_the_end_roll_back(setup):

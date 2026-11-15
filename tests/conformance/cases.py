@@ -36,6 +36,7 @@ from adorm.query import (
     Min,
     Now,
     OuterRef,
+    resolve_lookup,
     Subquery,
     Sum,
     Trunc,
@@ -365,6 +366,49 @@ async def a_model_instance_stands_for_its_primary_key():
         await Membership.objects.filter(club_id=koper.pk).count(),
         await Membership.objects.filter(club__in=[koper]).count(),
     )
+
+
+# Lookup keys built at run time
+
+MEMBER_FILTERS = [
+    ("level", "in", ["advanced", "intermediate"]),
+    ("first_name", "istartswith", "e"),
+    ("birth_date", "gte", datetime.date(1980, 1, 1)),
+]
+"""Declared filters as a dynamic filter form or a viewset produces them: field, lookup name, value."""
+
+
+@case(
+    "select",
+    "lookup.in",
+    "lookup.istartswith",
+    "lookup.gte",
+    expected=(["Eva"], ["Bojan", "Cvetka", "Eva", "Filip", "Gaja", "Hana", "Igor", "Jana", "Klemen", "Lara"]),
+)
+async def lookup_keys_built_at_run_time():
+    conditions = {f"{field}__{op}": value for field, op, value in MEMBER_FILTERS}
+    return (
+        await first_names(Member.objects.filter(**conditions)),
+        await first_names(Member.objects.filter(Q(*conditions.items(), _connector=Q.OR))),
+    )
+
+
+@case("select", "lookup.exact", "lookup.icontains", "path.nested", expected=["Igor"])
+async def lookup_keys_built_at_run_time_cross_relations():
+    path = "__".join(["memberships", "club", "city"])
+    return await first_names(Member.objects.filter(**{f"{path}__icontains": "kop", "memberships__role": "coach"}))
+
+
+@case("get", "count", "lookup.exact", "lookup.in", "lookup.lt", "lookup.isnull", expected=[3, 10, 0, 13])
+async def lookups_a_relation_takes_built_at_run_time():
+    koper = await Club.objects.get(slug="koper-sailing")
+    filters = [("club", "in", [koper]), ("club", "lt", koper.pk), ("club", "isnull", True), ("club", "isnull", False)]
+    counts = []
+    for name, op, value in filters:
+        key = f"{name}__{op}"
+        resolve_lookup(Membership, key)
+        counts.append(await Membership.objects.filter(**{key: value}).count())
+    return counts
 
 
 # Ordering, slicing, distinct

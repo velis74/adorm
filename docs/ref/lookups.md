@@ -4,7 +4,10 @@ Field lookups, importable from `adorm.query` (defined in `adorm.query.lookups`).
 queries](/topics/queries#field-lookups) shows them in context.
 
 ```python
-from adorm.query import LOOKUPS, Exact, IContains, In, build_lookup, register_lookup, split_lookup
+from adorm.query import (
+    LOOKUPS, Exact, IContains, In, ResolvedLookup, build_lookup, check_lookups, register_lookup, resolve_lookup,
+    split_lookup,
+)
 ```
 
 ## Lookup keys
@@ -19,7 +22,7 @@ A lookup key is a field path followed by an optional lookup name, joined with `_
 | `club__owner__name__startswith` | `club__owner__name` | `startswith` |
 | `range` | `range` | `exact` (a single segment is always a field) |
 | `range__exact` | `range` | `exact` |
-| `joined__year` | `joined__year` | `exact` (`year` is not a registered lookup) |
+| `joined__year` | `joined__year` | `exact` (`year` is not a registered lookup, so the path continues past the scalar field `joined`, which every driver refuses with `FieldError`) |
 
 The last segment is the lookup name when the key has more than one segment and the segment is a registered lookup.
 A field whose name equals a lookup name therefore takes an explicit lookup (`range__exact`). Segments are
@@ -50,6 +53,135 @@ The lookup node for `filter(key=value)`. `exact` and `iexact` with `None` become
 ```python
 build_lookup("club__name__icontains", "chess")   # IContains(F('club__name'), 'chess')
 build_lookup("club", None)                       # IsNull(F('club'), True)
+```
+
+### Keys built at run time
+
+A key is a plain string, so it can be built at run time and passed as a keyword argument or as a `(key, value)`
+pair; both build the same lookup as the literal keyword:
+
+```python
+key = f"{field}__{op}"                           # "club__name__icontains"
+Query("club.Member").filter(**{key: value})
+Query("club.Member").exclude(Q((key, value)))
+Q(*params.items(), _connector=Q.OR)              # pairs keep their order; keyword arguments are sorted
+```
+
+Splitting and building check only the key's syntax. Whether its fields exist is known to the model's schema:
+[`resolve_lookup()`](#adorm-query-resolve-lookup-target-key-annotations-source-none) and
+[`check_lookups()`](#adorm-query-check-lookups-target-condition-annotations-source-none) check a key or a condition
+against it without running an operation; otherwise the driver raises
+[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) when it
+builds the statement. A misspelled lookup name is not a lookup, so it is parsed as a field: `first_name__icontain` is
+the path `first_name__icontain` with `exact`, which the schema then refuses.
+
+## Resolving keys
+
+### `adorm.query.resolve_lookup(target, key, *, annotations=(), source=None)`
+
+Resolves the lookup key `key` against `target` and returns a
+[`ResolvedLookup`](#adorm-query-resolvedlookup); runs no operation and needs no session.
+
+| Argument | Meaning |
+|---|---|
+| `target` | a model class, a model label, or a [`Query`](./query) or [`QuerySet`](./queryset), whose annotation and alias names a key may also start with; anything else raises `TypeError`, a malformed label `ValueError` |
+| `annotations` | further annotation names, or a mapping of annotation names to their types |
+| `source` | the [`SchemaSource`](./encoding#adorm-schema-schemasource) the models are resolved in; the model registry (every model class with `_meta`) by default |
+
+Every segment of the field path but the last is a relation, until a JSON or record field (`dict`, `list`, `Any`, a
+pydantic model or a `TypedDict`, also inside `Optional`): the segments after it are keys inside its value. `pk` stands
+for the primary key at any segment. A key that is not a lookup key raises `ValueError`, as in `split_lookup()`.
+
+[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) is raised
+for:
+
+| Key | Message |
+|---|---|
+| `frist_name__icontains` | `clubs.Member has no field or relation 'frist_name'; perhaps you meant 'first_name'` |
+| `memberships__rol` | `clubs.Membership has no field or relation 'rol'; perhaps you meant 'role'` |
+| `first_name__icontain` | `unsupported lookup 'icontain' for clubs.Member.first_name; perhaps you meant 'icontains'` |
+| `joined__year__gte` | `clubs.Member.joined is neither a relation nor a JSON field; 'year' cannot follow` |
+| `memberships__club__icontains` | `unsupported lookup 'icontains' for the relation clubs.Membership.club; a relation takes exact, gt, gte, lt, lte, in, isnull` |
+
+A path that ends at a relation compares the target's primary key, so it takes only the lookups whose `on_relations`
+is true: `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`, `memberships__isnull`). The operation
+codec types field paths with the same resolution
+([`resolve_field_type()`](./encoding#adorm-schema-resolve-field-type-source-label-path)).
+
+A model `source` does not know ends the check: the rest of the path is accepted unresolved. A relation the model
+does not declare (one [`adorm generate`](/howto/generating-models) leaves out) cannot be resolved, so the check
+refuses a key the driver might still run.
+
+```python
+from adorm.query import resolve_lookup
+
+resolved = resolve_lookup(Member, "memberships__club__city__icontains")
+resolved.model, resolved.field, resolved.lookup     # ('clubs.Club', 'city', IContains)
+resolve_lookup(Club, "address__street").keys        # ('street',): a key inside the JSON field address
+resolve_lookup(Member.objects.annotate(n=Count("memberships")), "n__gte").field   # None: an annotation
+```
+
+A filter built from request parameters checks each key before it builds the query, so a wrong key is a client error
+and never reaches a slot:
+
+```python
+from pydantic import TypeAdapter
+
+async def search(params: dict[str, str]) -> list[Member]:
+    condition = Q()
+    for key, raw in params.items():
+        try:
+            resolved = resolve_lookup(Member, key)
+        except adorm.FieldError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        value_type = str if resolved.value_type is None else resolved.value_type   # None: a key inside JSON
+        if resolved.lookup.rhs_is_sequence:
+            value = TypeAdapter(list[value_type]).validate_python(raw.split(","))
+        else:
+            value = TypeAdapter(value_type).validate_python(raw)
+        condition &= Q((key, value))
+    return [member async for member in Member.objects.filter(condition)]
+```
+
+### `adorm.query.ResolvedLookup`
+
+A frozen dataclass, the result of `resolve_lookup()`:
+
+| Attribute | Value |
+|---|---|
+| `key` | the key as given |
+| `path` | the segments of the key's field path (`pk` as given) |
+| `lookup` | the lookup class |
+| `model` | the label of the model whose field or relation the path ends at; `None` for an annotation or after a model the source does not know |
+| `field` | that field or relation (`pk` resolved to the primary key's name), `None` likewise |
+| `field_type` | the type of the compared values: the field's type hint, the target's primary key type for a relation, an annotation's given type; `None` when unknown, always when `keys` is not empty |
+| `keys` | the segments after a JSON or record field, `()` otherwise |
+| `value_type` | a property: the type of a right-hand side value (of each value for `in` and `range`), `lookup.rhs_type(field_type)` |
+
+```python
+resolve_lookup(Member, "pk__in")
+# ResolvedLookup(key='pk__in', path=('pk',), lookup=In, model='clubs.Member', field='id',
+#                field_type=int | None, keys=())
+resolve_lookup(Member, "birth_date__isnull").value_type    # bool
+resolve_lookup(Member, "joined__startswith").value_type    # str: a text pattern
+```
+
+### `adorm.query.check_lookups(target, condition, *, annotations=(), source=None)`
+
+Resolves every lookup and field reference of `condition` (a `Q`, a lookup or another expression) against `target`,
+with the arguments of `resolve_lookup()`, and raises
+[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) for the
+first that does not resolve; anything other than a query node raises `TypeError`. A lookup's left-hand side `F` is
+resolved with the lookup, every other `F` (a right-hand side, a function argument, a `When` condition) as a field
+path. An `OuterRef` and the nodes of a query inside the condition (a `Subquery`, `Exists`, an `in` query) refer to
+other models and are not checked.
+
+```python
+from adorm.query import check_lookups
+
+condition = Q(**{f"{field}__{op}": value}) | Q(last_name=F("email"))
+check_lookups(Member, condition)                  # FieldError when a key does not resolve
+members = Member.objects.filter(condition)
 ```
 
 ## Built-in lookups
@@ -94,6 +226,11 @@ Two class members tell the [operation codec](./encoding) how to type the right-h
 |---|---|
 | `rhs_is_sequence` | `True` when `rhs` is a tuple of values, each typed on its own (`in`, `range`) |
 | `rhs_type(field_type)` | the type of a right-hand side value for a field of `field_type` (which may be `None`); `field_type` itself by default, `bool` for `isnull`, `str` for `regex`, `iregex` and the text pattern lookups (`None` for them when `field_type` is `None`); see `Contains` for its exceptions |
+
+The class attribute `on_relations` tells whether the lookup applies to a path that ends at a relation (compared by the
+target's primary key): `True` for `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull`, `False` by default.
+[`resolve_lookup()`](#adorm-query-resolve-lookup-target-key-annotations-source-none) refuses the others on a
+relation.
 
 A lookup class is itself a condition: it goes where `Q` goes, with any expression on the left.
 
@@ -203,4 +340,16 @@ class LongerThan(Lookup):
 
 
 Query("club.Member").filter(name__longer_than=3)
+```
+
+A lookup that applies to relations sets `on_relations`:
+
+```python
+@register_lookup
+class NotEqual(Lookup):
+    lookup_name = "ne"
+    on_relations = True
+
+
+resolve_lookup(Membership, "club__ne")   # resolves: the relation takes ne
 ```

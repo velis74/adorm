@@ -14,12 +14,13 @@ from adorm import (
     DatabaseError,
     DeadlockError,
     Exists,
+    FieldError,
     NotSupportedError,
     OuterRef,
     TransactionOutcome,
 )
 from adorm.drivers import is_connection_error
-from adorm.query import Count, Func, Length
+from adorm.query import check_lookups, Count, Func, Length, Q, resolve_lookup
 from demo.models.clubs import Club, Member, Membership
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -120,6 +121,83 @@ async def test_refusals_and_reads_racing_in_one_transaction(driver, pool):
             assert results[1::2] == [4] * 10
             assert all(isinstance(result, NotSupportedError) for result in results[::2])
             assert await Club.objects.count() == 3
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+# Lookup keys built at run time
+
+UNRESOLVED = ["frist_name__icontains", "nickname", "first_name__nope", "birth_date__year", "memberships__regex"]
+"""Keys a dynamic filter may build that the model does not resolve: a misspelled field, an unknown field, an unknown
+lookup name, a transform after a scalar field and a lookup a relation does not take; every driver reports them as
+`FieldError`."""
+
+
+def unresolved(n):
+    """An unresolvable dynamic filter."""
+    return Member.objects.filter(**{UNRESOLVED[n % len(UNRESOLVED)]: "x"})
+
+
+async def test_an_unresolvable_key_raises_field_error_and_keeps_the_slot(make_router):
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    for n in range(3 * len(REPEAT)):
+        with pytest.raises(FieldError):
+            await unresolved(n).count()
+        assert (pool.size, pool.in_use) == (1, 0)
+        assert await Member.objects.filter(**{"level__in": ["advanced"]}).count() == 4
+    assert pool.size == 1
+
+
+async def test_unresolvable_keys_inside_a_transaction_leave_it_usable(pool):
+    for n in REPEAT:
+        async with adorm.atomic():
+            with pytest.raises(FieldError):
+                await unresolved(n).count()
+            assert await Club.objects.filter(**{"slug__exact": "koper-sailing"}).update(city=f"Koper {n}") == 1
+            with pytest.raises(FieldError):
+                await unresolved(n + 1).first()
+        assert (await Club.objects.get(slug="koper-sailing")).city == f"Koper {n}"
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_unresolvable_and_valid_dynamic_filters_racing_in_one_transaction(pool):
+    for _ in REPEAT:
+        async with adorm.atomic():
+            results = await asyncio.gather(
+                *(
+                    Member.objects.filter(**{"level__iexact": "ADVANCED"}).count() if n % 2 else unresolved(n).count()
+                    for n in range(20)
+                ),
+                return_exceptions=True,
+            )
+            assert results[1::2] == [4] * 10
+            assert all(isinstance(result, FieldError) for result in results[::2])
+            assert await Club.objects.count() == 3
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_checking_keys_first_needs_no_slot(make_router):
+    pool = make_router(max_connections=1, acquire_timeout=30).pools[0]
+    holding = asyncio.Event()
+    done = asyncio.Event()
+
+    async def hold_the_only_slot():
+        async with adorm.atomic():
+            assert await Club.objects.count() == 3
+            holding.set()
+            await done.wait()
+
+    holder = asyncio.create_task(hold_the_only_slot())
+    try:
+        await holding.wait()
+        for key in UNRESOLVED:
+            with pytest.raises(FieldError):
+                resolve_lookup(Member, key)
+            with pytest.raises(FieldError):
+                check_lookups(Member.objects.all(), Q((key, "x")) | Q(level="advanced"))
+        assert pool.waiting == 0
+    finally:
+        done.set()
+        await holder
     assert (pool.size, pool.in_use) == (1, 0)
 
 

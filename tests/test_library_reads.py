@@ -20,6 +20,7 @@ from adorm import (
     DatabaseError,
     DataError,
     F,
+    FieldError,
     Lower,
     NotSupportedError,
     ProgrammingError,
@@ -550,7 +551,7 @@ async def reusable(pool):
 
 async def test_django_errors_become_adorm_errors_and_keep_the_connection(library, executor):  # noqa: ARG001
     pool = executor(max_connections=1)
-    with pytest.raises(ProgrammingError, match="Cannot resolve keyword 'nope'") as raised:
+    with pytest.raises(FieldError, match="Cannot resolve keyword 'nope'") as raised:
         await Author.objects.filter(nope=1).count()
     assert type(raised.value.original).__name__ == "FieldError"
     assert await reusable(pool)

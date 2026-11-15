@@ -11,6 +11,7 @@ import pytest
 
 from pydantic import BaseModel, ConfigDict, Field as PydanticField
 
+from adorm import FieldError
 from adorm.codec import (
     adapter_for,
     decode_node,
@@ -340,9 +341,14 @@ def test_node_shape():
 
 
 def test_lookups_are_typed_by_the_queried_model():
-    data = MEMBERS.filter(age__gt="3", joined__date__gte=1).to_dict(SCHEMA)
+    data = MEMBERS.filter(age__gt="3", tags__first__gte=1).to_dict(SCHEMA)
     lookups = {c["lhs"]["name"]: c["rhs"] for c in data["filters"][0]["children"]}
-    assert lookups == {"age": {"value": 3}, "joined__date": {"type": "int", "value": 1}}
+    assert lookups == {"age": {"value": 3}, "tags__first": {"type": "int", "value": 1}}
+
+
+def test_a_path_past_a_scalar_field_is_refused():
+    with pytest.raises(FieldError, match=r"club\.Member\.joined is neither a relation nor a JSON field; 'date'"):
+        MEMBERS.filter(joined__date__gte=1).to_dict(SCHEMA)
 
 
 @pytest.mark.parametrize(

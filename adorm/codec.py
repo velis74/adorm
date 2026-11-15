@@ -301,8 +301,8 @@ class _Codec:
     def field_type(self, path: str, *, outer: bool = False) -> Any:
         """The type of the field path in the current model (``outer``: the enclosing query's); ``None`` if unknown.
 
-        A one-segment path naming an annotation has the annotation's type (`expression_type`). Raises ``ValueError``
-        for a field the schema of a known model does not have.
+        A one-segment path naming an annotation has the annotation's type (`expression_type`). Raises
+        `adorm.FieldError` for a path the schema of a known model does not resolve.
         """
         return self._field_type(len(self._scopes) - (1 if outer else 0), path)
 

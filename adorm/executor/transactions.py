@@ -22,6 +22,7 @@ from adorm.events import ON_COMMIT
 from adorm.exceptions import (
     DatabaseError,
     DeadlockError,
+    FieldError,
     InterfaceError,
     NotSupportedError,
     ProtectedError,
@@ -172,6 +173,8 @@ def _leaves_transaction_failed(exc: BaseException) -> bool:
         return False  # a capability check on the client side
     if isinstance(exc, (ProtectedError, RestrictedError)) and exc.sqlstate is None:
         return False  # the delete's check of the references, before any statement changed data
+    if isinstance(exc, FieldError) and exc.sqlstate is None:
+        return False  # a field path or lookup key the driver could not resolve while building the statement
     return isinstance(exc, (DatabaseError, InterfaceError))
 
 
@@ -186,7 +189,8 @@ class Atomic:
     Exiting the block waits for the operations already sent, then commits (or releases the savepoint); on an
     exception it rolls back (to the savepoint). `commit()` and `rollback()` end the block earlier. An operation
     that arrives after the end raises `TransactionClosed`. After an operation of the block failed with a database
-    error or was cancelled, further operations raise `TransactionManagementError` and the end rolls back.
+    error (other than a `FieldError` or a client-side refusal) or was cancelled, further operations raise
+    `TransactionManagementError` and the end rolls back.
 
     While a savepoint is open, operations that other tasks send to an enclosing block wait until it ends.
 

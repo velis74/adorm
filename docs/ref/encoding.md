@@ -162,17 +162,20 @@ earlier one of the same label; a value that is not a `ModelSchema` raises `TypeE
 
 ### `adorm.schema.resolve_field_type(source, label, path)`
 
-The type hint of the field at `path` (the segments of a field path) from the model `label`. Every segment but the
-last is a relation, `pk` stands for the primary key at any segment, and a path that ends at a relation resolves to
-the target's primary key type. `None` when `source` is `None`, does not know a model on the way, or the path continues
-past a field (a key of a JSON field). A segment that is neither a field nor a relation of a model `source` knows
-raises `ValueError`.
+The type hint of the field at `path` (the segments of a field path) from the model `label`, resolved as
+[`resolve_lookup()`](./lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) resolves a field path.
+Every segment but the last is a relation, until a JSON or record field, whose following segments are keys inside its
+value; `pk` stands for the primary key at any segment, and a path that ends at a relation resolves to the target's
+primary key type. `None` when `source` is `None`, does not know a model on the way, or the path continues into a JSON
+field's value. A segment that is neither a field nor a relation of a model `source` knows, and segments after a field
+that is neither a relation nor a JSON field, raise
+[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none).
 
 ```python
 resolve_field_type(schema, "club.Member", ["club", "name"])   # str
 resolve_field_type(schema, "club.Member", ["club"])           # int (club.Club's primary key)
 resolve_field_type(schema, "club.Member", ["pk"])             # int
-resolve_field_type(schema, "club.Member", ["nickname"])       # ValueError: club.Member has no field or relation
+resolve_field_type(schema, "club.Member", ["nickname"])       # FieldError: club.Member has no field or relation
 resolve_field_type(schema, "club.Guest", ["nickname"])        # None (a model the schema does not know)
 ```
 
@@ -259,7 +262,7 @@ Encodes the nodes and operands of one top-level value, resolving field types aga
 | `node(node, hint=None)` | a node and its descendants as data; `hint` is the type of the node's position (it types a `Value` without `output_type`) |
 | `operand(value, hint=None, *, sequence=False)` | a node, or a value encoded with `hint`; with `sequence`, a tuple of them as `{"items": [...]}` |
 | `scope(model, annotations=())` | context manager: resolve field paths against the model `model` and the names of the `(name, expression)` pairs `annotations` inside the block |
-| `field_type(path, *, outer=False)` | the type of a field path in the current model (`outer`: the enclosing query's), `None` if unknown; `ValueError` for a field a known model does not have |
+| `field_type(path, *, outer=False)` | the type of a field path in the current model (`outer`: the enclosing query's), `None` if unknown; `FieldError` for a field a known model does not have |
 | `expression_type(expression)` | the type of an expression, as described under [typed positions](#typed-and-untyped-positions) |
 | `child_hint(cls, output_type, name, hint)` | static: the type a `cls` node in a position of type `hint` passes to the children in its attribute `name` |
 | `lookup_value_type(lookup, lhs)` | the type of a right-hand side value of the lookup class `lookup` applied to `lhs` |

@@ -371,7 +371,8 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | Django | adorm |
 |---|---|
 | `Model.DoesNotExist`, `Model.MultipleObjectsReturned` | `ObjectDoesNotExist`, `MultipleObjectsReturned`; the query set raises the adorm model's own |
-| `FieldError` (an unknown field or lookup) | `ProgrammingError` |
+| `FieldError`, `FieldDoesNotExist` (an unknown field or lookup) | `FieldError` |
+| a segment after a field that is neither a relation nor a JSON field (a Django transform such as `joined__year`), refused before Django sees it | `FieldError` |
 | `ValidationError` (a value Django rejects, such as an invalid UUID) | `ValidationError` |
 | `TransactionManagementError` | `TransactionManagementError` |
 | `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |

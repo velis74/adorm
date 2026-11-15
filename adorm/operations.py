@@ -165,14 +165,16 @@ class Operation:
 
     def to_dict(self, schema: SchemaSource | None = None) -> dict[str, Any]:
         """The operation as JSON-safe data: ``{"operation": kind, ...}``; values are encoded by the types ``schema``
-        gives them. Raises ``ValueError`` for a value that is not valid for its type and ``TypeError`` for a value
-        without a type that `adorm.codec` cannot infer."""
+        gives them. Raises ``ValueError`` for a value that is not valid for its type, ``TypeError`` for a value
+        without a type that `adorm.codec` cannot infer and `adorm.FieldError` for a field path ``schema`` does not
+        resolve."""
         return {"operation": self.kind, **self._encode(Encoder(schema))}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], schema: SchemaSource | None = None) -> Self:
         """The operation ``to_dict()`` produced with the same ``schema``. Raises ``ValueError`` for malformed data, an
-        unknown operation kind, one that is not a ``cls`` or an operation its constructor refuses."""
+        unknown operation kind, one that is not a ``cls`` or an operation its constructor refuses, and
+        `adorm.FieldError` for a field path ``schema`` does not resolve."""
         if not isinstance(data, Mapping):
             raise ValueError(f"an encoded operation is a mapping, not {type(data).__name__}")
         kind = data.get("operation")
