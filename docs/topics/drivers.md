@@ -202,8 +202,8 @@ methods), no direct call reaches the test's connection; the installed contract d
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | SQL built from the model metadata (table and column names) by Django's or SQLAlchemy's compiler, run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
-| rows from `values()`, keys renamed from ORM to adorm field names (`orm_names`) | `Record` to dict | `Row._mapping` to dict |
+| the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | a Django query compiled without a connection by [`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version) ([SQL compilation for asyncpg](./sql-compilation)), run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
+| rows from `values()`, keys renamed from ORM to adorm field names (`orm_names`) | [`DjangoStatement.rows()`](/ref/drivers#rows-records): tuples in select order with Django's converters applied, paired with the selected adorm field names | `Row._mapping` to dict |
 
 ### Transactions and savepoints
 

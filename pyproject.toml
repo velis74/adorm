@@ -36,7 +36,7 @@ adorm = "adorm.cli:main"
 
 [project.optional-dependencies]
 django = ["django>=4.2"]
-asyncpg = ["asyncpg>=0.30"]
+asyncpg = ["asyncpg>=0.30", "django>=4.2", "psycopg>=3.2"]
 
 [dependency-groups]
 dev = [
@@ -50,6 +50,7 @@ dev = [
     "pytest-asyncio",
     "pytest-django",
     "ruff",
+    "sqlalchemy>=2.0",
     "uvicorn>=0.54.0",
 ]
 

@@ -180,3 +180,11 @@
   URLs passed to fixtures do not appear in the output.
 - Documentation site (VitePress, `docs/`, published on docs.velis.si): introduction, concepts (sessions,
   slots, pool, drivers, transactions), how-to guides and API reference.
+- `adorm.drivers.sql`: `Statement` and `numbered_placeholders()`, which turns `%s` / `%%` placeholders into
+  PostgreSQL's `$n`, optionally with casts. `adorm.drivers.asyncpg.compiler`: `DjangoCompiler` compiles Django
+  selects, updates, deletes and aggregates for asyncpg on a database wrapper that never connects (server version
+  given, `select_for_update()` checked against `in_transaction`, parameter limit `MAX_QUERY_PARAMS`, empty
+  statements for queries that affect no rows); `bind_param()` turns Django's psycopg parameters into asyncpg values
+  with the cast psycopg's client-side or server-side binding implies; `DjangoStatement.rows()` returns asyncpg rows
+  as Django returns them on psycopg. The `asyncpg` extra installs Django and psycopg 3 as well.
+- Documentation: "SQL compilation for asyncpg" topic.

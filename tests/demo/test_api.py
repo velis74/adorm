@@ -90,6 +90,12 @@ def test_a_driver_needing_a_missing_package_is_not_available(monkeypatch):
     assert drivers.get("asyncpg").unavailable_reason() == "adorm.drivers.asyncpg needs asyncpg, which is not installed"
 
 
+def test_a_driver_whose_module_lacks_the_class_is_not_available():
+    driver = drivers.DemoDriver("absent", f"{__name__}:NoSuchDriver")
+    assert driver.unavailable_reason() == f"{__name__} does not define NoSuchDriver"
+    assert not driver.is_available()
+
+
 @pytest.mark.parametrize(
     "error",
     [ModuleNotFoundError("No module named 'adorm.missing'", name="adorm.missing"), ImportError("cannot import name")],

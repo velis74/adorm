@@ -1,0 +1,268 @@
+"""SQL for asyncpg from Django's query compiler, built without a database connection.
+
+`DjangoCompiler` compiles a Django query on a database wrapper of its own that never connects; `bind_param()`
+turns the parameters Django prepares for psycopg into values asyncpg encodes, with the PostgreSQL type psycopg
+gives them as an explicit cast. Django's PostgreSQL backend must run on psycopg 3.
+"""
+
+from __future__ import annotations
+
+import copy
+import datetime
+import decimal
+import ipaddress
+import json
+import math
+import uuid
+
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import Any, NoReturn
+
+import asyncpg
+
+from django.core.exceptions import EmptyResultSet
+from django.db import connections
+from django.db.backends.postgresql.psycopg_any import is_psycopg3
+from django.db.utils import load_backend
+from psycopg import Binary
+from psycopg.types.json import Json, Jsonb
+from psycopg.types.numeric import Float4, Float8, Int2, Int4, Int8, IntNumeric, Oid
+from psycopg.types.range import Range
+
+from adorm.drivers.sql import numbered_placeholders, Statement
+from adorm.exceptions import NotSupportedError, TransactionManagementError
+
+__all__ = ["bind_param", "DjangoCompiler", "DjangoStatement", "MAX_QUERY_PARAMS"]
+
+MAX_QUERY_PARAMS = 32767
+"""The most parameters asyncpg sends with one statement."""
+
+# psycopg's typed wrappers; Django wraps integer field values in the Int* ones.
+_WRAPPER_TYPES = {
+    Int2: "int2",
+    Int4: "int4",
+    Int8: "int8",
+    IntNumeric: "numeric",
+    Oid: "oid",
+    Float4: "float4",
+    Float8: "float8",
+}
+_INT_WIDTHS = ("int2", "int4", "int8", "numeric")
+_IP_TYPES = (
+    ipaddress.IPv4Address,
+    ipaddress.IPv6Address,
+    ipaddress.IPv4Interface,
+    ipaddress.IPv6Interface,
+    ipaddress.IPv4Network,
+    ipaddress.IPv6Network,
+)
+
+
+def _int_type(value: int) -> str:
+    """The smallest integer type psycopg sends ``value`` as with server-side binding."""
+    if -(2**15) <= value < 2**15:
+        return "int2"
+    return _literal_int_type(value)
+
+
+def _literal_int_type(value: int) -> str:
+    """The type PostgreSQL gives the integer literal psycopg renders for ``value`` with client-side binding."""
+    if -(2**31) <= value < 2**31:
+        return "int4"
+    if -(2**63) <= value < 2**63:
+        return "int8"
+    return "numeric"
+
+
+def _flatten(items: Iterable[Any]) -> Iterable[Any]:
+    for item in items:
+        if isinstance(item, list | tuple):
+            yield from _flatten(item)
+        elif item is not None:
+            yield item
+
+
+def _array_type(items: Sequence[Any]) -> str | None:
+    """The array type psycopg gives a list: the widest integer type of its items, else the first item's type."""
+    casts = [bind_param(item, server_side_binding=True)[1] for item in _flatten(items)]
+    if not casts or casts[0] is None:
+        return None
+    if all(cast in _INT_WIDTHS for cast in casts):
+        return max(casts, key=_INT_WIDTHS.index) + "[]"
+    return casts[0] + "[]"
+
+
+def _items(items: Sequence[Any]) -> list[Any]:
+    return [
+        _items(item) if isinstance(item, list | tuple) else bind_param(item, server_side_binding=True)[0]
+        for item in items
+    ]
+
+
+def bind_param(value: Any, *, server_side_binding: bool = False) -> tuple[Any, str | None]:
+    """Return the value asyncpg encodes for ``value``, a parameter Django prepared for psycopg, and the PostgreSQL
+    type to cast its placeholder to, or ``None`` for no cast.
+
+    The cast is the type the value has under psycopg, so PostgreSQL resolves the statement as it does there.
+    ``server_side_binding`` selects psycopg's binding mode (Django's ``OPTIONS["server_side_binding"]``). With
+    client-side binding, Django's default, psycopg renders numbers as untyped literals: integers (psycopg's integer
+    wrappers too) take ``int4``, ``int8`` or ``numeric`` by size, finite floats ``numeric``. With server-side
+    binding an integer takes the smallest of ``int2``, ``int4``, ``int8``, ``numeric``, a wrapper its own type and
+    a float ``float8``. ``str`` and ``None`` stay untyped and take their type from the context. A list or tuple
+    takes the array of its items' widest integer type or of its first item's type; without a typed item it stays
+    untyped. A psycopg object this function does not know raises ``NotSupportedError``.
+    """
+    kind = type(value)
+    if kind in _WRAPPER_TYPES:
+        number = float(value) if kind in (Float4, Float8) else int(value)
+        if server_side_binding:
+            return number, _WRAPPER_TYPES[kind]
+        return bind_param(number)
+    if value is None or isinstance(value, str):
+        return value, None
+    if isinstance(value, bool):
+        return value, "bool"
+    if isinstance(value, int):
+        return value, _int_type(value) if server_side_binding else _literal_int_type(value)
+    if isinstance(value, float):
+        if server_side_binding or not math.isfinite(value):
+            return value, "float8"
+        return decimal.Decimal(repr(value)), "numeric"
+    if isinstance(value, decimal.Decimal):
+        return value, "numeric"
+    if isinstance(value, datetime.datetime):
+        return value, "timestamp" if value.tzinfo is None else "timestamptz"
+    if isinstance(value, datetime.date):
+        return value, "date"
+    if isinstance(value, datetime.time):
+        return value, "time" if value.tzinfo is None else "timetz"
+    if isinstance(value, datetime.timedelta):
+        return value, "interval"
+    if isinstance(value, uuid.UUID):
+        return value, "uuid"
+    if isinstance(value, bytes | bytearray | memoryview):
+        return bytes(value), "bytea"
+    if isinstance(value, Binary):
+        return bytes(value.obj), "bytea"
+    if isinstance(value, Json | Jsonb):
+        dumps = value.dumps or json.dumps
+        return dumps(value.obj), "jsonb" if isinstance(value, Jsonb) else "json"
+    if isinstance(value, ipaddress.IPv4Address | ipaddress.IPv6Address):
+        return value, "inet"
+    if isinstance(value, ipaddress.IPv4Network | ipaddress.IPv6Network):
+        return value, "cidr"
+    if isinstance(value, Range):
+        if value.isempty:
+            return asyncpg.Range(empty=True), None
+        bounds = value.bounds
+        lower_inc, upper_inc = bounds[0] == "[", bounds[1] == "]"
+        return asyncpg.Range(value.lower, value.upper, lower_inc=lower_inc, upper_inc=upper_inc), None
+    if isinstance(value, list | tuple):
+        return _items(value), _array_type(value)
+    if kind.__module__.split(".")[0] == "psycopg":
+        raise NotSupportedError(f"no asyncpg value for the psycopg parameter {value!r}")
+    return value, None
+
+
+def _psycopg_value(value: Any) -> Any:
+    """``value`` from an asyncpg row as Django's psycopg setup loads it: ``inet`` / ``cidr`` as text, ``uuid`` as
+    ``uuid.UUID``, lists item by item."""
+    if isinstance(value, _IP_TYPES):
+        return str(value)
+    if isinstance(value, uuid.UUID) and type(value) is not uuid.UUID:
+        return uuid.UUID(bytes=value.bytes)
+    if isinstance(value, list):
+        return [_psycopg_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class DjangoStatement(Statement):
+    """A `Statement` compiled from a Django query; `rows()` applies Django's converters to its result rows.
+
+    An empty statement (``sql == ""``, `empty` true) is one Django does not execute: a query that matches no rows
+    (an update or delete filtered by ``pk__in=[]``) or an update without values. It affects no rows."""
+
+    compiler: Any = field(default=None, repr=False, compare=False)
+
+    @property
+    def empty(self) -> bool:
+        """True when there is no statement to execute."""
+        return not self.sql
+
+    def rows(self, records: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
+        """Return ``records`` (asyncpg ``Record`` objects or tuples, in select order) as tuples of the values Django's
+        own evaluation of the query produces: columns Django adds only for ordering or ``extra(select=)`` dropped,
+        ``inet`` / ``cidr`` values as text and ``uuid`` values as ``uuid.UUID``, as psycopg loads them, and the
+        fields' ``from_db_value()`` converters applied."""
+        width = self.compiler.col_count if self.compiler.has_extra_select else None
+        rows = [tuple(_psycopg_value(v) for v in tuple(r)[:width]) for r in records]
+        return list(self.compiler.results_iter(results=[rows], tuple_expected=True))
+
+
+class DjangoCompiler:
+    """Compiles Django queries for a ``DATABASES`` entry into `DjangoStatement` objects, without a connection.
+
+    The compiler runs on a database wrapper of its own, built from ``DATABASES[alias]`` and never connected:
+    Django's thread-local connection for ``alias`` is not touched, so compiling works in any thread and inside a
+    running event loop. ``server_version`` is PostgreSQL's ``server_version_num`` (``170006`` for 17.6); Django
+    reads it to choose SQL for some constructs (``AnyValue``, ``JSONObject``, ``JSONArray``, ``UUID7``) and would
+    otherwise connect to ask. Parameters are bound for the entry's ``OPTIONS["server_side_binding"]``. A construct
+    that needs a connection to compile (``SearchHeadline`` with options, which quotes them through psycopg) raises
+    ``NotSupportedError``. The entry must use Django's PostgreSQL backend on psycopg 3.
+    """
+
+    def __init__(self, alias: str = "default", *, server_version: int):
+        settings_dict = copy.deepcopy(connections.settings[alias])
+        wrapper = load_backend(settings_dict["ENGINE"]).DatabaseWrapper(settings_dict, alias)
+        if wrapper.vendor != "postgresql":
+            raise NotSupportedError(f"DATABASES[{alias!r}] is {wrapper.vendor}, not PostgreSQL")
+        if not is_psycopg3:
+            raise NotSupportedError("Django's PostgreSQL backend runs on psycopg2; DjangoCompiler needs psycopg 3")
+        wrapper.__dict__["pg_version"] = server_version
+        wrapper.features.max_query_params = MAX_QUERY_PARAMS
+        wrapper.ensure_connection = wrapper.connect = self._refuse_connection
+        # select_for_update compiles as inside a transaction; compile() checks the caller's transaction state.
+        wrapper.get_autocommit = lambda: False
+        self.alias = alias
+        self.server_version = server_version
+        self.server_side_binding = bool(settings_dict.get("OPTIONS", {}).get("server_side_binding"))
+        self.connection = wrapper
+
+    def _refuse_connection(self) -> NoReturn:
+        raise NotSupportedError(f"compiling this query for {self.alias!r} needs a database connection")
+
+    def compile(self, query: Any, *, in_transaction: bool = False) -> DjangoStatement:
+        """Compile ``query``, a Django ``QuerySet`` or ``Query`` (select, update, delete or aggregate), into a
+        statement with numbered placeholders and asyncpg parameters.
+
+        A select that matches no rows compiles with ``WHERE 0 = 1``; an update or delete that matches no rows and an
+        update without values compile into an empty statement. ``in_transaction`` tells whether the statement runs
+        inside a transaction: ``select_for_update()`` outside one raises ``TransactionManagementError``, as Django
+        does. Raises ``NotSupportedError`` for an insert, which compiles into one statement per batch, for an update
+        of fields of a multi-table inheritance parent, which Django runs as several statements after selecting the
+        keys, and for a statement with more than `MAX_QUERY_PARAMS` parameters."""
+        query = getattr(query, "query", query)
+        if getattr(query, "related_updates", None):
+            raise NotSupportedError("an update of parent model fields runs as several statements")
+        if getattr(query, "select_for_update", False) and not in_transaction:
+            raise TransactionManagementError("select_for_update cannot be used outside of a transaction.")
+        compiler = query.get_compiler(connection=self.connection, elide_empty=False)
+        try:
+            compiled = compiler.as_sql()
+        except EmptyResultSet:
+            return DjangoStatement("", (), compiler=compiler)
+        if isinstance(compiled, list):
+            raise NotSupportedError(f"{type(compiler).__name__} compiles into several statements")
+        sql, params = compiled
+        if not sql:
+            return DjangoStatement("", (), compiler=compiler)
+        if len(params) > MAX_QUERY_PARAMS:
+            raise NotSupportedError(f"{len(params)} parameters; asyncpg sends at most {MAX_QUERY_PARAMS}")
+        bound = [bind_param(p, server_side_binding=self.server_side_binding) for p in params]
+        return DjangoStatement(
+            numbered_placeholders(sql, [cast for _, cast in bound]),
+            tuple(value for value, _ in bound),
+            compiler=compiler,
+        )

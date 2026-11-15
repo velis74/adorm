@@ -35,6 +35,6 @@ the names it covers:
 | Connection options and timeouts | `connection_options`, `timeout` |
 | [Exceptions](./exceptions) | the exception hierarchy |
 | [Settings](./settings) | `configure`, connection profiles, pool settings, run-time profiles (`adorm.settings`) |
-| [Drivers](./drivers) | the driver contract (`adorm.drivers`) |
+| [Drivers](./drivers) | the driver contract (`adorm.drivers`), SQL statements (`adorm.drivers.sql`), Django's compiler for asyncpg (`adorm.drivers.asyncpg.compiler`) |
 | [Events](./events) | event types, their encoded form, the client's event channel and dispatch (`adorm.events`) |
 | [Model generator](./codegen) | `adorm generate`, the model description, rendering and files, `expose` and `client_base` (`adorm.codegen`, `adorm.cli`, `adorm.porting`) |

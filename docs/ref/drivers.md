@@ -328,3 +328,168 @@ class SQLiteConnection(ThreadedConnection):
 
     ...
 ```
+
+## SQL statements
+
+`adorm.drivers.sql` holds what a driver that executes SQL itself needs regardless of where the SQL comes from. It
+imports no ORM or database library.
+
+```python
+from adorm.drivers.sql import numbered_placeholders, Statement
+```
+
+### `adorm.drivers.sql.Statement`
+
+`Statement(sql, params=())`
+
+A frozen dataclass: an SQL statement with numbered placeholders (`$1`, `$2` …) and its positional parameters, in
+the form `asyncpg.Connection.fetch()` takes them.
+
+```python
+statement = Statement('SELECT "name" FROM "clubs_club" WHERE "id" = $1::int8', (42,))
+rows = await conn.fetch(statement.sql, *statement.params)
+```
+
+### `adorm.drivers.sql.numbered_placeholders(sql, casts=None)`
+
+Returns `sql` with every `%s` replaced by `$1`, `$2` … in order and every `%%` by `%`: the PEP 249 `format`
+paramstyle Django's compiler and psycopg use, turned into PostgreSQL's numbered placeholders. `casts`, when given,
+holds one entry per placeholder: a PostgreSQL type name appends `::<type>`, `None` leaves the placeholder bare.
+
+`%` is interpreted everywhere in `sql`, inside quoted literals and identifiers too, as psycopg interprets it. Any
+other `%` sequence (`%d`, `%(name)s`, a lone `%`) raises `ValueError`, and so does a `casts` sequence whose length
+differs from the number of placeholders.
+
+```python
+numbered_placeholders('SELECT "a" FROM "t" WHERE "b" = %s AND "c" LIKE %s')
+# 'SELECT "a" FROM "t" WHERE "b" = $1 AND "c" LIKE $2'
+numbered_placeholders("REPLACE(%s, E'%%', E'\\\\%%')")
+# "REPLACE($1, E'%', E'\\\\%')"
+numbered_placeholders("SELECT %s, %s", ["int4", None])
+# 'SELECT $1::int4, $2'
+```
+
+## Django's compiler for asyncpg
+
+`adorm.drivers.asyncpg.compiler` compiles Django queries into SQL for asyncpg, without a database connection. It
+imports Django, psycopg 3 (Django's PostgreSQL backend must run on it) and asyncpg, which the `asyncpg` extra
+installs (`pip install "adorm[asyncpg]"`). [SQL compilation for asyncpg](/topics/sql-compilation) describes the
+behaviour it relies on.
+
+```python
+from adorm.drivers.asyncpg.compiler import bind_param, DjangoCompiler, DjangoStatement, MAX_QUERY_PARAMS
+```
+
+### `adorm.drivers.asyncpg.compiler.DjangoCompiler(alias="default", *, server_version)`
+
+Compiles Django queries for the `DATABASES` entry `alias` into [`DjangoStatement`](#adorm-drivers-asyncpg-compiler-djangostatement)
+objects. It compiles on a database wrapper of its own (`connection`), built from that entry and never connected,
+so Django's thread-local connection for `alias` is not touched and compiling works in any thread and inside a
+running event loop. One instance can be shared by threads and tasks.
+
+`server_version` is PostgreSQL's `server_version_num` (`170006` for 17.6). Django reads it to choose the SQL for
+`AnyValue`, `JSONObject`, `JSONArray` and `UUID7`; a version that lacks a construct raises Django's
+`NotSupportedError` for it, as Django does. Parameters are bound for the entry's `OPTIONS["server_side_binding"]`
+(attribute `server_side_binding`). The wrapper's `features.max_query_params` is
+[`MAX_QUERY_PARAMS`](#adorm-drivers-asyncpg-compiler-max-query-params), so
+`compiler.connection.ops.bulk_batch_size(fields, objs)` returns batch sizes asyncpg accepts.
+
+An entry whose backend is not PostgreSQL, or whose PostgreSQL backend runs on psycopg2, raises `NotSupportedError`
+(adorm's).
+
+```python
+server_version = int(await conn.fetchval("SHOW server_version_num"))
+compiler = DjangoCompiler("default", server_version=server_version)
+```
+
+#### `compile(query, *, in_transaction=False)`
+
+Compiles `query`, a Django `QuerySet` or `Query` (select, update, delete or aggregate), into a `DjangoStatement`:
+`%s` placeholders become `$n`, each parameter goes through [`bind_param()`](#adorm-drivers-asyncpg-compiler-bind-param-value-server-side-binding-false)
+in the compiler's binding mode and its placeholder gets the cast `bind_param()` returns.
+
+A select whose filter matches nothing (`pk__in=[]`) compiles with `WHERE 0 = 1`. An update or delete whose filter
+matches nothing, and an update without values, compile into an empty statement ([`empty`](#empty)), which the caller
+does not execute.
+
+`in_transaction` tells whether the statement runs inside a transaction: a `select_for_update()` query compiles only
+then and raises adorm's `TransactionManagementError` otherwise, as Django does.
+
+Raises adorm's `NotSupportedError` for an insert, which Django compiles into one statement per batch, for an update
+that sets fields of a multi-table inheritance parent, which Django runs as one statement per table after selecting
+the keys on its own connection, for a statement with more than `MAX_QUERY_PARAMS` parameters, and for a construct
+that needs a connection to compile: `SearchHeadline` with options quotes them through psycopg.
+
+```python
+statement = compiler.compile(Book.objects.filter(title__icontains="war", pages__gte=100).order_by("isbn"))
+statement.sql      # '... WHERE ("library_book"."pages" >= $1::int4 AND UPPER("library_book"."title"::text) LIKE UPPER($2)) ...'
+statement.params   # (100, '%war%')
+records = await conn.fetch(statement.sql, *statement.params)
+```
+
+### `adorm.drivers.asyncpg.compiler.DjangoStatement`
+
+A [`Statement`](#adorm-drivers-sql-statement) compiled by `DjangoCompiler`. Its `compiler` field holds Django's
+compiler for the query; it is left out of comparison and `repr()`.
+
+#### `empty`
+
+`True` when `sql` is `""`: the query affects no rows and is not executed.
+
+```python
+statement = compiler.compile(update_query)
+count = 0 if statement.empty else int((await conn.execute(statement.sql, *statement.params)).split()[-1])
+```
+
+#### `rows(records)`
+
+Returns `records`, the asyncpg `Record` objects (or tuples) the statement fetched, as a list of tuples in select
+order: the values Django's own evaluation of the query returns on psycopg. It drops the columns Django adds only
+for ordering or `extra(select=)`, returns `inet` / `cidr` values as text and `uuid` values as `uuid.UUID` (in arrays
+too), as psycopg loads them, and applies the fields' `from_db_value()` converters, JSON decoding included.
+
+```python
+statement = compiler.compile(Book.objects.values("isbn", "extra"))
+statement.rows(await conn.fetch(statement.sql, *statement.params))
+# [('9780000000001', {'tags': ['x', 'y']}), ...]
+```
+
+### `adorm.drivers.asyncpg.compiler.bind_param(value, *, server_side_binding=False)`
+
+Returns `(asyncpg_value, cast)` for a parameter Django prepared for psycopg. `cast` is the PostgreSQL type the value
+has under psycopg, so the server resolves the statement as it does there, or `None` for an untyped parameter.
+`server_side_binding` selects psycopg's binding mode; the default, client-side binding, is Django's. The two modes
+differ only for numbers and lists of numbers.
+
+| Parameter | asyncpg value | Cast, client-side binding | Cast, server-side binding |
+|---|---|---|---|
+| `None`, `str` | unchanged | none: the type comes from the context | none |
+| `int`, psycopg `Int2`, `Int4`, `Int8`, `IntNumeric`, `Oid` (Django wraps integer field values) | `int` | `int4`, `int8` or `numeric`, the type of the integer literal | `int`: the smallest of `int2`, `int4`, `int8`, `numeric`; a wrapper: `int2`, `int4`, `int8`, `numeric`, `oid` |
+| finite `float`, psycopg `Float4`, `Float8` | `Decimal` of the float's `repr()` (client-side), `float` (server-side) | `numeric` | `float8`; a wrapper: `float4`, `float8` |
+| infinite or NaN `float` | `float` | `float8` | `float8` |
+| `bool` | unchanged | `bool` | `bool` |
+| `Decimal` | unchanged | `numeric` | `numeric` |
+| `datetime` | unchanged | `timestamptz` when aware, `timestamp` when naive | the same |
+| `date`, `time`, `timedelta`, `UUID` | unchanged | `date`, `time` (`timetz` when aware), `interval`, `uuid` | the same |
+| `bytes`, `bytearray`, `memoryview`, psycopg `Binary` | `bytes` | `bytea` | `bytea` |
+| psycopg `Jsonb`, `Json` | the JSON text, from the wrapper's `dumps` | `jsonb`, `json` | the same |
+| `IPv4Address` / `IPv6Address`, `IPv4Network` / `IPv6Network` | unchanged | `inet`, `cidr` | the same |
+| psycopg `Range` | `asyncpg.Range` | none | none |
+| `list`, `tuple` (nested too) | a list of the items' asyncpg values as server-side binding converts them | the array of the items' widest integer type (`int2[]` … `numeric[]`), else of the first non-`None` item's type (`float8[]`, `date[]`, `jsonb[]` …); none without a typed item (`str` items, only `None`, empty) | the same |
+
+Any other psycopg object raises `NotSupportedError`; any other value passes unchanged without a cast.
+
+```python
+bind_param(Int2(100))                               # (100, 'int4')
+bind_param(Int2(100), server_side_binding=True)     # (100, 'int2')
+bind_param(0.1)                                     # (Decimal('0.1'), 'numeric')
+bind_param([30000, 70000])                          # ([30000, 70000], 'int4[]')
+bind_param(Jsonb({"a": 1}))         # ('{"a": 1}', 'jsonb')
+bind_param(datetime(2024, 1, 1))    # (datetime(2024, 1, 1), 'timestamp')
+bind_param("%war%")                 # ('%war%', None)
+```
+
+### `adorm.drivers.asyncpg.compiler.MAX_QUERY_PARAMS`
+
+`32767`: the most parameters asyncpg sends with one statement; a statement with more raises
+`asyncpg.InterfaceError`.

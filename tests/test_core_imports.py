@@ -3,8 +3,10 @@ model generator's Django source (`adorm.codegen.django`)."""
 
 import ast
 import json
+import re
 import subprocess
 import sys
+import tomllib
 
 from pathlib import Path
 
@@ -67,3 +69,16 @@ def test_importing_the_core_loads_no_orm():
 def test_imported_roots():
     sample = PACKAGE / "drivers" / "base.py"
     assert {"asyncio", "adorm"} <= imported_roots(sample)
+
+
+def test_driver_extras_cover_driver_imports():
+    """Every ORM or database library a driver subpackage imports is in the extra named after it."""
+    extras = tomllib.loads((PACKAGE.parent / "pyproject.toml").read_text(encoding="utf-8"))["project"][
+        "optional-dependencies"
+    ]
+    drivers = [p for p in (PACKAGE / "drivers").iterdir() if p.is_dir() and (p / "__init__.py").is_file()]
+    assert drivers
+    for driver in drivers:
+        declared = {re.split(r"[\[<>=!~ ]", requirement)[0] for requirement in extras[driver.name]}
+        imported = set().union(*(imported_roots(path) for path in driver.rglob("*.py"))) & TARGETS
+        assert imported <= declared, f"{driver.name} imports {sorted(imported - declared)}"

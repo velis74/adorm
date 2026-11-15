@@ -35,7 +35,7 @@ uv run python demo.py
 ```text
 $ uv run python demo.py --list-drivers
 django     adorm.drivers.django:DjangoDriver        not available: adorm.drivers.django does not exist
-asyncpg    adorm.drivers.asyncpg:AsyncpgDriver      not available: adorm.drivers.asyncpg does not exist
+asyncpg    adorm.drivers.asyncpg:AsyncpgDriver      not available: adorm.drivers.asyncpg does not define AsyncpgDriver
 memory     demo.api.memory:MemoryDriver             available
 ```
 

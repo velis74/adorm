@@ -60,7 +60,8 @@ async def active_names() -> list[str]:
 ## Requirements
 
 - Python 3.11 or newer
-- The `django` extra for the Django ORM driver, the `asyncpg` extra for the native PostgreSQL driver
+- The `django` extra for the Django ORM driver, the `asyncpg` extra for the native PostgreSQL driver (it installs
+  asyncpg, Django and psycopg 3: the driver compiles its SQL with Django's compiler)
 
 ```bash
 pip install "adorm[django]"

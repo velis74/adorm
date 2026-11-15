@@ -1,10 +1,11 @@
 """The drivers the demo runs against.
 
-Each entry names an adorm driver class by import path. A driver is available when its module imports; it is not
-available when the module does not exist or needs a third-party package that is not installed, and any other import
-error propagates. The active driver comes from ``ADORM_DEMO_DRIVER`` (``demo.py --driver``); without one the first
-available driver is active, and with none available there is no active driver. The API registers the active driver as
-adorm's connection profile ``default`` (`DemoDriver.profile()`) and executes the ``/api/data`` endpoints on it.
+Each entry names an adorm driver class by import path. A driver is available when its module imports and defines the
+class; it is not available when the module does not exist, needs a third-party package that is not installed or lacks
+the class, and any other import error propagates. The active driver comes from ``ADORM_DEMO_DRIVER``
+(``demo.py --driver``); without one the first available driver is active, and with none available there is no active
+driver. The API registers the active driver as adorm's connection profile ``default`` (`DemoDriver.profile()`) and
+executes the ``/api/data`` endpoints on it.
 """
 
 from __future__ import annotations
@@ -58,19 +59,22 @@ class DemoDriver:
         return self.target.partition(":")[0]
 
     def unavailable_reason(self) -> str | None:
-        """Why the driver is not available; ``None`` when its module imports.
+        """Why the driver is not available; ``None`` when its module imports and defines the class.
 
         A ``ModuleNotFoundError`` for the module itself or for a package outside adorm makes the driver unavailable;
         any other import error propagates.
         """
         try:
-            importlib.import_module(self.module)
+            module = importlib.import_module(self.module)
         except ModuleNotFoundError as exc:
             if exc.name == self.module:
                 return f"{self.module} does not exist"
             if exc.name and exc.name.partition(".")[0] not in ("adorm", "demo"):
                 return f"{self.module} needs {exc.name}, which is not installed"
             raise
+        name = self.target.partition(":")[2]
+        if not hasattr(module, name):
+            return f"{self.module} does not define {name}"
         return None
 
     def is_available(self) -> bool:
