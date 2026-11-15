@@ -30,6 +30,36 @@ Because `query` is a `Query`, a query set stands wherever a query is accepted:
 Member.objects.filter(club_id__in=Club.objects.filter(name__startswith="A").values("id"))
 ```
 
+### Subclasses
+
+A subclass adds methods: client-side methods that build on the building methods, and
+[driver methods](./models#adorm-driver-method-func-queryset-only-false). Building methods return an instance of the
+subclass, and a copy pickles as one. A manager's `queryset_class` names the subclass (see the
+[managers topic](/topics/managers)).
+
+```python
+class LoanQuerySet(QuerySet):
+    def overdue(self, today):
+        return self.filter(due__lt=today)
+
+    @driver_method
+    async def archive(self, reason: str = "") -> int: ...
+
+
+await Loan.objects.overdue(today).order_by("due").archive("late")
+```
+
+#### `QuerySet.as_manager(orm_name=None, *, method_manager=None)`
+
+Class method: a [`Manager`](./models#adorm-manager-orm-name-none-method-manager-none) whose `queryset_class` is this
+class, `Manager.from_queryset(cls)(orm_name, method_manager=method_manager)`.
+
+```python
+class Loan(Model):
+    ...
+    objects = LoanQuerySet.as_manager("objects")
+```
+
 ## Building methods
 
 Each method applies the [`Query`](./query) method of the same name and returns a new query set on the same
@@ -129,9 +159,14 @@ column), inserted with a `Create` operation of the fields given (the primary key
 instance gets the values the target returns (primary key, defaults) and is bound to `executor`. Invalid values raise
 pydantic's `ValidationError` before any operation runs.
 
+When the query carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), the
+operation carries it too and the values that are not fields go along, so the target manager's `create()` receives
+them; an override of it may take such arguments. Without one, those values stay extra values of the instance.
+
 ```python
 member = await Member.objects.create(name="Ana", club=club)
 member.pk          # set by the database
+reader = await Reader.objects.create(name="Ann", username="ann")   # Create(..., manager="objects")
 ```
 
 #### `async get_or_create(defaults=None, **lookups)`

@@ -1,17 +1,25 @@
 """Introspection of Django models into `adorm.codegen.spec` values.
 
 Needs a configured Django (``django.setup()`` done). Concrete, non-swapped models are generated; auto-created
-many-to-many through models are not (a `ManyToMany` names them by label).
+many-to-many through models are not (a `ManyToMany` names them by label). Managers become `ManagerSpec` values: a
+manager whose class or query set class overrides a method the driver calls on the ORM manager (`ROUTED_METHODS`:
+``get_queryset``, ``create``, ``delete`` …) gets its ORM name, unless its client base defines the same method; the
+methods marked with `adorm.expose` or listed in the ``ADORM_EXPOSE`` setting (``"app_label.Model.manager.method"``)
+become driver methods, which run on the manager (``method_manager``) without routing its other operations.
 """
 
 from __future__ import annotations
 
 import enum
+import importlib
+import inspect
 import os
 import re
+import types
+import typing
 import warnings
 
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from decimal import Decimal
 from typing import Annotated, Any
 
@@ -19,6 +27,7 @@ import django
 import pydantic
 
 from django.apps import apps
+from django.conf import settings as django_settings
 from django.core import validators as django_validators
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
@@ -32,14 +41,22 @@ from adorm.codegen.spec import (
     CodegenWarning,
     compute_schema_hash,
     FieldSpec,
+    ManagerSpec,
+    MethodSpec,
     ModelSpec,
     NO_DEFAULT,
+    ParameterSpec,
     python_name,
+    QuerySetSpec,
     RelationSpec,
     TypeSpec,
 )
+from adorm.models.base import Model as AdormModelBase
+from adorm.models.managers import Manager as AdormManager
+from adorm.porting import get_client_base, is_exposed
+from adorm.query.queryset import QuerySet as AdormQuerySet
 
-__all__ = ["field_spec", "introspect", "model_spec", "schema_hash", "setup"]
+__all__ = ["exposed_methods", "field_spec", "introspect", "manager_specs", "model_spec", "schema_hash", "setup"]
 
 _INT = TypeSpec("int")
 _STR = TypeSpec("str")
@@ -371,6 +388,315 @@ def _relations(model: type[models.Model], include_parents: bool, included: Colle
     return relations
 
 
+_CORE_MODULES = frozenset({"django.db.models.manager", "django.db.models.query", "builtins"})
+_MANAGER_NAMES = frozenset(name for name in dir(models.Manager) if not name.startswith("__"))
+_QUERYSET_NAMES = frozenset(name for name in dir(models.QuerySet) if not name.startswith("__"))
+ROUTED_METHODS = frozenset(
+    {
+        "get_queryset", "all", "filter", "exclude", "annotate", "aggregate", "order_by", "values", "values_list",
+        "only", "defer", "select_related", "prefetch_related", "distinct", "none", "select_for_update", "get",
+        "first", "last", "count", "exists", "iterator", "create", "get_or_create", "update_or_create", "update",
+        "delete", "bulk_create", "bulk_update", "in_bulk",
+    }
+)  # fmt: skip
+"""The Django manager and query set methods whose override makes a manager run its operations through the ORM
+manager (``orm_name``)."""
+_SCALARS = frozenset({bool, int, float, str, bytes})
+_CONTAINERS = frozenset({list, tuple, set, frozenset, dict})
+_DOTTED_MODULES = frozenset({"datetime", "decimal", "uuid"})
+
+
+class _Skip(Exception):  # noqa: N818 - control flow inside this module only
+    pass
+
+
+def _user_classes(cls: type) -> list[type]:
+    """The classes of ``cls``'s MRO outside Django's own manager and query set modules."""
+    return [klass for klass in cls.__mro__ if klass.__module__ not in _CORE_MODULES]
+
+
+def _own_functions(cls: type, queryset_class: type | None = None) -> dict[str, Any]:
+    """Public functions and ``get_queryset`` the user classes of ``cls`` define, nearest first; a manager method
+    Django copied from ``queryset_class`` is left out."""
+    copied = _own_functions(queryset_class) if queryset_class is not None else {}
+    found: dict[str, Any] = {}
+    for klass in _user_classes(cls):
+        for name, value in vars(klass).items():
+            if name in found or not inspect.isfunction(value):
+                continue
+            if name.startswith("_") and name != "get_queryset":
+                continue
+            if name in copied and getattr(value, "__wrapped__", None) is copied[name]:
+                continue
+            found[name] = value
+    return found
+
+
+def exposed_methods() -> dict[str, set[str]]:
+    """The ``ADORM_EXPOSE`` setting as method names by ``"app_label.Model.manager"``.
+
+    Raises `CodegenError` for an entry that is not ``"app_label.Model.manager.method"``, names a model Django does not
+    know or a manager the model does not have.
+    """
+    entries = getattr(django_settings, "ADORM_EXPOSE", ())
+    if isinstance(entries, str):
+        raise CodegenError("ADORM_EXPOSE is a list of 'app_label.Model.manager.method' strings, not a string")
+    exposed: dict[str, set[str]] = {}
+    for entry in entries:
+        parts = entry.split(".") if isinstance(entry, str) else []
+        if len(parts) != 4 or not all(part.isidentifier() for part in parts):
+            raise CodegenError(f"ADORM_EXPOSE: {entry!r} is not 'app_label.Model.manager.method'")
+        label, manager, method = f"{parts[0]}.{parts[1]}", parts[2], parts[3]
+        try:
+            model = apps.get_model(label)
+        except LookupError:
+            raise CodegenError(f"ADORM_EXPOSE: {entry!r} names no installed model") from None
+        if manager not in {m.name for m in model._meta.managers}:
+            raise CodegenError(f"ADORM_EXPOSE: {label} has no manager {manager!r}")
+        exposed.setdefault(f"{label}.{manager}", set()).add(method)
+    return exposed
+
+
+def _annotation_type(annotation: Any, where: str, *, parameter: bool, included: Collection[str] | None) -> TypeSpec:
+    if annotation is None or annotation is type(None):
+        if parameter:
+            _warn(f"{where}: the annotation None is generated as typing.Any")
+            return TypeSpec("typing.Any")
+        return TypeSpec("None")
+    if annotation is Any:
+        return TypeSpec("typing.Any")
+    if isinstance(annotation, str):
+        _warn(f"{where}: the annotation {annotation!r} does not evaluate and is generated as typing.Any")
+        return TypeSpec("typing.Any")
+    origin, args = typing.get_origin(annotation), typing.get_args(annotation)
+    if origin is typing.Union or origin is types.UnionType:
+        rest = [arg for arg in args if arg is not type(None)]
+        if len(rest) == 1:
+            return _annotation_type(rest[0], where, parameter=parameter, included=included).with_nullable(
+                len(rest) < len(args)
+            )
+    elif origin is typing.Literal:
+        if all(isinstance(value, str | int | bool) for value in args):
+            return TypeSpec("typing.Literal", values=args)
+    elif origin in _CONTAINERS and Ellipsis not in args:
+        return TypeSpec(
+            origin.__name__,
+            tuple(_annotation_type(arg, where, parameter=parameter, included=included) for arg in args),
+        )
+    elif isinstance(annotation, type):
+        if annotation in _SCALARS or annotation in _CONTAINERS:
+            return TypeSpec(annotation.__name__)
+        if annotation.__module__ in _DOTTED_MODULES and annotation.__qualname__.isidentifier():
+            return TypeSpec(f"{annotation.__module__}.{annotation.__qualname__}")
+        if issubclass(annotation, models.QuerySet):
+            raise _Skip(f"{where}: it returns a query set; port it to the client base (adorm.client_base)")
+        if issubclass(annotation, models.Model):
+            label = annotation._meta.label
+            if parameter:
+                _warn(f"{where}: a {label} parameter is generated as typing.Any: pass the primary key instead")
+                return TypeSpec("typing.Any")
+            if included is None or label in included:
+                return TypeSpec(label, model=True)
+            return TypeSpec("typing.Any")
+    _warn(f"{where}: the annotation {annotation!r} is generated as typing.Any")
+    return TypeSpec("typing.Any")
+
+
+_KIND_NAMES = {
+    inspect.Parameter.POSITIONAL_ONLY: "positional_only",
+    inspect.Parameter.POSITIONAL_OR_KEYWORD: "positional_or_keyword",
+    inspect.Parameter.VAR_POSITIONAL: "var_positional",
+    inspect.Parameter.KEYWORD_ONLY: "keyword_only",
+    inspect.Parameter.VAR_KEYWORD: "var_keyword",
+}
+
+
+def _evaluate(annotation: Any, func: Any) -> Any:
+    """``annotation``, a string evaluated in ``func``'s module; a string that does not evaluate stays a string."""
+    if not isinstance(annotation, str):
+        return annotation
+    try:
+        return eval(annotation, getattr(func, "__globals__", {}))  # noqa: S307 - an annotation of the ORM's code
+    except Exception:  # noqa: BLE001 - reported as an annotation that does not evaluate
+        return annotation
+
+
+def _method_spec(func: Any, name: str, target: str, where: str, included: Collection[str] | None) -> MethodSpec | None:
+    """The `MethodSpec` of the exposed function ``func``; ``None``, with a `CodegenWarning`, when it is not
+    generated."""
+    where = f"{where}.{name}"
+    try:
+        if inspect.iscoroutinefunction(func):
+            raise _Skip(f"{where}: it is a coroutine function; expose the synchronous method")
+        signature = inspect.signature(func)
+        parameters = []
+        for parameter in list(signature.parameters.values())[1:]:
+            spec_type = None
+            if parameter.annotation is not inspect.Parameter.empty:
+                spec_type = _annotation_type(
+                    _evaluate(parameter.annotation, func),
+                    f"{where}({parameter.name})",
+                    parameter=True,
+                    included=included,
+                )
+            default = NO_DEFAULT
+            if parameter.default is not inspect.Parameter.empty:
+                default = parameter.default
+                if not can_render_value(default):
+                    raise _Skip(f"{where}: the default of {parameter.name} cannot be written as a literal")
+            parameters.append(ParameterSpec(parameter.name, _KIND_NAMES[parameter.kind], spec_type, default))
+        returns = None
+        if signature.return_annotation is not inspect.Signature.empty:
+            returns = _annotation_type(
+                _evaluate(signature.return_annotation, func), where, parameter=False, included=included
+            )
+    except _Skip as exc:
+        _warn(f"{exc} (not generated)")
+        return None
+    return MethodSpec(
+        name,
+        target,  # type: ignore[arg-type]
+        tuple(parameters),
+        returns,
+        doc=func.__doc__ if func.__doc__ and func.__doc__.strip() else None,
+        queryset_only=target == "queryset" and getattr(func, "queryset_only", False) is True,
+    )
+
+
+def _import_base(path: str | None, expected: type, where: str) -> type | None:
+    """The client base class at ``path``; `CodegenError` when it does not import or is not an ``expected`` subclass."""
+    if path is None:
+        return None
+    module, _, name = path.partition(":")
+    try:
+        base = getattr(importlib.import_module(module), name)
+    except (ImportError, AttributeError) as exc:
+        raise CodegenError(f"{where}: the client base {path} does not import: {exc}") from exc
+    if not isinstance(base, type) or not issubclass(base, expected):
+        raise CodegenError(f"{where}: the client base {path} is not a subclass of adorm.{expected.__name__}")
+    return base
+
+
+def _ported(base: type | None, name: str) -> bool:
+    """Whether the client base ``base`` defines ``name`` itself, not only through adorm's classes."""
+    return base is not None and any(
+        name in vars(klass) for klass in base.__mro__ if not klass.__module__.startswith("adorm.")
+    )
+
+
+def _manager_spec(
+    model: type[models.Model], manager: Any, exposed: Mapping[str, set[str]], included: Collection[str] | None
+) -> ManagerSpec | None:
+    label = model._meta.label
+    where = f"{label}.{manager.name}"
+    queryset_class = manager._queryset_class
+    manager_functions = _own_functions(type(manager), queryset_class)
+    queryset_functions = _own_functions(queryset_class)
+    listed = set(exposed.get(where, ()))
+    unknown = sorted(n for n in listed if n not in manager_functions and not hasattr(queryset_class, n))
+    unknown += sorted(
+        n for n in listed if n not in unknown and n not in manager_functions and n not in queryset_functions
+    )
+    if unknown:
+        raise CodegenError(f"ADORM_EXPOSE: {where} has no method {', '.join(map(repr, unknown))}")
+    manager_methods = [
+        spec
+        for name, func in manager_functions.items()
+        if (is_exposed(func) or name in listed)
+        and (spec := _method_spec(func, name, "manager", where, included)) is not None
+    ]
+    queryset_methods = [
+        spec
+        for name, func in queryset_functions.items()
+        if (is_exposed(func) or name in listed)
+        and (spec := _method_spec(func, name, "queryset", f"{where}.{queryset_class.__name__}", included)) is not None
+    ]
+    manager_base, queryset_base = get_client_base(type(manager)), get_client_base(queryset_class)
+    manager_client = _import_base(manager_base, AdormManager, where)
+    queryset_client = _import_base(queryset_base, AdormQuerySet, where)
+    overrides = any(name in ROUTED_METHODS and not _ported(manager_client, name) for name in manager_functions) or any(
+        name in ROUTED_METHODS and not _ported(queryset_client, name) for name in queryset_functions
+    )
+    exposed_names = {m.name for m in manager_methods} | {m.name for m in queryset_methods}
+    for functions, client, owner in (
+        (manager_functions, manager_client, where),
+        (queryset_functions, queryset_client, f"{where}.{queryset_class.__name__}"),
+    ):
+        for name, func in functions.items():
+            if (
+                name in exposed_names
+                or is_exposed(func)
+                or name in listed
+                or name in _MANAGER_NAMES
+                or name in _QUERYSET_NAMES
+                or _ported(client, name)
+                or func.__module__.startswith("django.")
+            ):
+                continue
+            _warn(f"{owner}.{name}: not generated; expose it or port it to a client base")
+    orm_name = manager.name if overrides else None
+    method_manager = manager.name if not overrides and (manager_methods or queryset_methods) else None
+    queryset = None
+    if queryset_methods or queryset_base is not None:
+        queryset = QuerySetSpec(queryset_class.__name__, tuple(queryset_methods), queryset_base)
+    class_name = None
+    if manager_methods or manager_base is not None:
+        class_name = type(manager).__name__
+    spec = ManagerSpec(
+        manager.name, orm_name, class_name, tuple(manager_methods), queryset, manager_base, method_manager
+    )
+    if spec.is_plain and manager.name == "objects":
+        return None
+    return spec
+
+
+def manager_specs(
+    model: type[models.Model],
+    *,
+    local: bool = False,
+    included: Collection[str] | None = None,
+    exposed: Mapping[str, set[str]] | None = None,
+) -> tuple[ManagerSpec, ...]:
+    """The `ManagerSpec` values of the Django model ``model``'s managers, in declaration order.
+
+    ``local`` takes only the managers the model declares itself, not inherited ones. A plain ``objects`` (no ORM name,
+    class or query set class) is left out, since `adorm.Model` declares it. When the model has no manager named
+    ``objects``, ``objects`` also stands for the default manager unless that is plain. ``exposed`` holds the
+    ``ADORM_EXPOSE`` methods (`exposed_methods()`, the default); ``included`` the labels of the generated models a
+    return type may name. A manager whose name would hide an attribute of `adorm.Model` is not generated, with a
+    `CodegenWarning`.
+    """
+    if exposed is None:
+        exposed = exposed_methods()
+    opts = model._meta
+    specs = []
+    for manager in opts.local_managers if local else opts.managers:
+        if manager.name.startswith("_") or (manager.name != "objects" and hasattr(AdormModelBase, manager.name)):
+            _warn(f"{opts.label}.{manager.name}: the manager would hide an attribute of adorm.Model (not generated)")
+            continue
+        spec = _manager_spec(model, manager, exposed, included)
+        if spec is not None:
+            specs.append(spec)
+    names = {m.name for m in opts.managers}
+    default = opts.default_manager
+    if "objects" not in names and default is not None and (not local or default in opts.local_managers):
+        spec = next((s for s in specs if s.name == default.name), None)
+        if spec is not None and not spec.is_plain:
+            specs.insert(
+                0,
+                ManagerSpec(
+                    "objects",
+                    spec.orm_name,
+                    spec.class_name,
+                    spec.methods,
+                    spec.queryset,
+                    spec.base,
+                    spec.method_manager,
+                ),
+            )
+    return tuple(specs)
+
+
 def _check_model(model: type[models.Model]) -> None:
     opts = model._meta
     if not isinstance(opts.pk, models.Field) or opts.pk.get_internal_type() == "CompositePrimaryKey":
@@ -401,8 +727,8 @@ def _invalid(model: type[models.Model], exc: ValueError) -> CodegenError:
 
 def schema_hash(model: type[models.Model]) -> str:
     """The schema hash of the Django model ``model``, the one `adorm generate` writes into ``_meta``: it covers the
-    label, primary key, parents, every concrete field (inherited ones included) and the forward relations it
-    generates.
+    label, primary key, parents, every concrete field (inherited ones included), the forward relations it generates
+    and the managers with an ORM name or driver methods.
 
     Raises `CodegenError` for a model it cannot describe (a composite primary key, a name no Python name maps to).
     """
@@ -420,7 +746,8 @@ def _schema_hash(model: type[models.Model]) -> str:
     parents = [parent._meta.label for parent in opts.get_parent_list()]
     if opts.proxy:
         parents.insert(0, opts.concrete_model._meta.label)
-    return compute_schema_hash(opts.label, python_name(opts.pk.attname), fields, relations, parents)
+    managers = manager_specs(model)
+    return compute_schema_hash(opts.label, python_name(opts.pk.attname), fields, relations, parents, managers)
 
 
 def model_spec(model: type[models.Model], *, included: Collection[str] | None = None) -> ModelSpec:
@@ -452,6 +779,7 @@ def _model_spec(model: type[models.Model], hashed: str, included: Collection[str
     else:
         fields = [field_spec(f) for f in (opts.concrete_fields if include_parents else opts.local_concrete_fields)]
     relations = _relations(model, include_parents, included)
+    managers = manager_specs(model, local=not include_parents, included=included)
     return ModelSpec(
         label=opts.label,
         class_name=opts.object_name,
@@ -461,6 +789,7 @@ def _model_spec(model: type[models.Model], hashed: str, included: Collection[str
         schema_hash=hashed,
         base=base,
         doc=_doc(model),
+        managers=managers,
     )
 
 

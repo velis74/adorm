@@ -11,16 +11,27 @@ from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
 
 from adorm.exceptions import InterfaceError
-from adorm.executor.transactions import active_transaction
+from adorm.executor.transactions import active_transaction, Atomic
 from adorm.models.base import Model, set_executor_resolver
+from adorm.models.managers import BoundModel
 from adorm.models.registry import registry
-from adorm.query.query import Query
-from adorm.query.queryset import QuerySet
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
+
+    from adorm.executor.slot import SlotLease
     from adorm.operations import Operation
 
-__all__ = ["BoundModel", "Runner", "Session", "create_session", "current_session", "set_runner"]
+__all__ = [
+    "BoundModel",
+    "Runner",
+    "Session",
+    "TransactionRunner",
+    "create_session",
+    "current_session",
+    "get_runner",
+    "set_runner",
+]
 
 
 @runtime_checkable
@@ -29,6 +40,14 @@ class Runner(Protocol):
     a slot for ``session``, executes the operation, releases the slot and returns the result."""
 
     async def run(self, session: Session, operation: Operation) -> Any: ...
+
+
+@runtime_checkable
+class TransactionRunner(Runner, Protocol):
+    """A `Runner` that also holds a slot for a transaction: ``async with runner.slot(session) as lease:`` acquires a
+    slot for ``session``, raising `SessionTimeout` or `DeadlockError`, and releases it on exit."""
+
+    def slot(self, session: Session) -> AbstractAsyncContextManager[SlotLease]: ...
 
 
 _runner: Runner | None = None
@@ -43,6 +62,17 @@ def set_runner(runner: Runner | None) -> Runner | None:
     return previous
 
 
+def get_runner() -> Runner | None:
+    """The `Runner` of operations outside a transaction: the one `set_runner()` set, else, inside a running event
+    loop and when adorm's settings have a connection profile or a provider, the loop's default router
+    (`adorm.settings.default_router()`); ``None`` otherwise."""
+    if _runner is not None:
+        return _runner
+    from adorm.settings import _default_runner
+
+    return _default_runner()
+
+
 def _check_name(value: Any, what: str) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{what} is a non-empty string, not {value!r}")
@@ -55,7 +85,8 @@ class Session:
 
     A session holds no slot. ``await session.execute(operation)`` runs the operation in the session's active
     transaction of the current context, or else on the configured `Runner`. ``session.Member`` (a model class name)
-    and ``session.bind(model)`` return the model bound to this session.
+    and ``session.bind(model)`` return the model bound to this session; ``session.atomic()`` opens a transaction on
+    it.
     """
 
     __slots__ = ("__weakref__", "session_name", "using")
@@ -90,11 +121,16 @@ class Session:
         """The pair ``(using, session_name)``."""
         return self.using, self.session_name
 
-    def bind(self, model: type[Model] | str) -> BoundModel:
-        """``model`` (a model class or a registered label) bound to this session."""
+    def bind(self, model: type[Model] | str, manager: str = "objects") -> BoundModel:
+        """The manager ``manager`` of ``model`` (a model class or a registered label) bound to this session."""
         if isinstance(model, str):
             model = registry.get(model)
-        return BoundModel(model, self)
+        if not isinstance(model, type) or not issubclass(model, Model):
+            raise TypeError(f"a bound model needs a Model subclass, not {model!r}")
+        declared = model.__adorm_managers__.get(manager)
+        if declared is None:
+            raise AttributeError(f"{model.__name__} has no manager {manager!r}")
+        return declared._bind(model, self)
 
     def __getattr__(self, name: str) -> BoundModel:
         if name.startswith("_"):
@@ -105,7 +141,7 @@ class Session:
         if len(matches) > 1:
             labels = ", ".join(sorted(m._meta.label for m in matches))  # type: ignore[union-attr]
             raise AttributeError(f"{name!r} names several models ({labels}): use bind() with a label")
-        return BoundModel(matches[0], self)
+        return self.bind(matches[0])
 
     @contextmanager
     def activate(self) -> Iterator[Session]:
@@ -117,13 +153,17 @@ class Session:
         finally:
             _current.reset(token)
 
+    def atomic(self) -> Atomic:
+        """An `Atomic` block on this session: ``async with session.atomic() as tx:``."""
+        return Atomic(self)
+
     async def execute(self, operation: Operation) -> Any:
         """Run ``operation``: in the transaction of this session active in the current context, or else on the
-        `Runner`. Without a transaction and a runner it raises `InterfaceError`."""
+        `Runner` (`get_runner()`). Without a transaction and a runner it raises `InterfaceError`."""
         transaction = active_transaction(self)
         if transaction is not None:
             return await transaction.execute(operation)
-        runner = _runner
+        runner = get_runner()
         if runner is None:
             raise InterfaceError(f"no runner executes operations outside a transaction (session {self!r})")
         return await runner.run(self, operation)
@@ -154,153 +194,6 @@ def current_session() -> Session:
     ``create_session("default", "default")``."""
     session = _current.get()
     return create_session() if session is None else session
-
-
-class BoundModel:
-    """A model class bound to a session: what ``Model.objects`` and ``session.Model`` return.
-
-    Binding takes no slot. It does not include a transaction: each operation looks up the session's active
-    transaction in the context it runs in. Query methods return a `QuerySet` on this session; ``objects`` returns
-    the bound model itself, so ``session.Member.objects`` is ``session.Member``.
-    """
-
-    __slots__ = ("model", "session")
-
-    model: type[Model]
-    session: Session
-
-    def __init__(self, model: type[Model], session: Session) -> None:
-        if not isinstance(model, type) or not issubclass(model, Model):
-            raise TypeError(f"a bound model needs a Model subclass, not {model!r}")
-        if model._meta is None:
-            raise TypeError(f"{model.__name__} is abstract: it has no _meta")
-        if not isinstance(session, Session):
-            raise TypeError(f"a bound model needs a Session, not {type(session).__name__}")
-        object.__setattr__(self, "model", model)
-        object.__setattr__(self, "session", session)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        raise AttributeError(f"a bound model is immutable: cannot set {name!r}")
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        return BoundModel, (self.model, self.session)
-
-    def __copy__(self) -> BoundModel:
-        return self
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> BoundModel:
-        return self
-
-    def __eq__(self, other: object) -> bool:
-        if not isinstance(other, BoundModel):
-            return NotImplemented
-        return self.model is other.model and self.session is other.session
-
-    def __hash__(self) -> int:
-        return hash((BoundModel, self.model, self.session))
-
-    def __repr__(self) -> str:
-        return f"<BoundModel {self.model._meta.label} on {self.session!r}>"  # type: ignore[union-attr]
-
-    @property
-    def objects(self) -> BoundModel:
-        """The bound model itself."""
-        return self
-
-    async def execute(self, operation: Operation) -> Any:
-        """Run ``operation`` on the session (`Session.execute()`)."""
-        return await self.session.execute(operation)
-
-    def all(self) -> QuerySet:
-        """A `QuerySet` of every row of the model, on this session."""
-        return QuerySet(self.model, self.session, Query(self.model._meta.label))  # type: ignore[union-attr]
-
-    def filter(self, *args: Any, **kwargs: Any) -> QuerySet:
-        """``all().filter(...)``."""
-        return self.all().filter(*args, **kwargs)
-
-    def exclude(self, *args: Any, **kwargs: Any) -> QuerySet:
-        """``all().exclude(...)``."""
-        return self.all().exclude(*args, **kwargs)
-
-    def annotate(self, **annotations: Any) -> QuerySet:
-        """``all().annotate(...)``."""
-        return self.all().annotate(**annotations)
-
-    def order_by(self, *keys: Any) -> QuerySet:
-        """``all().order_by(...)``."""
-        return self.all().order_by(*keys)
-
-    def values(self, *fields: str) -> QuerySet:
-        """``all().values(...)``."""
-        return self.all().values(*fields)
-
-    def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> QuerySet:
-        """``all().values_list(...)``."""
-        return self.all().values_list(*fields, flat=flat, named=named)
-
-    def only(self, *fields: str) -> QuerySet:
-        """``all().only(...)``."""
-        return self.all().only(*fields)
-
-    def defer(self, *fields: str | None) -> QuerySet:
-        """``all().defer(...)``."""
-        return self.all().defer(*fields)
-
-    def select_related(self, *fields: str | None) -> QuerySet:
-        """``all().select_related(...)``."""
-        return self.all().select_related(*fields)
-
-    def distinct(self, *fields: str) -> QuerySet:
-        """``all().distinct(...)``."""
-        return self.all().distinct(*fields)
-
-    def none(self) -> QuerySet:
-        """``all().none()``."""
-        return self.all().none()
-
-    def select_for_update(self, **options: Any) -> QuerySet:
-        """``all().select_for_update(...)``."""
-        return self.all().select_for_update(**options)
-
-    async def get(self, *args: Any, **kwargs: Any) -> Any:
-        """``await all().get(...)``."""
-        return await self.all().get(*args, **kwargs)
-
-    async def first(self) -> Any:
-        """``await all().first()``."""
-        return await self.all().first()
-
-    async def last(self) -> Any:
-        """``await all().last()``."""
-        return await self.all().last()
-
-    async def count(self) -> int:
-        """``await all().count()``."""
-        return await self.all().count()
-
-    async def exists(self) -> bool:
-        """``await all().exists()``."""
-        return await self.all().exists()
-
-    async def create(self, **values: Any) -> Any:
-        """``await all().create(...)``."""
-        return await self.all().create(**values)
-
-    async def get_or_create(self, defaults: Any = None, **lookups: Any) -> tuple[Any, bool]:
-        """``await all().get_or_create(...)``."""
-        return await self.all().get_or_create(defaults, **lookups)
-
-    async def update(self, **values: Any) -> int:
-        """``await all().update(...)``."""
-        return await self.all().update(**values)
-
-    async def delete(self) -> tuple[int, dict[str, int]]:
-        """``await all().delete()``."""
-        return await self.all().delete()
-
-    def __aiter__(self) -> Any:
-        return self.all().__aiter__()
 
 
 def _instance_executor(model: type[Model]) -> Session | None:  # noqa: ARG001 - every model uses the current session

@@ -12,15 +12,15 @@ from pydantic import BaseModel, ConfigDict, model_validator, PrivateAttr, Valida
 from pydantic_core.core_schema import ValidatorFunctionWrapHandler
 
 from adorm.exceptions import InterfaceError, ModelExceptionsMixin
+from adorm.models.managers import BoundModel, Manager
 from adorm.models.meta import ModelMeta
 from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey, Relation
 
 if TYPE_CHECKING:
-    from adorm.executor.sessions import BoundModel
     from adorm.operations import Operation
 
-__all__ = ["Executor", "Model", "ModelState", "ObjectsDescriptor", "get_relations", "set_executor_resolver"]
+__all__ = ["Executor", "Model", "ModelState", "get_managers", "get_relations", "set_executor_resolver"]
 
 
 @runtime_checkable
@@ -77,29 +77,25 @@ class ModelState:
         return f"ModelState(adding={self.adding!r}, related={sorted(self.related)!r})"
 
 
-class ObjectsDescriptor:
-    """The ``objects`` attribute of a model class: the model bound to the current session.
-
-    ``Model.objects`` returns ``current_session().bind(Model)``, evaluated at each access. It is not available on
-    instances or on abstract models (``AttributeError``).
-    """
-
-    def __get__(self, instance: Model | None, owner: type[Model]) -> BoundModel:
-        if instance is not None:
-            raise AttributeError(f"objects is not accessible via {owner.__name__} instances")
-        if owner._meta is None:
-            raise AttributeError(f"{owner.__name__} is abstract: it has no objects")
-        from adorm.executor.sessions import current_session
-
-        return current_session().bind(owner)
-
-    def __repr__(self) -> str:
-        return "<objects>"
-
-
 def get_relations(model: type[Model]) -> Mapping[str, Relation]:
     """The relation descriptors of ``model`` (inherited ones included) by attribute name."""
     return model.__adorm_relations__
+
+
+def get_managers(model: type[Model]) -> Mapping[str, Manager]:
+    """The manager declarations of ``model`` (inherited ones included) by attribute name."""
+    return model.__adorm_managers__
+
+
+def _collect_managers(cls: type) -> dict[str, Manager]:
+    managers: dict[str, Manager] = {}
+    for klass in reversed(cls.__mro__):
+        for name, value in vars(klass).items():
+            if isinstance(value, Manager) and not value._is_bound():
+                managers[name] = value
+            elif name in managers:
+                del managers[name]
+    return managers
 
 
 def _collect_relations(cls: type) -> dict[str, Relation]:
@@ -134,12 +130,12 @@ class Model(ModelExceptionsMixin, BaseModel):
     Instances are equal when they belong to the same model (label) and have the same non-``None`` primary key;
     the hash follows. Instances of an abstract model compare and hash by identity. Names that are neither fields
     nor relations (annotations, ``to_attr`` of a prefetch) are pydantic extra values. ``Model.objects`` is the model
-    bound to the current session.
+    bound to the current session; every `Manager` the class declares is accessed the same way.
     """
 
     model_config = ConfigDict(
         extra="allow",
-        ignored_types=(Relation, ObjectsDescriptor),
+        ignored_types=(Relation, BoundModel),
         serialize_by_alias=True,
         validate_by_name=True,
         validate_by_alias=True,
@@ -147,8 +143,9 @@ class Model(ModelExceptionsMixin, BaseModel):
     )
 
     _meta: ClassVar[ModelMeta | None] = None
-    objects = ObjectsDescriptor()
+    objects = Manager()
     __adorm_relations__: ClassVar[Mapping[str, Relation]] = {}
+    __adorm_managers__: ClassVar[Mapping[str, Manager]] = {}
     _state: ModelState = PrivateAttr(default_factory=ModelState)
 
     @classmethod
@@ -162,6 +159,13 @@ class Model(ModelExceptionsMixin, BaseModel):
             if isinstance(relation, ForeignKey) and relation.column not in fields:
                 raise TypeError(f"{cls.__name__}.{name} is stored in {relation.column!r}, which is not a field")
         cls.__adorm_relations__ = relations
+        managers = _collect_managers(cls)
+        clashes = sorted(name for name in managers if name in fields or name in relations)
+        if clashes:
+            raise TypeError(f"{cls.__name__} has managers named like fields or relations: {', '.join(clashes)}")
+        if "objects" not in managers:
+            raise TypeError(f"{cls.__name__}.objects is a Manager")
+        cls.__adorm_managers__ = managers
         meta = cls.__dict__.get("_meta")
         if meta is None:
             return

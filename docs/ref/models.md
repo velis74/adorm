@@ -1,12 +1,12 @@
 # Model API
 
-The model base class, model identity, relation descriptors and the model registry, importable from
-`adorm.models`. `Model`, `ModelMeta` and the relation descriptors `ForeignKey`, `ReverseForeignKey`,
-`ReverseOneToOne` and `ManyToMany` are also importable from `adorm`.
+The model base class, model identity, relation descriptors, managers and the model registry, importable from
+`adorm.models`. `Model`, `ModelMeta`, `Manager`, `driver_method` and the relation descriptors `ForeignKey`,
+`ReverseForeignKey`, `ReverseOneToOne` and `ManyToMany` are also importable from `adorm`.
 
 ```python
-from adorm import ForeignKey, Model, ModelMeta, ReverseOneToOne
-from adorm.models import get_relations, model_schema, registry, set_executor_resolver
+from adorm import driver_method, ForeignKey, Manager, Model, ModelMeta, ReverseOneToOne
+from adorm.models import get_managers, get_relations, model_schema, registry, set_executor_resolver
 ```
 
 The examples on this page use these models:
@@ -122,9 +122,10 @@ member.model_dump()            # {"id": 1, "name": "Ana", "fee": Decimal("12")}
 
 #### `objects`
 
-Class attribute: the model bound to the [current session](./sessions#adorm-current-session), a
+Class attribute: the model's default [`Manager`](#adorm-manager-orm-name-none-method-manager-none), `Manager()` unless the class declares
+its own. Reading it returns the model bound to the [current session](./sessions#adorm-current-session), a
 [`BoundModel`](./sessions#adorm-boundmodel), evaluated at every access. Reading it on an instance or on an abstract
-model raises `AttributeError`.
+model raises `AttributeError`. A class that sets `objects` to something other than a manager raises `TypeError`.
 
 ```python
 await Member.objects.filter(active=True).count()
@@ -191,7 +192,7 @@ The identity of a model: its `label` (`"app_label.ModelName"`) and the name of i
 dataclass; an invalid label or pk name raises `ValueError`.
 
 - `schema_hash`: the hash [`adorm generate`](/howto/generating-models) computed from the ORM model
-  ([`adorm.codegen.compute_schema_hash`](./codegen#adorm-codegen-compute-schema-hash-label-pk-fields-relations-parents)),
+  ([`adorm.codegen.compute_schema_hash`](./codegen#adorm-codegen-compute-schema-hash-label-pk-fields-relations-parents-managers)),
   `None` for a model written by hand. An empty or non-string value raises `ValueError`.
 - `orm_names`: the target ORM's name of each field or relation whose Python name differs, by Python name; `None` is an
   empty mapping. A generated model fills it for the names it renames. A model class's `_meta` also holds the entries
@@ -294,8 +295,12 @@ Member.model_validate_json('{"name": "Ana", "club_id": 5}')   # club_id == 5
 ### `adorm.ReverseForeignKey(target, *, column)`
 
 The reverse side of a `ForeignKey`: the rows of `target` whose field `column` holds the owner's primary key. On an
-instance it returns a [`QuerySet`](/ref/queryset) of those rows on the owner's executor (the session that loaded
-it, else the current session); an instance without a primary key value raises `ValueError`. `column` that is not an identifier raises `ValueError`.
+instance it returns those rows from the target's [`objects`](#objects) manager on the owner's executor (the session
+that loaded it, else the current session): a query set of the manager's `queryset_class` that starts from its
+`get_queryset()` and carries its ORM manager, as Django's related managers derive from the default manager. An
+executor that is not a `Session` gets a query set of that class with the ORM manager but without a client-side
+`get_queryset()`. An instance without a primary key value raises `ValueError`; `column` that is not an identifier
+raises `ValueError`.
 
 ```python
 class Club(Model):
@@ -304,7 +309,7 @@ class Club(Model):
     members = ReverseForeignKey("club.Member", column="club_id")
 
 
-club.members.query           # Query("club.Member").filter(club_id=club.pk)
+club.members.query           # Query("club.Member").filter(club_id=club.pk), plus the manager's conditions
 await club.members.count()   # Count on the club's session
 Club.members.column          # "club_id"
 ```
@@ -343,8 +348,9 @@ restaurant is await place.restaurant  # True, from the cache
 A many-to-many relation through the model labelled `through`. Each `through` row links the owner in `source_column`
 with a `target` row in `target_column`. For a link table without a model of its own, `through` is the label of the
 ORM's generated through model (Django: `"<app_label>.<Model>_<field>"`, e.g. `"club.Activity_tags"`). On an instance
-it returns a `QuerySet` of the related rows on the owner's executor; an instance without a primary key value raises
-`ValueError`.
+it returns the related rows from the target's `objects` manager on the owner's executor, as `ReverseForeignKey` does;
+an instance without a primary key value raises `ValueError`. A forward `ForeignKey` and a `ReverseOneToOne` load
+their row without the target's manager, as Django's base manager does.
 
 ```python
 class Activity(Model):
@@ -370,6 +376,148 @@ an inherited relation by assigning the name to something else.
 
 ```python
 get_relations(Member)    # {"club": Member.club, "sponsor": Member.sponsor}
+```
+
+## Managers
+
+The [managers topic](/topics/managers) explains which methods run in the client and which on the driver.
+
+### `adorm.Manager(orm_name=None, *, method_manager=None)`
+
+A manager declared in a model class body. `orm_name` names the target ORM's manager the driver applies to every
+operation of this manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)): its rows (Django:
+`get_queryset()`) and the overrides of its query set (`create()`, `delete()` …). `None` reads and writes the
+model's rows without manager logic, on every driver. `method_manager` names the target ORM's manager the [driver
+methods](#adorm-driver-method-func-queryset-only-false) run on and defaults to `orm_name`; a manager with a
+`method_manager` and no `orm_name` sends its queries without `Query.manager`, so they run on every driver, and only
+its driver methods need a driver that runs `call` operations. A name that is not a public identifier raises
+`ValueError`.
+
+Reading the manager on a model class returns a copy of it bound to that class and the current session (a
+[`BoundModel`](./sessions#adorm-boundmodel)); reading it on an instance or on an abstract model raises
+`AttributeError`. Subclasses of the model inherit its managers, bound to themselves. A manager instance is declared
+under one name (`TypeError` otherwise), and a manager named like a field or relation raises `TypeError`.
+
+A subclass adds methods: client-side ones that build on `get_queryset()`, [driver
+methods](#adorm-driver-method-func-queryset-only-false), an overridden `get_queryset()`, and `queryset_class`, the
+[`QuerySet`](./queryset) subclass of its query sets.
+
+```python
+class OpenLoans(Manager):
+    queryset_class = LoanQuerySet
+
+    def get_queryset(self):
+        return super().get_queryset().filter(archived=False)
+
+
+class Loan(Model):
+    _meta = ModelMeta("library.Loan")
+    id: int | None = None
+    archived: bool = False
+
+    objects = OpenLoans("objects")
+    all_loans = Manager()
+
+
+class User(Model):
+    ...
+    objects = UserManager(method_manager="objects")   # create_user() on the driver, queries on every driver
+```
+
+#### `Manager.from_queryset(queryset_class, class_name=None)`
+
+Class method: a subclass of the manager class with `queryset_class` set; its name is `class_name`, or
+`<Manager class name>From<QuerySet class name>`. A class that is not a `QuerySet` subclass raises `TypeError`.
+
+```python
+LoanManager = Manager.from_queryset(LoanQuerySet)
+objects = LoanManager("objects")
+```
+
+### `adorm.driver_method(func, *, queryset_only=False)`
+
+Declares an `async def` method of a `Manager` or `QuerySet` subclass as a method the driver runs, returning a
+[`DriverMethod`](#adorm-models-drivermethod). Used bare (`@driver_method`) or with arguments
+(`@driver_method(queryset_only=True)`). The declaration's signature is the method's: a call checks its arguments
+against it (`TypeError` before anything is sent), and the annotations type the arguments' encoding. The body does not
+run. `queryset_only` keeps a query set method off the manager, as Django's `queryset_only` does.
+
+A function that is not a coroutine function or has no `self` parameter raises `TypeError`; a name starting with `_`
+raises `ValueError`; so does assigning it to a class attribute of another name.
+
+```python
+class LoanQuerySet(QuerySet):
+    @driver_method
+    async def archive(self, reason: str = "") -> int:
+        """Archive the loans; returns their number."""
+
+
+class LoanManager(Manager):
+    queryset_class = LoanQuerySet
+
+    @driver_method
+    async def lend(self, reader_id: int, book_id: str, *, days: int = 14) -> "Loan": ...
+
+
+await Loan.objects.lend(7, "9780000000001")
+await Loan.objects.filter(reader_id=7).archive("moved")
+```
+
+### `adorm.models.DriverMethod`
+
+What `driver_method` returns: a descriptor that, read on an instance, gives a bound method returning a coroutine.
+
+| Member | Meaning |
+|---|---|
+| `func` | the declared function |
+| `name` | the method name |
+| `signature` | the declared `inspect.Signature` |
+| `queryset_only` | whether the manager leaves it to its query sets |
+| `schema` | the [`MethodSchema`](./encoding#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none) of the parameters after `self`; a string annotation is evaluated in the function's module, and one that does not evaluate types nothing |
+
+Calling it on a bound manager sends `Call(Query(label, manager=orm_name), name, "manager", args, kwargs,
+method_manager)`; on a query set, `Call(qs.query, name, "queryset", args, kwargs, manager)`, where `manager` is the
+query's [`Query.manager`](./query#adorm-query-query-model-manager-none) or else the `method_manager` of the model's
+first manager whose `queryset_class` declares the method
+([`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none)). No such
+manager raises `TypeError`, and so does an instance of any other class. The result is the driver's, with every
+[`ModelRow`](./operations#adorm-operations-modelrow-model-row), also inside lists, tuples and the values of mappings,
+turned into an instance of the registered model on the same session; a row of a model that is not registered raises `InterfaceError`. A
+`DoesNotExist` or `MultipleObjectsReturned` the driver raises becomes the model's.
+
+```python
+LoanManager.lend.schema.kwarg_type("days")       # int
+```
+
+### `adorm.models.get_managers(model)`
+
+The manager declarations of `model` (inherited ones included) by attribute name, unbound.
+
+```python
+list(get_managers(Loan))         # ["objects", "all_loans"]
+```
+
+### `adorm.models.driver_methods(model)`
+
+The [`DriverMethod`](#adorm-models-drivermethod) of every manager of `model` that has a `method_manager`, by
+`(method_manager, target, method)`: the manager's own methods with the target `"manager"`, the methods of its
+`queryset_class` with `"queryset"`.
+
+```python
+dict(driver_methods(Loan))
+# {("objects", "manager", "lend"): LoanManager.lend, ("objects", "queryset", "archive"): LoanQuerySet.archive}
+```
+
+### `adorm.models.find_driver_method(label, manager, target, method)`
+
+The driver method `method` declared for `target` of the ORM manager `manager` on the registered model `label`.
+[`DriverConnection.execute()`](./drivers#adorm-drivers-driverconnection) calls it for every `Call`, so a driver runs
+only declared methods. A model that is not registered, a `manager` of `None` and a method the model does not declare
+raise `NotSupportedError`.
+
+```python
+find_driver_method("library.Loan", "objects", "queryset", "archive")      # LoanQuerySet.archive
+find_driver_method("library.Loan", "objects", "queryset", "delete")       # NotSupportedError
 ```
 
 ## Executors
@@ -415,7 +563,7 @@ schema.
 | `register(model)` | register under `model._meta.label`; a class with the same module and qualified name replaces the registered one, another class raises `ValueError` |
 | `unregister(label)` | remove the model; an unknown label is ignored |
 | `get(label)` | the model class; `LookupError` when none is registered |
-| `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
+| `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
 | `label in registry`, `iter(registry)`, `len(registry)` | membership, the model classes, their number |
 
 ### `adorm.models.registry`
@@ -431,10 +579,9 @@ assert Operation.from_dict(data, registry) == operation
 
 ### `adorm.models.model_schema(model)`
 
-The [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names) of the model class `model`: its label, primary key, the
-type of every field (with its pydantic constraints), the target label of every relation and `_meta.orm_names`. An
-abstract model raises
-`TypeError`.
+The [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods) of the model class `model`: its label, primary key, the
+type of every field (with its pydantic constraints), the target label of every relation, `_meta.orm_names` and the
+`MethodSchema` of every [driver method](#adorm-models-driver-methods-model). An abstract model raises `TypeError`.
 
 ```python
 schema = model_schema(Member)

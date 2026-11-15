@@ -277,7 +277,7 @@ async def test_concurrent_tasks_bind_to_their_own_sessions(attempt, runner, log)
 
 def test_objects_binds_to_the_current_session():
     session = unique_session()
-    assert Venue.objects == BoundModel(Venue, create_session())
+    assert Venue.objects == create_session().bind(Venue)
     with session.activate():
         bound = Venue.objects
     assert bound.session is session
@@ -290,7 +290,7 @@ def test_session_attribute_binds_to_that_session():
     session = unique_session()
     bound = session.Venue
     assert isinstance(bound, BoundModel)
-    assert bound == BoundModel(Venue, session)
+    assert bound != BoundModel(Venue, session)
     assert session.Venue.objects is not None
     assert session.Venue.objects.session is session
     assert session.bind(Venue) == bound

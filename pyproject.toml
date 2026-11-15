@@ -95,10 +95,15 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 # S101: assert is how a test states its claim. S301: tests unpickle only objects they pickled themselves.
 # S608: tests build SQL from constant table names.
 "tests/**" = ["S101", "S301", "S608"]
-# N818: exception names mirror Django's (DoesNotExist, ObjectDoesNotExist …) and the executor's documented names.
-"adorm/exceptions.py" = ["N818"]
+# PT012, PT031: what a transaction block raises depends on the whole block, so the block is inside pytest.raises().
+"tests/test_transactions*.py" = ["PT012", "PT031"]
+"tests/demo/test_memory.py" = ["PT012"]
+"tests/demo/test_data.py" = ["PT012"]
 # I001: generated modules sort imports for an application that installs adorm, where adorm is a third-party package.
 "tests/generated/*" = ["I001"]
+"demo/models/*" = ["I001"]
+# N818: exception names mirror Django's (DoesNotExist, ObjectDoesNotExist …) and the executor's documented names.
+"adorm/exceptions.py" = ["N818"]
 
 [tool.ruff.format]
 quote-style = "double"

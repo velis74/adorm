@@ -11,7 +11,9 @@ from typing import Any, Literal
 from adorm import Case, Coalesce, Count, Exists, F, OuterRef, Q, Subquery, Sum, TruncMonth, Value, When
 from adorm.operations import Create, Delete, Get, GetOrCreate, Save, Select, Update
 from adorm.query import Query
-from demo.api.models import Activity, Attendance, Club, Invoice, Member, Membership, Payment
+from demo.models.activities import Activity, Attendance
+from demo.models.billing import Invoice, Payment
+from demo.models.clubs import Club, Member, Membership
 
 MemberOrdering = Literal["name", "-name", "joined", "-joined"]
 MEMBER_ORDERING: Mapping[str, tuple[str, ...]] = {

@@ -3,8 +3,8 @@
 Each entry names an adorm driver class by import path. A driver is available when its module imports; it is not
 available when the module does not exist or needs a third-party package that is not installed, and any other import
 error propagates. The active driver comes from ``ADORM_DEMO_DRIVER`` (``demo.py --driver``); without one the first
-available driver is active, and with none available there is no active driver. The API reports the active driver; it
-does not execute operations.
+available driver is active, and with none available there is no active driver. The API registers the active driver as
+adorm's connection profile ``default`` (`DemoDriver.profile()`) and executes the ``/api/data`` endpoints on it.
 """
 
 from __future__ import annotations
@@ -14,8 +14,11 @@ import os
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
+from adorm import ConnectionProfile
 from adorm.drivers import Driver
+from demo.api import memory
 
 DRIVER_ENV = "ADORM_DEMO_DRIVER"
 
@@ -27,13 +30,28 @@ def setup_django() -> None:
     django.setup()
 
 
+def setup_memory() -> None:
+    """Fill the memory driver's database with the demo database's rows, read through Django."""
+    setup_django()
+    from demo.models import MODELS
+
+    memory.DATABASE.load(memory.django_tables(MODELS))
+
+
+Hook = Callable[[Any, ConnectionProfile, Any], Any]
+
+
 @dataclass(frozen=True)
 class DemoDriver:
-    """A driver of the demo: ``target`` is ``"module:ClassName"``; ``setup`` prepares the process for it."""
+    """A driver of the demo: ``target`` is ``"module:ClassName"``; ``setup`` prepares the process for it (it runs
+    synchronously, outside the event loop). ``on_acquire`` and ``on_release`` are the hooks of its connection
+    profile."""
 
     name: str
     target: str
     setup: Callable[[], None] | None = None
+    on_acquire: Hook | None = None
+    on_release: Hook | None = None
 
     @property
     def module(self) -> str:
@@ -69,10 +87,21 @@ class DemoDriver:
             self.setup()
         return self.driver_class()()
 
+    def profile(self, driver: Driver, name: str = "default") -> ConnectionProfile:
+        """The connection profile ``name`` running on ``driver`` with this driver's hooks."""
+        return ConnectionProfile(name, driver, on_acquire=self.on_acquire, on_release=self.on_release)
+
 
 DRIVERS: tuple[DemoDriver, ...] = (
     DemoDriver("django", "adorm.drivers.django:DjangoDriver", setup_django),
     DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver"),
+    DemoDriver(
+        "memory",
+        "demo.api.memory:MemoryDriver",
+        setup_memory,
+        on_acquire=memory.on_acquire,
+        on_release=memory.on_release,
+    ),
 )
 
 

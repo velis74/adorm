@@ -1,11 +1,12 @@
-"""``manage.py check_adorm_models``: compare ``demo.api.models`` with the Django models; exit 1 on a difference."""
+"""``manage.py check_adorm_models``: compare the generated ``demo.models`` with the Django models; exit 1 on a
+difference."""
 
 import sys
 
 from django.core.management.base import BaseCommand
 
-from demo.api.models import MODELS
 from demo.backend.model_check import compare
+from demo.models import MODELS
 
 
 class Command(BaseCommand):

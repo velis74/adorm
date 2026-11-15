@@ -42,6 +42,9 @@ def test_every_generated_model_is_registered():
         "library.Note",
         "library.Shelf",
         "library.Placement",
+        "library.Reader",
+        "library.LoanPolicy",
+        "library.Loan",
     ]
     for cls in MODELS:
         assert issubclass(cls, Model)

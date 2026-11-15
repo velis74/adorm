@@ -58,7 +58,9 @@ member = await Member.objects.get(pk=1)
 active = [m async for m in Member.objects.filter(active=True)]
 ```
 
-`objects` is a class attribute, not a field: instances and abstract models do not have it.
+`objects` is a class attribute, not a field: instances and abstract models do not have it. It is the model's
+default [manager](/topics/managers); a model declares other managers, and the methods of its managers and query sets,
+the same way.
 
 ## Model identity
 
@@ -137,8 +139,9 @@ restaurant = await place.restaurant
 ```
 
 A `ReverseForeignKey` (the other side of a foreign key) and a `ManyToMany` return a
-[`QuerySet`](/ref/queryset) of the related rows on the owner's session instead; building it needs no connection,
-and its operations find that session's transaction when they run.
+[`QuerySet`](/ref/queryset) of the related rows on the owner's session instead, from the target model's `objects`
+manager ([related rows](/topics/managers#related-rows)); building it needs no connection, and its operations find
+that session's transaction when they run.
 
 ```python
 club.members.query             # Query("club.Member").filter(club_id=club.pk)

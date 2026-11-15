@@ -2,6 +2,7 @@
 
 import uuid
 
+from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -9,8 +10,10 @@ from django.contrib.contenttypes.fields import GenericForeignKey, GenericRelatio
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.fields import ArrayField
 from django.core.validators import MaxValueValidator, MinLengthValidator, MinValueValidator, RegexValidator
-from django.db import models
+from django.db import models, NotSupportedError
 from django.utils import timezone
+
+from adorm import client_base, expose
 
 
 class Genre(models.TextChoices):
@@ -99,3 +102,67 @@ class Placement(models.Model):
 
     class Meta:
         order_with_respect_to = "book"
+
+
+class ReaderQuerySet(models.QuerySet):
+    def create(self, **kwargs):
+        """Create a reader; ``username`` names the reader's account and is not stored."""
+        kwargs.pop("username", None)
+        return super().create(**kwargs)
+
+
+class Reader(models.Model):
+    """A library member: the query set's ``create()`` overrides Django's."""
+
+    name = models.CharField(max_length=100)
+    email = models.EmailField(blank=True)
+
+    objects = ReaderQuerySet.as_manager()
+
+
+class LoanPolicyQuerySet(models.QuerySet):
+    def delete(self):
+        raise NotSupportedError("loan policies are deleted one at a time")
+
+
+class LoanPolicy(models.Model):
+    """Lending rules: the query set forbids deleting several at once."""
+
+    name = models.CharField(max_length=40, unique=True)
+    max_days = models.PositiveSmallIntegerField(default=14)
+
+    objects = LoanPolicyQuerySet.as_manager()
+
+
+@client_base("tests.djangoproject.library.adorm_bases:LoanQuerySetBase")
+class LoanQuerySet(models.QuerySet):
+    def overdue(self, today):
+        return self.filter(due__lt=today)
+
+    @expose
+    def archive(self, reason: str = "") -> int:
+        """Archive the loans with ``reason`` as their note; returns the number of loans."""
+        return self.update(archived=True, note=reason)
+
+
+class LoanManager(models.Manager.from_queryset(LoanQuerySet)):
+    def get_queryset(self):
+        return super().get_queryset().filter(archived=False)
+
+    @expose
+    def lend(self, reader_id: int, book_id: str, *, days: int = 14) -> "Loan":
+        """Lend a book for ``days`` days."""
+        return self.create(reader_id=reader_id, book_id=book_id, due=timezone.localdate() + timedelta(days=days))
+
+
+class Loan(models.Model):
+    """A book lent to a reader: the default manager hides archived loans and has driver methods."""
+
+    reader = models.ForeignKey(Reader, on_delete=models.CASCADE, related_name="loans")
+    book = models.ForeignKey(Book, on_delete=models.CASCADE, related_name="loans")
+    due = models.DateField()
+    archived = models.BooleanField(default=False)
+    note = models.CharField(max_length=200, blank=True)
+
+    objects = LoanManager()
+    all_loans = models.Manager()

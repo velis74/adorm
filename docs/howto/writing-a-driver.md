@@ -54,6 +54,10 @@ class SQLiteConnection(ThreadedConnection):
             self.db = sqlite3.connect(self.profile.params["path"], isolation_level=None)
         self.db.row_factory = sqlite3.Row
 
+    @property
+    def target(self):
+        return self.db              # what the profile's on_acquire and on_release hooks receive
+
     def execute_sync(self, operation):
         cursor = self.db.execute(operation.sql, operation.params)
         if cursor.description is None:
@@ -99,6 +103,8 @@ class SQLiteConnection(ThreadedConnection):
 
 - `execute_sync()` returns plain data: dicts for rows, a count for writes. The core builds model instances.
 - `connect_sync()` uses the profile's `connect` hook when it is set, on the connection's thread.
+- `target` is the `sqlite3.Connection`; the profile's `on_acquire` and `on_release` hooks receive it on the
+  connection's thread.
 - `cancel_sync()` runs on another thread while a call runs, possibly while `connect_sync()` runs. It must return
   without waiting for the call.
 - `map_error()` runs on the connection's thread. The default, `wrap_driver_error`, already maps
@@ -138,7 +144,9 @@ To support options, add their names to `connection_options` and implement `set_o
 
 A connection reports events by calling `self.emit(event)`; on a threaded connection it may be called from any
 thread, including the connection's, and the event reaches the slot before the result of the call that emitted it. Add the
-names of the backend events to `capabilities.backend_events`.
+names of the backend events to `capabilities.backend_events`. Emit only `CallbackEvent` and `BackendEvent` values,
+and never `CallbackEvent("on_commit")` or `CallbackEvent("on_rollback")`: the slot delivers the outcome of each call
+and those two callbacks itself, and drops anything else a connection emits.
 
 ```python
 from adorm.events import BackendEvent
@@ -247,6 +255,10 @@ class AsyncpgConnection(DriverConnection):
     def is_usable(self):
         return self.usable and not self.conn.is_closed()
 
+    @property
+    def target(self):
+        return self.conn            # profile hooks receive the asyncpg.Connection
+
     # begin, commit, rollback, _savepoint, _release_savepoint, _rollback_to_savepoint, _set_options and close
     # follow the same pattern: await self.run(...) around the asyncpg call.
 
@@ -279,7 +291,11 @@ request to the server and waits for the statement to end.
   `ModelSchema.orm_names` from a schema source); a name it does not list is the same in the target.
 - `capabilities` lists exactly what the driver executes, including `savepoints` and `cancellation` when it
   implements them.
+- With `clause.manager`, a query and a `Create` that name a manager run through that manager of the target ORM; with
+  the operation `call`, a `Call` runs the method on the target manager `Call.manager` or its query set and returns model instances as
+  `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).
 - `connect_sync()` or `open_connection()` uses `profile.connect` when it is set.
+- `target` returns the target's connection object, which the profile's `on_acquire` and `on_release` hooks receive.
 - A cancelled statement leaves the connection usable and reports SQLSTATE `57014`, not a connection error.
 - `is_connection_lost()` is true only for errors after which the connection cannot be used; override it when the
   target reports statement errors as `OperationalError` without a SQLSTATE.

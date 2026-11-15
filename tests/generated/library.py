@@ -6,10 +6,38 @@ import decimal
 import uuid
 from typing import Any, Literal
 
-from adorm import ForeignKey, ManyToMany, Model, ModelMeta, ReverseForeignKey, ReverseOneToOne
+from adorm import ForeignKey, Manager, ManyToMany, Model, ModelMeta, ReverseForeignKey, ReverseOneToOne, driver_method
 from pydantic import Field
+from tests.djangoproject.library.adorm_bases import LoanQuerySetBase
 
-__all__ = ["Author", "Tag", "Book", "Edition", "BookProxy", "Tagging", "Note", "Shelf", "Placement"]
+__all__ = [
+    "Author",
+    "Tag",
+    "Book",
+    "Edition",
+    "BookProxy",
+    "Tagging",
+    "Note",
+    "Shelf",
+    "Placement",
+    "Reader",
+    "LoanPolicy",
+    "Loan",
+]
+
+
+class LoanQuerySet(LoanQuerySetBase):
+    @driver_method
+    async def archive(self, reason: str = "") -> int:
+        """Archive the loans with ``reason`` as their note; returns the number of loans."""
+
+
+class LoanManager(Manager):
+    queryset_class = LoanQuerySet
+
+    @driver_method
+    async def lend(self, reader_id: int, book_id: str, *, days: int = 14) -> "Loan":
+        """Lend a book for ``days`` days."""
 
 
 class Author(Model):
@@ -70,6 +98,7 @@ class Book(Model):
     tagging_set = ReverseForeignKey("library.Tagging", column="book_id")
     copy_notes = ReverseForeignKey("library.Note", column="copy_id")
     placements = ReverseForeignKey("library.Placement", column="book_id")
+    loans = ReverseForeignKey("library.Loan", column="book_id")
 
 
 class Edition(Book):
@@ -132,3 +161,40 @@ class Placement(Model):
     book_id: str
     order_: int | None = Field(default=None, alias="_order")
     book = ForeignKey("library.Book")
+
+
+class Reader(Model):
+    """A library member: the query set's ``create()`` overrides Django's."""
+
+    _meta = ModelMeta("library.Reader", schema_hash="4bc9105f7d99ed50")
+    id: int | None = None
+    name: str = Field(max_length=100)
+    email: str = Field(default="", max_length=254)
+    loans = ReverseForeignKey("library.Loan", column="reader_id")
+    objects = Manager("objects")
+
+
+class LoanPolicy(Model):
+    """Lending rules: the query set forbids deleting several at once."""
+
+    _meta = ModelMeta("library.LoanPolicy", schema_hash="8d4f4924c7125f38")
+    id: int | None = None
+    name: str = Field(max_length=40)
+    max_days: int = Field(default=14, ge=0)
+    objects = Manager("objects")
+
+
+class Loan(Model):
+    """A book lent to a reader: the default manager hides archived loans and has driver methods."""
+
+    _meta = ModelMeta("library.Loan", schema_hash="2da03c23fce17cf6")
+    id: int | None = None
+    reader_id: int
+    book_id: str
+    due: datetime.date
+    archived: bool = False
+    note: str = Field(default="", max_length=200)
+    reader = ForeignKey("library.Reader")
+    book = ForeignKey("library.Book")
+    objects = LoanManager("objects")
+    all_loans = Manager()

@@ -1,8 +1,9 @@
 # Pool and router
 
 ::: info Status
-The installed version provides pools, the router, slots and leases. Pools are built in code; connection profiles in
-adorm's settings, transactions (`atomic()`), connection options and slot lifetimes are not part of it yet. Neither
+The installed version provides pools, the router, slots and leases, used by [transactions](/topics/transactions)
+and built from [connection profiles](/topics/profiles); connection options and slot lifetimes are not part of it
+yet. Neither
 are the Django ORM and native PostgreSQL drivers used in the examples; any `Driver` implementation (see
 [Writing a driver](/howto/writing-a-driver)) works.
 :::
@@ -10,6 +11,10 @@ are the Django ORM and native PostgreSQL drivers used in the examples; any `Driv
 A **pool** holds the slots of one connection profile. A **slot** is an exclusive channel to one driver connection;
 for a threaded driver (the Django ORM) it also has its own thread. The **router** assigns slots to the sessions
 that ask for one: a session's `using` names the pool.
+
+`adorm.configure()` is all an application needs: the default router of each event loop creates the pool of a
+profile when a session first names it (see [connection profiles](/topics/profiles)). Pools and routers can also be
+built in code, as on the rest of this page:
 
 ```python
 from dataclasses import dataclass, field
@@ -64,6 +69,10 @@ async with router.slot(session) as lease:
 `router.run(session, operation)` is one operation on a slot of its own, the way an operation outside a transaction
 runs.
 
+When the pool's profile has [hooks](/topics/profiles#hooks), `acquire()` runs `on_acquire` before it returns the
+lease, within the acquisition's timeout, and `release()` runs `on_release` before the slot goes to the next request,
+within the pool's `release_timeout`. A hook that fails takes its slot out of the pool.
+
 ### Pool size
 
 `max_connections` limits the slots of a pool. With `0`, the default, the pool opens new connections until the
@@ -85,6 +94,14 @@ A slot leaves the pool when its lease is released and the connection reports its
 left a transaction that no successful `commit` or `rollback` ended (including one whose request was cancelled); the
 next request opens a fresh connection. `lease.release(discard=True)` drops the slot in any case.
 
+A slot inside a transaction waits at most the pool's `commit_timeout` (60 seconds by default, `None` for no limit) for the next request
+of its lease. When none arrives, the slot rolls the transaction back and leaves the pool; the lease is then
+`aborted`, and its requests raise `TransactionClosed`. This frees the slot of a client that is gone.
+
+```python
+pool = Pool(AsyncpgDriver(), profile, commit_timeout=60)
+```
+
 A driver method that does not return a coroutine fails its request with `InterfaceError`. When the slot's serving
 task itself fails, every queued request fails with `InterfaceError` and the slot leaves the pool on release.
 
@@ -92,26 +109,31 @@ task itself fails, every queued request fails with `InterfaceError` and the slot
 
 A lease is a pair of queues, like the reader and writer of an asyncio stream: `lease.requests` takes
 [`Request`](/ref/pool#adorm-executor-request-method-args-request-id) objects, and `lease.events` delivers what the
-slot sends back. The slot runs the requests one at a time, in the order they were put, each in the context of the
+slot sends back that the lease's [event channel](/topics/events) (`lease.channel`) does not interpret itself. The slot runs the requests one at a time, in the order they were put, each in the context of the
 task that put it.
 
 ```python
-from adorm.events import ErrorEvent, ResultEvent
+from adorm.events import CallbackEvent, ErrorEvent, ResultEvent
 from adorm.executor import Request
 
 begin, insert, commit = Request("begin"), Request("execute", (operation,)), Request("commit")
 for request in (begin, insert, commit):
     lease.requests.put_nowait(request)
 
-for _ in range(3):
+for _ in range(4):
     match await lease.events.get():
         case ResultEvent(request_id, value): ...
         case ErrorEvent(request_id, error): ...
+        case CallbackEvent("on_commit"): ...       # before the commit's ResultEvent
 ```
 
-`lease.call(method, *args)` sends one request and returns its result or raises its error; its outcome does not
-appear on `events`. Concurrent calls on one lease queue behind each other. A request that the driver cancels on its
-own, without the caller cancelling it, fails with `InterfaceError`.
+`lease.requests.cancel(request)` cancels a request: a queued one never runs, a running one is cancelled in the driver
+connection. Its outcome is a `CancelledEvent`, or its result or error when it finished first. The `CancelledEvent` of
+a queued request arrives as soon as it is cancelled, ahead of the outcomes of earlier requests.
+
+`lease.call(method, *args)` sends one request and returns its result or raises its error; the channel settles
+the call with the outcome, so it does not appear on `events`. Concurrent calls on one lease queue behind each other. A request that the driver or the slot
+cancels without the caller cancelling it fails with `InterfaceError`.
 
 `release()` waits until every queued request has run, then returns the slot. It completes even when the releasing
 task is cancelled meanwhile, so a cancelled flow does not leak its slot.
@@ -181,13 +203,16 @@ held slot closes when its lease is released. A slot still opening is closed once
 
 ## Events
 
-The pool and router emit no events of their own and consume none. A slot carries the
-[event channel](/ref/events) of its connection:
+The pool and router emit no events of their own. A slot delivers events to the
+[event channel](/topics/events) of its lease:
 
-| Event | Direction | Where it goes |
+| Event | Delivered by | Where it goes |
 |---|---|---|
-| `ResultEvent`, `ErrorEvent` | emitted by the slot, one per request | the lease's `events` queue, or the result of `call()` |
-| `CallbackEvent` (such as `on_commit`) | emitted by the driver connection | the lease's `events` queue while held; the pool's `events` bus while idle or when left unread at release |
-| `BackendEvent` (such as PostgreSQL `NOTIFY`) | emitted by the driver connection | the same as `CallbackEvent` |
+| `ResultEvent`, `ErrorEvent`, `CancelledEvent` | the slot, exactly one per request | the result of `call()`, else the lease's `events` queue |
+| `CallbackEvent("on_commit")`, `CallbackEvent("on_rollback")` | the slot, before the outcome of a successful `commit` or `rollback`; `on_rollback` also when the slot aborts a transaction | the handlers registered with `lease.channel.on()`, else the lease's `events` queue |
+| other `CallbackEvent` values | the driver connection | the same; the pool's `events` bus while the slot is idle |
+| `BackendEvent` (such as PostgreSQL `NOTIFY`) | the driver connection | the lease's `events` queue; the pool's `events` bus while the slot is idle |
 
-A request whose `call()` was cancelled before it started has no outcome event.
+When the lease is released its channel closes: callbacks and backend events left unread go to the pool's `events`
+bus, unread outcomes are dropped. A `CallbackEvent` named `on_commit` or `on_rollback` that a connection emits is
+dropped and logged.

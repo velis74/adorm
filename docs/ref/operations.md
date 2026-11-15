@@ -5,7 +5,8 @@ connection: one read or write, described without I/O, models by their label and 
 
 ```python
 from adorm import F, Now, Q
-from adorm.operations import Count, Create, Delete, Get, GetOrCreate, Save, Select, Update
+from adorm.models import registry
+from adorm.operations import Call, Count, Create, Delete, Get, GetOrCreate, ModelRow, Save, Select, Update
 from adorm.query import Query
 ```
 
@@ -24,11 +25,12 @@ expressions.
 | `qs.get(**lookups)` | `Get(query.filter(**lookups))` |
 | `qs.first()`, `qs.last()` | `First(query)`, `Last(query)` |
 | `qs.count()`, `qs.exists()` | `Count(query)`, `Exists(query)` |
-| `Model.objects.create(**values)` | `Create(label, values)` |
+| `Model.objects.create(**values)` | `Create(label, values)`, `Create(label, values, manager)` on a manager with an ORM name |
 | `obj.save(update_fields=...)` | `Save(label, pk, values, update_fields)` |
 | `qs.update(**values)` | `Update(query, values)` |
 | `qs.delete()`, `obj.delete()` | `Delete(query)`, `Delete(Query(label).filter(pk=pk))` |
 | `qs.get_or_create(defaults=..., **lookups)` | `GetOrCreate(query, lookups, defaults)` |
+| `qs.archive(...)`, `Model.objects.lend(...)` (driver methods) | `Call(query, "archive", "queryset", ...)`, `Call(Query(label, manager=...), "lend", "manager", ...)` |
 
 `filter()`, `exclude()`, `order_by()`, `distinct()`, slicing, `values()`, `values_list()`, `only()`, `defer()`,
 `none()`, `|`, `select_related()` and `select_for_update()` are part of the [`Query`](./query) an operation carries.
@@ -138,15 +140,22 @@ Field values are a mapping or `(name, value)` pairs, kept as a tuple of pairs in
 name without `__`; anything else, or a name given twice, raises `ValueError`. A value is a plain value or an
 expression; an expression containing an aggregate, or a node that is not an expression, raises `TypeError`.
 
-### `adorm.operations.Create(model, values=())`
+### `adorm.operations.Create(model, values=(), manager=None)`
 
 Inserts a row of the model `model` (a label) with `values`. An expression value may not refer to a field of the new
 row, an `F` outside a subquery or an `OuterRef` of the value's own subquery: `TypeError`. A subquery's own fields are
 allowed. Result: the row as stored, including the values the database set (the primary key,
 database defaults).
 
+`manager` names the target ORM's manager whose `create()` inserts the row, as
+[`Query.manager`](./query#adorm-query-query-model-manager-none); with one, the operation uses the construct
+`clause.manager` and `values` may name arguments that are not fields, which the encoding types by their values; a
+value that is a model instance raises `TypeError` (pass its primary key). The encoded form has `"manager"` only when
+there is one.
+
 ```python
 Create("club.Member", {"name": "Ann", "joined": Now()})
+Create("library.Reader", {"name": "Ann", "username": "ann"}, manager="objects")
 ```
 
 ### `adorm.operations.Save(model, pk, values=(), update_fields=None, force_insert=False, force_update=False)`
@@ -206,10 +215,62 @@ GetOrCreate(
 )
 ```
 
+## Driver methods
+
+### `adorm.operations.Call(query, method, target="queryset", args=(), kwargs=(), manager=None)`
+
+Calls the driver method `method` on the target ORM's manager `manager`, which defaults to
+[`query.manager`](./query#adorm-query-query-model-manager-none) and, when the query carries one, equals it. With
+`target` `"manager"` the method runs on that manager, and `query` is the model's plain query (`Query(model)` or
+`Query(model, manager=manager)`); with `"queryset"` it runs on the query set of `query` started from that manager. A
+query without `Query.manager` uses no `clause.manager`, so only the `call` operation needs a driver that runs the
+target ORM's code. `args` are the positional arguments, `kwargs` the keyword arguments as a mapping or
+`(name, value)` pairs, kept as a tuple of pairs; both hold plain values, copied as in other operations.
+[Driver methods](./models#adorm-driver-method-func-queryset-only-false) build it.
+
+Result: the method's return value as plain data, with every instance of a model of the target ORM as a
+[`ModelRow`](#adorm-operations-modelrow-model-row).
+
+No manager, an expression or a model instance among the arguments raises `TypeError`; a `manager` or `method` that is
+not a public identifier, a `manager` other than the query's, an unknown `target`, a manager call with a filtered
+query, an argument name that is not an identifier and a name given twice raise `ValueError`. A driver runs only the methods the registered model declares
+([`find_driver_method()`](./models#adorm-models-find-driver-method-label-manager-target-method)).
+
+| Member | Meaning |
+|---|---|
+| `model` | the label of `query`'s model |
+| `key` | the [`MethodKey`](./encoding#adorm-schema-methodkey) `(manager, target, method)` |
+
+The encoding types the arguments with the model schema's
+[`MethodSchema`](./encoding#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none) for
+`key`, and infers the types of arguments without one.
+
+```python
+Call(Query("library.Loan", manager="objects").filter(due__lt=today), "archive", args=("late",))
+Call(Query("library.Loan", manager="objects"), "lend", "manager", (7, "9780000000001"), {"days": 3})
+Call(Query("auth.User"), "create_user", "manager", ("ann",), {"password": "secret"}, manager="objects")
+
+Call(Query("library.Loan", manager="objects"), "archive").to_dict(registry)
+# {"operation": "call", "query": {...}, "manager": "objects", "method": "archive", "target": "queryset",
+#  "args": [], "kwargs": {}}
+```
+
+### `adorm.operations.ModelRow(model, row)`
+
+An instance of a model in the result of a `Call`: the row of the model `model` (a label) as a read-only mapping keyed
+by adorm field names. A driver returns one for every instance of the target ORM's model in a driver method's result;
+the caller builds an instance of the registered model from it. A frozen, hashable dataclass. A `model` that is not a
+label raises `ValueError`, a `row` that is not a mapping `TypeError`.
+
+```python
+ModelRow("library.Loan", {"id": 9, "reader_id": 7, "book_id": "9780000000001", "due": date(2026, 3, 4)})
+```
+
 ## Events
 
 Operations emit and consume no events: they are the requests a slot executes. The slot answers each one with a
-[`ResultEvent`](./events#adorm-events-resultevent-request-id-value) carrying the result above, or an
-[`ErrorEvent`](./events#adorm-events-errorevent-request-id-error) carrying an adorm exception. A write inside a transaction may lead
-to `on_commit` callbacks, reported as [`CallbackEvent`](./events#adorm-events-callbackevent-name-payload-none) when the transaction
-commits; signals of the target ORM run on the driver side only.
+[`ResultEvent`](./events#adorm-events-resultevent-request-id-value) carrying the result above, an
+[`ErrorEvent`](./events#adorm-events-errorevent-request-id-error) carrying an adorm exception, or a
+[`CancelledEvent`](./events#adorm-events-cancelledevent-request-id-started) when the client cancelled it. Callbacks
+registered with [`on_commit()`](./transactions#adorm-on-commit-func-robust-false-session-none) run when the slot
+reports the commit; signals of the target ORM run on the driver side only.

@@ -24,8 +24,8 @@ Abstract base class of every driver.
 
 Opens a connection for `profile` (a [`Profile`](#adorm-drivers-profile)) and returns a
 [`DriverConnection`](#adorm-drivers-driverconnection). When `profile.connect` is set, the target's connection
-comes from it instead of the driver's default. The connection reports events by calling `emit` with an
-[`Event`](/ref/events). A failure raises an adorm exception.
+comes from it instead of the driver's default. The connection reports events by calling `emit` with a
+[`CallbackEvent` or a `BackendEvent`](/ref/events). A failure raises an adorm exception.
 
 ```python
 class AsyncpgDriver(Driver):
@@ -47,7 +47,7 @@ class AsyncpgDriver(Driver):
 #### `is_refusal(exc)`
 
 Returns whether `exc`, an adorm exception `open_connection()` raised, means the database refuses more connections.
-A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0) with `max_connections=0` then stops opening connections and queues the
+A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0) with `max_connections=0` then stops opening connections and queues the
 request. Defaults to [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc). A driver whose library reports a refused
 connection without a SQLSTATE overrides it:
 
@@ -122,6 +122,7 @@ adorm's operations ([`adorm.operations`](./operations)) satisfy it; their kinds 
 ### `adorm.drivers.Profile`
 
 A runtime-checkable protocol for the connection profile a connection is opened for.
+[`ConnectionProfile`](/ref/settings#adorm-connectionprofile) satisfies it.
 
 | Member | Meaning |
 |---|---|
@@ -129,6 +130,7 @@ A runtime-checkable protocol for the connection profile a connection is opened f
 | `alias` | the target's database alias, e.g. a key of Django's `DATABASES` |
 | `params` | a mapping of driver parameters |
 | `connect` | `None`, or a callable that opens the target's connection in place of the driver's default: `connect(profile)` returns the target's connection. A threaded driver calls it in `connect_sync()` on the connection's thread; an async driver awaits its result in `open_connection()` |
+| `on_acquire`, `on_release` | optional; when present and not `None`, [hooks](/topics/profiles#hooks) the pool calls as `hook(connection, profile, session)` with the connection's [`target`](#adorm-drivers-driverconnection) |
 
 ### `adorm.drivers.is_connection_error(exc)`
 
@@ -166,7 +168,7 @@ The contract the slot calls:
 
 | Method | Does |
 |---|---|
-| `async execute(operation)` | checks `operation` against `driver.capabilities`, then awaits `_execute(operation)`; returns rows as dicts keyed by adorm field names, a scalar or a count; field path segments, value keys and row keys are adorm names, translated to and from the target's with the reached model's `orm_names` ([Drivers](/topics/drivers#operations-in-plain-data-out)) |
+| `async execute(operation)` | checks `operation` against `driver.capabilities` and a [`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) with [`find_driver_method()`](./models#adorm-models-find-driver-method-label-manager-target-method), then awaits `_execute(operation)`; returns rows as dicts keyed by adorm field names, a scalar or a count; field path segments, value keys and row keys are adorm names, translated to and from the target's with the reached model's `orm_names` ([Drivers](/topics/drivers#operations-in-plain-data-out)) |
 | `async begin()` | starts a transaction |
 | `async savepoint(name)` | checks `capabilities.savepoints`, then creates the savepoint `name` |
 | `async release_savepoint(name)` | checks `capabilities.savepoints`, then releases the savepoint `name` |
@@ -177,10 +179,14 @@ The contract the slot calls:
 | `cancel()` | cancels the running statement, if any; callable from any thread, returns without waiting; the call raises `OperationalError` with SQLSTATE `57014` |
 | `is_usable()` | whether the connection can serve further calls; does no I/O |
 | `async close()` | closes the connection; logs errors instead of raising them; a second call does nothing |
+| `target` | the target's connection that the profile's `on_acquire` and `on_release` hooks receive; defaults to the driver connection itself |
+| `async call_hook(hook, *args)` | calls `hook(self.target, *args)`, awaits the result when it is awaitable and returns it; an exception the hook raises is mapped with `map_error()` |
 | `map_error(exc)` | returns the adorm exception for an exception the target raised; defaults to `wrap_driver_error(exc)` |
 | `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it |
 
-A failed check raises `NotSupportedError` before the subclass is called. What a subclass implements:
+A failed check raises `NotSupportedError` before the subclass is called: an operation kind or construct the
+capabilities do not list, and a `Call` of a method the registered model does not declare. What a subclass
+implements:
 
 | Method | Required | Does |
 |---|---|---|
@@ -188,6 +194,31 @@ A failed check raises `NotSupportedError` before the subclass is called. What a 
 | `begin()`, `commit()`, `rollback()`, `cancel()`, `is_usable()`, `close()` | yes | as above |
 | `async _savepoint(name)`, `async _release_savepoint(name)`, `async _rollback_to_savepoint(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
 | `async _set_options(options, local)` | no | sets supported options from a dict; raises `NotSupportedError` for any option unless overridden |
+
+#### Managers and driver methods
+
+A driver that supports the construct `clause.manager` starts every query that carries a
+[`manager`](./query#adorm-query-query-model-manager-none) from that manager of the target ORM, and inserts a
+`Create` with a `manager` through that manager's `create()`, passing every value; a query without one reads the
+model's rows without manager logic. A driver that supports the operation `call` runs `Call` on the target ORM's
+manager `Call.manager`: on the manager itself (`target == "manager"`) or on the query set of `query` started from
+that manager (`"queryset"`), with `args` and `kwargs`. It returns every instance of a target model in the result,
+also inside lists, tuples and the values of mappings, as a
+[`ModelRow`](./operations#adorm-operations-modelrow-model-row) of adorm field names. For Django:
+
+```python
+def execute_call(call):
+    model = apps.get_model(call.model)
+    manager = getattr(model, call.manager)
+    target = manager if call.target == "manager" else build_queryset(manager.all(), call.query)
+    result = getattr(target, call.method)(*call.args, **dict(call.kwargs))
+    return to_plain(result)          # Django instances become ModelRow(label, row)
+```
+
+A driver that cannot run the target ORM's code, such as a native SQL driver, lists neither, so both raise
+`NotSupportedError`.
+
+#### Cancellation
 
 Cancelling the task that awaits `execute()` cancels the running statement; the call raises
 `asyncio.CancelledError`, the connection stays usable, and the slot rolls back an open transaction.
@@ -263,6 +294,9 @@ What the connection does around those methods:
 - `cancel()` runs `cancel_sync()` for the running call: on a thread of its own when called on the event loop's
   thread, otherwise on the calling thread. It does nothing when no call is running.
 - `close()` runs `close_sync()` on the thread and stops the thread; a call after it raises `InterfaceError`.
+- `call_hook(hook, *args)` runs `hook(self.target, *args)` on the thread like a `*_sync` method; a hook that returns
+  an awaitable raises `InterfaceError`. A subclass sets `target` to what profile hooks receive, such as Django's
+  connection wrapper.
 - On a direct connection no running event loop is visible during a `*_sync` call, so a check against use from an
   event loop (Django's `async_unsafe`) accepts it. A running direct call is cancelled only through `cancel()` from
   another thread.
@@ -270,7 +304,9 @@ What the connection does around those methods:
 #### `emit(event)`
 
 Reports an event to the slot. Callable from any thread, including the connection's thread; the event is
-delivered on the event loop, before the result of the call that emitted it.
+delivered on the event loop, before the result of the call that emitted it. The slot accepts only `CallbackEvent` and
+`BackendEvent`; it drops and logs any other event, and a `CallbackEvent` named `on_commit` or `on_rollback`
+([`RESERVED_CALLBACKS`](/ref/events#adorm-events-reserved-callbacks)).
 
 #### `async start()`
 

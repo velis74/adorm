@@ -1,35 +1,36 @@
-"""The demo API: FastAPI endpoints that build adorm operations from requests; nothing is executed.
+"""The demo API: FastAPI endpoints on the generated adorm models of ``demo.models``.
 
-Every ``/api/operations/...`` endpoint answers an `OperationPlan` (``POST .../payments`` answers a list of two): the
-operation it builds, encoded as JSON with the models' types, the construct names it uses and, for every available
-driver, the names that driver does not support.
+Every ``/api/operations/...`` endpoint builds an operation without executing it and answers an `OperationPlan`
+(``POST .../payments`` answers a list of two): the operation, encoded as JSON with the models' types, the construct
+names it uses and, for every available driver, the names that driver does not support. The ``/api/data/...``
+endpoints (`demo.api.data`) execute operations through sessions and transactions on the active driver.
 
     uv run python demo.py
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime
-import decimal
-import typing
 
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Body, FastAPI, Path, Query, Request
+from fastapi import Body, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 
 import adorm
 
+from adorm import PoolSettings
 from adorm.drivers import Driver
 from adorm.models import registry
 from adorm.operations import Operation
-from demo.api import drivers, operations
-from demo.api.models import Kind, Level, Member, MODELS
-
-Slug = Annotated[str, Path(description="The club's slug.", pattern=r"^[-a-zA-Z0-9_]+$", examples=["ljubljana-rowing"])]
-Id = Annotated[int, Path(description="Primary key.", ge=1)]
+from adorm.settings import close_pools
+from demo.api import data, drivers, operations
+from demo.api.schemas import AttendanceIn, Id, Kind, Level, MemberChanges, PaymentIn, Slug
+from demo.models import MODELS
+from demo.models.clubs import Member
 
 
 class OperationPlan(BaseModel):
@@ -61,48 +62,6 @@ class Health(BaseModel):
     driver: str | None = Field(description="The active driver; `null` when no driver is available.")
 
 
-class MemberChanges(BaseModel):
-    """Fields of a member to change; fields left out stay as they are."""
-
-    model_config = {"extra": "forbid"}
-
-    first_name: str | None = Field(None, max_length=60, description="First name.")
-    last_name: str | None = Field(None, max_length=60, description="Last name.")
-    email: str | None = Field(None, max_length=254, description="E-mail address.")
-    birth_date: datetime.date | None = Field(None, description="Date of birth; `null` clears it.")
-    level: Level | None = Field(None, description="Skill level.")
-    tags: list[str] | None = Field(None, description="Free-form tags; replaces the member's tags.")
-
-    @model_validator(mode="after")
-    def _check_changes(self) -> MemberChanges:
-        if not self.model_fields_set:
-            raise ValueError("no fields to change")
-        for name in sorted(self.model_fields_set):
-            if getattr(self, name) is None and type(None) not in typing.get_args(Member.model_fields[name].annotation):
-                raise ValueError(f"{name} cannot be null")
-        return self
-
-
-class PaymentIn(BaseModel):
-    """A payment of an invoice."""
-
-    model_config = {"extra": "forbid"}
-
-    amount: decimal.Decimal = Field(
-        gt=0, max_digits=10, decimal_places=2, examples=["120.00"], description="Amount paid, at most two decimals."
-    )
-    reference: str = Field("", max_length=40, description="Payment reference, e.g. the bank's.")
-    paid_at: datetime.datetime = Field(description="Time of payment, with a time zone.")
-
-
-class AttendanceIn(BaseModel):
-    """A member registering for an activity."""
-
-    model_config = {"extra": "forbid"}
-
-    member_id: int = Field(ge=1, description="Primary key of the member.")
-
-
 def invalid(msg: str, loc: tuple[str | int, ...] = ("body",), value: Any = None) -> RequestValidationError:
     """A 422 answer in FastAPI's validation error shape."""
     return RequestValidationError([{"type": "value_error", "loc": loc, "msg": msg, "input": value}])
@@ -115,17 +74,30 @@ def unprocessable(description: str) -> dict[str, Any]:
     }
 
 
+POOL = PoolSettings(max_connections=4, acquire_timeout=5.0)
+"""The pool settings of the demo's connection profile."""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Selects the active driver and loads it (its ``setup`` runs); the other available drivers are imported only, to
-    read their capabilities."""
+    """Selects the active driver and loads it (its ``setup`` runs on a worker thread); the other available drivers are
+    imported only, to read their capabilities. The active driver becomes adorm's connection profile ``default``; at
+    shutdown the pools close and the profile is removed."""
     active = drivers.selected()
     app.state.driver = active
-    app.state.drivers = {
-        name: drivers.get(name).load() if name == active else drivers.get(name).driver_class()
-        for name in drivers.available()
-    }
-    yield
+    loaded: dict[str, Driver | type[Driver]] = {}
+    for name in drivers.available():
+        demo_driver = drivers.get(name)
+        loaded[name] = await asyncio.to_thread(demo_driver.load) if name == active else demo_driver.driver_class()
+    app.state.drivers = loaded
+    if active is not None:
+        adorm.configure(profiles={"default": drivers.get(active).profile(loaded[active])}, pool=POOL)
+    try:
+        yield
+    finally:
+        if active is not None:
+            await close_pools()
+            adorm.configure()
 
 
 app = FastAPI(
@@ -134,6 +106,9 @@ app = FastAPI(
     description="Clubs, members, activities and billing on adorm models.",
     lifespan=lifespan,
 )
+app.include_router(data.router)
+app.include_router(data.executor_router)
+data.install_error_handlers(app)
 
 
 def loaded_drivers(request: Request) -> dict[str, Driver | type[Driver]]:

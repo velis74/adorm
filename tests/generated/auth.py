@@ -3,10 +3,15 @@
 
 import datetime
 
-from adorm import ForeignKey, ManyToMany, Model, ModelMeta, ReverseOneToOne
+from adorm import ForeignKey, Manager, ManyToMany, Model, ModelMeta, ReverseOneToOne, driver_method
 from pydantic import Field
 
 __all__ = ["Permission", "Group", "User"]
+
+
+class UserManager(Manager):
+    @driver_method
+    async def create_user(self, username, email=None, password=None, **extra_fields): ...
 
 
 class Permission(Model):
@@ -88,7 +93,7 @@ class User(Model):
     Username and password are required. Other fields are optional.
     """
 
-    _meta = ModelMeta("auth.User", schema_hash="3d8b96b984fd5a4c")
+    _meta = ModelMeta("auth.User", schema_hash="3388958ccf53ea7e")
     id: int | None = None
     password: str = Field(max_length=128)
     last_login: datetime.datetime | None = None
@@ -120,3 +125,4 @@ class User(Model):
         target_column="permission_id",
     )
     author = ReverseOneToOne("library.Author", column="account_id")
+    objects = UserManager(method_manager="objects")

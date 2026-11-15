@@ -1,20 +1,44 @@
-"""The active transactions of the current context, one per session."""
+"""Transactions: ``atomic()`` blocks and the active transactions of the current context, one per session."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+import asyncio
+import contextvars
+import inspect
+import itertools
+import logging
+import warnings
+import weakref
+
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from contextvars import ContextVar
-from types import MappingProxyType
-from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
+from contextvars import ContextVar, Token
+from types import MappingProxyType, TracebackType
+from typing import Any, cast, Protocol, runtime_checkable, TYPE_CHECKING
+
+from adorm.events import ON_COMMIT
+from adorm.exceptions import (
+    DatabaseError,
+    DeadlockError,
+    InterfaceError,
+    NotSupportedError,
+    TransactionClosed,
+    TransactionManagementError,
+)
+from adorm.executor.debug import debug_enabled
+from adorm.executor.slot import cancelled_before_start
 
 if TYPE_CHECKING:
     from adorm.executor.sessions import Session
+    from adorm.executor.slot import SlotLease
     from adorm.operations import Operation
 
-__all__ = ["Transaction", "active_transaction", "bind_transaction"]
+__all__ = ["Atomic", "Transaction", "active_transaction", "atomic", "bind_transaction", "on_commit"]
+
+logger = logging.getLogger("adorm.executor")
 
 SessionKey = tuple[str, str]
+Callback = Callable[[], Any]
 
 _EMPTY: Mapping[SessionKey, Any] = MappingProxyType({})
 _active: ContextVar[Mapping[SessionKey, Transaction]] = ContextVar("adorm_active_transactions", default=_EMPTY)
@@ -32,6 +56,12 @@ def active_transaction(session: Session) -> Transaction | None:
     return _active.get().get(session.key)
 
 
+def _bind(session: Session, transaction: Transaction) -> Token:
+    if not isinstance(transaction, Transaction):
+        raise TypeError(f"a transaction has an async execute(operation), {type(transaction).__name__} has none")
+    return _active.set(MappingProxyType({**_active.get(), session.key: transaction}))
+
+
 @contextmanager
 def bind_transaction(session: Session, transaction: Transaction) -> Iterator[Transaction]:
     """Make ``transaction`` the active transaction of ``session`` for the ``with`` block.
@@ -40,10 +70,476 @@ def bind_transaction(session: Session, transaction: Transaction) -> Iterator[Tra
     binding inside the block for the same session replaces this one until its own block ends; other sessions keep
     theirs.
     """
-    if not isinstance(transaction, Transaction):
-        raise TypeError(f"a transaction has an async execute(operation), {type(transaction).__name__} has none")
-    token = _active.set(MappingProxyType({**_active.get(), session.key: transaction}))
+    token = _bind(session, transaction)
     try:
         yield transaction
     finally:
         _active.reset(token)
+
+
+def atomic() -> Atomic:
+    """An `Atomic` block on the current session: ``async with adorm.atomic() as tx:``."""
+    from adorm.executor.sessions import current_session
+
+    return Atomic(current_session())
+
+
+async def on_commit(func: Callback, *, robust: bool = False, session: Session | None = None) -> None:
+    """Run ``func()`` once the transaction of ``session`` (default: the current session) active in this context
+    commits (`Atomic.on_commit()`); without an active transaction, run it now. An awaitable ``func()`` returns is
+    awaited. With ``robust``, an exception ``func`` raises is logged instead of raised."""
+    from adorm.executor.sessions import current_session
+
+    if not callable(func):
+        raise TypeError(f"an on_commit callback is callable, not {func!r}")
+    session = current_session() if session is None else session
+    transaction = active_transaction(session)
+    if isinstance(transaction, Atomic):
+        transaction.on_commit(func, robust=robust)
+    elif transaction is not None:
+        raise TransactionManagementError(
+            f"the active transaction of {session!r} is {transaction!r}, which runs no callbacks"
+        )
+    else:
+        await _run_callbacks([(func, robust)])
+
+
+async def _run_callbacks(callbacks: list[tuple[Callback, bool]]) -> None:
+    for func, robust in callbacks:
+        try:
+            result = func()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            if not robust:
+                raise
+            logger.exception("on_commit callback %r failed", func)
+
+
+def _unbind(session: Session) -> None:
+    _active.set(MappingProxyType({k: v for k, v in _active.get().items() if k != session.key}))
+
+
+_NEW, _OPEN, _CLOSING, _ENDED = "new", "open", "closing", "ended"
+
+
+def _leaves_transaction_failed(exc: BaseException) -> bool:
+    """Whether ``exc``, raised by a request, may leave the database transaction aborted or in an unknown state."""
+    if isinstance(exc, asyncio.CancelledError):
+        return not cancelled_before_start(exc)
+    if isinstance(exc, NotSupportedError) and exc.sqlstate is None and exc.original is None:
+        return False  # a capability check on the client side
+    return isinstance(exc, (DatabaseError, InterfaceError))
+
+
+class Atomic:
+    """A transaction block on one session: ``async with session.atomic() as tx:``.
+
+    Entering the block acquires a slot for the session and begins a transaction; the acquisition's
+    `SessionTimeout` or `DeadlockError` is raised there. Inside a transaction of the same session it creates a
+    savepoint on the transaction's slot instead. The block is the session's active transaction for its context, so
+    operations of the session, including those of tasks that inherit the context, run in it.
+
+    Exiting the block waits for the operations already sent, then commits (or releases the savepoint); on an
+    exception it rolls back (to the savepoint). `commit()` and `rollback()` end the block earlier. An operation
+    that arrives after the end raises `TransactionClosed`. After an operation of the block failed with a database
+    error or was cancelled, further operations raise `TransactionManagementError` and the end rolls back.
+
+    While a savepoint is open, operations that other tasks send to an enclosing block wait until it ends.
+
+    `on_commit()` registers callbacks that run after the transaction commits. The block learns of the commit from the
+    slot's ``CallbackEvent(ON_COMMIT)``, the same event in process and from a remote slot.
+    """
+
+    __slots__ = (
+        "__weakref__",
+        "_callbacks",
+        "_child",
+        "_committed",
+        "_drained",
+        "_end_error",
+        "_ended",
+        "_ender",
+        "_failed",
+        "_forced",
+        "_ids",
+        "_lease",
+        "_pending",
+        "_slot_cm",
+        "_state",
+        "_tasks",
+        "_token",
+        "parent",
+        "savepoint",
+        "session",
+    )
+
+    def __init__(self, session: Session) -> None:
+        from adorm.executor.sessions import Session
+
+        if not isinstance(session, Session):
+            raise TypeError(f"an atomic block needs a Session, not {type(session).__name__}")
+        self.session = session
+        self.parent: Atomic | None = None
+        self.savepoint: str | None = None
+        self._state = _NEW
+        self._forced = False
+        self._failed: BaseException | None = None
+        self._pending = 0
+        self._drained = asyncio.Event()
+        self._drained.set()
+        self._ended = asyncio.Event()
+        self._ender: asyncio.Task | None = None
+        self._end_error: Exception | None = None
+        self._child: Atomic | None = None
+        self._tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
+        self._lease: SlotLease | None = None
+        self._slot_cm: Any = None
+        self._token: Token | None = None
+        self._ids = itertools.count(1)
+        self._callbacks: list[tuple[Callback, bool]] = []
+        self._committed = False
+
+    def __repr__(self) -> str:
+        kind = f"savepoint {self.savepoint!r}" if self.savepoint else "transaction"
+        return f"<Atomic {kind} on {self.session!r}, {self._state}>"
+
+    @property
+    def root(self) -> Atomic:
+        """The outermost block of the transaction: this block when it is not a savepoint."""
+        block = self
+        while block.parent is not None:
+            block = block.parent
+        return block
+
+    @property
+    def lease(self) -> SlotLease | None:
+        """The lease of the transaction's slot; ``None`` before the block is entered."""
+        return self.root._lease
+
+    @property
+    def closed(self) -> bool:
+        """Whether the block no longer takes operations: it is ending or has ended."""
+        return self._state in (_CLOSING, _ENDED)
+
+    def _chain(self) -> Iterator[Atomic]:
+        block: Atomic | None = self
+        while block is not None:
+            yield block
+            block = block.parent
+
+    def _check_open(self) -> None:
+        lease = self.lease
+        if lease is not None and lease._aborted is not None:
+            raise TransactionClosed(lease._aborted)
+        for block in self._chain():
+            if block._state != _OPEN:
+                raise TransactionClosed(f"the atomic block on {self.session!r} has ended")
+        if self._failed is not None:
+            raise TransactionManagementError(
+                f"an operation of this atomic block failed ({self._failed!r}); "
+                "no further operations run until the block ends"
+            )
+
+    def _hold(self) -> None:
+        task = asyncio.current_task()
+        for block in self._chain():
+            block._pending += 1
+            block._drained.clear()
+            if task is not None:
+                block._tasks.add(task)
+
+    def _unhold(self) -> None:
+        for block in self._chain():
+            block._pending -= 1
+            if block._pending == 0:
+                block._drained.set()
+
+    async def _request(self, method: str, *args: Any) -> Any:
+        """Send a request to the slot, counted as pending in this block and its parents; a failure that may leave
+        the transaction aborted marks this block failed."""
+        lease = cast("SlotLease", self.lease)
+        self._hold()
+        try:
+            return await lease.call(method, *args)
+        except BaseException as exc:
+            if self._failed is None and _leaves_transaction_failed(exc):
+                self._failed = exc
+            raise
+        finally:
+            self._unhold()
+
+    async def _wait_for_savepoint(self) -> None:
+        """Wait until no savepoint is open directly inside this block, then check that the block is open. Raises
+        `DeadlockError` when the wait exceeds the pool's ``acquire_timeout``."""
+        while True:
+            self._check_open()
+            child = self._child
+            if child is None or child._state == _ENDED:
+                return
+            timeout = cast("SlotLease", self.lease).pool.acquire_timeout
+            try:
+                async with asyncio.timeout(timeout):
+                    await child._ended.wait()
+            except TimeoutError:
+                raise DeadlockError(
+                    f"{child!r} stayed open for {timeout:g} s while another task of {self!r} waited for it",
+                    held_sessions=(self.session,),
+                    session=self.session,
+                    timeout=timeout,
+                ) from None
+
+    async def execute(self, operation: Operation) -> Any:
+        """Run ``operation`` in this block, after a savepoint open inside it ends. Raises `TransactionClosed` once
+        the block ends and `TransactionManagementError` after an operation of the block failed."""
+        await self._wait_for_savepoint()
+        return await self._request("execute", operation)
+
+    def on_commit(self, func: Callback, *, robust: bool = False) -> None:
+        """Run ``func()`` after the transaction commits, once the slot has been released, in registration order and
+        outside the transaction: operations in ``func`` use a slot of their own. An awaitable ``func()`` returns is
+        awaited. Callbacks are dropped when the transaction, or the savepoint they were registered in, rolls back.
+        With ``robust`` an exception ``func`` raises is logged; otherwise it is raised by the end of the outermost
+        block (or `commit()`), after the commit, and the remaining callbacks do not run. Raises `TransactionClosed`
+        once the block has ended."""
+        if not callable(func):
+            raise TypeError(f"an on_commit callback is callable, not {func!r}")
+        if self._state != _OPEN:
+            raise TransactionClosed(f"{self!r} is not open")
+        self._callbacks.append((func, robust))
+
+    def _commit_confirmed(self, event: object) -> None:  # noqa: ARG002
+        self._committed = True
+
+    async def _run_on_commit(self) -> None:
+        """Run the callbacks after a confirmed commit, in a context without this session's transaction."""
+        callbacks, self._callbacks = self._callbacks, []
+        if not (self._committed and callbacks):
+            return
+        context = contextvars.copy_context()
+        context.run(_unbind, self.session)
+        await asyncio.get_running_loop().create_task(_run_callbacks(callbacks), context=context)
+
+    # Entering
+
+    async def __aenter__(self) -> Atomic:
+        if self._state != _NEW:
+            raise TransactionManagementError(f"{self!r} was already entered")
+        parent = active_transaction(self.session)
+        if parent is None:
+            await self._begin()
+        elif isinstance(parent, Atomic):
+            await self._begin_savepoint(parent)
+        else:
+            raise TransactionManagementError(
+                f"the active transaction of {self.session!r} is {parent!r}, which takes no nested atomic blocks"
+            )
+        self._token = _bind(self.session, self)
+        return self
+
+    async def _begin(self) -> None:
+        from adorm.executor.sessions import get_runner, TransactionRunner
+
+        runner = get_runner()
+        if not isinstance(runner, TransactionRunner):
+            raise InterfaceError(f"no runner holds a slot for a transaction of {self.session!r} (runner {runner!r})")
+        self._state = _CLOSING
+        try:
+            slot_cm = runner.slot(self.session)
+            lease = await slot_cm.__aenter__()
+            try:
+                await lease.call("begin")
+            except BaseException:
+                # A begin that failed or was cancelled may have left the connection inside a transaction.
+                await lease.release(discard=True)
+                await slot_cm.__aexit__(None, None, None)
+                raise
+        except BaseException:
+            self._state = _ENDED
+            self._ended.set()
+            raise
+        lease.channel.on(ON_COMMIT, self._commit_confirmed)
+        self._lease, self._slot_cm = lease, slot_cm
+        self._state = _OPEN
+
+    async def _begin_savepoint(self, parent: Atomic) -> None:
+        self._state = _CLOSING
+        try:
+            await parent._wait_for_savepoint()
+            root = parent.root
+            self.parent = parent
+            self.savepoint = f"adorm_sp_{next(root._ids)}"
+            parent._child = self
+            try:
+                await parent._request("savepoint", self.savepoint)
+                parent._check_open()
+            except BaseException:
+                parent._child = None
+                raise
+        except BaseException:
+            self._state = _ENDED
+            self._ended.set()
+            raise
+        self._state = _OPEN
+
+    # Ending
+
+    async def __aexit__(
+        self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
+    ) -> bool:
+        try:
+            if self._state == _OPEN:
+                await self._end(commit=exc_type is None, explicit=False)
+            elif self._forced:
+                if exc_type is None:
+                    raise TransactionClosed(f"the enclosing atomic block of {self!r} ended first")
+            elif self._ender is not asyncio.current_task():
+                # Another task ended the block with commit() or rollback().
+                await self._ended.wait()
+                if exc_type is None and self._end_error is not None:
+                    raise self._end_error
+        finally:
+            if self._token is not None:
+                _active.reset(self._token)
+                self._token = None
+            if self._slot_cm is not None:
+                slot_cm, self._slot_cm = self._slot_cm, None
+                await slot_cm.__aexit__(None, None, None)
+        return False
+
+    async def commit(self) -> None:
+        """Commit the transaction (release the savepoint) now, after the operations already sent. Later operations
+        of the block raise `TransactionClosed`; the end of the block does nothing more."""
+        self._check_ended_once()
+        await self._end(commit=True, explicit=True)
+
+    async def rollback(self) -> None:
+        """Roll back the transaction (to the savepoint) now. Later operations of the block raise
+        `TransactionClosed`; the end of the block does nothing more."""
+        self._check_ended_once()
+        await self._end(commit=False, explicit=True)
+
+    def _check_ended_once(self) -> None:
+        if self._state != _OPEN:
+            raise TransactionClosed(f"{self!r} is not open")
+
+    def _close_descendants(self) -> str | None:
+        """End the savepoints still open inside this block; return the name of the outermost one."""
+        child = self._child
+        forced = child.savepoint if child is not None and child._state == _OPEN else None
+        while child is not None:
+            if child._state == _OPEN:
+                child._state = _ENDED
+                child._forced = True
+                child._ended.set()
+            child._callbacks.clear()
+            child = child._child
+        self._child = None
+        return forced
+
+    def _warn_live_tasks(self) -> None:
+        if not debug_enabled():
+            return
+        current = asyncio.current_task()
+        live = sorted(task.get_name() for task in self._tasks if task is not current and not task.done())
+        if live:
+            warnings.warn(
+                f"{self!r} ends while tasks that used it are still running: {', '.join(live)}",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+
+    async def _end(self, *, commit: bool, explicit: bool) -> None:
+        self._state = _CLOSING
+        self._ender = asyncio.current_task()
+        forced = self._close_descendants()
+        self._warn_live_tasks()
+        try:
+            if self.parent is None:
+                await self._end_transaction(commit, explicit, forced)
+            else:
+                await self._end_savepoint(commit, explicit, forced)
+        except Exception as exc:
+            self._end_error = exc
+            self._callbacks.clear()
+            raise
+        finally:
+            self._ended.set()
+        if self.parent is None:
+            await self._run_on_commit()
+
+    async def _discard_forced(self, forced: str | None) -> BaseException | None:
+        """Roll back to the savepoint ``forced`` that another task left open; return the error if that fails."""
+        if forced is None:
+            return None
+        try:
+            await cast("SlotLease", self.lease).call("rollback_to_savepoint", forced)
+        except Exception as exc:
+            logger.warning("rolling back the unfinished savepoint %r of %r failed", forced, self, exc_info=True)
+            return exc
+        return None
+
+    async def _end_transaction(self, commit: bool, explicit: bool, forced: str | None) -> None:
+        lease = cast("SlotLease", self._lease)
+        failed = self._failed
+        try:
+            await self._drained.wait()
+            failed = self._failed
+            if commit and failed is None and lease._aborted is None:
+                failed = await self._discard_forced(forced)
+            if lease._aborted is not None:
+                failed = None
+                if commit:
+                    raise TransactionClosed(lease._aborted)
+            elif commit and failed is None:
+                await lease.call("commit")
+            else:
+                try:
+                    await lease.call("rollback")
+                except Exception:
+                    if explicit and failed is None:
+                        raise
+                    logger.warning("rolling back %r failed", self, exc_info=True)
+        finally:
+            self._state = _ENDED
+            await lease.release()
+        if commit and failed is not None:
+            raise TransactionManagementError(
+                f"{self!r} was rolled back because an operation failed: {failed!r}"
+            ) from failed
+
+    async def _end_savepoint(self, commit: bool, explicit: bool, forced: str | None) -> None:
+        parent = cast("Atomic", self.parent)
+        failed = self._failed
+        settled = False
+        parent._hold()  # the parent ends only after this savepoint
+        try:
+            await self._drained.wait()
+            failed = self._failed
+            if commit and failed is None:
+                failed = await self._discard_forced(forced)
+            if commit and failed is None:
+                await parent._request("release_savepoint", self.savepoint)
+                parent._callbacks.extend(self._callbacks)
+            else:
+                try:
+                    await parent._request("rollback_to_savepoint", self.savepoint)
+                    await parent._request("release_savepoint", self.savepoint)
+                except Exception:
+                    if explicit and failed is None:
+                        raise
+                    logger.warning("rolling back %r failed", self, exc_info=True)
+            settled = True
+        finally:
+            if not settled and parent._failed is None:
+                parent._failed = TransactionManagementError(f"{self!r} did not end cleanly")
+            parent._unhold()
+            self._callbacks.clear()
+            self._state = _ENDED
+            self._ended.set()
+            if parent._child is self:
+                parent._child = None
+        if commit and failed is not None:
+            raise TransactionManagementError(
+                f"{self!r} was rolled back because an operation failed: {failed!r}"
+            ) from failed

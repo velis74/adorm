@@ -1,9 +1,11 @@
 # Sessions and bound models
 
 ::: info Status
-The installed version provides sessions, the current session, bound models and query sets. An operation outside a
-transaction runs on the configured [runner](/ref/sessions#adorm-executor-set-runner-runner), such as the
-[router](/topics/pool) of the slot pools.
+The installed version provides sessions, the current session, bound models, query sets and
+[transactions](/topics/transactions). An operation outside a transaction runs on the
+[runner](/ref/sessions#adorm-executor-set-runner-runner) set with `set_runner()`, such as the [router](/topics/pool) of
+the slot pools, or, once connection profiles are configured, on the event loop's default router (see
+[connection profiles](/topics/profiles#the-default-router)).
 :::
 
 A session names where operations run: the pair `(using, session_name)`. `using` is the name of a connection
@@ -73,6 +75,8 @@ Member.objects                      # <BoundModel club.Member on Session('defaul
 reports.Member                      # <BoundModel club.Member on Session('reports', 'nightly')>
 reports.bind("club.Member")         # the same
 reports.Member.objects              # the bound model itself, for Django-like spelling
+reports.Loan.all_loans              # another manager of the model, on the same session
+reports.bind(Loan, "all_loans")     # the same
 ```
 
 Binding takes no slot. The binding is fixed when `objects` is read: a bound model stored at module level stays bound
@@ -113,25 +117,27 @@ the current context: when one is bound, the operation runs in it; otherwise it g
 slot for that operation alone. The same bound model therefore runs inside or outside a transaction depending on
 where it is awaited.
 
-A transaction is bound to a session for a block with
-[`bind_transaction()`](/ref/sessions#adorm-executor-bind-transaction-session-transaction); `transaction` is any
-object with an `async execute(operation)`:
+An [`atomic()`](/topics/transactions) block binds its transaction to its session for the block:
 
 ```python
-from adorm.executor import active_transaction, bind_transaction
+from adorm.executor import active_transaction
 
 members = reports.Member                        # bound outside any transaction
 
-with bind_transaction(reports, transaction):
-    active_transaction(reports)                 # transaction
-    await members.filter(pk=1).update(fee=0)    # transaction.execute(Update(...))
+async with reports.atomic() as tx:
+    active_transaction(reports)                 # tx
+    await members.filter(pk=1).update(fee=0)    # tx.execute(Update(...))
 await members.count()                           # runner.run(reports, Count(...))
 ```
 
+[`bind_transaction()`](/ref/transactions#adorm-executor-bind-transaction-session-transaction) binds any object with an
+`async execute(operation)` the same way.
+
 A transaction of one session does not affect another session, even one on the same profile. Tasks created inside
 the block inherit its transaction with the context, also after the block ends; the transaction decides what an
-operation arriving then does. The target of an operation is chosen when it starts: an operation already running
-when the block ends stays in the transaction.
+operation arriving then does (an `atomic()` block raises `TransactionClosed`). The target of an operation is chosen
+when it starts: an operation already running when the block ends stays in the transaction; an `atomic()` block waits
+for it before it commits.
 
 ## Events
 

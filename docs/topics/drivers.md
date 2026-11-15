@@ -60,13 +60,17 @@ Besides return values a connection reports events through the `emit` callable it
 
 | Event | Meaning | Example |
 |---|---|---|
-| `CallbackEvent(name, payload)` | a point in the connection's life the client runs callbacks for | `on_commit` |
+| `CallbackEvent(name, payload)` | a point in the connection's life the client runs callbacks for; not `on_commit` or `on_rollback`, which the slot delivers itself | `cache_cleared` |
 | `BackendEvent(name, channel, payload)` | something the database or the target raised on its own | PostgreSQL `NOTIFY` |
 
-The slot forwards them over its event queue together with `ResultEvent` and `ErrorEvent`, the outcome of each
-request. On the client side an [`EventBus`](/ref/events#adorm-events-eventbus) dispatches them to subscribers.
-Signals of the target (Django's `post_save`, SQLAlchemy's ORM events) and the target's own `on_commit` hooks run
-on the driver side only; the client sees what the driver emits.
+The slot forwards them over its event queue together with the outcome of each request (`ResultEvent`,
+`ErrorEvent`, `CancelledEvent`) and its own `CallbackEvent("on_commit")` and `CallbackEvent("on_rollback")` after a
+successful commit or rollback. A connection emits nothing else: the slot drops and logs any other event it emits,
+outcome events and the names `on_commit` and `on_rollback` included. On the client the
+lease's event channel interprets each event, and the pool's [`EventBus`](/ref/events#adorm-events-eventbus)
+dispatches the unclaimed ones to subscribers; the [events topic](/topics/events) describes the path. Signals of the
+target (Django's `post_save`, SQLAlchemy's ORM events) and the target's own `on_commit` hooks run on the driver
+side only; the client sees what the driver emits.
 
 ## Capabilities
 
@@ -157,6 +161,17 @@ A connection is opened for a [`Profile`](/ref/drivers#adorm-drivers-profile): it
 target's database `alias`, driver `params` and an optional `connect` hook. When `connect` is set, the driver
 opens the target's connection with `connect(profile)` instead of its default: a threaded driver calls it in
 `connect_sync()` on the connection's thread, an async driver awaits its result in `open_connection()`.
+
+The profile's `on_acquire` and `on_release` hooks run through the connection's `call_hook()`, which passes them
+the connection's `target`: the target's own connection object, so that a hook can run `SET ROLE` or similar with the
+target's API. A threaded connection runs them on its thread. See [connection profiles](/topics/profiles#hooks).
+
+```python
+class DjangoConnection(ThreadedConnection):
+    @property
+    def target(self):
+        return self.db              # django.db.backends.base.base.BaseDatabaseWrapper
+```
 
 ## The contract on Django ORM, asyncpg and SQLAlchemy
 

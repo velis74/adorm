@@ -98,16 +98,21 @@ operation equals the original when its values already had their fields' types.
 
 ## `adorm.schema`
 
-### `adorm.schema.ModelSchema(label, pk, fields, relations={}, *, orm_names={})`
+### `adorm.schema.ModelSchema(label, pk, fields, relations={}, *, orm_names={}, methods={})`
 
 The schema of the model `label`: `fields` maps every concrete field name (a foreign key's column field such as
 `club_id` included) to its type hint, `relations` maps every relation name (forward, reverse and many-to-many) to the
 target model's label, and `pk` names the primary key field. `orm_names` maps a field or relation name to the target
 ORM's name where the two differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none)
-does. A frozen dataclass; the mappings are copied into read-only views.
+does. `methods` maps the [`MethodKey`](#adorm-schema-methodkey) of every driver method of the model's managers to
+its [`MethodSchema`](#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none); a
+[`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) encodes its arguments with
+those types. A frozen dataclass; the mappings are copied into read-only views.
 
 A label that is not `"app_label.ModelName"` (also among the relation targets), a `pk` that is not one of `fields`, a
-name that is both a field and a relation and an `orm_names` key that is neither raise `ValueError`.
+name that is both a field and a relation, an `orm_names` key that is neither and a `methods` key that is not a
+`(manager, "manager" | "queryset", method)` triple raise `ValueError`; a `methods` value that is not a
+`MethodSchema` raises `TypeError`.
 
 ```python
 ModelSchema("club.Payment", "code", {"code": uuid.UUID, "amount": decimal.Decimal}, {"member": "club.Member"})
@@ -115,6 +120,34 @@ ModelSchema("club.Note", "id", {"id": int, "json_": str}, orm_names={"json_": "j
 ```
 
 Any hint pydantic adapts can be a field type: scalars, `X | None`, `Literal`, enums, `list[str]`, pydantic models.
+
+### `adorm.schema.MethodKey`
+
+The type of a key of `ModelSchema.methods`: `tuple[str, str, str]`, the ORM manager name, the target (`"manager"` or
+`"queryset"`) and the method name.
+
+```python
+("objects", "queryset", "archive")
+```
+
+### `adorm.schema.MethodSchema(positional=(), keyword={}, var_positional=None, var_keyword=None)`
+
+The parameter types of a driver method (the parameters after `self`). `positional` holds the types of the
+parameters that take positional arguments, in order; `keyword` the types of those that take keyword arguments, by
+name; `var_positional` and `var_keyword` the types of `*args` and `**kwargs`. `None` is a parameter without a type,
+whose values are encoded with their inferred type. A frozen dataclass.
+
+| Method | Returns |
+|---|---|
+| `arg_type(index)` | the type of the positional argument at `index`: `positional[index]`, or `var_positional` past its end |
+| `kwarg_type(name)` | the type of the keyword argument `name`: `keyword[name]`, or `var_keyword` |
+
+```python
+# async def lend(self, reader_id: int, book_id: str, *, days: int = 14, **options: str)
+schema = MethodSchema((int, str), {"reader_id": int, "book_id": str, "days": int}, None, str)
+schema.arg_type(1)          # str
+schema.kwarg_type("colour") # str
+```
 
 ### `adorm.schema.SchemaSource`
 

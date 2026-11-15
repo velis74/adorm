@@ -33,9 +33,10 @@ ADORM_TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/postgres uv run 
 
 ## Demo
 
-`demo.py` runs the demo application: a Django project with a club domain (`demo/backend`), a FastAPI app using
-adorm (`demo/api`) and PostgreSQL. It creates, migrates and seeds the database `ADORM_DEMO_DATABASE_URL` (default
-`postgres://postgres@127.0.0.1:5432/adorm_demo`), then serves the API on <http://127.0.0.1:8000/docs>.
+`demo.py` runs the demo application: a Django project with a club domain (`demo/backend`), the adorm models generated
+from it (`demo/models`), a FastAPI app using them (`demo/api`) and PostgreSQL. It creates, migrates and seeds the
+database `ADORM_DEMO_DATABASE_URL` (default `postgres://postgres@127.0.0.1:5432/adorm_demo`), then serves the API on
+<http://127.0.0.1:8000/docs>; its `/api/data` endpoints run sessions and transactions on the executor.
 
 ```bash
 uv run python demo.py --list-drivers

@@ -1,0 +1,439 @@
+"""adorm's settings: connection profiles, pool defaults, the debug switch and providers of run-time profiles."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import inspect
+import logging
+import threading
+import weakref
+
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from dataclasses import asdict, dataclass, field, fields
+from types import MappingProxyType
+from typing import Any, TYPE_CHECKING
+
+from adorm.drivers.base import Driver
+from adorm.exceptions import InterfaceError
+from adorm.executor.debug import set_debug
+from adorm.executor.pool import (
+    check_hook,
+    check_timeout,
+    DEFAULT_ACQUIRE_TIMEOUT,
+    DEFAULT_COMMIT_TIMEOUT,
+    DEFAULT_RELEASE_TIMEOUT,
+    Router,
+)
+
+if TYPE_CHECKING:
+    from adorm.executor.sessions import Session
+
+__all__ = [
+    "ConnectionProfile",
+    "PoolSettings",
+    "ProfileProvider",
+    "ProfileRegistry",
+    "add_profile_provider",
+    "close_pools",
+    "configure",
+    "default_router",
+    "get_profile",
+    "profiles",
+    "register_profile",
+    "remove_profile_provider",
+    "unregister_profile",
+]
+
+Hook = Callable[[Any, "ConnectionProfile", "Session"], Any]
+"""``hook(connection, profile, session)``: ``connection`` is the target's connection (`DriverConnection.target`)."""
+
+ProfileProvider = Callable[[str], "ConnectionProfile | None | Awaitable[ConnectionProfile | None]"]
+"""``provider(name)`` returns the profile ``name``, ``None`` when it does not provide it, or an awaitable of either."""
+
+
+@dataclass(frozen=True)
+class PoolSettings:
+    """The settings of a profile's pool; see `adorm.executor.Pool` for their meaning."""
+
+    max_connections: int = 0
+    acquire_timeout: float = DEFAULT_ACQUIRE_TIMEOUT
+    commit_timeout: float | None = DEFAULT_COMMIT_TIMEOUT
+    release_timeout: float = DEFAULT_RELEASE_TIMEOUT
+
+    def __post_init__(self) -> None:
+        value = self.max_connections
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"max_connections is a non-negative integer, not {value!r}")
+        check_timeout(self.acquire_timeout, "acquire_timeout")
+        if self.commit_timeout is not None:
+            check_timeout(self.commit_timeout, "commit_timeout")
+        check_timeout(self.release_timeout, "release_timeout")
+
+    @classmethod
+    def coerce(cls, value: PoolSettings | Mapping[str, Any]) -> PoolSettings:
+        """``value`` when it is a `PoolSettings`, else ``PoolSettings(**value)``."""
+        if isinstance(value, PoolSettings):
+            return value
+        if isinstance(value, Mapping):
+            return cls(**value)
+        raise TypeError(f"pool settings are a PoolSettings or a mapping, not {type(value).__name__}")
+
+    def as_kwargs(self) -> dict[str, Any]:
+        """The settings as keyword arguments of `adorm.executor.Pool`."""
+        return asdict(self)
+
+
+def _import_driver(path: str) -> Any:
+    module_name, sep, attribute = path.partition(":") if ":" in path else path.rpartition(".")
+    if not sep or not module_name or not attribute:
+        raise ValueError(f"a driver path is 'package.module.Name' or 'package.module:Name', not {path!r}")
+    module = importlib.import_module(module_name)
+    try:
+        return getattr(module, attribute)
+    except AttributeError:
+        raise ImportError(f"module {module_name!r} has no driver {attribute!r}") from None
+
+
+logger = logging.getLogger("adorm.settings")
+
+_driver_lock = threading.Lock()
+
+
+@dataclass(frozen=True, eq=False)
+class ConnectionProfile:
+    """A named connection profile: what a session's ``using`` refers to.
+
+    ``driver`` is a `Driver` instance, a `Driver` subclass (instantiated without arguments) or the import path of
+    either (``"package.module.Name"`` or ``"package.module:Name"``), imported on first use. ``alias`` is the
+    target's database alias and ``params`` the driver parameters. The hooks:
+
+    - ``connect(profile)`` opens the target's connection in place of the driver's default;
+    - ``on_acquire(connection, profile, session)`` runs when a slot is assigned to a session, before its first
+      request;
+    - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.
+
+    ``connection`` is the target's connection. A threaded driver runs the hooks on the connection's thread and
+    they are plain functions; an async driver awaits a hook's result when it is awaitable. ``pool`` overrides the
+    registry's pool defaults. ``params`` and ``connect`` do not appear in the representation. A profile copies as
+    itself.
+    """
+
+    name: str
+    driver: Driver | type[Driver] | str
+    alias: str = "default"
+    params: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    connect: Callable[[Any], Any] | None = field(default=None, repr=False)
+    on_acquire: Hook | None = None
+    on_release: Hook | None = None
+    pool: PoolSettings | None = None
+
+    def __post_init__(self) -> None:
+        for what in ("name", "alias"):
+            value = getattr(self, what)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{what} is a non-empty string, not {value!r}")
+        driver = self.driver
+        if (
+            not (isinstance(driver, (Driver, str)) or (isinstance(driver, type) and issubclass(driver, Driver)))
+            or driver == ""
+        ):
+            raise TypeError(f"driver is a Driver, a Driver subclass or an import path, not {driver!r}")
+        if not isinstance(self.params, Mapping):
+            raise TypeError(f"params is a mapping, not {type(self.params).__name__}")
+        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        # The mode of a driver given by import path is checked when its pool is created.
+        mode = None if isinstance(driver, str) else getattr(driver, "mode", None)
+        for what in ("connect", "on_acquire", "on_release"):
+            check_hook(getattr(self, what), what, self.name, mode)
+        if self.pool is not None:
+            object.__setattr__(self, "pool", PoolSettings.coerce(self.pool))
+        object.__setattr__(self, "_driver", driver if isinstance(driver, Driver) else None)
+
+    def __copy__(self) -> ConnectionProfile:
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> ConnectionProfile:
+        return self
+
+    @classmethod
+    def coerce(cls, name: str, value: ConnectionProfile | Mapping[str, Any]) -> ConnectionProfile:
+        """``value`` when it is a profile named ``name``, else ``ConnectionProfile(name=name, **value)``."""
+        if isinstance(value, ConnectionProfile):
+            if value.name != name:
+                raise ValueError(f"profile {value.name!r} is registered under the name {name!r}")
+            return value
+        if isinstance(value, Mapping):
+            return cls(name=name, **value)
+        raise TypeError(f"a connection profile is a ConnectionProfile or a mapping, not {type(value).__name__}")
+
+    def get_driver(self) -> Driver:
+        """The profile's driver instance, imported and created on the first call. Thread-safe."""
+        driver = self._driver  # type: ignore[attr-defined]
+        if driver is not None:
+            return driver
+        with _driver_lock:
+            if self._driver is None:  # type: ignore[attr-defined]
+                found = _import_driver(self.driver) if isinstance(self.driver, str) else self.driver
+                if isinstance(found, type) and issubclass(found, Driver):
+                    found = found()
+                if not isinstance(found, Driver):
+                    raise TypeError(f"{self.driver!r} of profile {self.name!r} is not a Driver")
+                object.__setattr__(self, "_driver", found)
+            return self._driver  # type: ignore[attr-defined]
+
+    def replace(self, **changes: Any) -> ConnectionProfile:
+        """A copy of the profile with ``changes``."""
+        values = {f.name: getattr(self, f.name) for f in fields(self)}
+        values.update(changes)
+        return ConnectionProfile(**values)
+
+
+class ProfileRegistry:
+    """Connection profiles by name, with providers that create profiles at run time.
+
+    `resolve()` returns a registered profile, or asks the providers in the order they were added and registers the
+    first profile one returns. ``pool`` holds the pool settings of profiles that set none. Routers built with the
+    registry retire the pool of a profile that is unregistered or replaced. Thread-safe.
+    """
+
+    def __init__(self, *, pool: PoolSettings | Mapping[str, Any] | None = None) -> None:
+        self._lock = threading.RLock()
+        self._profiles: dict[str, ConnectionProfile] = {}
+        self._providers: list[ProfileProvider] = []
+        self._routers: weakref.WeakSet[Router] = weakref.WeakSet()
+        self.pool = PoolSettings() if pool is None else PoolSettings.coerce(pool)
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._profiles
+
+    def __iter__(self) -> Any:
+        return iter(list(self._profiles.values()))
+
+    def __len__(self) -> int:
+        return len(self._profiles)
+
+    @property
+    def providers(self) -> tuple[ProfileProvider, ...]:
+        """The providers, in the order they are asked."""
+        return tuple(self._providers)
+
+    def is_empty(self) -> bool:
+        """Whether the registry has neither profiles nor providers."""
+        return not self._profiles and not self._providers
+
+    def get(self, name: str) -> ConnectionProfile | None:
+        """The registered profile ``name``, ``None`` when there is none. Providers are not asked."""
+        return self._profiles.get(name)
+
+    def register(self, profile: ConnectionProfile, *, replace: bool = False) -> ConnectionProfile:
+        """Register ``profile`` under its name. A registered name raises `ValueError` unless ``replace``."""
+        if not isinstance(profile, ConnectionProfile):
+            raise TypeError(f"register() takes a ConnectionProfile, not {type(profile).__name__}")
+        with self._lock:
+            previous = self._profiles.get(profile.name)
+            if previous is not None and not replace:
+                raise ValueError(f"connection profile {profile.name!r} is already registered")
+            self._profiles[profile.name] = profile
+        if previous is not None and previous is not profile:
+            self._changed(profile.name)
+        return profile
+
+    def unregister(self, name: str) -> ConnectionProfile | None:
+        """Remove the profile ``name`` and return it, ``None`` when it was not registered. A provider may provide
+        the name again on its next use."""
+        with self._lock:
+            profile = self._profiles.pop(name, None)
+        if profile is not None:
+            self._changed(name)
+        return profile
+
+    def add_provider(self, provider: ProfileProvider) -> ProfileProvider:
+        """Add ``provider``; it is asked after the providers added before it."""
+        if not callable(provider):
+            raise TypeError(f"a profile provider is a callable, not {type(provider).__name__}")
+        with self._lock:
+            self._providers.append(provider)
+        return provider
+
+    def remove_provider(self, provider: ProfileProvider) -> None:
+        """Remove ``provider``; the profiles it provided stay registered. An unknown provider raises `ValueError`."""
+        with self._lock:
+            self._providers.remove(provider)
+
+    def clear(self) -> None:
+        """Remove every profile and provider."""
+        with self._lock:
+            names = list(self._profiles)
+            self._profiles.clear()
+            self._providers.clear()
+        for name in names:
+            self._changed(name)
+
+    async def resolve(self, name: str) -> ConnectionProfile:
+        """The profile ``name``: the registered one, else the first one a provider returns, registered. Raises
+        `InterfaceError` when there is none, and `ValueError` when a provider returns a profile of another name."""
+        profile = self._profiles.get(name)
+        if profile is not None:
+            return profile
+        for provider in self.providers:
+            result = provider(name)
+            if inspect.isawaitable(result):
+                result = await result
+            if result is None:
+                continue
+            if not isinstance(result, ConnectionProfile):
+                raise TypeError(f"profile provider {provider!r} returned {type(result).__name__} for {name!r}")
+            if result.name != name:
+                raise ValueError(f"profile provider {provider!r} returned profile {result.name!r} for {name!r}")
+            with self._lock:
+                return self._profiles.setdefault(name, result)
+        raise InterfaceError(f"no connection profile is named {name!r}")
+
+    def _attach(self, router: Router) -> None:
+        self._routers.add(router)
+
+    def _changed(self, name: str) -> None:
+        for router in list(self._routers):
+            router._profile_changed(name)
+
+
+_registry = profiles = ProfileRegistry()
+"""The connection profiles of `configure()`, `register_profile()` and the default routers."""
+
+_routers: dict[asyncio.AbstractEventLoop, Router] = {}
+_closers: dict[asyncio.AbstractEventLoop, AsyncGenerator[None, None]] = {}
+_routers_lock = threading.Lock()
+
+
+def configure(
+    *,
+    profiles: Mapping[str, ConnectionProfile | Mapping[str, Any]] | None = None,
+    providers: Iterable[ProfileProvider] = (),
+    pool: PoolSettings | Mapping[str, Any] | None = None,
+    debug: bool | None = None,
+) -> None:
+    """Replace adorm's settings: the connection profiles by name (a `ConnectionProfile` or the keyword arguments of
+    one), the profile providers, the pool settings of profiles that set none, and the executor's debug switch
+    (`adorm.executor.set_debug()`). Everything is validated before anything changes."""
+    registry = _registry
+    if profiles is not None and not isinstance(profiles, Mapping):
+        raise TypeError(f"profiles is a mapping of names to profiles, not {type(profiles).__name__}")
+    built = [ConnectionProfile.coerce(name, value) for name, value in (profiles or {}).items()]
+    providers = list(providers)
+    for provider in providers:
+        if not callable(provider):
+            raise TypeError(f"a profile provider is a callable, not {type(provider).__name__}")
+    defaults = PoolSettings() if pool is None else PoolSettings.coerce(pool)
+    if debug is not None and not isinstance(debug, bool):
+        raise TypeError(f"debug is a bool or None, not {debug!r}")
+    registry.clear()
+    registry.pool = defaults
+    for profile in built:
+        registry.register(profile)
+    for provider in providers:
+        registry.add_provider(provider)
+    set_debug(debug)
+
+
+def register_profile(profile: ConnectionProfile, *, replace: bool = False) -> ConnectionProfile:
+    """Register ``profile`` in the settings at run time (`ProfileRegistry.register()`)."""
+    return _registry.register(profile, replace=replace)
+
+
+def unregister_profile(name: str) -> ConnectionProfile | None:
+    """Remove the profile ``name`` from the settings (`ProfileRegistry.unregister()`); default routers close its
+    pool."""
+    return _registry.unregister(name)
+
+
+def get_profile(name: str) -> ConnectionProfile | None:
+    """The registered profile ``name``, ``None`` when there is none."""
+    return _registry.get(name)
+
+
+def add_profile_provider(provider: ProfileProvider) -> ProfileProvider:
+    """Add a provider of run-time profiles to the settings (`ProfileRegistry.add_provider()`). Usable as a
+    decorator."""
+    return _registry.add_provider(provider)
+
+
+def remove_profile_provider(provider: ProfileProvider) -> None:
+    """Remove a provider from the settings (`ProfileRegistry.remove_provider()`)."""
+    _registry.remove_provider(provider)
+
+
+def default_router(*, create: bool = True) -> Router | None:
+    """The router of the running event loop built from the settings' profiles; created on the first call unless
+    ``create`` is false. Raises `RuntimeError` outside a running event loop.
+
+    The router's pools close when the loop shuts down its asynchronous generators (`asyncio.run()`,
+    `asyncio.Runner`, asgiref's ``async_to_sync``) or on `close_pools()`. Creating a router also drops the routers
+    of loops that closed without either; their threaded connections are closed on their own threads.
+    """
+    loop = asyncio.get_running_loop()
+    router = _routers.get(loop)
+    if router is None and create:
+        with _routers_lock:
+            router = _routers.get(loop)
+            if router is None:
+                _drop_closed_loops()
+                router = _routers[loop] = Router(profiles=_registry)
+                closer = _closers[loop] = _close_at_shutdown(loop, router)
+                # Started here so that the loop tracks it and closes it at shutdown.
+                try:
+                    closer.asend(None).send(None)
+                except StopIteration:
+                    pass
+    return router
+
+
+async def _close_at_shutdown(loop: asyncio.AbstractEventLoop, router: Router) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        with _routers_lock:
+            if _routers.get(loop) is router:
+                del _routers[loop]
+                _closers.pop(loop, None)
+        await router.close()
+
+
+def _drop_closed_loops() -> None:
+    """Forget the routers of closed loops; close their threaded connections, report the others."""
+    for loop in [loop for loop in _routers if loop.is_closed()]:
+        router = _routers.pop(loop)
+        _closers.pop(loop, None)
+        left = 0
+        for pool in router.pools:
+            for slot in pool._slots:
+                close = getattr(slot.connection, "_close_detached", None)
+                if close is None or not close():
+                    left += 1
+        if left:
+            logger.warning(
+                "an event loop closed without closing adorm's pools; %d connection(s) of its default router are "
+                "left open",
+                left,
+            )
+
+
+async def close_pools() -> None:
+    """Close the pools of the running event loop's default router and drop the router; the next operation builds a
+    new one."""
+    loop = asyncio.get_running_loop()
+    with _routers_lock:
+        _routers.pop(loop, None)
+        closer = _closers.pop(loop, None)
+    if closer is not None:
+        await closer.aclose()
+
+
+def _default_runner() -> Router | None:
+    """The default router of the running event loop when the settings have a profile or a provider."""
+    if _registry.is_empty():
+        return None
+    try:
+        return default_router()
+    except RuntimeError:
+        return None

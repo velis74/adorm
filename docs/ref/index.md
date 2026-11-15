@@ -28,12 +28,13 @@ the names it covers:
 | [Operation encoding](./encoding) | model schemas and the JSON encoding of operations (`adorm.schema`, `adorm.codec`) |
 | [Lookups](./lookups) | field lookups (`exact`, `icontains`, `in`, …) and relation traversal |
 | [Expressions, functions and aggregates](./expressions) | `F`, `Value`, `Q`, `Func` and its functions, aggregates, `Case`, `Subquery` |
-| [Model API](./models) | `Model`, `ModelMeta`, relation descriptors, the model registry |
-| [Sessions](./sessions) | `create_session`, `current_session`, `Session`, `BoundModel`, the active transactions of a context (`adorm.executor`) |
-| [Pool and router](./pool) | `Pool`, `Router`, slots, leases and their request and event queues, held slots (`adorm.executor`) |
-| Transactions and timeouts | `atomic`, `connection_options`, `timeout` |
+| [Model API](./models) | `Model`, `ModelMeta`, relation descriptors, `Manager` and `driver_method`, the model registry |
+| [Sessions](./sessions) | `create_session`, `current_session`, `Session`, `BoundModel`, the runner (`adorm.executor`) |
+| [Pool and router](./pool) | `Pool`, `Router`, slots, leases and their request queues and event channels, held slots (`adorm.executor`) |
+| [Transactions](./transactions) | `atomic`, `Atomic`, `on_commit`, the active transactions of a context (`adorm.executor`) |
+| Connection options and timeouts | `connection_options`, `timeout` |
 | [Exceptions](./exceptions) | the exception hierarchy |
-| Settings | pool settings and connection profiles |
+| [Settings](./settings) | `configure`, connection profiles, pool settings, run-time profiles (`adorm.settings`) |
 | [Drivers](./drivers) | the driver contract (`adorm.drivers`) |
-| [Events](./events) | event types and their dispatch (`adorm.events`) |
-| [Model generator](./codegen) | `adorm generate`, the model description, rendering and files (`adorm.codegen`, `adorm.cli`) |
+| [Events](./events) | event types, their encoded form, the client's event channel and dispatch (`adorm.events`) |
+| [Model generator](./codegen) | `adorm generate`, the model description, rendering and files, `expose` and `client_base` (`adorm.codegen`, `adorm.cli`, `adorm.porting`) |

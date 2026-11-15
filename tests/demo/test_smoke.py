@@ -1,6 +1,7 @@
 """The demo end to end: ``demo.py`` sets up a PostgreSQL database and serves the API, once per available driver."""
 
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -73,6 +74,7 @@ def database(demo_env):
     assert result.returncode == 0, result.stderr
     assert "Created the demo database." in result.stdout
     assert "Demo data created." in result.stdout
+    assert "5 generated files are up to date." in result.stdout
     assert "11 adorm models match the Django models." in result.stdout
     with psycopg.connect(demo_env["ADORM_DEMO_DATABASE_URL"]) as conn:
         yield conn
@@ -244,6 +246,86 @@ def test_api_serves_operations(server):
         assert http.delete("/api/operations/clubs/koper-sailing/draft-invoices").status_code == 200
         assert len(http.get("/api/models").json()) == 11
         assert http.get("/openapi.json").status_code == 200
+
+
+def test_api_executes_the_data_endpoints(server, demo_env, database):
+    """The data endpoints on every driver. The memory driver loads the seeded database and keeps its writes in
+    memory; on another driver the writes land in the database, which is reset afterwards."""
+    driver, base = server
+    if driver is None:
+        pytest.skip("no driver is available")
+    try:
+        _check_data_endpoints(driver, base, database)
+    finally:
+        if driver != "memory":
+            database.rollback()
+            result = run_demo(demo_env, "--setup-only", "--reset")
+            assert result.returncode == 0, result.stderr
+
+
+def _check_data_endpoints(driver, base, database):
+    members_before = count(database, "clubs_member")
+    payments_before = count(database, "billing_payment")
+    invoice = database.execute("SELECT min(id) FROM billing_invoice WHERE status = 'open'").fetchone()[0]
+    with httpx.Client(base_url=base, timeout=10) as http:
+        members = http.get("/api/data/members", params={"limit": 100}).json()
+        assert len(members["result"]) == members_before
+        if driver == "memory":
+            assert [call["call"] for call in members["calls"]] == ["acquire", "select clubs.Member", "release"]
+
+        summary = http.get("/api/data/clubs/ljubljana-rowing/summary", params={"atomic": True}).json()["result"]
+        expected = database.execute(
+            "SELECT (SELECT count(*) FROM clubs_membership m WHERE m.club_id = c.id AND m.active),"
+            " (SELECT count(*) FROM activities_activity a WHERE a.club_id = c.id),"
+            " (SELECT count(*) FROM billing_invoice i WHERE i.club_id = c.id AND i.status = 'open')"
+            " FROM clubs_club c WHERE c.slug = 'ljubljana-rowing'"
+        ).fetchone()
+        assert (summary["active_memberships"], summary["activities"], summary["open_invoices"]) == expected
+
+        enrolment = {"first_name": "Mia", "last_name": "Kos", "email": "mia@example.com", "fee": "50.00"}
+        enrolled = http.post("/api/data/clubs/koper-sailing/members", json=enrolment)
+        assert enrolled.status_code == 201, enrolled.text
+        member_id = enrolled.json()["result"]["member"]["id"]
+        assert http.get(f"/api/data/members/{member_id}").json()["result"]["first_name"] == "Mia"
+        assert [message["text"] for message in http.get("/api/data/outbox").json()] == [
+            "Welcome to Koper Sailing Club, Mia!"
+        ]
+
+        payment = {"amount": "120.00", "paid_at": "2026-02-01T12:00:00Z"}
+        assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 201
+        assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 409
+        assert http.get(f"/api/data/invoices/{invoice}").json()["result"]["invoice"]["status"] == "paid"
+
+        state = http.get("/api/executor").json()
+        assert state["driver"] == driver
+        assert state["pools"][0]["in_use"] == 0
+    database.rollback()
+    status = database.execute("SELECT status FROM billing_invoice WHERE id = %s", (invoice,)).fetchone()
+    if driver == "memory":
+        assert count(database, "clubs_member") == members_before
+        assert count(database, "billing_payment") == payments_before
+        assert status == ("open",)
+    else:
+        assert count(database, "clubs_member") == members_before + 1
+        assert count(database, "billing_payment") == payments_before + 1
+        assert status == ("paid",)
+
+
+def test_stale_generated_models_fail_the_check(demo_env, tmp_path):
+    shutil.copytree(ROOT / "demo" / "models", tmp_path / "models")
+    clubs = tmp_path / "models" / "clubs.py"
+    clubs.write_text(clubs.read_text().replace("max_length=100", "max_length=99"))
+    command = ["-m", "adorm", "generate", "--settings", "demo.backend.settings", "--line-length", "120", "--check"]
+    result = subprocess.run(  # noqa: S603 - fixed command
+        [sys.executable, *command, "-o", str(tmp_path / "models")],
+        cwd=ROOT,
+        env=demo_env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 1
+    assert "clubs.py" in result.stdout + result.stderr
 
 
 MISMATCH = """

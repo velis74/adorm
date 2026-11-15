@@ -11,7 +11,8 @@ from adorm.models import ManyToMany, registry, ReverseForeignKey
 from adorm.operations import Create, Get, GetOrCreate, Operation, Save, Select, Update
 from demo.api import drivers, operations
 from demo.api.main import app
-from demo.api.models import Member, MODELS
+from demo.models import MODELS
+from demo.models.clubs import Member
 
 
 class FakeDriver(Driver):
@@ -109,9 +110,10 @@ def test_load_runs_setup_before_instantiating():
     assert calls == ["setup"]
 
 
-def test_the_demo_lists_django_and_asyncpg():
-    assert [d.name for d in drivers.DRIVERS] == ["django", "asyncpg"]
+def test_the_demo_lists_django_asyncpg_and_memory():
+    assert [d.name for d in drivers.DRIVERS] == ["django", "asyncpg", "memory"]
     assert drivers.get("asyncpg").module == "adorm.drivers.asyncpg"
+    assert drivers.get("memory").is_available()
 
 
 async def test_drivers_endpoint_reports_availability(matrix, client):  # noqa: ARG001

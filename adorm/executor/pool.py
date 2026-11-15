@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import logging
 import math
@@ -11,22 +12,25 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any, TYPE_CHECKING
+from typing import Any, cast, TYPE_CHECKING
 
 from adorm.events import EventBus
 from adorm.exceptions import DeadlockError, InterfaceError, SessionTimeout
 from adorm.executor.slot import Slot, SlotLease
 
 if TYPE_CHECKING:
-    from adorm.drivers.base import Driver, Profile
+    from adorm.drivers.base import Driver, DriverConnection, Profile
     from adorm.executor.sessions import Session
     from adorm.operations import Operation
+    from adorm.settings import ConnectionProfile, ProfileRegistry
 
 __all__ = ["Pool", "Router", "held_leases", "holding"]
 
 logger = logging.getLogger("adorm.executor")
 
 DEFAULT_ACQUIRE_TIMEOUT = 30.0
+DEFAULT_COMMIT_TIMEOUT = 60.0
+DEFAULT_RELEASE_TIMEOUT = 30.0
 
 _held: ContextVar[tuple[SlotLease, ...]] = ContextVar("adorm_held_leases", default=())
 
@@ -53,10 +57,25 @@ def holding(lease: SlotLease) -> Iterator[SlotLease]:
         _held.reset(token)
 
 
-def _check_timeout(value: Any, what: str) -> float:
+def check_timeout(value: Any, what: str) -> float:
+    """``value`` as a float; `ValueError` unless it is a positive, finite number of seconds."""
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not value > 0 or math.isinf(value):
         raise ValueError(f"{what} is a positive, finite number of seconds, not {value!r}")
     return float(value)
+
+
+def check_hook(hook: Any, what: str, profile_name: str, mode: str | None) -> None:
+    """Raise `TypeError` unless ``hook`` is ``None`` or a callable that a driver of ``mode`` can call: a threaded
+    driver calls hooks on the connection's thread, so they are plain functions."""
+    if hook is None:
+        return
+    if not callable(hook):
+        raise TypeError(f"{what} of profile {profile_name!r} is a callable or None, not {type(hook).__name__}")
+    if mode == "threaded" and inspect.iscoroutinefunction(hook):
+        raise TypeError(
+            f"{what} of profile {profile_name!r} is a coroutine function; "
+            "a threaded driver runs it on the connection's thread, so it is a plain function"
+        )
 
 
 _OPEN = object()  # handed to a waiter instead of a slot: it may open a connection, the capacity is reserved
@@ -84,7 +103,13 @@ class Pool:
     (`Driver.is_refusal()`). After a refusal the pool holds at most as many slots as it had then, whatever
     ``max_connections`` is, until a slot leaves the pool. A request finds an idle slot, opens a new one, or waits in
     a first-in, first-out queue for a slot to be returned. ``acquire_timeout`` is the default number of seconds a
-    request waits.
+    request waits. ``commit_timeout`` is the number of seconds a slot inside a transaction waits for its lease's next
+    request before it rolls the transaction back and leaves the pool; ``None`` sets no limit.
+
+    The profile's ``on_acquire`` and ``on_release`` attributes, when present and not ``None``, are its hooks: the
+    router calls ``on_acquire`` when it assigns a slot to a session, the slot calls ``on_release`` when the session
+    returns it usable. ``release_timeout`` is the number of seconds ``on_release`` may run before the slot leaves
+    the pool instead.
 
     A pool serves one event loop; its slots are acquired through a `Router`. ``events`` receives the callbacks and
     backend events a connection emits while no lease holds its slot.
@@ -97,13 +122,20 @@ class Pool:
         *,
         max_connections: int = 0,
         acquire_timeout: float = DEFAULT_ACQUIRE_TIMEOUT,
+        commit_timeout: float | None = DEFAULT_COMMIT_TIMEOUT,
+        release_timeout: float = DEFAULT_RELEASE_TIMEOUT,
     ) -> None:
         if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections < 0:
             raise ValueError(f"max_connections is a non-negative integer, not {max_connections!r}")
         self.driver = driver
         self.profile = profile
         self.max_connections = max_connections
-        self.acquire_timeout = _check_timeout(acquire_timeout, "acquire_timeout")
+        self.acquire_timeout = check_timeout(acquire_timeout, "acquire_timeout")
+        self.commit_timeout = None if commit_timeout is None else check_timeout(commit_timeout, "commit_timeout")
+        self.release_timeout = check_timeout(release_timeout, "release_timeout")
+        check_hook(getattr(profile, "connect", None), "connect", profile.name, driver.mode)
+        self.on_acquire = self._hook(profile, "on_acquire")
+        self.on_release = self._hook(profile, "on_release")
         self.events = EventBus()
         self.closed = False
         self.router: Router | None = None
@@ -113,6 +145,11 @@ class Pool:
         self._refused_at: int | None = None
         self._waiters: deque[_Waiter] = deque()
         self._closing: set[asyncio.Task] = set()
+
+    def _hook(self, profile: Profile, what: str) -> Any:
+        hook = getattr(profile, what, None)
+        check_hook(hook, what, profile.name, self.driver.mode)
+        return hook
 
     @property
     def name(self) -> str:
@@ -246,15 +283,27 @@ class Router:
     pool a flow waits for is held through `slot()` or `run()` by tasks that themselves wait for a slot that cannot
     become free, one of those tasks gets `DeadlockError` at once.
 
+    With ``profiles``, a `ProfileRegistry`, a session whose ``using`` no added pool serves gets a pool created
+    from the registry's profile of that name (`ProfileRegistry.resolve()`), with the profile's pool settings or the
+    registry's. When that profile is unregistered or replaced, the router stops routing to its pool and closes it;
+    the next acquisition creates a pool from the current profile.
+
     A router serves one event loop. It is a `Runner`: ``set_runner(router)`` makes it run the operations of
     sessions outside a transaction.
     """
 
-    def __init__(self, pools: Iterable[Pool] = ()) -> None:
+    def __init__(self, pools: Iterable[Pool] = (), *, profiles: ProfileRegistry | None = None) -> None:
         self._pools: dict[str, Pool] = {}
         self._waiting: dict[asyncio.Task, _Waiter] = {}
+        self.profiles = profiles
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._resolving: dict[str, asyncio.Future[Pool]] = {}
+        self._from_profiles: set[Pool] = set()
+        self._retiring: set[asyncio.Task] = set()
         for pool in pools:
             self.add(pool)
+        if profiles is not None:
+            profiles._attach(self)
 
     def add(self, pool: Pool) -> Pool:
         """Route the sessions of ``pool.name`` to ``pool``. A pool belongs to one router; a name to one pool."""
@@ -280,6 +329,95 @@ class Router:
         """The routed pools."""
         return tuple(self._pools.values())
 
+    async def get_pool(self, using: str) -> Pool:
+        """The pool of the profile ``using``, created from ``profiles`` when no pool serves it. Raises
+        `InterfaceError` when there is no such pool or profile, and the error of creating the profile's driver."""
+        pool = self._pools.get(using)
+        if pool is not None:
+            return pool
+        if self.profiles is None:
+            raise InterfaceError(f"no pool serves connection profile {using!r}")
+        self._loop = asyncio.get_running_loop()
+        while True:
+            future = self._resolving.get(using)
+            if future is None:
+                break
+            # Another task creates the pool; a creator that was cancelled leaves it to the next one.
+            try:
+                return await asyncio.shield(future)
+            except asyncio.CancelledError:
+                if not future.cancelled():
+                    raise
+                task = asyncio.current_task()
+                if task is not None and task.cancelling():
+                    raise
+            pool = self._pools.get(using)
+            if pool is not None:
+                return pool
+        future = self._loop.create_future()
+        self._resolving[using] = future
+        try:
+            pool = await self._create_pool(using)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        except BaseException as exc:
+            future.set_exception(exc)
+            future.exception()  # retrieved here: the creating task raises it, waiters re-raise it
+            raise
+        finally:
+            del self._resolving[using]
+        future.set_result(pool)
+        return pool
+
+    async def _create_pool(self, using: str) -> Pool:
+        registry = cast("ProfileRegistry", self.profiles)
+        profile: ConnectionProfile = await registry.resolve(using)
+        settings = registry.pool if profile.pool is None else profile.pool
+        pool = Pool(profile.get_driver(), profile, **settings.as_kwargs())
+        existing = self._pools.get(using)
+        if existing is not None:  # added meanwhile
+            return existing
+        self.add(pool)
+        self._from_profiles.add(pool)
+        if registry.get(using) is not profile:
+            # Unregistered or replaced while the pool was created.
+            self._retire(using, pool)
+        return pool
+
+    def _profile_changed(self, name: str) -> None:
+        """Retire the pool created from the profile ``name``; callable from any thread."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        if asyncio._get_running_loop() is loop:
+            self._retire(name)
+        else:
+            try:
+                loop.call_soon_threadsafe(self._retire, name)
+            except RuntimeError:
+                pass  # the loop closed meanwhile
+
+    def _retire(self, name: str, pool: Pool | None = None) -> None:
+        pool = self._pools.get(name) if pool is None else pool
+        if pool is None or pool not in self._from_profiles or self._pools.get(name) is not pool:
+            return
+        del self._pools[name]
+        self._from_profiles.discard(pool)
+        task = asyncio.get_running_loop().create_task(pool.close())
+        self._retiring.add(task)
+        task.add_done_callback(self._retiring.discard)
+
+    async def remove(self, using: str) -> Pool:
+        """Stop routing the sessions of ``using`` to its pool, close the pool (`Pool.close()`) and return it. Raises
+        `InterfaceError` when no pool serves ``using``. A router with ``profiles`` creates a new pool for the next
+        acquisition."""
+        pool = self.pool(using)
+        del self._pools[using]
+        self._from_profiles.discard(pool)
+        await pool.close()
+        return pool
+
     def held_sessions(self, task: asyncio.Task | None = None) -> tuple[Session, ...]:
         """The sessions of the unreleased leases a flow holds: those ``task`` acquired and, when ``task`` is the
         current task (the default), those of the current context's `held_leases()`."""
@@ -301,8 +439,8 @@ class Router:
         `DeadlockError`, `InterfaceError` when the pool is closed, and the driver's error when opening a
         connection fails for another reason than a refusal.
         """
-        pool = self.pool(session.using)
-        timeout = pool.acquire_timeout if timeout is None else _check_timeout(timeout, "timeout")
+        pool = await self.get_pool(session.using)
+        timeout = pool.acquire_timeout if timeout is None else check_timeout(timeout, "timeout")
         if pool.closed:
             raise InterfaceError(f"pool {pool.name!r} is closed")
         task = asyncio.current_task()
@@ -316,7 +454,25 @@ class Router:
             refused = slot is None
         if slot is None:
             slot = await self._wait(pool, session, task, deadline, timeout, front=refused)
-        return slot._lease_to(session, task)
+        lease = slot._lease_to(session, task)
+        if pool.on_acquire is not None:
+            await self._on_acquire(pool, lease, deadline, timeout)
+        return lease
+
+    async def _on_acquire(self, pool: Pool, lease: SlotLease, deadline: float, timeout: float) -> None:
+        """Run the profile's ``on_acquire`` hook within the acquisition's deadline; on failure discard the slot."""
+        connection = cast("DriverConnection", lease.slot.connection)
+        hook_timeout = asyncio.timeout_at(deadline)
+        try:
+            async with hook_timeout:
+                await connection.call_hook(pool.on_acquire, pool.profile, lease.session)
+        except BaseException as exc:
+            # The hook may have left the connection in any state.
+            await lease.release(discard=True)
+            if isinstance(exc, TimeoutError) and hook_timeout.expired():
+                message = f"on_acquire of profile {pool.name!r} did not finish within {timeout:g} s"
+                raise self._timeout(lease.session, timeout, message) from None
+            raise
 
     async def _acquire_bound(self, session: Session, timeout: float | None) -> SlotLease:
         """`acquire()` a lease that only the acquiring task releases, so it counts for immediate deadlocks."""
@@ -405,11 +561,15 @@ class Router:
             pool._returned(result)
         self._detect_deadlock()
 
-    def _timeout(self, session: Session, timeout: float) -> SessionTimeout:
+    def _timeout(self, session: Session, timeout: float, message: str | None = None) -> SessionTimeout:
         held = self.held_sessions()
         if held:
-            return DeadlockError(held_sessions=held, session=session, timeout=timeout)
-        return SessionTimeout(session=session, timeout=timeout)
+            if message is not None:
+                message += f" for {session!r} while holding {', '.join(map(repr, held))}"
+            return DeadlockError(message, held_sessions=held, session=session, timeout=timeout)
+        if message is not None:
+            message += f" for {session!r}"
+        return SessionTimeout(message, session=session, timeout=timeout)
 
     def _detect_deadlock(self) -> None:
         """Fail one task of a set of waiting tasks none of which can get a slot.
@@ -475,5 +635,5 @@ class Router:
             await lease.release()
 
     async def close(self) -> None:
-        """Close every pool."""
-        await asyncio.gather(*(pool.close() for pool in self._pools.values()))
+        """Close every pool, those retired after a profile change included."""
+        await asyncio.gather(*(pool.close() for pool in self._pools.values()), *self._retiring)

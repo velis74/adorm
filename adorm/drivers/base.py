@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import enum
+import inspect
 import itertools
 import logging
 import queue
@@ -63,7 +64,9 @@ class Profile(Protocol):
 
     ``name`` is the ``using`` value, ``alias`` the target's database alias and ``params`` the driver parameters.
     ``connect``, when not ``None``, opens the target's connection in place of the driver's default:
-    ``connect(profile)`` returns the target's connection; an async driver awaits the result.
+    ``connect(profile)`` returns the target's connection; an async driver awaits the result. The pool also reads the
+    optional ``on_acquire`` and ``on_release`` attributes, when present and not ``None``: hooks called as
+    ``hook(connection, profile, session)`` with the connection's `DriverConnection.target`.
     """
 
     @property
@@ -154,6 +157,15 @@ def is_refusal(exc: BaseException) -> bool:
     return isinstance(exc, OperationalError) and exc.sqlstate is not None and exc.sqlstate.startswith("53")
 
 
+def _check_call(operation: Operation) -> None:
+    from adorm.models.managers import find_driver_method
+    from adorm.operations import Call
+
+    if not isinstance(operation, Call):
+        raise NotSupportedError(f"a 'call' operation is an adorm.operations.Call, not {type(operation).__name__}")
+    find_driver_method(operation.model, operation.manager, operation.target, operation.method)
+
+
 class DriverConnection(ABC):
     """One connection of a driver, owned by exactly one slot.
 
@@ -171,8 +183,14 @@ class DriverConnection(ABC):
         self.driver = driver
 
     async def execute(self, operation: Operation) -> Any:
-        """Execute ``operation``; return plain data: rows as dicts keyed by adorm field names, a scalar or a count."""
+        """Execute ``operation``; return plain data: rows as dicts keyed by adorm field names, a scalar or a count.
+
+        A `adorm.operations.Call` reaches ``_execute()`` only when the registered model declares the method
+        (`adorm.models.find_driver_method()`); otherwise `NotSupportedError`.
+        """
         self.driver.capabilities.check(operation)
+        if operation.kind == "call":
+            _check_call(operation)
         return await self._execute(operation)
 
     async def savepoint(self, name: str) -> None:
@@ -194,6 +212,27 @@ class DriverConnection(ABC):
         """Set connection options; ``local`` limits them to the open transaction (``SET LOCAL``)."""
         self.driver.capabilities.check_options(options)
         await self._set_options(dict(options), local)
+
+    @property
+    def target(self) -> Any:
+        """The target's connection that profile hooks receive. Defaults to the driver connection itself."""
+        return self
+
+    async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
+        """Call ``hook(self.target, *args)``, await its result when it is awaitable, and return it.
+
+        An exception the hook raises is mapped with ``map_error()``.
+        """
+        try:
+            result = hook(self.target, *args)
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            mapped = self.map_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        return result
 
     @abstractmethod
     async def _execute(self, operation: Operation) -> Any:
@@ -461,6 +500,19 @@ class ThreadedConnection(DriverConnection):
     async def _set_options(self, options: dict[str, Any], local: bool) -> None:
         await self._call(self.set_options_sync, options, local)
 
+    async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
+        """Call ``hook(self.target, *args)`` on the connection's thread and return its result. The hook is a plain
+        function: one that returns an awaitable raises `InterfaceError`."""
+        return await self._call(self._run_hook, hook, args)
+
+    def _run_hook(self, hook: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+        result = hook(self.target, *args)
+        if inspect.isawaitable(result):
+            if inspect.iscoroutine(result):
+                result.close()
+            raise InterfaceError(f"hook {hook!r} of a threaded {self.driver.name} connection returned an awaitable")
+        return result
+
     def cancel(self) -> None:
         """Have ``cancel_sync()`` run for the running call, if any.
 
@@ -501,6 +553,18 @@ class ThreadedConnection(DriverConnection):
             raise
         except Exception:
             logger.exception("closing %s connection failed", self.driver.name)
+
+    def _close_detached(self) -> bool:
+        """Close the connection without its event loop: queue ``close_sync()`` on the connection's thread and stop
+        the thread. Returns whether the close was queued."""
+        if self._closed:
+            return True
+        if self._direct or self._stuck or not self._thread.is_alive():
+            return False
+        self._closed = True
+        self._requests.put(_Call(self.close_sync, (), None))
+        self._requests.put(None)
+        return True
 
     def emit(self, event: Event) -> None:
         """Report ``event`` to the slot; callable from any thread.
@@ -645,6 +709,10 @@ class ThreadedConnection(DriverConnection):
             if outcome is None:
                 continue
             ok, value = outcome
+            if call.future is None:
+                if not ok:
+                    logger.error("closing %s connection failed", self.driver.name, exc_info=value)
+                continue
             try:
                 self._loop.call_soon_threadsafe(_resolve, call.future, ok, value)
             except RuntimeError:

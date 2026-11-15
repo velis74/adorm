@@ -18,5 +18,8 @@ MODELS: tuple[type[Model], ...] = (
     library.Note,
     library.Shelf,
     library.Placement,
+    library.Reader,
+    library.LoanPolicy,
+    library.Loan,
 )
 """Every generated model class."""

@@ -226,6 +226,99 @@ Abstract models are not generated (their fields are part of each concrete child)
 models are not generated either (a `ManyToMany` names them by label, e.g. `"activities.Activity_tags"`). A model with a
 composite primary key stops the command with an error; leave it out with `--exclude`.
 
+## Managers
+
+The generator writes the managers of every model; the [managers topic](/topics/managers) explains what runs where.
+
+- A manager whose class or query set class overrides a method the driver calls on the Django manager
+  ([`ROUTED_METHODS`](/ref/codegen#adorm-codegen-django-routed-methods): `get_queryset()`, `create()`, `delete()`,
+  `update()` …) gets its Django name as ORM name: `objects = Manager("objects")`. Every operation of that adorm
+  manager then runs through the Django manager, so the overrides apply. An override of another method
+  (`contribute_to_class()`, `deconstruct()` …) does not count, and neither does one the `@client_base` class defines
+  too: the method ported to the client replaces the Django one, so `get_queryset()` in the client base keeps the
+  manager's queries in the client, on every driver.
+- A manager with exposed methods and no such override runs only its driver methods on the Django manager:
+  `objects = UserManager(method_manager="objects")`. Its queries carry no ORM manager and run on every driver.
+- Any other manager reads the plain rows: `all_loans = Manager()`. A plain `objects` is not written; `adorm.Model`
+  declares it.
+- When a model has no manager named `objects`, `objects` also stands for its default manager, unless that one is
+  plain.
+- A method marked with `@expose`, or listed in the `ADORM_EXPOSE` setting as `"app_label.Model.manager.method"`,
+  becomes a driver method of a generated manager or query set class, with the method's signature and docstring.
+  Methods defined on the manager go to the manager class, methods of the query set to the query set class.
+- `@client_base("package.module:ClassName")` on a Django manager or query set class makes its generated class derive
+  from that hand-written adorm class, where methods ported by hand live.
+- A public method that is neither exposed, nor a method of Django's `Manager` or `QuerySet`, nor defined by the
+  client base is not generated and is reported as a warning, unless it comes from Django's own modules.
+- A multi-table child or proxy declares only its own managers; it inherits the parent's from the parent's class.
+
+```python
+from adorm import client_base, expose
+
+
+@client_base("library.adorm_bases:LoanQuerySetBase")
+class LoanQuerySet(models.QuerySet):
+    @expose
+    def archive(self, reason: str = "") -> int:
+        """Archive the loans with ``reason`` as their note; returns the number of loans."""
+        return self.update(archived=True, note=reason)
+
+
+class LoanManager(models.Manager.from_queryset(LoanQuerySet)):
+    def get_queryset(self):
+        return super().get_queryset().filter(archived=False)
+
+    @expose
+    def lend(self, reader_id: int, book_id: str, *, days: int = 14) -> "Loan":
+        """Lend a book for ``days`` days."""
+        ...
+
+
+class Loan(models.Model):
+    ...
+    objects = LoanManager()
+    all_loans = models.Manager()
+```
+
+```python
+# settings.py
+ADORM_EXPOSE = ["auth.User.objects.create_user"]
+```
+
+`adorm generate` writes:
+
+```python
+class LoanQuerySet(LoanQuerySetBase):
+    @driver_method
+    async def archive(self, reason: str = "") -> int:
+        """Archive the loans with ``reason`` as their note; returns the number of loans."""
+
+
+class LoanManager(Manager):
+    queryset_class = LoanQuerySet
+
+    @driver_method
+    async def lend(self, reader_id: int, book_id: str, *, days: int = 14) -> "Loan":
+        """Lend a book for ``days`` days."""
+
+
+class Loan(Model):
+    ...
+    objects = LoanManager("objects")
+    all_loans = Manager()
+```
+
+and, in the `auth` module, `class UserManager(Manager)` with `create_user(self, username, email=None, password=None,
+**extra_fields)` and `objects = UserManager(method_manager="objects")` on `User`.
+
+Parameter and return annotations are written when the generator can express them: builtins, `datetime`, `decimal`
+and `uuid` types, `X | None`, `Literal`, containers of these, and, as a return type, a model of the same module
+(quoted) or of another module (`Any`). Anything else becomes `Any` with a warning; a parameter typed as a model too,
+since arguments are plain values (pass the primary key). A method is not generated, with a warning, when it is a
+coroutine function, returns a query set (a query-building method belongs to the client base) or has a default the
+generator cannot write as a literal. A manager whose name would hide an attribute of `adorm.Model` is not generated
+either.
+
 ## Name clashes
 
 A field or relation whose name is an attribute of `adorm.Model` (pydantic's `model_dump`, `model_validate`,
@@ -288,8 +381,9 @@ note.model_dump()["json"]      # "{}"
 ## Schema hash
 
 `_meta.schema_hash` is 16 hexadecimal digits of a SHA-256 over the model's label, primary key, parents, every
-concrete field (name, Django name, type, nullability, constraints; inherited fields included) and its forward
-relations. Defaults, descriptions and reverse relations do not take part. A server computes the same hash from the
+concrete field (name, Django name, type, nullability, constraints; inherited fields included), its forward
+relations and its managers with an ORM name or driver methods (names and the methods' parameters). Defaults,
+descriptions, return types and reverse relations do not take part. A server computes the same hash from the
 Django model with [`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model) and
 compares it with the client's:
 
@@ -308,8 +402,8 @@ body.
 ## Formatters and linters
 
 The modules are formatted as ruff and black format them at the given `--line-length`, and imports are sorted for an
-application that installs adorm: the standard library, then `adorm` and `pydantic` together, then a parent class
-imported from another generated module. Exclude the package from tools that format or sort differently, as any
+application that installs adorm: the standard library, then `adorm`, `pydantic` and client bases together, then a
+parent class imported from another generated module. Exclude the package from tools that format or sort differently, as any
 generated code, for example:
 
 ```toml

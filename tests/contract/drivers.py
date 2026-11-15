@@ -110,6 +110,10 @@ class DjangoConnection(ThreadedConnection):
         self.pg = self.db.connection
         self.pg.add_notify_handler(lambda n: self.emit(BackendEvent("notify", n.channel, n.payload)))
 
+    @property
+    def target(self) -> Any:
+        return self.db
+
     def _run(self, sql: str, params: Iterable[Any] = ()) -> Any:
         with self.db.cursor() as cursor:
             cursor.execute(sql, tuple(params))
@@ -184,6 +188,10 @@ class AsyncpgConnection(DriverConnection):
         self._cancel_requested = False
         self._usable = True
         self._closed = False
+
+    @property
+    def target(self) -> Any:
+        return self.conn
 
     async def _guard(self, coro: Any) -> Any:
         # The statement runs in its own task so that cancel() can stop it without cancelling the caller.

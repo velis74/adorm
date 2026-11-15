@@ -51,4 +51,6 @@ INSTALLED_APPS = [
     "tests.djangoproject.library",
 ]
 
+ADORM_EXPOSE = ["auth.User.objects.create_user"]
+
 DATABASES = {"default": database_from_url(os.environ.get("ADORM_TEST_DATABASE_URL", DEFAULT_DATABASE_URL))}

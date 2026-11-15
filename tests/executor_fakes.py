@@ -41,7 +41,8 @@ class Op:
 
 
 class FakeConnection(DriverConnection):
-    """``close_gate`` holds closing."""
+    """``close_gate`` holds closing. ``gates`` holds a transaction call (``"commit"``, ``"savepoint"`` …) until the
+    event is set; ``errors`` makes it raise. ``entered`` maps a transaction call to an event set when it starts."""
 
     def __init__(self, driver: FakeDriver, emit: Emit, number: int) -> None:
         super().__init__(driver)
@@ -54,6 +55,9 @@ class FakeConnection(DriverConnection):
         self.closed = False
         self.close_gate: asyncio.Event | None = None
         self.running = 0
+        self.gates: dict[str, asyncio.Event] = {}
+        self.errors: dict[str, BaseException] = {}
+        self.entered: dict[str, asyncio.Event] = {}
 
     async def _execute(self, operation: Op) -> Any:
         self.calls.append(("execute", operation.name))
@@ -78,17 +82,33 @@ class FakeConnection(DriverConnection):
             self.running -= 1
             driver.running -= 1
 
+    async def _transaction_call(self, method: str, name: str | None = None) -> None:
+        self.calls.append((method, name))
+        self.entered.setdefault(method, asyncio.Event()).set()
+        gate = self.gates.get(method)
+        if gate is not None:
+            await gate.wait()
+        error = self.errors.get(method)
+        if error is not None:
+            raise error
+
     async def begin(self) -> None:
-        self.calls.append(("begin", None))
+        await self._transaction_call("begin")
 
     async def commit(self) -> None:
-        self.calls.append(("commit", None))
+        await self._transaction_call("commit")
 
     async def rollback(self) -> None:
-        self.calls.append(("rollback", None))
+        await self._transaction_call("rollback")
 
     async def _savepoint(self, name: str) -> None:
-        self.calls.append(("savepoint", name))
+        await self._transaction_call("savepoint", name)
+
+    async def _release_savepoint(self, name: str) -> None:
+        await self._transaction_call("release_savepoint", name)
+
+    async def _rollback_to_savepoint(self, name: str) -> None:
+        await self._transaction_call("rollback_to_savepoint", name)
 
     def cancel(self) -> None:
         pass

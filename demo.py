@@ -8,7 +8,8 @@ Runs the demo: prepares the PostgreSQL database and serves the API.
 
 The database is ``ADORM_DEMO_DATABASE_URL`` (default ``postgres://postgres@127.0.0.1:5432/adorm_demo``). Setup
 creates the database when the server lacks it, applies the Django migrations, seeds the demo data when the database
-has none and compares the adorm models with the Django models (``manage.py check_adorm_models``).
+has none, checks that the generated models in ``demo/models`` are up to date (``adorm generate --check``) and compares
+them with the Django models (``manage.py check_adorm_models``).
 """
 
 import argparse
@@ -16,10 +17,25 @@ import os
 import subprocess
 import sys
 
+from pathlib import Path
+
 from demo.api import drivers
 from demo.database import DEFAULT_DATABASE_NAME, DEFAULT_SERVER_URL, ensure_database, with_database
 
 DATABASE_ENV = "ADORM_DEMO_DATABASE_URL"
+ROOT = Path(__file__).parent
+GENERATE = (
+    "generate",
+    "--settings",
+    "demo.backend.settings",
+    "--pythonpath",
+    str(ROOT),
+    "--output",
+    str(ROOT / "demo" / "models"),
+    "--line-length",
+    "120",
+)
+"""Arguments of ``adorm`` that regenerate the demo's models."""
 
 
 def manage(*args: str, env: dict[str, str]) -> None:
@@ -29,11 +45,22 @@ def manage(*args: str, env: dict[str, str]) -> None:
         raise SystemExit(f"manage.py {' '.join(args)} failed")
 
 
+def check_generated(env: dict[str, str]) -> None:
+    """Run ``adorm generate --check`` for the demo's models in a child process; exit when they are not up to date."""
+    command = [sys.executable, "-m", "adorm", *GENERATE, "--check"]
+    if subprocess.run(command, env=env, check=False).returncode:  # noqa: S603 - fixed command
+        raise SystemExit(
+            "demo/models is not up to date; regenerate it with\n"
+            "  uv run adorm generate --settings demo.backend.settings -o demo/models --line-length 120"
+        )
+
+
 def setup(env: dict[str, str], *, reset: bool) -> None:
     if ensure_database(env[DATABASE_ENV]):
         print("Created the demo database.", flush=True)
     manage("migrate", "--verbosity", "0", env=env)
     manage("seed_demo", *(["--reset"] if reset else []), env=env)
+    check_generated(env)
     manage("check_adorm_models", env=env)
 
 

@@ -13,7 +13,18 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from adorm.codegen.spec import AppSpec, FieldSpec, ModelSpec, NO_DEFAULT, RelationSpec, TypeSpec
+from adorm.codegen.spec import (
+    AppSpec,
+    FieldSpec,
+    ManagerSpec,
+    MethodSpec,
+    ModelSpec,
+    NO_DEFAULT,
+    ParameterSpec,
+    QuerySetSpec,
+    RelationSpec,
+    TypeSpec,
+)
 
 __all__ = ["HEADER", "can_render_value", "render_module", "render_package"]
 
@@ -109,7 +120,7 @@ class _Imports:
             else:
                 section = "third_party"
             line = f"from {module} import {text}"
-            if len(line) > self.line_length and len(names) > 1:
+            if len(line) > self.line_length:
                 items = "".join(f"{INDENT}{item.strip()},\n" for item in text.split(","))
                 line = f"from {module} import (\n{items})"
             sections[section].append(line)
@@ -264,6 +275,11 @@ def _split_top_level(text: str) -> list[str]:
     return items
 
 
+def _class_key(spec: QuerySetSpec | ManagerSpec) -> Any:
+    """What a generated helper class depends on: specs with the same key share one class."""
+    return spec.class_key if isinstance(spec, ManagerSpec) else spec
+
+
 def _docstring(text: str, indent: str, line_length: int) -> list[str]:
     """The docstring ``text`` as lines; a line longer than ``line_length`` is wrapped at spaces."""
     text = inspect.cleandoc(text).replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
@@ -297,6 +313,17 @@ class _ModuleRenderer:
         names = {model.class_name for model in app.models} | {"__all__"}
         names |= {f.name for model in app.models for f in model.fields}
         names |= {r.name for model in app.models for r in model.relations}
+        names |= {m.name for model in app.models for m in model.managers}
+        self.helpers: list[tuple[QuerySetSpec | ManagerSpec, str]] = []
+        for model in app.models:
+            for manager in model.managers:
+                for spec in (manager.queryset, manager if manager.class_name is not None else None):
+                    if spec is not None and not any(_class_key(known) == _class_key(spec) for known, _ in self.helpers):
+                        name = str(spec.class_name)
+                        while name in names:
+                            name += "_"
+                        names.add(name)
+                        self.helpers.append((spec, name))
         self.imports = _Imports(names, line_length)
         self.writer = _Writer(self.imports, line_length)
         self.reserved = names
@@ -381,6 +408,97 @@ class _ModuleRenderer:
         callee = self.imports.name("adorm", _RELATION_CLASSES[relation.kind])
         return w.call(f"{relation.name} = ", callee, args, INDENT)
 
+    def helper_name(self, spec: QuerySetSpec | ManagerSpec) -> str:
+        return next(name for known, name in self.helpers if _class_key(known) == _class_key(spec))
+
+    def annotation(self, spec: TypeSpec) -> str:
+        """The annotation of a driver method's parameter or return type; a model of this module is quoted."""
+        text, quoted = self._annotation(spec)
+        return f'"{text}"' if quoted else text
+
+    def _annotation(self, spec: TypeSpec) -> tuple[str, bool]:
+        if spec.model:
+            classes = {model.label: model.class_name for model in self.app.models}
+            if spec.name not in classes:
+                return self.writer.ref("typing.Any"), False
+            return classes[spec.name] + (" | None" if spec.nullable else ""), True
+        if spec.args:
+            parts = [self._annotation(arg) for arg in spec.args]
+            text = f"{self.writer.ref(spec.name)}[{', '.join(text for text, _ in parts)}]"
+            quoted = any(q for _, q in parts)
+            return (f"{text} | None" if spec.nullable else text), quoted
+        return self.writer.type(spec), False
+
+    def parameter(self, parameter: ParameterSpec) -> str:
+        prefix = {"var_positional": "*", "var_keyword": "**"}.get(parameter.kind, "")
+        text = f"{prefix}{parameter.name}"
+        if parameter.type is not None:
+            text += f": {self.annotation(parameter.type)}"
+        if parameter.default is not NO_DEFAULT:
+            value = self.writer.value(parameter.default)
+            text += f" = {value}" if parameter.type is not None else f"={value}"
+        return text
+
+    def method(self, method: MethodSpec) -> list[str]:
+        decorator = self.imports.name("adorm", "driver_method")
+        lines = [f"{INDENT}@{decorator}" + ("(queryset_only=True)" if method.queryset_only else "")]
+        params = ["self"]
+        kinds = [p.kind for p in method.parameters]
+        last_positional = max((i for i, kind in enumerate(kinds) if kind == "positional_only"), default=None)
+        first_keyword = kinds.index("keyword_only") if "keyword_only" in kinds else None
+        for index, parameter in enumerate(method.parameters):
+            if index == first_keyword and "var_positional" not in kinds:
+                params.append("*")
+            params.append(self.parameter(parameter))
+            if index == last_positional:
+                params.append("/")
+        returns = "" if method.returns is None else f" -> {self.annotation(method.returns)}"
+        documented = bool(method.doc and method.doc.strip())
+        # ruff writes the body of an undocumented stub, `...`, on the line of the signature
+        tail = ":" if documented else ": ..."
+        head = f"{INDENT}async def {method.name}("
+        line = f"{head}{', '.join(params)}){returns}{tail}"
+        if len(line) <= self.writer.line_length:
+            lines.append(line)
+        else:
+            lines.append(head)
+            lines += [f"{INDENT}{INDENT}{param}," for param in params]
+            lines.append(f"{INDENT}){returns}{tail}")
+        if documented:
+            lines += _docstring(str(method.doc), INDENT + INDENT, self.writer.line_length)
+        return lines
+
+    def helper(self, spec: QuerySetSpec | ManagerSpec, name: str) -> list[str]:
+        if spec.base is not None:
+            module, _, base_name = spec.base.partition(":")
+            base = self.imports.name(module, base_name)
+        else:
+            base = self.imports.name("adorm", "QuerySet" if isinstance(spec, QuerySetSpec) else "Manager")
+        lines = [f"class {name}({base}):"]
+        body: list[list[str]] = []
+        if isinstance(spec, ManagerSpec) and spec.queryset is not None:
+            body.append([f"{INDENT}queryset_class = {self.helper_name(spec.queryset)}"])
+        body += [self.method(method) for method in spec.methods]
+        if not body:
+            return [*lines, f"{INDENT}pass"]
+        for index, block in enumerate(body):
+            if index:
+                lines.append("")
+            lines += block
+        return lines
+
+    def manager(self, manager: ManagerSpec) -> list[str]:
+        args = [] if manager.orm_name is None else [self.writer.value(manager.orm_name)]
+        if manager.method_manager is not None and manager.method_manager != manager.orm_name:
+            args.append(f"method_manager={self.writer.value(manager.method_manager)}")
+        if manager.class_name is not None:
+            callee = self.helper_name(manager)
+        elif manager.queryset is not None:
+            callee = f"{self.helper_name(manager.queryset)}.as_manager"
+        else:
+            callee = self.imports.name("adorm", "Manager")
+        return self.writer.call(f"{manager.name} = ", callee, args, INDENT)
+
     def model(self, model: ModelSpec) -> list[str]:
         lines = [f"class {model.class_name}({self.base(model)}):"]
         if model.doc:
@@ -390,10 +508,13 @@ class _ModuleRenderer:
             lines += self.field(model, field)
         for relation in model.relations:
             lines += self.relation(relation)
+        for manager in model.managers:
+            lines += self.manager(manager)
         return lines
 
     def render(self) -> str:
-        classes = [self.model(model) for model in self.app.models]
+        helpers = [self.helper(spec, name) for spec, name in self.helpers]
+        classes = helpers + [self.model(model) for model in self.app.models]
         exported = [self.writer.value(model.class_name) for model in self.app.models]
         all_lines = self.writer.subscript("__all__ = ", "", exported)
         out = f'{HEADER}\n"""adorm models of the {self.source} app ``{self.app.label}``."""\n\n'

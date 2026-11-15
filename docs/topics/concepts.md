@@ -30,10 +30,16 @@ is in Django. A profile names the driver, the database alias, extra driver param
 - `on_acquire` runs when a session gets a slot (for example `SET ROLE`),
 - `on_release` resets session state when the slot returns to the pool.
 
-Pool settings are `max_connections` and `purge_stale_connections_at` (see [Pool](#pool) and [Slots](#slots)).
+Pool settings are `max_connections`, the timeouts, and `purge_stale_connections_at` (see [Pool](#pool) and
+[Slots](#slots)).
+
+```python
+adorm.configure(profiles={"default": {"driver": "myproject.drivers.DjangoDriver", "alias": "default"}})
+```
 
 A call never carries connection parameters; different database accounts are different profiles. Profiles can
-also be registered at run time through the settings plugin API, for example one per database user.
+also be registered at run time through the settings plugin API, for example one per database user. The
+[connection profiles topic](/topics/profiles) describes them.
 
 ## Sessions
 
@@ -73,7 +79,9 @@ in detail.
 
 A slot is an exclusive channel to one driver connection. Work reaches a slot over a pair of queues: a request
 queue the client writes operations to, and an event queue the slot writes results, callbacks (such as
-`on_commit`) and backend events to.
+`on_commit`) and backend events to. On the client an event channel interprets each event: it returns a result,
+runs a callback or calls a subscribed function. The [events topic](/topics/events) follows an event from the slot
+to the client, in process and through a remote driver.
 
 - **An atomic operation** outside a transaction acquires a slot, executes and releases the slot at once.
 - **A transaction** holds one slot for the whole block. A context variable records that the slot is held, so
@@ -92,8 +100,8 @@ async with adorm.atomic() as tx:          # acquires a slot, BEGIN
 `tx.commit()` commits before the end of the block. `session.atomic()` opens the transaction on a given
 session. Exiting the block waits for operations already
 sent, then commits; an operation that arrives after the end (from a task that inherited the context) raises
-`TransactionClosed`. A slot aborts its transaction when neither commit nor rollback arrives within the
-configured deadline.
+`TransactionClosed`. A slot aborts its transaction when no request (an operation, the commit or the rollback)
+arrives within the pool's `commit_timeout`. The [transactions topic](/topics/transactions) covers all of this.
 
 The connection in a slot lives until it has been idle for `purge_stale_connections_at` seconds. Acquiring a slot
 does nothing to the connection. A slot leaves the pool, and the next request gets a fresh connection, when a

@@ -16,6 +16,7 @@ import adorm.models
 import adorm.operations
 import adorm.query
 import adorm.schema
+import adorm.settings
 
 DOCS = Path(__file__).parent.parent / "docs"
 CONFIG = DOCS / ".vitepress" / "config.ts"
@@ -106,8 +107,17 @@ def test_has_reference_heading(reference, expected):
     ("module", "name"),
     [
         (m.__name__, n)
-        for m in (adorm.codec, adorm.codegen, adorm.drivers, adorm.events, adorm.operations, adorm.schema)
+        for m in (
+            adorm.codec,
+            adorm.codegen,
+            adorm.drivers,
+            adorm.events,
+            adorm.operations,
+            adorm.schema,
+            adorm.settings,
+        )
         for n in m.__all__
+        if not (m is adorm.settings and n in adorm.__all__)
     ],
 )
 def test_submodule_public_names_are_documented(module, name):

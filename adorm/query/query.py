@@ -27,6 +27,7 @@ _SAME_WHEN_COMBINED = (
     "only_fields",
     "deferred_fields",
     "for_update",
+    "manager",
 )
 
 
@@ -35,6 +36,12 @@ def check_model_label(label: Any) -> str:
     if not isinstance(label, str) or not _LABEL.fullmatch(label):
         raise ValueError(f"{label!r} is not a model label ('app_label.ModelName')")
     return label
+
+
+def _check_manager(name: Any) -> str | None:
+    if name is not None and (not isinstance(name, str) or not name.isidentifier() or name.startswith("_")):
+        raise ValueError(f"{name!r} is not a manager name")
+    return name
 
 
 def _is_int(value: Any) -> bool:
@@ -107,7 +114,12 @@ class Query(Node):
     ``distinct_fields``, ``low_mark`` and ``high_mark`` (the slice; ``high_mark`` ``None`` for no limit),
     ``only_fields`` (``None`` unless ``only()`` limits the loaded fields) and ``deferred_fields``,
     ``select_related_fields`` (``False``, ``True`` for every non-null relation, or a tuple of relation paths),
-    ``is_none`` (``none()``) and ``for_update`` (a `ForUpdate` or ``None``).
+    ``is_none`` (``none()``), ``for_update`` (a `ForUpdate` or ``None``) and ``manager``.
+
+    ``manager`` names the target ORM's manager whose rows and method overrides the driver applies (Django: the
+    manager attribute of the model, so its ``get_queryset()`` and its query set's ``create()``, ``delete()`` …);
+    ``None`` reads the model's rows without manager logic. A query with a manager uses the construct
+    ``clause.manager``.
     """
 
     _fields = (
@@ -126,6 +138,7 @@ class Query(Node):
         "select_related_fields",
         "is_none",
         "for_update",
+        "manager",
     )
     ROW_FORMATS: ClassVar[tuple[str, ...]] = ROW_FORMATS
     model: str
@@ -143,8 +156,9 @@ class Query(Node):
     select_related_fields: bool | tuple[str, ...]
     is_none: bool
     for_update: ForUpdate | None
+    manager: str | None
 
-    def __init__(self, model: str) -> None:
+    def __init__(self, model: str, *, manager: str | None = None) -> None:
         self._init(
             model=check_model_label(model),
             where=Q(),
@@ -161,6 +175,7 @@ class Query(Node):
             select_related_fields=False,
             is_none=False,
             for_update=None,
+            manager=_check_manager(manager),
         )
 
     @property
@@ -346,9 +361,12 @@ class Query(Node):
             yield "clause.defer"
         if self.select_related_fields:
             yield "clause.select_related"
+        if self.manager is not None:
+            yield "clause.manager"
 
     def _check_decoded(self) -> None:
         check_model_label(self.model)
+        _check_manager(self.manager)
         if not isinstance(self.where, Q) or not all(isinstance(o, OrderBy) for o in self.ordering):
             raise ValueError("a query's where is a Q and its ordering OrderBy nodes")
         if self.for_update is not None and not isinstance(self.for_update, ForUpdate):
@@ -385,6 +403,8 @@ class Query(Node):
 
     def __repr__(self) -> str:
         parts = [repr(self.model)]
+        if self.manager is not None:
+            parts.append(f"manager={self.manager!r}")
         if self.where:
             parts.append(f"where={self.where!r}")
         for name in ("ordering", "select", "distinct_fields", "deferred_fields", "select_related_fields"):

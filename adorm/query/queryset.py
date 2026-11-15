@@ -9,13 +9,14 @@ from __future__ import annotations
 from collections import namedtuple
 from collections.abc import AsyncIterator, Iterable, Mapping
 from functools import lru_cache
-from typing import Any, TYPE_CHECKING
+from typing import Any, Self, TYPE_CHECKING
 
 from adorm.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
 from adorm.query.query import Query
 
 if TYPE_CHECKING:
     from adorm.models.base import Executor, Model
+    from adorm.models.managers import Manager
     from adorm.operations import Operation
 
 __all__ = ["QuerySet"]
@@ -30,8 +31,9 @@ class QuerySet:
     """The rows of ``query`` on ``model`` (a model class), run by ``executor`` (a session).
 
     ``Model.objects`` and ``session.Model`` create query sets; the building methods are those of `Query`, each
-    returning a new query set. ``query`` is the underlying `Query`, so a query set can stand wherever a query is
-    accepted, e.g. ``filter(pk__in=qs)``.
+    returning a new query set of the same class. ``query`` is the underlying `Query`, so a query set can stand wherever
+    a query is accepted, e.g. ``filter(pk__in=qs)``. A subclass adds client-side methods that build on these and
+    driver methods (`adorm.driver_method`); a manager's ``queryset_class`` names it.
     """
 
     __slots__ = ("executor", "model", "query")
@@ -56,7 +58,7 @@ class QuerySet:
         raise AttributeError(f"a query set is immutable: cannot set {name!r}")
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return QuerySet, (self.model, self.executor, self.query)
+        return type(self), (self.model, self.executor, self.query)
 
     def __copy__(self) -> QuerySet:
         return self
@@ -64,69 +66,77 @@ class QuerySet:
     def __deepcopy__(self, memo: dict[int, Any]) -> QuerySet:
         return self
 
-    def _clone(self, query: Query) -> QuerySet:
-        return QuerySet(self.model, self.executor, query)
+    def _clone(self, query: Query) -> Self:
+        return type(self)(self.model, self.executor, query)
+
+    @classmethod
+    def as_manager(cls, orm_name: str | None = None, *, method_manager: str | None = None) -> Manager:
+        """A `Manager` whose ``queryset_class`` is this class:
+        ``Manager.from_queryset(cls)(orm_name, method_manager=method_manager)``."""
+        from adorm.models.managers import _queryset_as_manager
+
+        return _queryset_as_manager(cls, orm_name, method_manager)
 
     def __repr__(self) -> str:
         return f"<QuerySet {self.query!r} on {self.executor!r}>"
 
     # Building: no I/O
 
-    def all(self) -> QuerySet:
+    def all(self) -> Self:
         """A copy of the query set."""
         return self._clone(self.query)
 
-    def filter(self, *args: Any, **kwargs: Any) -> QuerySet:
+    def filter(self, *args: Any, **kwargs: Any) -> Self:
         """`Query.filter()`."""
         return self._clone(self.query.filter(*args, **kwargs))
 
-    def exclude(self, *args: Any, **kwargs: Any) -> QuerySet:
+    def exclude(self, *args: Any, **kwargs: Any) -> Self:
         """`Query.exclude()`."""
         return self._clone(self.query.exclude(*args, **kwargs))
 
-    def annotate(self, **annotations: Any) -> QuerySet:
+    def annotate(self, **annotations: Any) -> Self:
         """`Query.annotate()`."""
         return self._clone(self.query.annotate(**annotations))
 
-    def order_by(self, *keys: Any) -> QuerySet:
+    def order_by(self, *keys: Any) -> Self:
         """`Query.order_by()`."""
         return self._clone(self.query.order_by(*keys))
 
-    def values(self, *fields: str) -> QuerySet:
+    def values(self, *fields: str) -> Self:
         """`Query.values()`: rows as dicts."""
         return self._clone(self.query.values(*fields))
 
-    def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> QuerySet:
+    def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> Self:
         """`Query.values_list()`: rows as tuples, single values (``flat``) or named tuples (``named``)."""
         return self._clone(self.query.values_list(*fields, flat=flat, named=named))
 
-    def only(self, *fields: str) -> QuerySet:
+    def only(self, *fields: str) -> Self:
         """`Query.only()`."""
         return self._clone(self.query.only(*fields))
 
-    def defer(self, *fields: str | None) -> QuerySet:
+    def defer(self, *fields: str | None) -> Self:
         """`Query.defer()`."""
         return self._clone(self.query.defer(*fields))
 
-    def select_related(self, *fields: str | None) -> QuerySet:
+    def select_related(self, *fields: str | None) -> Self:
         """`Query.select_related()`."""
         return self._clone(self.query.select_related(*fields))
 
-    def distinct(self, *fields: str) -> QuerySet:
+    def distinct(self, *fields: str) -> Self:
         """`Query.distinct()`."""
         return self._clone(self.query.distinct(*fields))
 
-    def none(self) -> QuerySet:
+    def none(self) -> Self:
         """`Query.none()`: terminal methods return an empty result without running an operation."""
         return self._clone(self.query.none())
 
     def select_for_update(
         self, *, nowait: bool = False, skip_locked: bool = False, of: Iterable[str] = (), no_key: bool = False
-    ) -> QuerySet:
+    ) -> Self:
         """`Query.select_for_update()`."""
         return self._clone(self.query.select_for_update(nowait=nowait, skip_locked=skip_locked, of=of, no_key=no_key))
 
-    def __getitem__(self, key: slice) -> QuerySet:
+    def __getitem__(self, key: slice) -> Self:
         return self._clone(self.query[key])
 
     def _combine(self, other: Any, combine: Any) -> Any:
@@ -136,10 +146,10 @@ class QuerySet:
             raise TypeError("cannot combine query sets of different sessions")
         return self._clone(combine(self.query, other.query))
 
-    def __or__(self, other: Any) -> QuerySet:
+    def __or__(self, other: Any) -> Self:
         return self._combine(other, Query.__or__)
 
-    def __and__(self, other: Any) -> QuerySet:
+    def __and__(self, other: Any) -> Self:
         return self._combine(other, Query.__and__)
 
     # Rows
@@ -244,7 +254,12 @@ class QuerySet:
 
     async def create(self, **values: Any) -> Model:
         """A new instance validated from ``values`` (as the model's constructor takes them) and inserted with a
-        `Create` operation. The instance gets the values the target set (primary key, defaults)."""
+        `Create` operation. The instance gets the values the target set (primary key, defaults).
+
+        When the query carries an ORM manager (`Query.manager`), the operation carries it too and the values that are
+        not fields go along: the target manager's ``create()`` receives them, as an override of it may take
+        arguments that are not fields. Without one, such values stay extra values of the instance.
+        """
         from adorm.operations import Create
 
         instance = self.model(**values)
@@ -254,7 +269,10 @@ class QuerySet:
             for name in self.model.__pydantic_fields__
             if name in instance.model_fields_set and not (name == pk and instance.__dict__[name] is None)
         }
-        instance._stored(await self._run(Create(self.query.model, stored)), self.executor)
+        manager = self.query.manager
+        if manager is not None and instance.__pydantic_extra__:
+            stored.update(instance.__pydantic_extra__)
+        instance._stored(await self._run(Create(self.query.model, stored, manager=manager)), self.executor)
         return instance
 
     async def get_or_create(self, defaults: Mapping[str, Any] | None = None, **lookups: Any) -> tuple[Model, bool]:

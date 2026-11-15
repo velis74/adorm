@@ -97,6 +97,7 @@ def test_registry():
         "create": Create,
         "save": Save,
         "get_or_create": GetOrCreate,
+        "call": operations.Call,
     }
     for kind, cls in OPERATIONS.items():
         assert cls.kind == kind

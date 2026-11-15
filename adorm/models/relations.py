@@ -150,10 +150,22 @@ async def _load_one(relation: Relation, instance: Model, query: Query) -> Model:
     return related
 
 
-def _related(relation: Relation, instance: Model, query: Query) -> Any:
+def _related(relation: Relation, instance: Model, **lookups: Any) -> Any:
+    """The target's rows matching ``lookups``, from the target's ``objects`` manager on the owner's executor: the
+    query set has the manager's ``queryset_class`` and starts from its ``get_queryset()``."""
+    from adorm.executor.sessions import Session
     from adorm.query.queryset import QuerySet
 
-    return QuerySet(relation.target_model(), instance._executor(), query)
+    target = relation.target_model()
+    executor = instance._executor()
+    manager = target.__adorm_managers__.get("objects")
+    if manager is None:
+        return QuerySet(target, executor, Query(relation.target)).filter(**lookups)
+    if isinstance(executor, Session):
+        queryset = manager._bind(target, executor).get_queryset()
+    else:
+        queryset = manager.queryset_class(target, executor, Query(relation.target, manager=manager.orm_name))
+    return queryset.filter(**lookups)
 
 
 def _owner_pk(relation: Relation, instance: Model) -> Any:
@@ -167,8 +179,9 @@ class ReverseForeignKey(Relation):
     """The reverse side of a `ForeignKey`: the rows of ``target`` whose field ``column`` holds the owner's primary
     key.
 
-    On an instance it returns a `QuerySet` of ``Query(target).filter(<column>=instance.pk)`` on the owner's
-    executor. An instance without a primary key value raises ``ValueError``.
+    On an instance it returns the target's ``objects.filter(<column>=instance.pk)`` on the owner's executor: a query
+    set of the manager's ``queryset_class`` that applies its ``get_queryset()`` and ORM manager. An instance without a
+    primary key value raises ``ValueError``.
     """
 
     def __init__(self, target: str, *, column: str) -> None:
@@ -178,7 +191,7 @@ class ReverseForeignKey(Relation):
     def __get__(self, instance: Model | None, owner: type | None = None) -> Any:
         if instance is None:
             return self
-        return _related(self, instance, Query(self.target).filter(**{self.column: _owner_pk(self, instance)}))
+        return _related(self, instance, **{self.column: _owner_pk(self, instance)})
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.target!r}, column={self.column!r})"
@@ -223,8 +236,9 @@ class ManyToMany(Relation):
     label of the ORM's generated through model, e.g. ``"app.Activity_tags"``). Each ``through`` row links the owner
     in ``source_column`` with ``target`` in ``target_column``.
 
-    On an instance it returns a `QuerySet`, on the owner's executor, of the related ``target`` rows:
-    ``Query(target).filter(pk__in=Query(through).filter(<source_column>=instance.pk).values(<target_column>))``.
+    On an instance it returns the related ``target`` rows on the owner's executor, from the target's ``objects`` manager
+    as for `ReverseForeignKey`:
+    ``objects.filter(pk__in=Query(through).filter(<source_column>=instance.pk).values(<target_column>))``.
     An instance without a primary key value raises ``ValueError``.
     """
 
@@ -238,7 +252,7 @@ class ManyToMany(Relation):
         if instance is None:
             return self
         links = Query(self.through).filter(**{self.source_column: _owner_pk(self, instance)})
-        return _related(self, instance, Query(self.target).filter(pk__in=links.values(self.target_column)))
+        return _related(self, instance, pk__in=links.values(self.target_column))
 
     def __repr__(self) -> str:
         return (

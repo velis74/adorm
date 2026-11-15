@@ -6,7 +6,7 @@ import pytest
 
 from adorm import create_session, DeadlockError, InterfaceError, OperationalError, ProgrammingError, SessionTimeout
 from adorm.drivers import is_refusal
-from adorm.events import BackendEvent, CallbackEvent, ErrorEvent, ResultEvent
+from adorm.events import BackendEvent, CallbackEvent, ErrorEvent, ON_COMMIT, ResultEvent
 from adorm.executor import (
     held_leases,
     holding,
@@ -178,9 +178,12 @@ async def test_requests_run_in_order_and_events_carry_their_ids():
         requests = [Request("begin"), Request("execute", (Op("a"),)), Request("execute", (Op("b"),)), Request("commit")]
         for request in requests:
             await lease.requests.put(request)
-        events = [await lease.events.get() for _ in requests]
-    assert [e.request_id for e in events] == [r.request_id for r in requests]
-    assert [e.value for e in events] == [None, "a", "b", None]
+        events = [await lease.events.get() for _ in range(len(requests) + 1)]
+    # A successful commit delivers CallbackEvent(ON_COMMIT) before its outcome.
+    assert events[3] == CallbackEvent(ON_COMMIT)
+    outcomes = events[:3] + events[4:]
+    assert [e.request_id for e in outcomes] == [r.request_id for r in requests]
+    assert [e.value for e in outcomes] == [None, "a", "b", None]
     assert driver.connections[0].calls == [("begin", None), ("execute", "a"), ("execute", "b"), ("commit", None)]
 
 
@@ -240,12 +243,12 @@ async def test_unread_callbacks_and_backend_events_go_to_the_pool_bus_on_release
     lease = await router.acquire(session())
 
     def callback(connection):
-        connection.emit(CallbackEvent("on_commit", 7))
+        connection.emit(CallbackEvent("cache_cleared", 7))
 
     await lease.call("execute", Op(effect=callback))
     lease.requests.put_nowait(Request("begin"))  # its unread ResultEvent is dropped
     await lease.release()
-    assert seen == [CallbackEvent("on_commit", 7)]
+    assert seen == [CallbackEvent("cache_cleared", 7)]
 
 
 async def test_requests_run_in_the_context_of_the_sender():
@@ -848,7 +851,7 @@ async def test_a_cancelled_request_inside_a_transaction_discards_the_slot():
     with pytest.raises(asyncio.CancelledError):
         await call
     await lease.release()
-    assert lease._calls == {}
+    assert lease.channel.awaited == 0
     assert driver.connections[0].closed
     assert pool.size == 0
 

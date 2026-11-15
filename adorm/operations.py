@@ -20,6 +20,7 @@ from adorm.schema import SchemaSource
 
 __all__ = [
     "OPERATIONS",
+    "Call",
     "Count",
     "Create",
     "Delete",
@@ -28,6 +29,7 @@ __all__ = [
     "Get",
     "GetOrCreate",
     "Last",
+    "ModelRow",
     "Operation",
     "Save",
     "Select",
@@ -83,14 +85,23 @@ def _check_query(query: Any) -> None:
         raise TypeError(f"expected a Query, not {type(query).__name__}")
 
 
-def _encode_values(encoder: Encoder, pairs: tuple[tuple[str, Any], ...]) -> dict[str, Any]:
-    return {name: encoder.operand(value, encoder.field_type(name)) for name, value in pairs}
+def _value_type(codec: Encoder | Decoder, name: str, extra: bool) -> Any:
+    """The type of the field ``name``; with ``extra``, ``None`` for a name that is not a field."""
+    if extra:
+        model = codec.schema.model_schema(codec._scopes[-1].model) if codec.schema is not None else None
+        if model is not None and name not in model.fields and name != "pk":
+            return None
+    return codec.field_type(name)
 
 
-def _decode_values(decoder: Decoder, data: Any, what: str) -> tuple[tuple[str, Any], ...]:
+def _encode_values(encoder: Encoder, pairs: tuple[tuple[str, Any], ...], *, extra: bool = False) -> dict[str, Any]:
+    return {name: encoder.operand(value, _value_type(encoder, name, extra)) for name, value in pairs}
+
+
+def _decode_values(decoder: Decoder, data: Any, what: str, *, extra: bool = False) -> tuple[tuple[str, Any], ...]:
     if not isinstance(data, Mapping):
         raise ValueError(f"the {what} are a mapping of field names to values")
-    return tuple((name, decoder.operand(value, decoder.field_type(name))) for name, value in data.items())
+    return tuple((name, decoder.operand(value, _value_type(decoder, name, extra))) for name, value in data.items())
 
 
 def _get(data: Mapping[str, Any], name: str) -> Any:
@@ -314,29 +325,49 @@ class Create(Operation):
     primary key, defaults).
 
     ``values`` is a mapping or ``(name, value)`` pairs. An expression value refers to no field and contains no
-    aggregate (``TypeError``).
+    aggregate (``TypeError``). ``manager`` names the target ORM's manager whose ``create()`` inserts the row
+    (`Query.manager`); with one, ``values`` may name arguments that are not fields, encoded with their inferred types,
+    and a value that is a model instance raises ``TypeError`` (pass its primary key). The encoded form has
+    ``"manager"`` only when there is one.
     """
 
     kind: ClassVar[str] = "create"
     model: str
     values: tuple[tuple[str, Any], ...] = ()
+    manager: str | None = None
 
     def __post_init__(self) -> None:
         check_model_label(self.model)
         object.__setattr__(self, "values", _field_values(self.values, refs=False))
+        Query(self.model, manager=self.manager)
+        if self.manager is not None:
+            for name, value in self.values:
+                _check_not_instance(value, f"the value of {name!r}")
+
+    def constructs(self) -> Iterator[str]:
+        yield from super().constructs()
+        if self.manager is not None:
+            yield "clause.manager"
 
     def nodes(self) -> Iterator[Node]:
         return (value for _, value in self.values if isinstance(value, Node))
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
-            return {"model": self.model, "values": _encode_values(encoder, self.values)}
+            data = {"model": self.model, "values": _encode_values(encoder, self.values, extra=self.manager is not None)}
+        if self.manager is not None:
+            data["manager"] = self.manager
+        return data
 
     @classmethod
     def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
         model = check_model_label(_get(data, "model"))
+        manager = data.get("manager")
+        if manager is not None and not isinstance(manager, str):
+            raise ValueError("the manager is a name or null")
         with decoder.scope(model):
-            return cls(model, _decode_values(decoder, _get(data, "values"), "values"))
+            values = _decode_values(decoder, _get(data, "values"), "values", extra=manager is not None)
+            return cls(model, values, manager)
 
 
 @dataclass(frozen=True, eq=False)
@@ -493,3 +524,147 @@ class GetOrCreate(Operation):
         with decoder.scope(query.model):
             defaults = _decode_values(decoder, _get(data, "defaults"), "defaults")
         return cls(query, tuple(lookups), defaults)
+
+
+@dataclass(frozen=True)
+class ModelRow:
+    """A model instance in the result of a `Call`: the row of the model ``model`` (a label), keyed by adorm field
+    names. A driver returns one for every instance of the target ORM's model in a driver method's result; the caller
+    builds an instance of the registered model from it."""
+
+    model: str
+    row: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        check_model_label(self.model)
+        if not isinstance(self.row, Mapping):
+            raise TypeError(f"a row is a mapping, not {type(self.row).__name__}")
+        object.__setattr__(self, "row", MappingProxyType(dict(self.row)))
+
+    def __hash__(self) -> int:
+        return hash((self.model, make_hashable(dict(self.row))))
+
+
+def _check_not_instance(value: Any, what: str) -> None:
+    from adorm.models.base import Model
+
+    if isinstance(value, Model):
+        raise TypeError(f"{what} is a plain value, not a {type(value).__name__} instance: pass its primary key")
+
+
+def _arguments(args: Iterable[Any], what: str) -> tuple[Any, ...]:
+    values = []
+    for value in args:
+        if isinstance(value, Node):
+            raise TypeError(f"{what} is a plain value, not an expression")
+        _check_not_instance(value, what)
+        values.append(freeze_value(value))
+    return tuple(values)
+
+
+def _method_schema(codec: Encoder | Decoder, call_key: tuple[str, str, str], model: str) -> Any:
+    schema = codec.schema.model_schema(model) if codec.schema is not None else None
+    return None if schema is None else schema.methods.get(call_key)
+
+
+@dataclass(frozen=True, eq=False)
+class Call(Operation):
+    """Call the driver method ``method`` of the target ORM.
+
+    ``manager`` names the target ORM's manager the method runs on; it defaults to `Query.manager` and, when the query
+    carries one, equals it. ``target`` ``"manager"`` calls the method on that manager, and ``query`` is then the
+    model's plain query (``Query(model)``, or ``Query(model, manager=manager)``); ``"queryset"`` calls it on the query
+    set of ``query`` started from that manager. ``args`` are the positional arguments, ``kwargs`` the keyword arguments
+    as ``(name, value)`` pairs; both are plain values, not expressions and not model instances (pass the primary key).
+    Result: the method's return value as plain data, with every instance of a model as a `ModelRow`.
+
+    No manager, a manager other than the query's, a method name that is not public or an invalid argument raises
+    ``TypeError`` or ``ValueError``. A driver runs only methods the registered model declares
+    (`adorm.models.find_driver_method()`). Arguments are encoded with the parameter types the model schema's
+    `MethodSchema` gives, or their inferred types.
+    """
+
+    kind: ClassVar[str] = "call"
+    query: Query
+    method: str
+    target: str = "queryset"
+    args: tuple[Any, ...] = ()
+    kwargs: tuple[tuple[str, Any], ...] = ()
+    manager: str | None = None
+
+    def __post_init__(self) -> None:
+        _check_query(self.query)
+        if self.manager is None:
+            object.__setattr__(self, "manager", self.query.manager)
+        if self.manager is None:
+            raise TypeError("a driver method needs an ORM manager")
+        if not isinstance(self.manager, str) or not self.manager.isidentifier() or self.manager.startswith("_"):
+            raise ValueError(f"{self.manager!r} is not a manager name")
+        if self.query.manager is not None and self.query.manager != self.manager:
+            raise ValueError(f"the query runs on the manager {self.query.manager!r}, not {self.manager!r}")
+        if not isinstance(self.method, str) or not self.method.isidentifier() or self.method.startswith("_"):
+            raise ValueError(f"{self.method!r} is not a public method name")
+        if self.target not in ("manager", "queryset"):
+            raise ValueError(f"the target is 'manager' or 'queryset', not {self.target!r}")
+        if self.target == "manager" and self.query != Query(self.query.model, manager=self.query.manager):
+            raise ValueError("a manager method takes the manager's plain query")
+        object.__setattr__(self, "args", _arguments(self.args, "an argument"))
+        items = self.kwargs.items() if isinstance(self.kwargs, Mapping) else self.kwargs
+        pairs: list[tuple[str, Any]] = []
+        for name, value in items:
+            if not isinstance(name, str) or not name.isidentifier():
+                raise ValueError(f"{name!r} is not an argument name")
+            if any(n == name for n, _ in pairs):
+                raise ValueError(f"the argument {name!r} is given twice")
+            pairs.append((name, _arguments((value,), f"the argument {name!r}")[0]))
+        object.__setattr__(self, "kwargs", tuple(pairs))
+
+    @property
+    def model(self) -> str:
+        """The label of the model."""
+        return self.query.model
+
+    @property
+    def key(self) -> tuple[str, str, str]:
+        """The `adorm.schema.MethodKey` of the method: ``(manager, target, method)``."""
+        return (self.manager, self.target, self.method)  # type: ignore[return-value]
+
+    def nodes(self) -> Iterator[Node]:
+        yield self.query
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        method = _method_schema(encoder, self.key, self.query.model)
+        return {
+            "query": encoder.node(self.query),
+            "manager": self.manager,
+            "method": self.method,
+            "target": self.target,
+            "args": [
+                encoder.operand(value, None if method is None else method.arg_type(index))
+                for index, value in enumerate(self.args)
+            ],
+            "kwargs": {
+                name: encoder.operand(value, None if method is None else method.kwarg_type(name))
+                for name, value in self.kwargs
+            },
+        }
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        query = _decode_query(decoder, data)
+        name, target, manager = _get(data, "method"), _get(data, "target"), _get(data, "manager")
+        if not isinstance(manager, str):
+            raise ValueError("the manager is a name")
+        raw_args, raw_kwargs = _get(data, "args"), _get(data, "kwargs")
+        if not isinstance(raw_args, list) or not isinstance(raw_kwargs, Mapping):
+            raise ValueError("the arguments are a list and a mapping")
+        method = _method_schema(decoder, (manager, target, name), query.model)
+        args = tuple(
+            decoder.operand(value, None if method is None else method.arg_type(index))
+            for index, value in enumerate(raw_args)
+        )
+        kwargs = tuple(
+            (key, decoder.operand(value, None if method is None else method.kwarg_type(key)))
+            for key, value in raw_kwargs.items()
+        )
+        return cls(query, name, target, args, kwargs, manager)

@@ -22,8 +22,18 @@ from adorm.exceptions import (
     TransactionManagementError,
     ValidationError,
 )
-from adorm.executor import BoundModel, create_session, current_session, Session
-from adorm.models import ForeignKey, ManyToMany, Model, ModelMeta, ReverseForeignKey, ReverseOneToOne
+from adorm.executor import Atomic, atomic, BoundModel, create_session, current_session, on_commit, Session
+from adorm.models import (
+    driver_method,
+    ForeignKey,
+    Manager,
+    ManyToMany,
+    Model,
+    ModelMeta,
+    ReverseForeignKey,
+    ReverseOneToOne,
+)
+from adorm.porting import client_base, expose
 from adorm.query import (
     Aggregate,
     Avg,
@@ -60,17 +70,20 @@ from adorm.query import (
     Value,
     When,
 )
+from adorm.settings import configure, ConnectionProfile, PoolSettings
 
 __version__ = "0.0.1"
 
 __all__ = [
     "AdormError",
     "Aggregate",
+    "Atomic",
     "Avg",
     "BoundModel",
     "Case",
     "Coalesce",
     "Concat",
+    "ConnectionProfile",
     "Count",
     "DatabaseError",
     "DataError",
@@ -86,6 +99,7 @@ __all__ = [
     "InternalError",
     "Length",
     "Lower",
+    "Manager",
     "ManyToMany",
     "Max",
     "Min",
@@ -98,6 +112,7 @@ __all__ = [
     "OperationalError",
     "OperationTimeout",
     "OuterRef",
+    "PoolSettings",
     "ProgrammingError",
     "ProtectedError",
     "Q",
@@ -126,7 +141,13 @@ __all__ = [
     "ValidationError",
     "Value",
     "When",
+    "atomic",
+    "client_base",
+    "configure",
     "create_session",
     "current_session",
+    "driver_method",
+    "expose",
+    "on_commit",
     "__version__",
 ]

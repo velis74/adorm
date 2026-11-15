@@ -14,12 +14,13 @@ __all__ = ["ModelRegistry", "model_schema", "registry"]
 
 
 def model_schema(model: type[Model]) -> ModelSchema:
-    """The `ModelSchema` of the model class ``model``: its label, primary key, field types, relation targets and ORM
-    names.
+    """The `ModelSchema` of the model class ``model``: its label, primary key, field types, relation targets, ORM
+    names and the `MethodSchema` of every driver method (`adorm.models.driver_methods()`).
 
     Raises ``TypeError`` for an abstract model (no ``_meta``).
     """
     from adorm.models.base import get_relations
+    from adorm.models.managers import driver_methods
 
     meta = model._meta
     if meta is None:
@@ -29,7 +30,8 @@ def model_schema(model: type[Model]) -> ModelSchema:
         hint = info.annotation
         fields[name] = Annotated[(hint, *info.metadata)] if info.metadata else hint
     relations = {name: relation.target for name, relation in get_relations(model).items()}
-    return ModelSchema(meta.label, meta.pk, fields, relations, orm_names=meta.orm_names)
+    methods = {key: method.schema for key, method in driver_methods(model).items()}
+    return ModelSchema(meta.label, meta.pk, fields, relations, orm_names=meta.orm_names, methods=methods)
 
 
 class ModelRegistry:

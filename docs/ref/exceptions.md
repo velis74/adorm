@@ -1,10 +1,11 @@
 # Exceptions
 
 ::: info Status
-The installed version provides the exception classes, `wrap_driver_error` and the [driver contract](/ref/drivers),
-whose connections raise these exceptions. The other components that raise them (the bundled drivers, the pool,
-`atomic()`, `timeout()`) are described on the [concepts](/topics/concepts) page and are not part of the installed
-version; the examples below show how application code handles the exceptions they raise.
+The installed version provides the exception classes, `wrap_driver_error`, the [driver contract](/ref/drivers),
+whose connections raise these exceptions, the [pool and router](/ref/pool) and [`atomic()`](/ref/transactions). The
+other components that raise them (the bundled drivers, `timeout()`) are described on the
+[concepts](/topics/concepts) page and are not part of the installed version; the examples below show how application
+code handles the exceptions they raise.
 :::
 
 adorm has its own exceptions, modelled on Django's. Applications catch adorm's classes, never the target ORM's or
@@ -225,12 +226,27 @@ The database or the driver does not support the requested feature (SQLSTATE clas
 
 ### `adorm.TransactionManagementError`
 
-A transaction was used incorrectly.
+A transaction was used incorrectly. An [`atomic()`](/ref/transactions) block raises it for an operation after an
+operation of the block failed, at a normal end after such a failure (once it has rolled back, with the failure as
+`__cause__`), when it is entered a second time, and when it would nest in an active transaction that is not an
+`Atomic`.
+
+```python
+async with adorm.atomic():
+    try:
+        await Member.objects.create(name="Ana")        # IntegrityError
+    except adorm.IntegrityError:
+        pass
+# TransactionManagementError: rolled back because an operation failed
+```
 
 ### `adorm.TransactionClosed`
 
 An operation arrived for a transaction that has already ended, typically from a task that inherited the
-transaction's context and outlived the `atomic()` block.
+transaction's context and outlived the `atomic()` block. It is also raised by operations after `tx.commit()` or
+`tx.rollback()`, by the requests of a lease whose slot aborted the transaction (the pool's `commit_timeout`), by the
+normal end of a block whose transaction the slot aborted, and by the normal end of a savepoint block that its
+enclosing block closed first.
 
 ```python
 async with adorm.atomic():
@@ -262,7 +278,9 @@ except adorm.SessionTimeout as exc:
 
 A `SessionTimeout` raised while the waiting flow already holds slots, so waiting can make it wait on itself. It is
 raised when the acquisition times out while the flow holds a slot, and at once when every slot is held by a flow
-that itself waits for a slot. `held_sessions` is a tuple of the sessions whose slots the flow holds.
+that itself waits for a slot. Inside a transaction, an operation or a nested `atomic()` that waits longer than the
+pool's `acquire_timeout` for a savepoint of another task to end raises it too, with the transaction's session in
+`held_sessions`. `held_sessions` is a tuple of the sessions whose slots the flow holds.
 
 ```python
 audit = adorm.create_session(using="default", session_name="audit")

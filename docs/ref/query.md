@@ -8,10 +8,11 @@ from adorm import F, Lower, Q, Sum
 from adorm.query import ForUpdate, Query, as_query
 ```
 
-### `adorm.query.Query(model)`
+### `adorm.query.Query(model, *, manager=None)`
 
 The rows of one model that a read returns. `model` is the model's label, `"app_label.ModelName"`; anything else
-raises `ValueError`. A `Query` is a [node](./expressions#adorm-query-node): immutable, compared by value and
+raises `ValueError`. `manager` names the target ORM's manager the driver starts from (a public identifier, otherwise
+`ValueError`); [managers](/topics/managers) set it. A `Query` is a [node](./expressions#adorm-query-node): immutable, compared by value and
 hashable. Every method returns a new query; building does no I/O.
 
 ```python
@@ -41,6 +42,7 @@ q = (
 | `select_related_fields` | `False`, `True` (every non-null relation) or a tuple of relation paths |
 | `is_none` | whether `none()` was called |
 | `for_update` | a [`ForUpdate`](#adorm-query-forupdate-nowait-false-skip-locked-false-of-no-key-false), or `None` |
+| `manager` | the target ORM's manager whose rows and query set methods the driver uses (Django: the manager attribute, so its `get_queryset()` and its query set's `delete()` …), `None` for the model's rows without manager logic |
 | `is_sliced` | whether a slice limits the rows |
 | `is_empty` | whether the query returns no rows: `is_none`, or the slice leaves none (`high_mark <= low_mark`) |
 
@@ -143,8 +145,8 @@ Query("club.Member")[10:20][5:]      # rows 15 to 19
 
 #### `query | other`, `query & other`
 
-Rows matching either query (`|`) or both (`&`). Both queries are on the same model, unsliced, and agree on
-distinctness, `select`, `row_format`, annotations, `only()`, `defer()` and `select_for_update()`; otherwise
+Rows matching either query (`|`) or both (`&`). Both queries are on the same model and manager, unsliced, and agree
+on distinctness, `select`, `row_format`, annotations, `only()`, `defer()` and `select_for_update()`; otherwise
 `TypeError`. The result has the ordering of `other`, or of `query` when `other` has none, and the
 `select_related()` paths of both. A query without conditions matches every row, so `|` with it has no conditions;
 `|` with a `none()` query returns the other query, `&` returns the empty one.
@@ -161,8 +163,13 @@ active & guests            # where: active=True AND guest=True
 #### Construct names
 
 `constructs()` yields the construct names of the where condition, the annotations and the ordering, plus
-`clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related` and the names of
-`for_update` for the clauses in use. `values()`, `values_list()`, `none()` and slicing have none.
+`clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`
+and the names of `for_update` for the clauses in use. `values()`, `values_list()`, `none()` and slicing have none.
+
+```python
+set(Query("library.Loan", manager="objects").filter(archived=False).constructs())
+# {"clause.manager", "lookup.exact"}
+```
 
 #### Encoding
 

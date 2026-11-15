@@ -1,8 +1,9 @@
 """Model schemas: the field types and relations an operation's values are typed by.
 
-A `ModelSchema` describes one model by its label: its primary key, the Python type of every field and the target
-of every relation. A `SchemaSource` returns the schema of a label; `Schema` is a plain registry of them. The
-operation codec (`adorm.codec`) resolves field paths against a source to encode each value by its field's type.
+A `ModelSchema` describes one model by its label: its primary key, the Python type of every field, the target
+of every relation and the parameter types of its driver methods (`MethodSchema`). A `SchemaSource` returns the
+schema of a label; `Schema` is a plain registry of them. The operation codec (`adorm.codec`) resolves field paths
+against a source to encode each value by its field's type.
 """
 
 from __future__ import annotations
@@ -14,7 +15,39 @@ from typing import Any, Protocol, runtime_checkable
 
 from adorm.query.query import check_model_label
 
-__all__ = ["ModelSchema", "Schema", "SchemaSource", "resolve_field_type"]
+__all__ = ["MethodKey", "MethodSchema", "ModelSchema", "Schema", "SchemaSource", "resolve_field_type"]
+
+MethodKey = tuple[str, str, str]
+"""The key of a driver method in `ModelSchema.methods`: ``(manager, target, method)``, where ``manager`` is the ORM
+manager name, ``target`` ``"manager"`` or ``"queryset"`` and ``method`` the method name."""
+
+
+@dataclass(frozen=True, eq=False)
+class MethodSchema:
+    """The parameter types of a driver method, for the arguments of a `adorm.operations.Call`.
+
+    ``positional`` holds the types of the parameters that take positional arguments, in order; ``keyword`` the types
+    of the parameters that take keyword arguments, by name; ``var_positional`` and ``var_keyword`` the types of
+    ``*args`` and ``**kwargs``. ``None`` is a parameter without a type: its values are encoded with their inferred
+    type.
+    """
+
+    positional: tuple[Any, ...] = ()
+    keyword: Mapping[str, Any] = MappingProxyType({})
+    var_positional: Any = None
+    var_keyword: Any = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "positional", tuple(self.positional))
+        object.__setattr__(self, "keyword", MappingProxyType(dict(self.keyword)))
+
+    def arg_type(self, index: int) -> Any:
+        """The type of the positional argument at ``index``."""
+        return self.positional[index] if index < len(self.positional) else self.var_positional
+
+    def kwarg_type(self, name: str) -> Any:
+        """The type of the keyword argument ``name``."""
+        return self.keyword[name] if name in self.keyword else self.var_keyword
 
 
 @dataclass(frozen=True, eq=False)
@@ -24,7 +57,8 @@ class ModelSchema:
     ``fields`` maps every concrete field name (a foreign key's column field too, e.g. ``club_id``) to its type hint;
     ``relations`` maps every relation name (forward, reverse and many-to-many) to the target model's label; ``pk``
     names the primary key field, which is one of ``fields``. ``orm_names`` maps a field or relation name to the target
-    ORM's name where the two differ (`adorm.ModelMeta.orm_names`).
+    ORM's name where the two differ (`adorm.ModelMeta.orm_names`). ``methods`` maps the `MethodKey` of every driver
+    method of the model's managers and query sets to its `MethodSchema`.
     """
 
     label: str
@@ -32,9 +66,18 @@ class ModelSchema:
     fields: Mapping[str, Any]
     relations: Mapping[str, str] = MappingProxyType({})
     orm_names: Mapping[str, str] = field(default=MappingProxyType({}), kw_only=True)
+    methods: Mapping[MethodKey, MethodSchema] = field(default=MappingProxyType({}), kw_only=True)
 
     def __post_init__(self) -> None:
         check_model_label(self.label)
+        object.__setattr__(self, "methods", MappingProxyType(dict(self.methods)))
+        for key, method in self.methods.items():
+            if not (isinstance(key, tuple) and len(key) == 3 and all(isinstance(part, str) for part in key)):
+                raise ValueError(f"{key!r} is not a (manager, target, method) key")
+            if key[1] not in ("manager", "queryset"):
+                raise ValueError(f"the target of {key!r} is 'manager' or 'queryset'")
+            if not isinstance(method, MethodSchema):
+                raise TypeError(f"the schema of {key!r} is a MethodSchema, not {type(method).__name__}")
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
         object.__setattr__(self, "relations", MappingProxyType(dict(self.relations)))
         object.__setattr__(self, "orm_names", MappingProxyType(dict(self.orm_names)))
