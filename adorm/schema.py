@@ -33,7 +33,7 @@ class MethodSchema:
     """
 
     positional: tuple[Any, ...] = ()
-    keyword: Mapping[str, Any] = MappingProxyType({})
+    keyword: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
     var_positional: Any = None
     var_keyword: Any = None
 
@@ -64,9 +64,9 @@ class ModelSchema:
     label: str
     pk: str
     fields: Mapping[str, Any]
-    relations: Mapping[str, str] = MappingProxyType({})
-    orm_names: Mapping[str, str] = field(default=MappingProxyType({}), kw_only=True)
-    methods: Mapping[MethodKey, MethodSchema] = field(default=MappingProxyType({}), kw_only=True)
+    relations: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    orm_names: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}), kw_only=True)
+    methods: Mapping[MethodKey, MethodSchema] = field(default_factory=lambda: MappingProxyType({}), kw_only=True)
 
     def __post_init__(self) -> None:
         check_model_label(self.label)

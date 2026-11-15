@@ -4,7 +4,10 @@ import asyncio
 import copy
 import datetime
 import pickle
+import re
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, ClassVar
 
 import pytest
@@ -142,6 +145,16 @@ def bound(executor: Executor, manager: str = "objects") -> tuple[BoundModel, Any
 # Declarations
 
 
+@contextmanager
+def raises_in_set_name(expected: type[Exception], match: str) -> Iterator[None]:
+    """Expect ``expected`` from ``__set_name__``; Python 3.11 wraps it in a RuntimeError."""
+    with pytest.raises((expected, RuntimeError)) as caught:
+        yield
+    error = caught.value if isinstance(caught.value, expected) else caught.value.__cause__
+    assert isinstance(error, expected)
+    assert re.search(match, str(error))
+
+
 def test_model_declares_a_plain_objects_manager():
     declared = get_managers(Bare)["objects"]
     assert type(declared) is Manager
@@ -211,7 +224,7 @@ def test_orm_name_is_a_public_identifier(name):
 
 def test_a_manager_is_declared_under_one_name():
     shared = Manager()
-    with pytest.raises(TypeError, match="already 'first', not 'second'"):
+    with raises_in_set_name(TypeError, "already 'first', not 'second'"):
 
         class Twice(Model):
             first = shared
@@ -505,7 +518,7 @@ def test_driver_method_declaration_errors():
         driver_method(_hidden)
     with pytest.raises(TypeError, match="needs a self parameter"):
         driver_method(no_self)
-    with pytest.raises(ValueError, match="declare it under its own name"):
+    with raises_in_set_name(ValueError, "declare it under its own name"):
 
         class Renamed(QuerySet):
             other = driver_method(RentalQuerySet.__dict__["archive"].func)
