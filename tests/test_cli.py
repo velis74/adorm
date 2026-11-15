@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from adorm.cli import main
+from adorm.cli import _import_path, main
 from adorm.codegen import HEADER
 
 ROOT = Path(__file__).parent.parent
@@ -158,6 +158,75 @@ def test_pythonpath_makes_a_project_importable(tmp_path):
     assert result.returncode == 0, result.stderr
     text = (output / "shopapp.py").read_text(encoding="utf-8")
     assert 'json_: str = Field(alias="json", max_length=10)' in text
+
+
+def write_project(root, app, field):
+    """A Django project in ``root``: settings module ``shopsettings`` and an app ``app`` with model ``Item``."""
+    (root / app).mkdir(parents=True)
+    (root / app / "__init__.py").write_text("", encoding="utf-8")
+    (root / app / "models.py").write_text(
+        f"from django.db import models\n\n\nclass Item(models.Model):\n    {field} = models.IntegerField()\n",
+        encoding="utf-8",
+    )
+    (root / "shopsettings.py").write_text(
+        f'INSTALLED_APPS = ["{app}"]\nDEFAULT_AUTO_FIELD = "django.db.models.AutoField"\n', encoding="utf-8"
+    )
+
+
+def run_script(*args, cwd, pythonpath):
+    """The ``adorm`` console script, as ``uv run adorm`` starts it, with ``PYTHONPATH`` set to ``pythonpath``."""
+    script = Path(sys.executable).with_name("adorm.exe" if os.name == "nt" else "adorm")
+    assert script.is_file(), f"the adorm console script is not installed next to {sys.executable}"
+    environ = {key: value for key, value in os.environ.items() if key != "DJANGO_SETTINGS_MODULE"}
+    environ["PYTHONPATH"] = os.pathsep.join(str(path) for path in pythonpath)
+    return subprocess.run(  # noqa: S603 - the console script of the environment running the suite
+        [str(script), *args], capture_output=True, text=True, cwd=cwd, env=environ, check=False
+    )
+
+
+@pytest.mark.parametrize("listed", ["absent", "behind"])
+def test_console_script_imports_the_project_from_the_current_directory(tmp_path, listed):
+    """An editable install lists its repository root on the import path. A package of the same name there (adorm's
+    own ``demo``) shadows the project's unless the current directory comes first, also when the current directory
+    is listed further back (the project itself installed editable)."""
+    project, other = tmp_path / "project", tmp_path / "other"
+    write_project(project, "shopapp", "mine")
+    write_project(other, "shopapp", "shadow")
+    pythonpath = {"absent": [other], "behind": [other, project]}[listed]
+    result = run_script("generate", "--settings", "shopsettings", "-o", "out", cwd=project, pythonpath=pythonpath)
+    assert result.returncode == 0, result.stderr
+    text = (project / "out" / "shopapp.py").read_text(encoding="utf-8")
+    assert "mine: int" in text
+    assert "shadow" not in text
+
+
+def test_console_script_pythonpath_comes_after_the_current_directory(tmp_path):
+    """``--pythonpath`` directories, relative ones resolved against the current directory, also come before a
+    shadowing entry, in the order given and after the current directory."""
+    work, other = tmp_path / "work", tmp_path / "other"
+    work.mkdir()
+    write_project(work / "first", "shopapp", "first")
+    write_project(work / "second", "shopapp", "second")
+    write_project(other, "shopapp", "shadow")
+    (other / "shopsettings.py").unlink()
+    result = run_script(
+        "generate", "--settings", "shopsettings", "--pythonpath", "first", "--pythonpath", "second", "-o", "out",
+        cwd=work, pythonpath=[other, work / "second"],
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    assert "first: int" in (work / "out" / "shopapp.py").read_text(encoding="utf-8")
+
+
+def test_import_path_moves_entries_naming_the_front_directories(tmp_path, monkeypatch):
+    """``''``, a trailing separator and a relative entry name the same directory as the front entries and are
+    removed from further back; the other entries keep their order."""
+    project = tmp_path / "project"
+    (project / "sub").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    entries = ["", "elsewhere", f"{project}{os.sep}", "sub", str(project / "sub"), "/opt/site"]
+    monkeypatch.setattr(sys, "path", entries)
+    _import_path(["sub"])
+    assert sys.path == [str(project), str(project / "sub"), "elsewhere", "/opt/site"]
 
 
 def test_generated_demo_models_match_the_demo_django_models(tmp_path):

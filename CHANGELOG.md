@@ -146,8 +146,9 @@
   forward relations to models that are not generated are reported as warnings. Each model carries a schema hash
   (`adorm.codegen.django.schema_hash()`). `--check` exits with status 1 when a file is missing, stale, obsolete or
   not written by the generator; such files are never replaced. Errors, including a cycle of base classes between
-  modules and a model the generator cannot describe, exit with status 2. API in `adorm.codegen` (model description,
-  rendering, files) and `adorm.codegen.django`.
+  modules and a model the generator cannot describe, exit with status 2. The current directory and the
+  `--pythonpath` directories go to the front of the import path, ahead of installed packages of the same name. API
+  in `adorm.codegen` (model description, rendering, files) and `adorm.codegen.django`.
 - Managers and driver methods: `adorm.Manager(orm_name=None, *, method_manager=None)` declared in a model class body (`objects = Manager()`
   on `Model`), bound to the current session when read, with `queryset_class`, `get_queryset()`, `from_queryset()`,
   `QuerySet.as_manager()` and query set methods forwarded to the manager; `BoundModel` gains `name`, `orm_name`,

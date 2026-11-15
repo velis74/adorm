@@ -20,8 +20,10 @@ adorm generate [-h] -o OUTPUT [--settings SETTINGS] [--pythonpath PYTHONPATH] [-
 ```
 
 Writes one module per Django app and a package `__init__.py` into `OUTPUT`; with `--check`, writes nothing and
-reports the differences. `python -m adorm generate` is the same command. Warnings (constructs that are not
-generated, forward relations to models that are not generated) go to standard error as `warning: <message>`.
+reports the differences. `python -m adorm generate` is the same command. Before Django is set up, the current
+directory and then each `--pythonpath` directory, as absolute paths, are put at the front of `sys.path`; entries that
+name the same directories further back are moved there. Warnings (constructs that are not generated, forward
+relations to models that are not generated) go to standard error as `warning: <message>`.
 
 | Exit status | Meaning |
 |---|---|

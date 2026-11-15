@@ -38,7 +38,10 @@ def _parser() -> argparse.ArgumentParser:
     generate.add_argument("-o", "--output", required=True, type=Path, help="package directory of the modules")
     generate.add_argument("--settings", help="Django settings module (default: DJANGO_SETTINGS_MODULE)")
     generate.add_argument(
-        "--pythonpath", action="append", default=[], help="directory to add to the import path (repeatable)"
+        "--pythonpath",
+        action="append",
+        default=[],
+        help="directory to put on the import path after the current directory (repeatable)",
     )
     generate.add_argument(
         "-e", "--exclude", action="append", default=[], metavar="LABEL", help="app or model label to leave out"
@@ -48,11 +51,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _import_path(pythonpath: Sequence[str]) -> None:
+    """Put the current directory, then each ``pythonpath`` directory, at the front of `sys.path`, moving entries
+    that name the same directory there, so an installed module of the same name does not shadow them."""
+    front = list(dict.fromkeys(os.path.abspath(path) for path in (os.curdir, *pythonpath)))
+    rest = [entry for entry in sys.path if os.path.abspath(entry or os.curdir) not in front]
+    sys.path[:] = [*front, *rest]
+
+
 def _source(settings: str | None, pythonpath: Sequence[str]) -> ModuleType:
     """`adorm.codegen.django`, with Django set up."""
-    for path in reversed([os.getcwd(), *pythonpath]):
-        if path not in sys.path:
-            sys.path.insert(0, path)
+    _import_path(pythonpath)
     try:
         source = importlib.import_module("adorm.codegen.django")
     except ModuleNotFoundError as exc:

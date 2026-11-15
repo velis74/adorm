@@ -21,7 +21,15 @@ wrote myproject/adorm_models/billing.py
 ```
 
 Without app labels every installed app with models is generated, in `INSTALLED_APPS` order. `python -m adorm generate`
-is the same command. The current directory is on the import path; `--pythonpath DIR` adds more.
+is the same command. The current directory comes first on the import path, then each `--pythonpath DIR`, ahead of
+installed packages and editable installs, so under `uv run` too the project's packages are imported from the current
+directory:
+
+```sh
+cd myproject-repo
+uv run adorm generate --settings myproject.settings --output myproject/adorm_models
+uv run adorm generate --settings settings --pythonpath src --output src/adorm_models  # settings in src/
+```
 
 The package imports every module, so importing it registers every model, and lists the classes in `MODELS`:
 
@@ -37,7 +45,7 @@ schemas = {model._meta.label: model.model_json_schema() for model in MODELS}
 | `app_label …` | the apps to generate; default: every app with models |
 | `-o`, `--output DIR` | the package directory; created when missing |
 | `--settings MODULE` | the Django settings module; default: `DJANGO_SETTINGS_MODULE` |
-| `--pythonpath DIR` | a directory added to the import path (repeatable) |
+| `--pythonpath DIR` | a directory put on the import path after the current directory (repeatable) |
 | `-e`, `--exclude LABEL` | an app label (`billing`) or model label (`billing.Payment`) to leave out (repeatable) |
 | `--check` | write nothing; exit with status 1 when a file is missing, stale, obsolete or not generated |
 | `--line-length N` | the longest line before a statement is split (default 88) |
