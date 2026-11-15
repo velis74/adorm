@@ -84,7 +84,9 @@ except adorm.ObjectDoesNotExist:          # any model
     club = None
 ```
 
-`adorm.exceptions.ModelExceptionsMixin` adds the two classes to every subclass in `__init_subclass__`. Their
+#### `adorm.exceptions.ModelExceptionsMixin`
+
+Adds the two classes to every subclass in `__init_subclass__`; `Model` inherits it. Their
 `__qualname__` is `<Model>.DoesNotExist` in the model's module, so they pickle when the model is defined at module
 level. A class that defines `DoesNotExist` or `MultipleObjectsReturned` itself keeps its own; the class must then
 derive from `ObjectDoesNotExist` or `MultipleObjectsReturned` for subclasses to inherit from it.

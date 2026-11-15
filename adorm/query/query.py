@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 
 from adorm.query.expressions import check_field_path, Expression, F, Node, OrderBy, Q
 
-__all__ = ["ForUpdate", "Query", "as_query", "check_model_label"]
+__all__ = ["ForUpdate", "Query", "as_query"]
 
 _LABEL = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
 

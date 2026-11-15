@@ -1,3 +1,4 @@
+import importlib
 import json
 import re
 
@@ -123,6 +124,76 @@ def test_has_reference_heading(reference, expected):
 def test_submodule_public_names_are_documented(module, name):
     pattern = rf"^#{{2,4}} `{re.escape(module)}\.{re.escape(name)}(\(.*\))?`"
     assert re.search(pattern, reference_text(), re.MULTILINE), f"no reference heading for {module}.{name}"
+
+
+SUBMODULES = (
+    "adorm.cli",
+    "adorm.codegen.files",
+    "adorm.codegen.render",
+    "adorm.codegen.spec",
+    "adorm.drivers.base",
+    "adorm.exceptions",
+    "adorm.executor.debug",
+    "adorm.executor.pool",
+    "adorm.executor.sessions",
+    "adorm.executor.slot",
+    "adorm.executor.transactions",
+    "adorm.models.base",
+    "adorm.models.managers",
+    "adorm.models.meta",
+    "adorm.models.registry",
+    "adorm.models.relations",
+    "adorm.porting",
+    "adorm.query.expressions",
+    "adorm.query.lookups",
+    "adorm.query.query",
+    "adorm.query.queryset",
+)
+
+
+def documented_paths(module: str, name: str) -> list[str]:
+    """The dotted paths under which a public name may be documented: its own module, or a package or the top-level
+    package that re-exports the same object."""
+    obj = getattr(importlib.import_module(module), name)
+    paths = [module]
+    parts = module.split(".")
+    for end in range(len(parts) - 1, 0, -1):
+        parent = importlib.import_module(".".join(parts[:end]))
+        if name in getattr(parent, "__all__", ()) and getattr(parent, name) is obj:
+            paths.append(parent.__name__)
+    return paths
+
+
+@pytest.mark.parametrize(
+    ("module", "name"),
+    [(m, n) for m in SUBMODULES for n in importlib.import_module(m).__all__],
+)
+def test_every_submodule_public_name_is_documented(module, name):
+    text = reference_text()
+    paths = documented_paths(module, name)
+    found = any(
+        re.search(rf"^#{{2,4}} `{re.escape(path)}\.{re.escape(name)}(\(.*\))?`", text, re.MULTILINE)
+        or re.search(rf"^#{{2,4}} .*`{re.escape(path)}\.{re.escape(name)}`", text, re.MULTILINE)
+        for path in paths
+    )
+    assert found, f"no reference heading for {module}.{name} (looked for {', '.join(paths)})"
+
+
+def test_every_public_module_is_checked():
+    modules = {
+        ".".join(("adorm", *p.relative_to(DOCS.parent / "adorm").with_suffix("").parts))
+        for p in (DOCS.parent / "adorm").rglob("*.py")
+        if p.name not in {"__init__.py", "__main__.py"}
+    }
+    checked = set(SUBMODULES) | {
+        "adorm.codec",
+        "adorm.codegen.django",
+        "adorm.events",
+        "adorm.operations",
+        "adorm.schema",
+        "adorm.settings",
+    }
+    assert modules - checked == set()
 
 
 @pytest.mark.parametrize("name", adorm.query.__all__)
