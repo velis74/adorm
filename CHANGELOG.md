@@ -264,8 +264,7 @@
   block goes on. A commit of a transaction Django marked for rollback, or that PostgreSQL aborted, rolls back and
   raises `TransactionManagementError`; `begin()` inside a Django atomic block of a direct connection's thread raises
   it too. Django's signals fire on the driver side only. Every ORM call runs on the profile's alias.
-  `adorm.drivers.django.READ_CAPABILITIES` holds the reads and arithmetic (`expression.CombinedExpression`), which
-  the asyncpg driver declares;
+  `adorm.drivers.django.READ_CAPABILITIES` holds the reads and arithmetic (`expression.CombinedExpression`);
   `model_row()` turns a Django instance into a `ModelRow`; `adorm.drivers.django.translation` gains
   `model_queryset()`, `field_kwargs()`, `lookup_kwargs()` and `instance_row()`.
 - `adorm.operations.UpdateOrCreate` (`defaults`, `create_defaults`), `QuerySet.update_or_create()` and the bound
@@ -278,3 +277,24 @@
   on every driver.
 - `ThreadedConnection.after_call_sync(fn)`: work that runs on the connection's thread after a call's outcome is
   delivered and before the next call, out of reach of `cancel()`.
+- Native PostgreSQL driver writes and transactions: the driver declares the Django driver's `CAPABILITIES` and
+  savepoints. `adorm.drivers.asyncpg.writes.Writer` runs `create`, `save`, `update`, `delete`, `delete_instance`,
+  `get_or_create` and `update_or_create` with Django's write logic on Django's queries and model instances (multi-table
+  inheritance inserts and updates, `RETURNING` of the values the database sets, fields' `pre_save()`,
+  `order_with_respect_to`, Django's deletion collector with every built-in `on_delete` handler, generic relations and
+  `ProtectedError` / `RestrictedError` with complete instances), each statement awaited on asyncpg, with the Django
+  driver's results. No model method, manager or query set override and no Django signal runs: a write whose model,
+  manager or query set overrides the Django method it would call, and a delete reaching an `on_delete` handler other
+  than Django's, raise `NotSupportedError` before anything is written. Statements Django runs in one atomic block run
+  in a transaction of the driver's own outside `adorm.atomic()` (a cancellation gives the connection up, so the server
+  rolls it back) and in savepoints where Django uses them. Savepoints are tracked by name; `begin()` inside a
+  transaction and a `COMMIT` that PostgreSQL turns into a rollback raise `TransactionManagementError`. A write of
+  several statements that fails partway through inside a transaction, outside a savepoint, leaves the transaction
+  rollback-only, as Django's `needs_rollback`: later operations and the commit raise `TransactionManagementError`.
+  Delete statements stay within asyncpg's 32 767 parameters. `adorm.drivers.asyncpg.writes.Collector` is Django's
+  deletion collector on a `Writer`. `DjangoCompiler.compile_insert()`, `compile(..., returning=...)` and
+  `DjangoStatement.returned()` compile inserts and `RETURNING` clauses (an update's `RETURNING` on Django 6; on
+  Django 5.2 `returning` raises `NotSupportedError`). The conformance suite holds every driver to
+  what it does with Python code of the target ORM: model `save()` / `delete()` overrides, query set `create()` /
+  `update()` overrides, custom `on_delete` handlers, Django's signals and `on_commit()` callbacks, `pre_init` /
+  `post_init` (`tests/conformance/test_driver_code.py`).

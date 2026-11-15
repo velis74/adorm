@@ -291,9 +291,9 @@ class Delete(_QueryOperation):
 
 @dataclass(frozen=True, eq=False)
 class DeleteInstance(Operation):
-    """Delete the instance of ``model`` with primary key ``pk`` as the target deletes one instance (a Django model's
-    ``delete()`` runs), with the rows that cascade from it. Result: ``(total, {label: count})``; a missing row
-    deletes nothing.
+    """Delete the instance of ``model`` with primary key ``pk`` as the driver deletes one instance, with the rows that
+    cascade from it (the Django driver runs the model's ``delete()``; the native PostgreSQL driver refuses a model
+    that overrides it). Result: ``(total, {label: count})``; a missing row deletes nothing.
 
     ``pk`` is a value, not ``None`` (``ValueError``) and not an expression (``TypeError``).
     """

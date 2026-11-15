@@ -11,7 +11,6 @@ import threading
 
 from decimal import Decimal
 
-import asyncpg
 import pytest
 
 from django.db import connections, transaction
@@ -70,63 +69,6 @@ async def executor():
 @pytest.fixture
 async def pool(executor):
     return executor(max_connections=2, acquire_timeout=5)
-
-
-class Database:
-    """Two asyncpg connections of the test's own: ``holder`` takes row locks, ``monitor`` watches the server."""
-
-    def __init__(self, holder, monitor):
-        self.holder = holder
-        self.monitor = monitor
-        self.transaction = None
-
-    async def lock_author(self, slug):
-        self.transaction = self.holder.transaction()
-        await self.transaction.start()
-        await self.holder.execute("SELECT id FROM library_author WHERE slug = $1 FOR UPDATE", slug)
-
-    async def release(self):
-        transaction, self.transaction = self.transaction, None
-        if transaction is not None:
-            await transaction.rollback()
-
-    async def waiting(self):
-        """The pid of a backend that waits for a lock, once there is one."""
-        async with asyncio.timeout(10):
-            while True:
-                pid = await self.monitor.fetchval(
-                    "SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()"
-                    " AND pid <> pg_backend_pid()"
-                )
-                if pid is not None:
-                    return pid
-                await asyncio.sleep(0.01)
-
-    async def open_transactions(self):
-        """How many connections other than the test's own are inside a transaction."""
-        own = [self.holder.get_server_pid()]
-        return await self.monitor.fetchval(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND xact_start IS NOT NULL"
-            " AND pid <> pg_backend_pid() AND pid <> ALL($1::int[])",
-            own,
-        )
-
-    async def transactions_ended(self):
-        async with asyncio.timeout(5):
-            while await self.open_transactions():
-                await asyncio.sleep(0.01)
-
-
-@pytest.fixture
-async def database(test_database_url):
-    holder = await asyncpg.connect(test_database_url)
-    monitor = await asyncpg.connect(test_database_url)
-    try:
-        yield Database(holder, monitor)
-    finally:
-        await Database(holder, monitor).release()
-        await holder.close()
-        await monitor.close()
 
 
 @pytest.fixture

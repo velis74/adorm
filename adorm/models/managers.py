@@ -294,9 +294,10 @@ def _forwarded(queryset_class: type[QuerySet], name: str) -> bool:
 class Manager(BoundModel):
     """A manager declared in a model class body: ``objects = Manager()``.
 
-    ``orm_name`` names the target ORM's manager whose logic the driver applies to every operation of this manager
-    (`Query.manager`): its rows (Django: ``get_queryset()``) and the overrides of its query set (``create()``,
-    ``delete()`` …). ``None`` reads and writes the model's rows without manager logic, on every driver.
+    ``orm_name`` names the target ORM's manager that every operation of this manager names (`Query.manager`); the
+    driver applies its rows (Django: ``get_queryset()``) and treats the overrides of its query set (``create()``,
+    ``delete()`` …) as its documentation states: the Django driver runs them, the native PostgreSQL driver refuses the
+    write. ``None`` reads and writes the model's rows without manager logic, on every driver.
     ``method_manager`` names the target ORM's manager the driver methods (`driver_method`) run on; it defaults to
     ``orm_name``. A manager with ``method_manager`` and no ``orm_name`` sends its queries without `Query.manager`, so
     they run on every driver; only its driver methods need a driver that runs ``call`` operations.

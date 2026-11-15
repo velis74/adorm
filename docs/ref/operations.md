@@ -204,7 +204,8 @@ Delete(Query("club.Member").filter(active=False, joined__lt=cutoff))
 ### `adorm.operations.DeleteInstance(model, pk)`
 
 Deletes the instance of `model` with primary key `pk` as the target deletes one instance, with the rows that cascade
-from it: on the Django driver the model's `delete()` runs, an override included. A missing row deletes nothing.
+from it: on the Django driver the model's `delete()` runs, an override included; the native PostgreSQL driver deletes
+with Django's collector and raises `NotSupportedError` for a model with an override. A missing row deletes nothing.
 `pk` as `None` raises `ValueError`, as an expression `TypeError`. Result: `(total, {label: count})`.
 
 ```python

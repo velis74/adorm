@@ -12,14 +12,14 @@ import threading
 import uuid
 
 import asyncpg
+import django
 import pytest
 
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.postgres.search import SearchHeadline
-from django.db import connection, connections, NotSupportedError as DjangoNotSupportedError, transaction
+from django.db import connection, connections, models, NotSupportedError as DjangoNotSupportedError, transaction
 from django.db.backends.signals import connection_created
 from django.db.models import (
-    AnyValue,
     Case,
     Count,
     Exists,
@@ -46,13 +46,15 @@ from adorm.drivers.sql import Statement
 from adorm.exceptions import NotSupportedError, TransactionManagementError
 from tests.djangoproject.library.models import Author, Book, Edition, Note
 
+AnyValue = getattr(models, "AnyValue", None)  # Django 6
+
 SERVER_VERSION = 170000
 PUBLISHED = datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.UTC)
 
 
 def queries():
     """Querysets covering the constructs whose SQL or parameters differ between psycopg and asyncpg."""
-    return {
+    found = {
         "lookups": Book.objects.filter(title__icontains="war", pages__gte=100).order_by("-published", "isbn")[:5],
         "pattern_with_percent": Book.objects.filter(title__contains="100%_").order_by("isbn"),
         "contains_expression": Book.objects.filter(title__contains=F("genre")).order_by("isbn"),
@@ -79,7 +81,6 @@ def queries():
         "in_list": Book.objects.filter(pk__in=["9780000000001", "9780000000002"]).order_by("isbn"),
         "or_not": Book.objects.filter(Q(pages__lt=200) | ~Q(genre="fiction")).order_by("isbn"),
         "json_object": Book.objects.annotate(j=JSONObject(t="title", p="pages")).values("isbn", "j").order_by("isbn"),
-        "any_value": Book.objects.values("genre").annotate(t=AnyValue("title")).filter(t__isnull=False),
         "int_arithmetic": Book.objects.annotate(x=Value(30000) + Value(30000)).values("isbn", "x").order_by("isbn"),
         "smallint_column_arithmetic": Author.objects.annotate(x=F("rating") + 30000)
         .values("slug", "x")
@@ -100,6 +101,9 @@ def queries():
             other=RawSQL("%s::uuid", (str(uuid.UUID(int=2)),), output_field=UUIDField())
         ).values_list("code", "other"),
     }
+    if AnyValue is not None:
+        found["any_value"] = Book.objects.values("genre").annotate(t=AnyValue("title")).filter(t__isnull=False)
+    return found
 
 
 def in_fresh_thread(fn):
@@ -183,6 +187,8 @@ def test_server_version_selects_the_sql():
     queryset = Book.objects.annotate(j=JSONObject(t="title")).values("j")
     assert "JSON_OBJECT(" in DjangoCompiler(server_version=170000).compile(queryset).sql
     assert "JSONB_BUILD_OBJECT(" in DjangoCompiler(server_version=150000).compile(queryset).sql
+    if AnyValue is None:
+        return
     any_value = Book.objects.values("genre").annotate(t=AnyValue("title"))
     assert "ANY_VALUE(" in DjangoCompiler(server_version=160000).compile(any_value).sql
     with pytest.raises(DjangoNotSupportedError, match="ANY_VALUE"):
@@ -291,11 +297,46 @@ def test_delete_compiles(compiler):
     assert statement.params == (10,)
 
 
-def test_insert_is_not_supported(compiler):
+def test_an_insert_compiles_with_compile_insert(compiler):
     query = InsertQuery(Author)
-    query.insert_values([Author._meta.get_field("name")], [Author(name="Ana")])
-    with pytest.raises(NotSupportedError, match="several statements"):
+    fields = [Author._meta.get_field(name) for name in ("name", "slug")]
+    query.insert_values(fields, [Author(name="Ana", slug="ana")])
+    with pytest.raises(NotSupportedError, match="compile_insert"):
         compiler.compile(query)
+    statement = in_fresh_thread(lambda: compiler.compile_insert(query, [Author._meta.pk]))
+    assert statement.sql == (
+        'INSERT INTO "library_author" ("name", "slug") VALUES ($1, $2) RETURNING "library_author"."id"'
+    )
+    assert (statement.params, statement.returning) == (("Ana", "ana"), (Author._meta.pk,))
+    plain = compiler.compile_insert(query)
+    assert "RETURNING" not in plain.sql
+    assert plain.returning == ()
+
+
+def test_an_update_returns_the_fields_it_names(compiler):
+    update = Author.objects.filter(pk=1).query.chain(UpdateQuery)
+    rating = Author._meta.get_field("rating")
+    update.add_update_fields([(rating, None, F("rating") + 1)])
+    if not compiler_module._UPDATE_RETURNING:
+        with pytest.raises(NotSupportedError, match="RETURNING"):
+            compiler.compile(update, returning=[rating])
+        return
+    statement = compiler.compile(update, returning=[rating])
+    assert statement.sql.endswith('WHERE "library_author"."id" = $2::int4 RETURNING "library_author"."rating"')
+    assert statement.returning == (rating,)
+    assert statement.returned([(4,)]) == [(4,)]
+
+
+def test_returned_rows_apply_the_fields_converters(compiler):
+    query = InsertQuery(Book)
+    query.insert_values([Book._meta.get_field("isbn")], [Book(isbn="9780000000099")])
+    extra, published = Book._meta.get_field("extra"), Book._meta.get_field("published")
+    statement = compiler.compile_insert(query, [extra, published])
+    at = datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.timezone(datetime.timedelta(hours=2)))
+    ((value, when),) = statement.returned([('{"a": [1]}', at)])
+    assert value == {"a": [1]}
+    assert when == at
+    assert when.tzinfo == datetime.UTC
 
 
 def test_parameter_limit(compiler):
@@ -304,6 +345,8 @@ def test_parameter_limit(compiler):
     with pytest.raises(NotSupportedError, match="at most 32767"):
         compiler.compile(Book.objects.filter(pk__in=keys))
     fields = [Author._meta.get_field(name) for name in ("name", "slug", "rating")]
+    if django.VERSION < (6,):
+        return  # Django 5.2's PostgreSQL backend sizes no batches
     assert compiler.connection.ops.bulk_batch_size(fields, [None] * 50_000) == MAX_QUERY_PARAMS // 3
 
 

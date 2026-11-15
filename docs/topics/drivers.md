@@ -2,9 +2,8 @@
 
 ::: info Status
 The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`), the
-[slots and pool](/topics/pool) that call drivers, and two drivers: the [Django driver](/topics/django-driver), which
-executes reads, writes, row locks and savepoints, and the [native PostgreSQL driver](/topics/postgresql-driver), which
-executes reads.
+[slots and pool](/topics/pool) that call drivers, and two drivers that execute reads, writes, row locks and
+savepoints: the [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver).
 :::
 
 A driver executes adorm operations on one target: an ORM such as Django's or SQLAlchemy, or a database library
@@ -221,14 +220,15 @@ methods), no direct call reaches the test's connection; the installed contract d
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
 | the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | the same Django query set, compiled without a connection by [`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none) ([SQL compilation for asyncpg](./sql-compilation)), run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
+| writes through the model's and the query set's methods (`save()`, `delete()`, `update()` …), Django's signals included | Django's write logic on Django's queries and model instances ([`Writer`](/ref/drivers#adorm-drivers-asyncpg-writes-writer-connection)), each statement compiled and awaited; no model method, override or signal runs | Core statements |
 | rows from `values_list()`, keyed by adorm field names (`orm_names`) | [`DjangoStatement.rows()`](/ref/drivers#rows-records): tuples in select order with Django's converters applied, keyed by adorm field names as on the Django driver | `Row._mapping` to dict |
 
 ### Transactions and savepoints
 
 | Call | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|---|
-| `begin()` | `set_autocommit(False)` | `BEGIN` (with the isolation level of `OPTIONS`) | `conn.begin()` |
-| `commit()` / `rollback()` | `commit()` / `rollback()`, then `set_autocommit(True)` | `COMMIT` / `ROLLBACK` | `Transaction.commit()` / `rollback()` |
+| `begin()` | an outermost `transaction.atomic()` block | `BEGIN` (with the isolation level of `OPTIONS`) | `conn.begin()` |
+| `commit()` / `rollback()` | leaving that block | `COMMIT` / `ROLLBACK`; a `COMMIT` that rolls back a failed transaction raises `TransactionManagementError` | `Transaction.commit()` / `rollback()` |
 | `savepoint(name)` | `SAVEPOINT` with the given name | `SAVEPOINT` | `begin_nested()`; the driver keeps a map from name to `NestedTransaction` |
 | `release_savepoint(name)` | `RELEASE SAVEPOINT` | `RELEASE SAVEPOINT` | `NestedTransaction.commit()` |
 | `rollback_to_savepoint(name)` | `ROLLBACK TO SAVEPOINT` | `ROLLBACK TO SAVEPOINT` | `NestedTransaction.rollback()` |

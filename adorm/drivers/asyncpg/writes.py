@@ -1,0 +1,988 @@
+"""Writes of the native PostgreSQL driver: Django's write logic on asyncpg, without Django's model methods and signals.
+
+`Writer` runs one write operation of an `AsyncpgConnection`. It follows the steps of Django's ``Model.save()``,
+``QuerySet.update()``, ``QuerySet.delete()`` (its collector), ``get_or_create()`` and ``update_or_create()`` with
+Django's queries, fields and model instances, and awaits every statement on the connection instead of running it
+through Django's connection. Django's ``pre_save``, ``post_save``, ``pre_delete`` and ``post_delete`` signals are not
+sent. Python code that overrides one of the Django methods a write would call (a model's ``save()`` or
+``delete()``, a query set's or manager's ``create()``, ``update()``, ``delete()`` …) cannot run here: such a write
+raises `NotSupportedError` before any statement runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import inspect
+import itertools
+
+from collections import Counter, defaultdict
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Sequence
+from functools import reduce
+from operator import or_
+from typing import Any
+
+from django.db import DatabaseError as DjangoDatabaseError, models
+from django.db.models import deletion, sql
+from django.db.models.expressions import DatabaseDefault
+from django.db.models.fields import Field
+from django.db.models.query import QuerySet
+from django.db.models.query_utils import Q
+from django.db.models.sql.constants import GET_ITERATOR_CHUNK_SIZE
+from django.db.models.utils import resolve_callables
+
+from adorm.drivers.asyncpg import compiler as _compiler
+from adorm.drivers.django.translation import django_model, field_kwargs, instance_row, lookup_kwargs, model_queryset
+from adorm.exceptions import (
+    IntegrityError,
+    NotSupportedError,
+    ObjectDoesNotExist,
+    ProgrammingError,
+    TransactionManagementError,
+)
+
+__all__ = ["BATCH_SIZE", "Collector", "WRITES", "Writer"]
+
+BATCH_SIZE = 10_000
+"""How many keys one statement of a delete's collection or a multi-table update names at most per foreign key; a
+statement that names keys for several foreign keys names at most `MAX_QUERY_PARAMS` keys in all."""
+
+_ids = itertools.count(1)
+
+# Django 6 returns the values of expressions a save writes; Django 5.2 leaves the expression on the instance.
+_RETURNS_EXPRESSIONS = hasattr(models.Model, "_assign_returned_values")
+_SKIP_COLLECTION = getattr(deletion, "SKIP_COLLECTION", frozenset({deletion.DO_NOTHING}))
+
+
+def _batches(items: Sequence[Any], size: int | None = None) -> Iterable[Sequence[Any]]:
+    size = size or BATCH_SIZE
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
+
+def _batch_size(fields: int) -> int:
+    """The keys per statement that names them for ``fields`` foreign keys: `BATCH_SIZE`, within `MAX_QUERY_PARAMS`."""
+    return max(1, min(BATCH_SIZE, _compiler.MAX_QUERY_PARAMS // max(1, fields)))
+
+
+def _refuse(owner: str, name: str) -> NotSupportedError:
+    return NotSupportedError(
+        f"{owner} overrides {name}(); the asyncpg driver does not run Python code of the target ORM, "
+        "the Django driver does"
+    )
+
+
+def _require_model_methods(model: type[models.Model], *names: str) -> None:
+    """Raise `NotSupportedError` when ``model`` overrides one of Django's ``Model`` methods ``names``."""
+    for name in names:
+        if getattr(model, name) is not getattr(models.Model, name):
+            raise _refuse(model._meta.label, name)
+
+
+def _require_queryset_methods(queryset: QuerySet, *names: str) -> None:
+    """Raise `NotSupportedError` when the class of ``queryset`` overrides one of Django's ``QuerySet`` methods."""
+    for name in names:
+        if getattr(type(queryset), name) is not getattr(QuerySet, name):
+            raise _refuse(f"the query set of {queryset.model._meta.label}", name)
+
+
+def _require_manager_methods(manager: models.Manager, *names: str) -> None:
+    """Raise `NotSupportedError` when ``manager``, or the query set it returns, overrides one of ``names``. A
+    manager method Django generates from a query set method (``from_queryset()``) is not an override."""
+    for name in names:
+        attribute = inspect.getattr_static(type(manager), name, None)
+        wrapped = getattr(attribute, "__wrapped__", None)
+        if attribute is not None and wrapped is not getattr(QuerySet, name):
+            raise _refuse(f"the manager {manager.name!r} of {manager.model._meta.label}", name)
+    _require_queryset_methods(manager.get_queryset(), *names)
+
+
+def _manager(model: type[models.Model], name: str | None) -> models.Manager:
+    if name is None:
+        return model._base_manager
+    manager = getattr(model, name, None)
+    if not isinstance(manager, models.Manager):
+        raise ProgrammingError(f"{model._meta.label} has no Django manager {name!r}")
+    return manager
+
+
+class Writer:
+    """Runs write operations on ``connection``, an `AsyncpgConnection`, statement by statement.
+
+    Model instances are Django's, built with the model's constructor (``pre_init`` and ``post_init`` fire) and
+    ``Model.from_db()``; their ``_state.db`` is the connection's alias. Several statements that Django runs in an
+    atomic block run in a transaction of their own outside the connection's transaction, and inside it in a savepoint
+    where Django uses one.
+    """
+
+    def __init__(self, connection: Any) -> None:
+        self.connection = connection
+        self.alias: str = connection.compiler.alias
+        self.features = connection.compiler.connection.features
+
+    # Statements
+
+    async def rows(self, queryset: Any) -> list[tuple[Any, ...]]:
+        """The rows of ``queryset``, a Django ``values_list()`` query set or a select ``Query``."""
+        return await self.connection._fetch(self.connection._compile(queryset))
+
+    async def row_count(self, query: Any) -> int:
+        return await self.connection._row_count(self.connection._compile(query))
+
+    async def exists(self, queryset: QuerySet) -> bool:
+        statement = self.connection._compile(queryset.query.exists())
+        return await self.connection._run(self.connection.conn.fetchrow(statement.sql, *statement.params)) is not None
+
+    async def keys(self, queryset: QuerySet) -> list[Any]:
+        """The primary keys of the rows of ``queryset``."""
+        return [row[0] for row in await self.rows(queryset.values_list("pk"))]
+
+    async def instances(self, queryset: QuerySet) -> list[models.Model]:
+        """The rows of ``queryset`` as Django model instances with every concrete field loaded, by primary key."""
+        model = queryset.model
+        names = [field.attname for field in model._meta.concrete_fields]
+        rows = await self.rows(queryset.order_by("pk").values_list(*names))
+        return [model.from_db(self.alias, names, row) for row in rows]
+
+    async def get(self, queryset: QuerySet, lookups: dict[str, Any] | None = None) -> models.Model:
+        """The one row of ``queryset`` filtered by ``lookups`` as a Django model instance; none raises
+        `ObjectDoesNotExist`, several `MultipleObjectsReturned`, as Django's ``get()``."""
+        if lookups:
+            queryset = queryset.filter(**lookups)
+        model = queryset.model
+        names = [field.attname for field in model._meta.concrete_fields]
+        row = await self.connection._get(queryset.values_list(*names))
+        return model.from_db(self.alias, names, row)
+
+    @contextlib.asynccontextmanager
+    async def atomic(self, *, savepoint: bool = True) -> AsyncIterator[None]:
+        """Django's ``transaction.atomic(savepoint=savepoint)`` on the connection.
+
+        Outside a transaction the block runs in one of its own: committed on exit, rolled back on an error. A
+        cancellation leaves it to the server: the connection is given up, and closing it rolls the transaction back.
+        Inside a transaction the block is a savepoint, rolled back on an error, or with ``savepoint`` false runs in
+        the transaction as it is; an error after a statement of the block ran then leaves the transaction
+        rollback-only, as Django's ``needs_rollback``.
+        """
+        connection = self.connection
+        if connection.conn.is_in_transaction():
+            if not savepoint:
+                statements = connection._statements
+                try:
+                    yield
+                except BaseException:
+                    if connection._statements != statements:
+                        connection._mark_rollback_only()
+                    raise
+                return
+            name = f'"adorm_asyncpg_{next(_ids)}"'
+            await connection._command(f"SAVEPOINT {name}")
+            rollback_only = connection._rollback_only
+            try:
+                yield
+            except asyncio.CancelledError:
+                raise  # the enclosing block rolls back past the savepoint
+            except BaseException:
+                await connection._command(f"ROLLBACK TO SAVEPOINT {name}")
+                await connection._command(f"RELEASE SAVEPOINT {name}")
+                connection._rollback_only = rollback_only
+                raise
+            await connection._command(f"RELEASE SAVEPOINT {name}")
+            return
+        try:
+            await connection._command(connection._begin)
+            yield
+        except asyncio.CancelledError:
+            connection._usable = False
+            raise
+        except BaseException:
+            try:
+                await connection._command("ROLLBACK")
+            except asyncio.CancelledError:
+                connection._usable = False
+                raise
+            except Exception:
+                connection._usable = False
+            raise
+        try:
+            status = await connection._command("COMMIT")
+        except asyncio.CancelledError:
+            # The outcome of the COMMIT is not known; the connection is not reused.
+            connection._usable = False
+            raise
+        if status == "ROLLBACK":
+            raise TransactionManagementError("the transaction failed earlier, so it was rolled back")
+
+    # Saving (Model.save())
+
+    async def save_instance(
+        self,
+        instance: models.Model,
+        *,
+        force_insert: bool = False,
+        force_update: bool = False,
+        update_fields: Iterable[str] | None = None,
+    ) -> None:
+        """Save ``instance`` as Django's ``Model.save()`` does, without the model's ``save()`` and signals."""
+        opts = instance._meta
+        if force_insert and (force_update or update_fields):
+            raise ValueError("Cannot force both insert and updating in model saving.")
+        deferred = {f.attname for f in opts.concrete_fields if f.attname not in instance.__dict__ and not f.generated}
+        if update_fields is not None:
+            if not update_fields:
+                return
+            update_fields = frozenset(update_fields)
+            not_updatable = update_fields.difference(opts._non_pk_concrete_field_names)
+            if not_updatable:
+                raise ValueError(
+                    "The following fields do not exist in this model, are m2m fields, primary keys, or are "
+                    "non-concrete fields: " + ", ".join(sorted(not_updatable))
+                )
+        elif not force_insert and deferred and instance._state.db == self.alias and instance._is_pk_set():
+            names = {f.attname for f in opts.concrete_fields if f not in opts.pk_fields and not hasattr(f, "through")}
+            loaded = names - deferred
+            if loaded:
+                update_fields = frozenset(loaded)
+        cls = type(instance)
+        if cls._meta.proxy:
+            cls = cls._meta.concrete_model
+        block = self.atomic(savepoint=False) if cls._meta.parents else contextlib.nullcontext()
+        async with block:  # type: ignore[attr-defined]
+            inserts = cls._validate_force_insert(force_insert)
+            parent_inserted = await self._save_parents(instance, cls, update_fields, inserts)
+            await self._save_table(instance, cls, inserts or parent_inserted, force_update, update_fields)
+        instance._state.db = self.alias
+        instance._state.adding = False
+
+    async def _save_parents(
+        self, instance: models.Model, cls: type[models.Model], update_fields: Any, force_insert: Any, updated=None
+    ) -> bool:
+        inserted = False
+        if updated is None:
+            updated = {}
+        for parent, field in cls._meta.parents.items():
+            if (
+                field
+                and getattr(instance, parent._meta.pk.attname) is None
+                and getattr(instance, field.attname) is not None
+            ):
+                setattr(instance, parent._meta.pk.attname, getattr(instance, field.attname))
+            parent_updated = updated.get(parent)
+            if parent_updated is None:
+                parent_inserted = await self._save_parents(instance, parent, update_fields, force_insert, updated)
+                parent_updated = await self._save_table(
+                    instance,
+                    parent,
+                    parent_inserted or issubclass(parent, force_insert),
+                    False,
+                    update_fields,
+                )
+                if not parent_updated:
+                    inserted = True
+                updated[parent] = parent_updated
+            elif not parent_updated:
+                inserted = True
+            if field:
+                setattr(instance, field.attname, instance._get_pk_val(parent._meta))
+                if field.is_cached(instance):
+                    field.delete_cached_value(instance)
+        return inserted
+
+    async def _save_table(
+        self, instance: models.Model, cls: type[models.Model], force_insert: Any, force_update: bool, update_fields: Any
+    ) -> bool:
+        meta = cls._meta
+        pk_fields = meta.pk_fields
+        non_pks = [f for f in meta.local_concrete_fields if f not in pk_fields and not f.generated]
+        if update_fields:
+            non_pks = [f for f in non_pks if f.name in update_fields or f.attname in update_fields]
+        if not instance._is_pk_set(meta) and not isinstance(getattr(instance, meta.pk.attname), DatabaseDefault):
+            setattr(instance, meta.pk.attname, meta.pk.get_pk_value_on_save(instance))
+        pk_set = instance._is_pk_set(meta)
+        if not pk_set and (force_update or update_fields):
+            raise ValueError("Cannot force an update in save() with no primary key.")
+        updated = False
+        if (
+            not force_insert
+            and not force_update
+            and instance._state.adding
+            and all(f.has_default() or f.has_db_default() for f in meta.pk_fields)
+        ):
+            force_insert = True
+        if pk_set and not force_insert:
+            values = [(f, None, f.pre_save(instance, False)) for f in non_pks]
+            forced_update = bool(update_fields or force_update)
+            returning = [
+                f for f in meta.local_concrete_fields if f.generated and f.referenced_fields.intersection(non_pks)
+            ]
+            for field, _model, value in values:
+                if (update_fields is None or field.name in update_fields) and hasattr(value, "resolve_expression"):
+                    returning.append(field)
+            if not _RETURNS_EXPRESSIONS:
+                returning = []
+            results = await self._do_update(instance, cls, values, update_fields, forced_update, returning)
+            updated = bool(results)
+            if updated and returning:
+                instance._assign_returned_values(results[0], returning)
+            elif not updated and force_update:
+                raise _not_updated(instance, "Forced update did not affect any rows.")
+            elif not updated and update_fields:
+                raise _not_updated(instance, "Save with update_fields did not affect any rows.")
+        if not updated:
+            if meta.order_with_respect_to:
+                instance._order = await self._next_order(instance, cls)
+            insert_fields = [
+                f for f in meta.local_concrete_fields if not f.generated and (pk_set or f is not meta.auto_field)
+            ]
+            returning = list(meta.db_returning_fields)
+            for field in insert_fields if _RETURNS_EXPRESSIONS else ():
+                value = field.pre_save(instance, add=True)
+                if hasattr(value, "resolve_expression"):
+                    if field not in returning:
+                        returning.append(field)
+                elif (
+                    field.db_returning
+                    and not self.features.can_return_columns_from_insert
+                    and not (pk_set and field is meta.auto_field)
+                ):
+                    returning.remove(field)
+            query = sql.InsertQuery(cls)
+            query.insert_values(insert_fields, [instance])
+            statement = self.connection.compiler.compile_insert(query, returning)
+            if returning:
+                results = await self.connection._fetch_returned(statement)
+                if results:
+                    for value, field in zip(results[0], returning, strict=False):
+                        setattr(instance, field.attname, value)
+            else:
+                await self.connection._row_count(statement)
+        return updated
+
+    async def _do_update(
+        self,
+        instance: models.Model,
+        cls: type[models.Model],
+        values: list[tuple[Any, Any, Any]],
+        update_fields: Any,
+        forced_update: bool,
+        returning: list[Any],
+    ) -> list[tuple[Any, ...]]:
+        filtered = cls._base_manager.using(self.alias).filter(pk=instance._get_pk_val(cls._meta))
+        if not values:
+            if update_fields is not None or await self.exists(filtered):
+                return [()]
+            return []
+        if instance._meta.select_on_save and not forced_update:
+            if not await self.exists(filtered):
+                return []
+            results = await self._update_fields(filtered, values, returning)
+            if results:
+                return results
+            return [()] if await self.exists(filtered) else []
+        return await self._update_fields(filtered, values, returning)
+
+    async def _update_fields(
+        self, queryset: QuerySet, values: list[tuple[Any, Any, Any]], returning: list[Any]
+    ) -> list[tuple[Any, ...]]:
+        """Django's ``QuerySet._update()``: the rows ``returning`` returns, or one empty row per updated row."""
+        query = queryset.query.chain(sql.UpdateQuery)
+        query.add_update_fields(values)
+        query.annotations = {}
+        if not returning:
+            return [()] * await self.row_count(query)
+        return await self.connection._fetch_returned(self.connection._compile(query, returning=returning))
+
+    async def _next_order(self, instance: models.Model, cls: type[models.Model]) -> int:
+        """The ``_order`` value of a new row of a model with ``order_with_respect_to``: one more than the highest
+        among its siblings, 0 for the first."""
+        field = cls._meta.order_with_respect_to
+        siblings = cls._base_manager.filter(**field.get_filter_kwargs_for_object(instance)).order_by()
+        statement = self.connection._compile(siblings.values_list("_order"))
+        text = f'SELECT COALESCE(MAX("_order") + 1, 0) FROM ({statement.sql}) "siblings"'  # noqa: S608 - compiled SQL
+        return await self.connection._run(self.connection.conn.fetchval(text, *statement.params))
+
+    async def create_instance(self, model: type[models.Model], values: dict[str, Any]) -> models.Model:
+        """Django's ``QuerySet.create()``: a new instance of ``model`` with ``values``, inserted."""
+        reverse = frozenset(values).intersection(model._meta._reverse_one_to_one_field_names)
+        if reverse:
+            raise ValueError("The following fields do not exist in this model: " + ", ".join(sorted(reverse)))
+        instance = model(**values)
+        await self.save_instance(instance, force_insert=True)
+        return instance
+
+    # Updates (QuerySet.update())
+
+    async def update_queryset(self, queryset: QuerySet, values: dict[str, Any]) -> int:
+        """Django's ``QuerySet.update(**values)``: the number of rows updated."""
+        queryset._not_support_combined_queries("update")
+        if queryset.query.is_sliced:
+            raise TypeError("Cannot update a query once a slice has been taken.")
+        if queryset.query.distinct_fields:
+            raise TypeError("Cannot call update() after .distinct(*fields).")
+        query = queryset.query.chain(sql.UpdateQuery)
+        query.add_update_values(values)
+        order_by = []
+        for column in query.order_by:
+            name, descending = column, False
+            if isinstance(name, str) and name.startswith("-"):
+                name, descending = name.removeprefix("-"), True
+            annotation = query.annotations.get(name)
+            if annotation is None:
+                order_by.append(column)
+                continue
+            if getattr(annotation, "contains_aggregate", False):
+                raise ProgrammingError(f"Cannot update when ordering by an aggregate: {annotation}")
+            order_by.append(annotation.desc() if descending else annotation)
+        query.order_by = tuple(order_by)
+        query.clear_select_clause()
+        return await self.execute_update(query)
+
+    async def execute_update(self, query: sql.UpdateQuery) -> int:
+        """Run ``query`` as Django's update compiler does: one statement, or, when it sets fields of multi-table
+        inheritance parents, the keys selected first and one statement per table, in a transaction of their own
+        outside the connection's. Returns the number of rows of the first statement that updated any."""
+        if not query.related_updates:
+            return await self.row_count(query)
+        async with self.atomic(savepoint=False):
+            keys, related_keys = await self._update_keys(query)
+            count: int | None = None
+            if query.values and keys:
+                count = 0
+                for batch in _batches(keys):
+                    main = sql.UpdateQuery(query.model)
+                    main.values = list(query.values)
+                    main.add_filter("pk__in", list(batch))
+                    count += await self.row_count(main)
+            for model, values in query.related_updates.items():
+                related = 0
+                for batch in _batches(related_keys[model]):
+                    update = sql.UpdateQuery(model)
+                    update.values = list(values)
+                    update.add_filter("pk__in", list(batch))
+                    related += await self.row_count(update)
+                if count is None and related:
+                    count = related
+        return count or 0
+
+    async def _update_keys(self, query: sql.UpdateQuery) -> tuple[list[Any], dict[Any, list[Any]]]:
+        """The primary keys of the rows ``query`` updates and, for each parent model it updates, those of the parent
+        rows, selected as Django's ``SQLUpdateCompiler.pre_sql_setup()`` selects them."""
+        select = query.chain(klass=sql.Query)
+        select.select_related = False
+        select.clear_ordering(force=True)
+        select.extra = {}
+        select.select = []
+        meta = select.get_meta()
+        names = [meta.pk.name]
+        indexes = []
+        for related in query.related_updates:
+            if all(path.join_field.primary_key for path in meta.get_path_to_parent(related)):
+                indexes.append((related, 0))
+            else:
+                indexes.append((related, len(names)))
+                names.append(related._meta.pk.name)
+        select.add_fields(names)
+        rows = await self.rows(select)
+        related_keys = {model: [row[index] for row in rows] for model, index in indexes}
+        return [row[0] for row in rows], related_keys
+
+    async def update_batch(self, model: type[models.Model], keys: Sequence[Any], values: dict[str, Any]) -> None:
+        """Django's ``UpdateQuery.update_batch()``: set ``values`` on the rows of ``model`` with the keys ``keys``."""
+        for batch in _batches(keys, GET_ITERATOR_CHUNK_SIZE):
+            query = sql.UpdateQuery(model)
+            query.add_update_values(values)
+            query.add_filter("pk__in", list(batch))
+            await self.execute_update(query)
+
+    # Deletes (Collector)
+
+    async def delete_batch(self, model: type[models.Model], keys: Sequence[Any]) -> int:
+        """Django's ``DeleteQuery.delete_batch()``: delete the rows of ``model`` with primary keys ``keys``."""
+        deleted = 0
+        for batch in _batches(keys, GET_ITERATOR_CHUNK_SIZE):
+            query = sql.DeleteQuery(model)
+            query.add_filter(f"{model._meta.pk.attname}__in", list(batch))
+            deleted += await self.row_count(query)
+        return deleted
+
+    async def raw_delete(self, queryset: QuerySet) -> int:
+        """Django's ``QuerySet._raw_delete()``: delete the rows of ``queryset`` with one statement."""
+        query = queryset.query.clone()
+        query.__class__ = sql.DeleteQuery
+        return await self.row_count(query)
+
+    async def delete_queryset(self, queryset: QuerySet) -> tuple[int, dict[str, int]]:
+        """Django's ``QuerySet.delete()``."""
+        queryset._not_support_combined_queries("delete")
+        query = queryset._chain()
+        query.query.select_for_update = False
+        query.query.select_related = False
+        query.query.clear_ordering(force=True)
+        collector = Collector(self)
+        await collector.collect_queryset(query)
+        return await collector.delete()
+
+    # Operations
+
+    async def create(self, operation: Any) -> dict[str, Any]:
+        model = django_model(operation.model)
+        manager = _manager(model, operation.manager)
+        _require_manager_methods(manager, "create")
+        _require_model_methods(model, "save", "save_base")
+        instance = await self.create_instance(model, field_kwargs(operation.model, operation.values))
+        return instance_row(instance)
+
+    async def save(self, operation: Any) -> dict[str, Any]:
+        model = django_model(operation.model)
+        _require_model_methods(model, "save", "save_base")
+        names = [name for name, _ in operation.values]
+        kwargs = field_kwargs(operation.model, operation.values)
+        if operation.pk is None or operation.force_insert:
+            return await self._insert(model, kwargs, operation.pk, operation.force_insert)
+        opts = model._meta
+        by_name = dict(zip(names, kwargs, strict=True))
+        values = {opts.get_field(key).attname: value for key, value in kwargs.items()}
+        # Every primary key on the way to the row (the parents' of a multi-table child too) has the instance's value.
+        loaded = [
+            (field.attname, operation.pk if field.primary_key else values[field.attname])
+            for field in opts.concrete_fields
+            if field.primary_key or field.attname in values
+        ]
+        instance = model.from_db(self.alias, [name for name, _ in loaded], [value for _, value in loaded])
+        if operation.update_fields is None and len(loaded) < len(opts.concrete_fields):
+            # Django saves a partly loaded instance with update_fields, which never inserts; the row is checked first.
+            if not await self.exists(model._base_manager.filter(pk=operation.pk)):
+                if operation.force_update:
+                    raise _not_updated(model, "Forced update did not affect any rows.")
+                return await self._insert(model, kwargs, operation.pk, True)
+            if not values:
+                return instance_row(instance)
+        update_fields = None if operation.update_fields is None else [by_name[n] for n in operation.update_fields]
+        await self.save_instance(instance, update_fields=update_fields, force_update=operation.force_update)
+        return instance_row(instance)
+
+    async def _insert(self, model: type[models.Model], kwargs: dict[str, Any], pk: Any, force: bool) -> dict[str, Any]:
+        instance = model(**kwargs)
+        if pk is not None:
+            instance.pk = pk
+        await self.save_instance(instance, force_insert=force)
+        return instance_row(instance)
+
+    async def update(self, operation: Any) -> int:
+        queryset = model_queryset(operation.query)
+        _require_queryset_methods(queryset, "update")
+        return await self.update_queryset(queryset, field_kwargs(operation.query, operation.values))
+
+    async def delete(self, operation: Any) -> tuple[int, dict[str, int]]:
+        queryset = model_queryset(operation.query)
+        _require_queryset_methods(queryset, "delete")
+        return await self.delete_queryset(queryset)
+
+    async def delete_instance(self, operation: Any) -> tuple[int, dict[str, int]]:
+        model = django_model(operation.model)
+        _require_model_methods(model, "delete")
+        keys = await self.keys(model._base_manager.filter(pk=operation.pk))
+        if not keys:
+            return 0, {}
+        collector = Collector(self)
+        await collector.collect(model, keys)
+        return await collector.delete()
+
+    async def get_or_create(self, operation: Any) -> tuple[dict[str, Any], bool]:
+        queryset = model_queryset(operation.query)
+        _require_queryset_methods(queryset, "get_or_create", "get", "create")
+        _require_model_methods(queryset.model, "save", "save_base")
+        instance, created = await self._get_or_create(
+            queryset,
+            field_kwargs(operation.query, operation.defaults),
+            lookup_kwargs(operation.query, operation.lookups),
+        )
+        return instance_row(instance), created
+
+    async def _get_or_create(
+        self, queryset: QuerySet, defaults: dict[str, Any], lookups: dict[str, Any]
+    ) -> tuple[models.Model, bool]:
+        """Django's ``QuerySet.get_or_create()``."""
+        try:
+            return await self.get(queryset, lookups), False
+        except ObjectDoesNotExist:
+            params = queryset._extract_model_params(defaults, **lookups)
+        try:
+            async with self.atomic():
+                return await self.create_instance(queryset.model, dict(resolve_callables(params))), True
+        except Exception as exc:
+            if not isinstance(self.connection.map_error(exc), IntegrityError):
+                raise
+            try:
+                return await self.get(queryset, lookups), False
+            except ObjectDoesNotExist:
+                pass
+            raise
+
+    async def update_or_create(self, operation: Any) -> tuple[dict[str, Any], bool]:
+        """Django's ``QuerySet.update_or_create()``: the row is read with ``select_for_update()`` and saved in one
+        atomic block."""
+        queryset = model_queryset(operation.query)
+        _require_queryset_methods(queryset, "update_or_create", "select_for_update", "get_or_create", "get", "create")
+        model = queryset.model
+        _require_model_methods(model, "save", "save_base")
+        update_defaults = field_kwargs(operation.query, operation.defaults)
+        create_defaults = update_defaults
+        if operation.create_defaults is not None:
+            create_defaults = field_kwargs(operation.query, operation.create_defaults)
+        lookups = lookup_kwargs(operation.query, operation.lookups)
+        async with self.atomic():
+            instance, created = await self._get_or_create(queryset.select_for_update(), create_defaults, lookups)
+            if created:
+                return instance_row(instance), True
+            for name, value in resolve_callables(update_defaults):
+                setattr(instance, name, value)
+            update_fields = set(update_defaults)
+            if model._meta._non_pk_concrete_field_names.issuperset(update_fields):
+                # Fields set by pre_save() (auto_now) are written too, as Django does.
+                for field in model._meta.local_concrete_fields:
+                    if not (field in model._meta.pk_fields or field.__class__.pre_save is Field.pre_save):
+                        update_fields.add(field.name)
+                        if field.name != field.attname:
+                            update_fields.add(field.attname)
+                await self.save_instance(instance, update_fields=update_fields)
+            else:
+                await self.save_instance(instance)
+        return instance_row(instance), False
+
+
+def _not_updated(model: Any, message: str) -> Exception:
+    """Django's error for a save that updated no row: the model's ``NotUpdated`` (Django 6), else ``DatabaseError``."""
+    return getattr(model, "NotUpdated", DjangoDatabaseError)(message)
+
+
+def _protected_message(model: type[models.Model], keys: Iterable[str], kind: str) -> str:
+    return (
+        f"Cannot delete some instances of model {model.__name__!r} because they are referenced through {kind} "
+        f"foreign keys: {', '.join(keys)}."
+    )
+
+
+class Collector:
+    """Django's deletion ``Collector`` on a `Writer`: collects the rows a delete removes, updates or is refused by,
+    then deletes them, by primary key. It sends no signals and runs only Django's own ``on_delete`` handlers
+    (``CASCADE``, ``PROTECT``, ``RESTRICT``, ``SET_NULL``, ``SET_DEFAULT``, ``SET()``, ``DO_NOTHING`` and the
+    ``DB_*`` ones the database applies); another handler raises `NotSupportedError`."""
+
+    def __init__(self, writer: Writer) -> None:
+        self.writer = writer
+        self.data: dict[type[models.Model], dict[Any, None]] = {}
+        self.dependencies: defaultdict[type[models.Model], set[type[models.Model]]] = defaultdict(set)
+        self.field_updates: defaultdict[tuple[Any, Any], list[Any]] = defaultdict(list)
+        self.restricted: defaultdict[type[models.Model], defaultdict[Any, set[Any]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
+        self.fast_deletes: list[QuerySet] = []
+
+    def add(
+        self, model: type[models.Model], keys: Iterable[Any], source: Any = None, nullable: bool = False, reverse=False
+    ) -> list[Any]:
+        """Add the rows of ``model`` with primary keys ``keys``; return the keys that were not collected yet."""
+        keys = list(dict.fromkeys(keys))
+        if not keys:
+            return []
+        collected = self.data.setdefault(model, {})
+        new = [key for key in keys if key not in collected]
+        collected.update(dict.fromkeys(new))
+        if source is not None and not nullable:
+            self.add_dependency(source, model, reverse)
+        return new
+
+    def add_dependency(self, model: Any, dependency: Any, reverse: bool = False) -> None:
+        if reverse:
+            model, dependency = dependency, model
+        self.dependencies[model._meta.concrete_model].add(dependency._meta.concrete_model)
+        self.data.setdefault(dependency, {})
+
+    def can_fast_delete(self, model: type[models.Model], from_field: Any = None) -> bool:
+        """Whether rows of ``model`` can be deleted with one statement, without collecting them: Django's rule,
+        without its check for signal receivers."""
+        if from_field is not None and from_field.remote_field.on_delete is not deletion.CASCADE:
+            return False
+        opts = model._meta
+        return (
+            all(link == from_field for link in opts.concrete_model._meta.parents.values())
+            and all(
+                related.field.remote_field.on_delete in _SKIP_COLLECTION
+                for related in deletion.get_candidate_relations_to_delete(opts)
+            )
+            and not any(hasattr(field, "bulk_related_objects") for field in opts.private_fields)
+        )
+
+    async def collect_queryset(
+        self, queryset: QuerySet, source: Any = None, nullable: bool = False, fail_on_restricted: bool = True
+    ) -> None:
+        if self.can_fast_delete(queryset.model):
+            self.fast_deletes.append(queryset)
+            return
+        keys = await self.writer.keys(queryset)
+        await self.collect(
+            queryset.model, keys, source=source, nullable=nullable, fail_on_restricted=fail_on_restricted
+        )
+
+    async def collect(
+        self,
+        model: type[models.Model],
+        keys: Iterable[Any],
+        source: Any = None,
+        nullable: bool = False,
+        collect_related: bool = True,
+        reverse_dependency: bool = False,
+        fail_on_restricted: bool = True,
+    ) -> None:
+        """Django's ``Collector.collect()`` for the rows of ``model`` with primary keys ``keys``."""
+        new = self.add(model, keys, source, nullable, reverse_dependency)
+        if not new:
+            return
+        for ptr in model._meta.concrete_model._meta.parents.values():
+            if ptr:
+                await self.collect(
+                    ptr.remote_field.model,
+                    await self._parent_keys(model, ptr, new),
+                    source=model,
+                    collect_related=False,
+                    reverse_dependency=True,
+                    fail_on_restricted=False,
+                )
+        if not collect_related:
+            return
+        fast_deletes: defaultdict[type[models.Model], list[Any]] = defaultdict(list)
+        protected: defaultdict[str, list[Any]] = defaultdict(list)
+        for related in deletion.get_candidate_relations_to_delete(model._meta):
+            field = related.field
+            on_delete = field.remote_field.on_delete
+            if on_delete in _SKIP_COLLECTION:
+                continue
+            related_model = related.related_model
+            if self.can_fast_delete(related_model, from_field=field):
+                fast_deletes[related_model].append(field)
+                continue
+            for batch in _batches(new, _batch_size(1)):
+                rows = self.related_objects(related_model, [field], model, batch)
+                lazy = getattr(on_delete, "lazy_sub_objs", False)
+                related_keys = None if lazy else await self.writer.keys(rows)
+                if lazy or related_keys:
+                    try:
+                        await self._on_delete(on_delete, field, related_model, rows, related_keys)
+                    except deletion.ProtectedError as error:
+                        protected[f"'{field.model.__name__}.{field.name}'"] += error.protected_objects
+        if protected:
+            objects = list(dict.fromkeys(itertools.chain.from_iterable(protected.values())))
+            raise deletion.ProtectedError(_protected_message(model, protected, "protected"), objects)
+        for related_model, fields in fast_deletes.items():
+            for batch in _batches(new, _batch_size(len(fields))):
+                self.fast_deletes.append(self.related_objects(related_model, fields, model, batch))
+        for field in model._meta.private_fields:
+            if hasattr(field, "bulk_related_objects"):
+                for batch in _batches(new):
+                    rows = await self._generic_related(field, batch)
+                    if rows is not None:
+                        await self.collect_queryset(rows, source=model, nullable=True, fail_on_restricted=False)
+        if fail_on_restricted:
+            await self._check_restricted(model)
+
+    async def _parent_keys(self, model: type[models.Model], ptr: Any, keys: list[Any]) -> list[Any]:
+        """The primary keys of the parent rows ``ptr`` links the rows ``keys`` of ``model`` to."""
+        if ptr.primary_key and ptr.target_field.primary_key:
+            return keys
+        found: list[Any] = []
+        for batch in _batches(keys):
+            queryset = model._base_manager.filter(pk__in=list(batch)).values_list(f"{ptr.name}__pk")
+            found.extend(row[0] for row in await self.writer.rows(queryset))
+        return found
+
+    def related_objects(
+        self, related_model: type[models.Model], fields: list[Any], model: type[models.Model], keys: Sequence[Any]
+    ) -> QuerySet:
+        """The rows of ``related_model`` whose foreign key ``fields`` refer to the rows ``keys`` of ``model``."""
+        conditions = []
+        for field in fields:
+            target = field.target_field
+            on_key = target.primary_key and all(
+                path.join_field.primary_key for path in model._meta.get_path_to_parent(target.model)
+            )
+            # A foreign key to another field is matched with a subquery selecting that field.
+            values = list(keys) if on_key else model._base_manager.filter(pk__in=list(keys))
+            conditions.append((f"{field.name}__in", values))
+        predicate = Q.create(conditions, connector=Q.OR)
+        return related_model._base_manager.using(self.writer.alias).filter(predicate)
+
+    async def _on_delete(
+        self, on_delete: Any, field: Any, related_model: Any, rows: QuerySet, keys: list[Any] | None
+    ) -> None:
+        if on_delete is deletion.CASCADE:
+            source = field.remote_field.model
+            await self.collect(related_model, keys or (), source=source, nullable=field.null, fail_on_restricted=False)
+        elif on_delete is deletion.PROTECT:
+            raise deletion.ProtectedError(
+                f"Cannot delete some instances of model '{field.remote_field.model.__name__}' because they are "
+                f"referenced through a protected foreign key: '{related_model.__name__}.{field.name}'",
+                await self.writer.instances(rows),
+            )
+        elif on_delete is deletion.RESTRICT:
+            self.restricted[related_model][field].update(keys or ())
+            self.add_dependency(field.remote_field.model, field.model)
+        elif on_delete is deletion.SET_NULL:
+            self.field_updates[field, None].append(rows)
+        elif on_delete is deletion.SET_DEFAULT:
+            self.field_updates[field, field.get_default()].append((related_model, keys))
+        else:
+            value = _set_value(on_delete)
+            if value is _NOT_SET:
+                raise NotSupportedError(
+                    f"the asyncpg driver runs Django's on_delete handlers, not {on_delete!r} of {field}"
+                )
+            if callable(value):
+                self.field_updates[field, value()].append((related_model, keys))
+            else:
+                self.field_updates[field, value].append(rows)
+
+    async def _generic_related(self, field: Any, keys: Sequence[Any]) -> QuerySet | None:
+        """The rows a ``GenericRelation`` ``field`` relates to the rows ``keys``, as its ``bulk_related_objects()``
+        selects them; ``None`` when the model has no content type, so nothing refers to it."""
+        from django.contrib.contenttypes.models import ContentType
+
+        model = field.model._meta.concrete_model if field.for_concrete_model else field.model
+        content_types = ContentType.objects.filter(app_label=model._meta.app_label, model=model._meta.model_name)
+        found = await self.writer.keys(content_types)
+        if not found:
+            return None
+        return field.remote_field.model._base_manager.using(self.writer.alias).filter(
+            **{f"{field.content_type_field_name}__pk": found[0], f"{field.object_id_field_name}__in": list(keys)}
+        )
+
+    async def _check_restricted(self, model: type[models.Model]) -> None:
+        """Raise ``RestrictedError`` for the rows a ``RESTRICT`` reference keeps that the delete does not remove."""
+        for collected_model, keys in self.data.items():
+            self._clear_restricted(collected_model, set(keys))
+        for queryset in self.fast_deletes:
+            restricted = self.restricted.get(queryset.model)
+            if restricted:
+                pending = [key for keys in restricted.values() for key in keys]
+                for batch in _batches(pending):
+                    deleted = await self.writer.keys(queryset.filter(pk__in=list(batch)))
+                    self._clear_restricted(queryset.model, set(deleted))
+        remaining: defaultdict[str, list[Any]] = defaultdict(list)
+        for related_model, fields in self.restricted.items():
+            for field, keys in fields.items():
+                if keys:
+                    queryset = related_model._base_manager.filter(pk__in=list(keys))
+                    remaining[f"'{related_model.__name__}.{field.name}'"] += await self.writer.instances(queryset)
+        if remaining:
+            objects = list(itertools.chain.from_iterable(remaining.values()))
+            raise deletion.RestrictedError(_protected_message(model, remaining, "restricted"), objects)
+
+    def _clear_restricted(self, model: type[models.Model], keys: set[Any]) -> None:
+        if model in self.restricted:
+            for field, restricted in self.restricted[model].items():
+                self.restricted[model][field] = restricted - keys
+
+    def sort(self) -> None:
+        """Order the collected models so that each comes after the models it depends on, as Django does."""
+        ordered: list[type[models.Model]] = []
+        concrete: set[type[models.Model]] = set()
+        models_ = list(self.data)
+        while len(ordered) < len(models_):
+            found = False
+            for model in models_:
+                if model in ordered:
+                    continue
+                dependencies = self.dependencies.get(model._meta.concrete_model)
+                if not (dependencies and dependencies.difference(concrete)):
+                    ordered.append(model)
+                    concrete.add(model._meta.concrete_model)
+                    found = True
+            if not found:
+                return
+        self.data = {model: self.data[model] for model in ordered}
+
+    async def delete(self) -> tuple[int, dict[str, int]]:
+        """Delete what was collected: Django's ``Collector.delete()``. Returns ``(total, {label: count})``."""
+        data = {model: sorted(keys) for model, keys in self.data.items()}
+        self.data = data  # type: ignore[assignment]
+        self.sort()
+        writer = self.writer
+        if len(self.data) == 1 and not self.fast_deletes:
+            ((model, keys),) = self.data.items()
+            if len(keys) == 1 and self.can_fast_delete(model):
+                count = await writer.delete_batch(model, keys)  # type: ignore[arg-type]
+                return count, {model._meta.label: count}
+        counter: Counter[str] = Counter()
+        steps: list[Callable[[], Awaitable[None]]] = []
+
+        async def fast_delete(queryset: QuerySet) -> None:
+            count = await writer.raw_delete(queryset)
+            if count:
+                counter[queryset.model._meta.label] += count
+
+        async def field_update(field: Any, value: Any, entries: list[Any]) -> None:
+            querysets = [entry for entry in entries if isinstance(entry, QuerySet)]
+            # Django joins them into one update; here as many as fit into `MAX_QUERY_PARAMS` keys.
+            per_update = max(1, _compiler.MAX_QUERY_PARAMS // _batch_size(1))
+            for group in _batches(querysets, per_update):
+                await writer.update_queryset(reduce(or_, group), {field.name: value})
+            pairs = [entry for entry in entries if not isinstance(entry, QuerySet)]
+            if pairs:
+                keys = list(dict.fromkeys(key for _, keys in pairs for key in keys))
+                await writer.update_batch(pairs[0][0], keys, {field.name: value})
+
+        async def delete_rows(model: type[models.Model], keys: list[Any]) -> None:
+            count = await writer.delete_batch(model, keys)
+            if count:
+                counter[model._meta.label] += count
+
+        steps.extend(lambda queryset=queryset: fast_delete(queryset) for queryset in self.fast_deletes)
+        steps.extend(
+            lambda field=field, value=value, entries=entries: field_update(field, value, entries)
+            for (field, value), entries in self.field_updates.items()
+        )
+        steps.extend(
+            lambda model=model, keys=keys: delete_rows(model, list(reversed(keys)))  # type: ignore[call-overload]
+            for model, keys in self.data.items()
+            if keys
+        )
+        if not steps:
+            return 0, {}
+        batches = [keys for keys in self.data.values() if keys]
+        one_statement = not self.field_updates and (
+            (len(self.fast_deletes) == 1 and not batches)
+            or (not self.fast_deletes and len(batches) == 1 and len(batches[0]) <= GET_ITERATOR_CHUNK_SIZE)
+        )
+        if one_statement:
+            await steps[0]()  # one statement is atomic on its own
+        else:
+            async with writer.atomic(savepoint=False):
+                for step in steps:
+                    await step()
+        return sum(counter.values()), dict(counter)
+
+
+_NOT_SET = object()
+
+
+def _set_value(on_delete: Any) -> Any:
+    """The value of a handler made by Django's ``SET(value)``, or `_NOT_SET` for another handler."""
+    deconstruct = getattr(on_delete, "deconstruct", None)
+    if deconstruct is None:
+        return _NOT_SET
+    path, args, _ = deconstruct()
+    if path != "django.db.models.SET" or len(args) != 1:
+        return _NOT_SET
+    return args[0]
+
+
+WRITES: dict[str, Callable[[Writer, Any], Awaitable[Any]]] = {
+    "create": Writer.create,
+    "save": Writer.save,
+    "update": Writer.update,
+    "delete": Writer.delete,
+    "delete_instance": Writer.delete_instance,
+    "get_or_create": Writer.get_or_create,
+    "update_or_create": Writer.update_or_create,
+}
+"""The `Writer` method that executes each write operation kind."""

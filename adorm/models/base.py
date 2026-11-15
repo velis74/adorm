@@ -397,8 +397,8 @@ class Model(ModelExceptionsMixin, BaseModel):
 
     async def delete(self) -> tuple[int, dict[str, int]]:
         """Delete the instance's row and the rows that cascade from it with a `DeleteInstance` operation, which runs
-        the target's delete of an instance (a Django model's ``delete()`` override included); returns
-        ``(total, {label: count})`` and, when rows were deleted, sets the primary key to ``None``.
+        the target's delete of an instance (on the Django driver a Django model's ``delete()`` override included);
+        returns ``(total, {label: count})`` and, when rows were deleted, sets the primary key to ``None``.
 
         Raises ``ValueError`` without a primary key value, and `ProtectedError` or `RestrictedError` (with instances of
         the registered models as objects) when a reference forbids the delete.

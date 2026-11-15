@@ -196,14 +196,21 @@ class TrackedMemoryDriver(memory.MemoryDriver):
         return connection
 
 
+DRIVER_CODE = ("runs", "refused", "not run")
+"""What a driver does with Python code of the target ORM that a write would call (a model's ``save()`` or ``delete()``
+override, a query set override, a custom ``on_delete`` handler, Django's signals and ``on_commit()`` callbacks): run it,
+refuse a write that would call an override or handler, or run none of it."""
+
+
 @dataclass(frozen=True)
 class ConformanceDriver:
     """A driver under test: ``create(url)`` returns an instance over the seeded test database at ``url``;
-    ``blocker(driver, url)`` returns its `Blocker`."""
+    ``blocker(driver, url)`` returns its `Blocker`; ``driver_code`` is one of `DRIVER_CODE`."""
 
     name: str
     create: Callable[[str], Awaitable[Driver]]
     blocker: Callable[[Driver, str], Blocker]
+    driver_code: str
 
     def unavailable_reason(self) -> str | None:
         return demo_drivers.get(self.name).unavailable_reason()
@@ -219,7 +226,7 @@ async def _memory_driver(_url: str) -> Driver:
 
 
 DRIVERS: tuple[ConformanceDriver, ...] = (
-    ConformanceDriver("django", lambda _url: _sql_driver("django"), lambda _driver, url: TableLock(url)),
-    ConformanceDriver("asyncpg", lambda _url: _sql_driver("asyncpg"), lambda _driver, url: TableLock(url)),
-    ConformanceDriver("memory", _memory_driver, lambda driver, _url: RowLock(driver)),  # type: ignore[arg-type]
+    ConformanceDriver("django", lambda _url: _sql_driver("django"), lambda _driver, url: TableLock(url), "runs"),
+    ConformanceDriver("asyncpg", lambda _url: _sql_driver("asyncpg"), lambda _driver, url: TableLock(url), "refused"),
+    ConformanceDriver("memory", _memory_driver, lambda driver, _url: RowLock(driver), "not run"),  # type: ignore[arg-type]
 )

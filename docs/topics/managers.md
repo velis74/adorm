@@ -3,8 +3,9 @@
 ::: info Status
 The installed [Django driver](/topics/django-driver) applies a manager's `get_queryset()` (`clause.manager`) and its
 write overrides (`create()`, `update()`, `delete()`, `get_or_create()`, `update_or_create()`); the
-[native PostgreSQL driver](/topics/postgresql-driver) applies `get_queryset()` to reads only. Driver methods (`call`
-operations) raise `NotSupportedError` on both.
+[native PostgreSQL driver](/topics/postgresql-driver) applies `get_queryset()` to reads and writes and refuses a
+write whose manager or query set overrides the method it would call. Driver methods (`call` operations) raise
+`NotSupportedError` on both.
 :::
 
 A Django model carries logic in its managers and query sets: a `get_queryset()` that hides soft-deleted rows, a
@@ -28,7 +29,10 @@ of a chain.
 A query with an ORM manager uses the construct `clause.manager`; a driver that builds its queries from the target
 ORM's query sets applies it: the Django driver and the native PostgreSQL driver. The native PostgreSQL driver builds
 the query on the event loop, so there a manager's `get_queryset()` must only build a query; one that accesses the
-database raises `NotSupportedError`. A driver method is a `call` operation and needs a driver that runs the ORM's
+database raises `NotSupportedError`. It runs no Python code of the manager's other methods: a write whose manager
+or query set overrides the method it would call raises `NotSupportedError` before anything is written: `create()`,
+`update()`, `delete()`, `get_or_create()` or `update_or_create()`, and for `get_or_create()` also `get()` and
+`create()`, for `update_or_create()` also `select_for_update()`, `get_or_create()`, `get()` and `create()` ([what runs on the driver side](/topics/postgresql-driver#what-runs-and-what-does-not)). A driver method is a `call` operation and needs a driver that runs the ORM's
 code: the Django driver. A driver without these capabilities refuses them with `NotSupportedError` before anything
 runs. A manager that only has driver methods keeps its queries off the ORM manager, so on such a driver only its
 driver methods are refused.

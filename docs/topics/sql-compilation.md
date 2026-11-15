@@ -40,7 +40,8 @@ the query. With it, a server version decides the SQL: `JSONObject` compiles to `
 from PostgreSQL 16 on and to `JSONB_BUILD_OBJECT(...)` before; `AnyValue` raises Django's `NotSupportedError`
 before 16. `DjangoCompiler` stores the version it is given, answers `get_autocommit()` with `False` and checks
 `select_for_update()` against the caller's `in_transaction` itself; it refuses the parent-field update and
-`SearchHeadline` with options.
+`SearchHeadline` with options. The native PostgreSQL driver runs the parent-field update itself: it selects the keys
+as `pre_sql_setup()` does, then compiles one update per table filtered by those keys.
 
 `get_compiler(using)` takes the wrapper from `django.db.connections`, which is thread-local: each thread has its own
 wrapper and its own cached `pg_version`. `get_compiler(connection=wrapper)` takes any wrapper instead, including
@@ -50,7 +51,18 @@ running event loop works; only an attempt to connect raises `SynchronousOnlyOper
 the wrapper's cached properties, with the same values in every thread, so one wrapper serves concurrent threads.
 
 `as_sql()` of a select, update, delete or aggregate query returns one statement; an insert returns a list of
-statements, one per batch.
+statements, one per batch, and one statement for a single row on PostgreSQL. With the compiler's `returning_fields`
+set, an insert or update ends with `RETURNING`, which PostgreSQL supports for both; Django's insert reads the
+primary key and the values the database sets that way, and Django 6 also the values of expressions a save writes.
+`DjangoCompiler.compile_insert()` and `compile(..., returning=...)` set them, and
+[`DjangoStatement.returned()`](/ref/drivers#returned-records) applies the fields' converters to the returned rows.
+
+```python
+query = InsertQuery(Tag)
+query.insert_values([Tag._meta.get_field("name")], [Tag(name="night")])
+statement = compiler.compile_insert(query, [Tag._meta.pk])
+statement.sql      # 'INSERT INTO "library_tag" ("name") VALUES ($1) RETURNING "library_tag"."id"'
+```
 
 ### Queries without a statement
 
@@ -116,8 +128,9 @@ session's time zone; asyncpg's `timestamptz` encoder reads it as UTC. With the c
 time zone applies, as under psycopg.
 
 asyncpg sends at most 32767 parameters with one statement and raises `InterfaceError` above that. `DjangoCompiler`
-refuses a statement with more and sets its wrapper's `features.max_query_params` to that limit, so
-`compiler.connection.ops.bulk_batch_size(fields, objs)` returns batch sizes within it.
+refuses a statement with more and sets its wrapper's `features.max_query_params` to that limit, so on Django 6
+`compiler.connection.ops.bulk_batch_size(fields, objs)` returns batch sizes within it (Django 5.2's PostgreSQL backend
+does not read it).
 
 ## Results
 

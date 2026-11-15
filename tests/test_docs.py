@@ -133,6 +133,7 @@ SUBMODULES = (
     "adorm.codegen.spec",
     "adorm.drivers.asyncpg.compiler",
     "adorm.drivers.asyncpg.driver",
+    "adorm.drivers.asyncpg.writes",
     "adorm.drivers.base",
     "adorm.drivers.django.driver",
     "adorm.drivers.django.translation",

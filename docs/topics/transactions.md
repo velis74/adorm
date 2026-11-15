@@ -4,8 +4,7 @@
 The installed version provides `atomic()` blocks, savepoints, the transaction in the context and the slot's commit
 deadline and `on_commit` callbacks. Transactions run on the [router](/topics/pool) set as the runner. Connection
 options (`connection_options()`) and `adorm.timeout()` are not part of it yet. The [Django driver](/topics/django-driver)
-runs reads, writes and savepoints in transactions; the [native PostgreSQL driver](/topics/postgresql-driver) runs reads
-in transactions, and writes and savepoints on it are not part of it yet. Any `Driver` implementation (see
+and the [native PostgreSQL driver](/topics/postgresql-driver) run reads, writes and savepoints in transactions. Any `Driver` implementation (see
 [Writing a driver](/howto/writing-a-driver)) works.
 :::
 

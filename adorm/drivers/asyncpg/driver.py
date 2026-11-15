@@ -1,4 +1,4 @@
-"""The native PostgreSQL driver: adorm reads executed on asyncpg, on the event loop, without threads."""
+"""The native PostgreSQL driver: adorm operations executed on asyncpg, on the event loop, without threads."""
 
 from __future__ import annotations
 
@@ -16,8 +16,9 @@ import asyncpg
 from django.core.exceptions import SynchronousOnlyOperation
 
 from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
+from adorm.drivers.asyncpg.writes import Writer, WRITES
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
-from adorm.drivers.django.driver import map_django_error, READ_CAPABILITIES
+from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
 from adorm.drivers.django.translation import translate
 from adorm.events import Emit
 from adorm.exceptions import (
@@ -27,6 +28,7 @@ from adorm.exceptions import (
     ObjectDoesNotExist,
     OperationalError,
     ProgrammingError,
+    TransactionManagementError,
 )
 
 __all__ = [
@@ -43,12 +45,13 @@ __all__ = [
 logger = logging.getLogger("adorm.drivers.asyncpg")
 
 CAPABILITIES = Capabilities(
-    operations=READ_CAPABILITIES.operations,
-    constructs=READ_CAPABILITIES.constructs,
+    operations=DJANGO_CAPABILITIES.operations,
+    constructs=DJANGO_CAPABILITIES.constructs,
+    savepoints=True,
     cancellation=True,
 )
-"""What `AsyncpgDriver` supports: the reads and constructs of the Django query translation
-(`adorm.drivers.django.READ_CAPABILITIES`)."""
+"""What `AsyncpgDriver` supports: the operations and constructs of `adorm.drivers.django.CAPABILITIES` (reads,
+writes, row locks), savepoints and cancellation."""
 
 MAX_GET_RESULTS = 21
 """How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""
@@ -168,8 +171,9 @@ def connect_arguments(settings_dict: Mapping[str, Any], *, time_zone: str | None
 class AsyncpgConnection(DriverConnection):
     """An ``asyncpg.Connection`` for one slot, with a `DjangoCompiler` for its profile's ``DATABASES`` entry.
 
-    Each read translates the operation's query into a Django query set, compiles it on the event loop without a
-    database connection and runs the statement on asyncpg. ``target`` (what profile hooks receive) is the
+    Each operation translates into Django query sets, queries and model instances, compiles them on the event loop
+    without a database connection and runs the statements on asyncpg; writes run Django's write logic as `Writer`
+    does, without Django's model methods and signals. ``target`` (what profile hooks receive) is the
     ``asyncpg.Connection``.
     """
 
@@ -195,7 +199,10 @@ class AsyncpgConnection(DriverConnection):
         self._statement: asyncio.Task | None = None
         self._cancelled: asyncio.Task | None = None
         self._statement_failed = False
-        self._in_transaction = False
+        self._savepoints: list[str] = []
+        # The savepoint depth at which a write failed partway through, leaving the transaction rollback-only.
+        self._rollback_only: int | None = None
+        self._statements = 0
         self._usable = True
         self._closed = False
 
@@ -212,6 +219,7 @@ class AsyncpgConnection(DriverConnection):
             raise InterfaceError("asyncpg connection is closed")
         task = asyncio.ensure_future(coroutine)
         self._statement = task
+        self._statements += 1
         try:
             return await task
         except asyncio.CancelledError:
@@ -230,17 +238,38 @@ class AsyncpgConnection(DriverConnection):
             self._statement = None
             self._cancelled = None
 
-    def _compile(self, query: Any, *, count: bool = False) -> DjangoStatement:
+    def _compile(self, query: Any, *, count: bool = False, returning: Any = ()) -> DjangoStatement:
+        in_transaction = self.conn.is_in_transaction()
         if count:
-            return self.compiler.compile_count(query, in_transaction=self._in_transaction)
-        return self.compiler.compile(query, in_transaction=self._in_transaction)
+            return self.compiler.compile_count(query, in_transaction=in_transaction)
+        return self.compiler.compile(query, in_transaction=in_transaction, returning=returning)
 
     async def _fetch(self, statement: DjangoStatement) -> list[tuple[Any, ...]]:
         return statement.rows(await self._run(self.conn.fetch(statement.sql, *statement.params)))
 
+    async def _fetch_returned(self, statement: DjangoStatement) -> list[tuple[Any, ...]]:
+        """The rows of the ``RETURNING`` clause of ``statement``, an insert or update; none for an empty one."""
+        if statement.empty:
+            return []
+        return statement.returned(await self._run(self.conn.fetch(statement.sql, *statement.params)))
+
+    async def _row_count(self, statement: DjangoStatement) -> int:
+        """Run ``statement``, an insert, update or delete, and return the number of rows it affected."""
+        if statement.empty:
+            return 0
+        status = await self._run(self.conn.execute(statement.sql, *statement.params))
+        return int(status.rpartition(" ")[2])
+
     async def _execute(self, operation: Any) -> Any:
+        if self._rollback_only is not None:
+            raise TransactionManagementError(
+                "a write failed partway through in this transaction; it can only be rolled back"
+            )
         self._statement_failed = False
         try:
+            write = WRITES.get(operation.kind)
+            if write is not None:
+                return await write(Writer(self), operation)
             return await self._read(operation)
         except asyncio.CancelledError:
             raise
@@ -293,9 +322,10 @@ class AsyncpgConnection(DriverConnection):
         found = len(rows) if len(rows) < MAX_GET_RESULTS else f"more than {MAX_GET_RESULTS - 1}"
         raise MultipleObjectsReturned(f"get() returned more than one {name} -- it returned {found}!")
 
-    async def _command(self, sql: str) -> None:
+    async def _command(self, sql: str) -> str:
+        """Run ``sql``, a statement without parameters, and return its status; errors are mapped."""
         try:
-            await self._run(self.conn.execute(sql))
+            return await self._run(self.conn.execute(sql))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -307,20 +337,67 @@ class AsyncpgConnection(DriverConnection):
     # Transactions
 
     async def begin(self) -> None:
+        """Start a transaction (``BEGIN``, with the entry's isolation level). Raises `TransactionManagementError` when
+        one is open."""
+        if self.conn.is_in_transaction():
+            raise TransactionManagementError("a transaction is already open on this connection")
+        self._savepoints = []
+        self._rollback_only = None
         await self._command(self._begin)
-        self._in_transaction = True
 
     async def commit(self) -> None:
-        try:
-            await self._command("COMMIT")
-        finally:
-            self._in_transaction = self.conn.is_in_transaction()
+        """Commit the open transaction. A transaction that failed earlier, in the database or by a write that failed
+        partway through, is rolled back instead; that raises `TransactionManagementError`, so the commit is never
+        reported for it."""
+        self._savepoints = []
+        if self._rollback_only is not None:
+            self._rollback_only = None
+            await self._command("ROLLBACK")
+            raise TransactionManagementError("a write failed partway through, so the transaction was rolled back")
+        status = await self._command("COMMIT")
+        if status == "ROLLBACK":
+            raise TransactionManagementError("the transaction failed earlier, so it was rolled back")
 
     async def rollback(self) -> None:
+        self._savepoints = []
+        self._rollback_only = None
+        await self._command("ROLLBACK")
+
+    def _savepoint_index(self, name: str) -> int:
+        if not self.conn.is_in_transaction():
+            raise TransactionManagementError("no transaction is open on this connection")
         try:
-            await self._command("ROLLBACK")
-        finally:
-            self._in_transaction = self.conn.is_in_transaction()
+            return self._savepoints.index(name)
+        except ValueError:
+            raise TransactionManagementError(f"no savepoint {name!r} is open") from None
+
+    async def _savepoint(self, name: str) -> None:
+        if not self.conn.is_in_transaction():
+            raise TransactionManagementError("no transaction is open on this connection")
+        if name in self._savepoints:
+            raise TransactionManagementError(f"the savepoint {name!r} is already open")
+        await self._command(f"SAVEPOINT {_quote_name(name)}")
+        self._savepoints.append(name)
+
+    async def _release_savepoint(self, name: str) -> None:
+        index = self._savepoint_index(name)
+        await self._command(f"RELEASE SAVEPOINT {_quote_name(name)}")
+        # Releasing a savepoint releases the savepoints opened after it.
+        del self._savepoints[index:]
+        if self._rollback_only is not None:
+            self._rollback_only = min(self._rollback_only, index)
+
+    async def _rollback_to_savepoint(self, name: str) -> None:
+        index = self._savepoint_index(name)
+        await self._command(f"ROLLBACK TO SAVEPOINT {_quote_name(name)}")
+        del self._savepoints[index + 1 :]
+        if self._rollback_only is not None and self._rollback_only > index:
+            self._rollback_only = None  # the failed write is undone
+
+    def _mark_rollback_only(self) -> None:
+        """Leave the open transaction rollback-only: a write failed after some of its statements ran."""
+        depth = len(self._savepoints)
+        self._rollback_only = depth if self._rollback_only is None else min(self._rollback_only, depth)
 
     # Connection
 
@@ -367,6 +444,10 @@ class AsyncpgConnection(DriverConnection):
         return mapped
 
 
+def _quote_name(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 async def _configure(conn: asyncpg.Connection, settings_dict: Mapping[str, Any], time_zone: str) -> None:
     """Set the session time zone when it differs from ``time_zone`` and assume ``OPTIONS["assume_role"]``."""
     if conn.get_settings().TimeZone != time_zone:
@@ -377,7 +458,7 @@ async def _configure(conn: asyncpg.Connection, settings_dict: Mapping[str, Any],
 
 
 class AsyncpgDriver(Driver):
-    """Executes adorm reads on asyncpg, natively async.
+    """Executes adorm reads and writes on asyncpg, natively async.
 
     A connection is an ``asyncpg.Connection`` opened with the profile's ``DATABASES`` entry (``alias``) and
     ``params``, which replace keys of that entry; SQL is compiled from Django query sets by a `DjangoCompiler` for the

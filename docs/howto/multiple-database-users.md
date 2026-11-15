@@ -2,8 +2,7 @@
 
 ::: info Status
 The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run the
-hooks of this recipe; the Django driver executes reads, writes, row locks and savepoints, the native PostgreSQL
-driver reads. Any `Driver` whose connection `target` is Django's connection wrapper or an
+hooks of this recipe; both execute reads, writes, row locks and savepoints. Any `Driver` whose connection `target` is Django's connection wrapper or an
 `asyncpg.Connection` works (see [Writing a driver](/howto/writing-a-driver)).
 :::
 

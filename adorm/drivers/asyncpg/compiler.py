@@ -26,6 +26,7 @@ from django.conf import settings
 from django.core.exceptions import EmptyResultSet
 from django.db import connections
 from django.db.backends.postgresql.psycopg_any import is_psycopg3
+from django.db.models import Model, sql
 from django.db.utils import load_backend
 from psycopg import Binary
 from psycopg.types.json import Json, Jsonb
@@ -39,6 +40,9 @@ __all__ = ["bind_param", "DjangoCompiler", "DjangoStatement", "MAX_QUERY_PARAMS"
 
 MAX_QUERY_PARAMS = 32767
 """The most parameters asyncpg sends with one statement."""
+
+# Django 6 compiles RETURNING for an update; Django 5.2 drops it.
+_UPDATE_RETURNING = hasattr(Model, "_assign_returned_values")
 
 # psycopg's typed wrappers; Django wraps integer field values in the Int* ones.
 _WRAPPER_TYPES = {
@@ -184,12 +188,15 @@ def _psycopg_value(value: Any, timezone: datetime.tzinfo, naive: bool) -> Any:
 
 @dataclass(frozen=True)
 class DjangoStatement(Statement):
-    """A `Statement` compiled from a Django query; `rows()` applies Django's converters to its result rows.
+    """A `Statement` compiled from a Django query; `rows()` applies Django's converters to its result rows, `returned()`
+    to the rows of its ``RETURNING`` clause.
 
     An empty statement (``sql == ""``, `empty` true) is one Django does not execute: a query that matches no rows
-    (an update or delete filtered by ``pk__in=[]``) or an update without values. It affects no rows."""
+    (an update or delete filtered by ``pk__in=[]``) or an update without values. It affects no rows. ``returning``
+    holds the Django fields an insert or update returns, in order."""
 
     compiler: Any = field(default=None, repr=False, compare=False)
+    returning: tuple[Any, ...] = field(default=(), repr=False, compare=False)
 
     @property
     def empty(self) -> bool:
@@ -206,6 +213,18 @@ class DjangoStatement(Statement):
         timezone, naive = _result_timezone(self.compiler.connection)
         rows = [tuple(_psycopg_value(v, timezone, naive) for v in tuple(r)[:width]) for r in records]
         return list(self.compiler.results_iter(results=[rows], tuple_expected=True))
+
+    def returned(self, records: Iterable[Sequence[Any]]) -> list[tuple[Any, ...]]:
+        """Return ``records``, the rows of the statement's ``RETURNING`` clause, as tuples of the values Django's own
+        insert or update returns: values loaded as in `rows()` and the ``returning`` fields' converters applied."""
+        timezone, naive = _result_timezone(self.compiler.connection)
+        rows: Iterable[Sequence[Any]] = [tuple(_psycopg_value(v, timezone, naive) for v in tuple(r)) for r in records]
+        if self.returning:
+            table = self.compiler.query.get_meta().db_table
+            converters = self.compiler.get_converters([f.get_col(table) for f in self.returning])
+            if converters:
+                rows = self.compiler.apply_converters(rows, converters)
+        return [tuple(row) for row in rows]
 
 
 def _result_timezone(wrapper: Any) -> tuple[datetime.tzinfo, bool]:
@@ -250,30 +269,46 @@ class DjangoCompiler:
     def _refuse_connection(self) -> NoReturn:
         raise NotSupportedError(f"compiling this query for {self.alias!r} needs a database connection")
 
-    def compile(self, query: Any, *, in_transaction: bool = False) -> DjangoStatement:
+    def compile(self, query: Any, *, in_transaction: bool = False, returning: Sequence[Any] = ()) -> DjangoStatement:
         """Compile ``query``, a Django ``QuerySet`` or ``Query`` (select, update, delete or aggregate), into a
         statement with numbered placeholders and asyncpg parameters.
 
         A select that matches no rows compiles with ``WHERE 0 = 1``; an update or delete that matches no rows and an
         update without values compile into an empty statement. ``in_transaction`` tells whether the statement runs
         inside a transaction: ``select_for_update()`` outside one raises ``TransactionManagementError``, as Django
-        does. Raises ``NotSupportedError`` for an insert, which compiles into one statement per batch, for an update
-        of fields of a multi-table inheritance parent, which Django runs as several statements after selecting the
-        keys, and for a statement with more than `MAX_QUERY_PARAMS` parameters."""
+        does. ``returning`` names the Django fields an update returns (``RETURNING``). Raises ``NotSupportedError`` for
+        an insert (`compile_insert()` compiles one), for an update of fields of a multi-table inheritance parent,
+        which Django runs as several statements after selecting the keys, and for a statement with more than
+        `MAX_QUERY_PARAMS` parameters, and for ``returning`` on Django before 6, which does not compile it."""
         query = getattr(query, "query", query)
-        if getattr(query, "related_updates", None):
+        if returning and not _UPDATE_RETURNING:
+            raise NotSupportedError("this Django version does not compile RETURNING for an update")
+        if isinstance(query, sql.UpdateQuery) and query.related_updates:
             raise NotSupportedError("an update of parent model fields runs as several statements")
+        if isinstance(query, sql.InsertQuery):
+            raise NotSupportedError("an insert compiles with compile_insert()")
         compiler = self._compiler(query, in_transaction)
+        if returning:
+            compiler.returning_fields = list(returning)
         try:
-            compiled = compiler.as_sql()
+            sql_text, params = compiler.as_sql()
         except EmptyResultSet:
             return DjangoStatement("", (), compiler=compiler)
-        if isinstance(compiled, list):
-            raise NotSupportedError(f"{type(compiler).__name__} compiles into several statements")
-        sql, params = compiled
-        if not sql:
+        if not sql_text:
             return DjangoStatement("", (), compiler=compiler)
-        return self._statement(sql, params, compiler)
+        return self._statement(sql_text, params, compiler, returning)
+
+    def compile_insert(self, query: Any, returning: Sequence[Any] = ()) -> DjangoStatement:
+        """Compile ``query``, a Django ``InsertQuery`` of one row, into a statement that returns the Django fields
+        ``returning`` (``RETURNING``), in order. Raises ``NotSupportedError`` for a query that compiles into several
+        statements and for one with more than `MAX_QUERY_PARAMS` parameters."""
+        compiler = query.get_compiler(connection=self.connection)
+        compiler.returning_fields = list(returning) or None
+        statements = compiler.as_sql()
+        if len(statements) != 1:
+            raise NotSupportedError(f"the insert compiles into {len(statements)} statements")
+        sql_text, params = statements[0]
+        return self._statement(sql_text, params, compiler, returning)
 
     def compile_count(self, query: Any, *, in_transaction: bool = False) -> DjangoStatement:
         """Compile the number of rows of ``query``, a Django select ``QuerySet`` or ``Query``, into a statement that
@@ -286,20 +321,23 @@ class DjangoCompiler:
         inner.subquery = True
         inner.clear_ordering(force=False)
         compiler = self._compiler(inner, in_transaction)
-        sql, params = compiler.as_sql(with_col_aliases=True)
-        return self._statement(f"SELECT COUNT(*) FROM ({sql}) subquery", params, compiler)  # noqa: S608 - compiled SQL
+        inner_sql, params = compiler.as_sql(with_col_aliases=True)
+        return self._statement(f"SELECT COUNT(*) FROM ({inner_sql}) subquery", params, compiler)  # noqa: S608 - compiled
 
     def _compiler(self, query: Any, in_transaction: bool) -> Any:
         if getattr(query, "select_for_update", False) and not in_transaction:
             raise TransactionManagementError("select_for_update cannot be used outside of a transaction.")
         return query.get_compiler(connection=self.connection, elide_empty=False)
 
-    def _statement(self, sql: str, params: Sequence[Any], compiler: Any) -> DjangoStatement:
+    def _statement(
+        self, sql_text: str, params: Sequence[Any], compiler: Any, returning: Sequence[Any] = ()
+    ) -> DjangoStatement:
         if len(params) > MAX_QUERY_PARAMS:
             raise NotSupportedError(f"{len(params)} parameters; asyncpg sends at most {MAX_QUERY_PARAMS}")
         bound = [bind_param(p, server_side_binding=self.server_side_binding) for p in params]
         return DjangoStatement(
-            numbered_placeholders(sql, [cast for _, cast in bound]),
+            numbered_placeholders(sql_text, [cast for _, cast in bound]),
             tuple(value for value, _ in bound),
             compiler=compiler,
+            returning=tuple(returning),
         )

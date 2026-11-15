@@ -82,6 +82,43 @@ Coverage tests fail when:
 | a connection option the driver declares | `set_options()` accepts the value in `OPTIONS` and the connection executes the next operation |
 | a connection option the driver does not declare | `NotSupportedError` naming it, with `local` false and true; the connection stays usable |
 
+## Python code of the target ORM
+
+`tests/conformance/test_driver_code.py` runs every driver through the Python code of the target ORM that a write
+would call. Each driver states in its `ConformanceDriver.driver_code` what it does with that code (`DRIVER_CODE`):
+
+| `driver_code` | Driver | A model's `save()` / `delete()` override, a query set's `create()` / `update()` override, a custom `on_delete` handler | Django's signals, Django's `on_commit()` callbacks |
+|---|---|---|---|
+| `"runs"` | Django | runs on the driver side | `pre_save`, `post_save`, `pre_delete`, `post_delete` fire; `on_commit()` callbacks run after the commit |
+| `"refused"` | native PostgreSQL | the write raises `NotSupportedError` naming the override or handler; nothing is written | do not fire; none is registered |
+| `"not run"` | memory | not run; the write goes ahead (a delete that would reach the handler is refused, as the driver does not cascade) | do not fire; none is registered |
+
+`pre_init` and `post_init` fire on the Django and the native PostgreSQL driver, which build Django model instances,
+and not on the memory driver.
+
+The tests override the Django model `Tag`'s `save()` (it stores the name in upper case), `delete()` (it deletes
+nothing) and the `create()` and `update()` of its base manager's query set after the data is seeded, replace the
+`on_delete` handler of `Activity.coach` with a custom one, and connect signal receivers:
+
+| Test | What holds |
+|---|---|
+| `create()`, `save()` and `get_or_create()` with the `save()` override | the stored names and the override's calls the driver's `driver_code` implies; afterwards a transaction refuses the write (`"refused"`) and still commits its other writes |
+| `delete()` of an instance with the `delete()` override | `(0, {})` with the row kept (`"runs"`), `NotSupportedError` with the row kept (`"refused"`), the row deleted (`"not run"`); a query set delete runs no model's `delete()` on any driver |
+| create, save and delete with signal receivers | the receivers see six calls on the Django driver and none on the others |
+| `create()` and `update()` with the query set overrides | the override's calls and stored names on `"runs"`, `NotSupportedError` with nothing written on `"refused"`, the plain write on `"not run"` |
+| deleting a coach with the custom `on_delete` handler | the handler runs and the coach is deleted (`"runs"`); `NotSupportedError` with nothing deleted (`"refused"`, `"not run"`) |
+| a `post_save` receiver that registers `transaction.on_commit()` inside `adorm.atomic()` | the callback runs after the commit, not inside the block or after a rollback, on `"runs"`; never on the others |
+| `create()` with `pre_init` and `post_init` receivers | both fire once on the Django and the native PostgreSQL driver, never on the memory driver |
+
+```python
+@pytest.mark.usefixtures("save_override")
+async def test_a_models_save_override(conformance_driver, router, calls):
+    ...
+    if code == "refused":
+        with pytest.raises(NotSupportedError, match=r"overrides save\(\)"):
+            await Tag.objects.create(name="night")
+```
+
 ## Failures
 
 `tests/conformance/test_failures.py` runs every driver through what goes wrong in production, each concurrency test

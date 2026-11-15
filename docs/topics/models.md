@@ -183,7 +183,8 @@ set that loaded the instance, or else the [current session](/topics/sessions#the
 
 `await instance.delete()` deletes the instance's row and the rows that cascade from it, and returns
 `(total, {label: count})`. When rows were deleted, the instance's primary key becomes `None`. On the Django driver the
-Django model's own `delete()` runs, so an override (a soft delete) applies.
+Django model's own `delete()` runs, so an override (a soft delete) applies; the native PostgreSQL driver refuses the
+delete of a model with an override.
 
 ```python
 total, per_model = await member.delete()     # (3, {"clubs.Member": 1, "clubs.Membership": 2}); member.pk is None

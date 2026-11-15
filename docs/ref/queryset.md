@@ -161,7 +161,9 @@ pydantic's `ValidationError` before any operation runs.
 
 When the query carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), the
 operation carries it too and the values that are not fields go along, so the target manager's `create()` receives
-them; an override of it may take such arguments. Without one, those values stay extra values of the instance.
+them; an override of it may take such arguments (on the Django driver; the native PostgreSQL driver raises
+`NotSupportedError` for a manager or query set that overrides `create()`). Without one, those values stay extra
+values of the instance.
 
 ```python
 member = await Member.objects.create(name="Ana", club=club)

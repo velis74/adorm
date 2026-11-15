@@ -190,7 +190,8 @@ leaves the instance unchanged.
 
 Coroutine: delete the instance's row and the rows that cascade from it with a
 [`DeleteInstance`](./operations#adorm-operations-deleteinstance-model-pk) operation on the instance's executor, which
-runs the target's delete of one instance (on the Django driver the model's `delete()`, an override included). Returns
+runs the target's delete of one instance (on the Django driver the model's `delete()`, an override included; the
+native PostgreSQL driver raises `NotSupportedError` for a model with an override). Returns
 `(total, {label: count})`; when rows were deleted it sets the primary key to `None`, otherwise (a missing row, a
 `delete()` override that deletes nothing) the instance keeps it.
 

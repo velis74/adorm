@@ -10,9 +10,10 @@ API has two groups of endpoints:
   executor, and answer the calls the driver received.
 
 The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. The
-[Django driver](/topics/django-driver), the first available one, and the demo's [in-memory driver](#memory-driver)
-(`--driver memory`) execute the reads and the writes; the [native PostgreSQL driver](/topics/postgresql-driver)
-(`--driver asyncpg`) executes the reads. The writes run on the active driver;
+[Django driver](/topics/django-driver) (the first available one), the
+[native PostgreSQL driver](/topics/postgresql-driver) (`--driver asyncpg`) and the demo's
+[in-memory driver](#memory-driver) (`--driver memory`) execute the reads and the writes. The writes run on the active
+driver;
 a read runs on any available driver its request names in the header `X-Adorm-Driver`
 (see [Choosing the driver of a read](#choosing-the-driver-of-a-read)).
 
@@ -355,7 +356,7 @@ The read endpoints (`GET /api/data/members`, `/members/{pk}`, `/invoices/{pk}` a
 header `X-Adorm-Driver`: the name of an available driver, as `GET /api/drivers` lists it. The request then runs in
 the session `(<driver>, <session name>)` on that driver's profile and pool; without the header it runs on `default`.
 A name that is not an available driver answers 422 with the header in `loc`. The writing endpoints ignore the header
-and run on the active driver: the asyncpg driver executes reads only.
+and run on the active driver.
 
 ```bash
 curl http://127.0.0.1:8000/api/data/members/3 -H 'X-Adorm-Driver: asyncpg' -H 'X-Adorm-Session: alice'

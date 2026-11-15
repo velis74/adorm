@@ -285,8 +285,9 @@ class QuerySet:
         `Create` operation. The instance gets the values the target set (primary key, defaults).
 
         When the query carries an ORM manager (`Query.manager`), the operation carries it too and the values that are
-        not fields go along: the target manager's ``create()`` receives them, as an override of it may take
-        arguments that are not fields. Without one, such values stay extra values of the instance.
+        not fields go along to the target manager's ``create()``: an override of it may take arguments that are not
+        fields (on the Django driver; the native PostgreSQL driver refuses an override). Without one, such values stay
+        extra values of the instance.
         """
         from adorm.operations import Create
 

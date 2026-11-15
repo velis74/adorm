@@ -3,7 +3,7 @@
 ::: info Status
 The installed version provides the exception classes, `wrap_driver_error`, the [driver contract](/ref/drivers),
 whose connections raise these exceptions, the [pool and router](/ref/pool), [`atomic()`](/ref/transactions), the
-[Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) for reads.
+[Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver).
 `timeout()`, which raises `OperationTimeout`, is described on the [concepts](/topics/concepts) page and is not part
 of the installed version; the examples below show how application code handles the exceptions it raises.
 :::
