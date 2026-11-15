@@ -2,8 +2,8 @@
 
 ::: info Status
 The installed version provides pools, the router, slots and leases, used by [transactions](/topics/transactions)
-and built from [connection profiles](/topics/profiles), with [connection options](/topics/options); idle slots
-are not closed after a period of inactivity (`purge_stale_connections_at`) yet. The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) execute
+and built from [connection profiles](/topics/profiles), with [connection options](/topics/options) and the
+[slot lifecycle](#slot-lifecycle). The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) execute
 reads, writes, row locks and savepoints. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver)) works.
 :::
 
@@ -89,10 +89,6 @@ pool.limit                                     # None: no refusal yet
 pool.limit                                     # 20
 ```
 
-A slot leaves the pool when its lease is released and the connection reports itself unusable, or a `begin` request
-left a transaction that no successful `commit` or `rollback` ended (including one whose request was cancelled); the
-next request opens a fresh connection. `lease.release(discard=True)` drops the slot in any case.
-
 A slot inside a transaction waits at most the lease's `commit_timeout` for the next request of its lease: the
 pool's `commit_timeout` (60 seconds by default, `None` for no limit), or the `commit_timeout`
 [connection option](/topics/options) in effect when the transaction acquired the slot. When none arrives, the slot rolls the transaction back and leaves the pool; the lease is then
@@ -104,6 +100,54 @@ pool = Pool(AsyncpgDriver(), profile, commit_timeout=60)
 
 A driver method that does not return a coroutine fails its request with `InterfaceError`. When the slot's serving
 task itself fails, every queued request fails with `InterfaceError` and the slot leaves the pool on release.
+
+## Slot lifecycle
+
+adorm decides how long a connection lives, not the target ORM (Django's `CONN_MAX_AGE` does not apply). Acquiring a
+slot does nothing to its connection: no ping, no reset, no query; the profile's `on_acquire` hook is the only work
+before a lease's first request. The connection's state is kept clean by closing it instead: when a lease ends, the
+slot closes its connection and leaves the pool, and the next request gets a fresh connection, when
+
+- the session ended without a commit or rollback: its client is gone, a `commit` or `rollback` failed, or a lease
+  inside a transaction was released (a transaction the slot aborts after `commit_timeout` leaves the same way);
+- a request failed with a connection error ([`is_connection_lost()`](/ref/drivers#adorm-drivers-driverconnection),
+  such as PostgreSQL's `57P01` after `pg_terminate_backend()`), even when the driver still reports the connection
+  usable;
+- the connection ran custom SQL, SQL that adorm did not generate, such as a Django signal receiver's
+  `cursor.execute()` ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), also when the transaction committed: that SQL
+  may have changed the connection's state;
+- the connection reports itself unusable, or the lease was released with `discard=True`.
+
+```python
+from django.db import connection
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+@receiver(post_save, sender=Member)
+def audit(instance, **kwargs):                  # runs on the slot's thread, inside the driver's save()
+    with connection.cursor() as cursor:
+        cursor.execute("SET search_path TO audit, public")
+        cursor.execute("INSERT INTO log (member_id) VALUES (%s)", [instance.pk])
+
+
+async with adorm.atomic():
+    await member.save()                         # the receiver's SQL marks the connection
+# committed; the slot then closes its connection, and the next session gets a fresh one
+```
+
+An idle slot closes its connection and leaves the pool after `purge_stale_connections_at` seconds (300 by default,
+`None` to keep idle slots until the pool closes). A request takes the idle slot returned last, so under a smaller
+load the slots it no longer needs stay idle and reach that age; a request never takes a slot past it, also when the
+loop is too busy to run the purge on time.
+
+```python
+pool = Pool(DjangoDriver(), profile, purge_stale_connections_at=60)
+adorm.configure(profiles={...}, pool={"purge_stale_connections_at": 60})       # the default of every profile
+```
+
+`slot.close_reason` tells why a slot left the pool ([`CloseReason`](/ref/pool#adorm-executor-closereason)), and the
+`adorm.executor` logger records it at debug level.
 
 ## Requests and events
 
@@ -203,7 +247,8 @@ children) waits until the timeout, then gets `DeadlockError`. So does a flow who
 
 `await router.close()` closes every pool: idle slots close at once, waiting requests raise `InterfaceError`, and a
 held slot closes when its lease is released. A slot still opening is closed once open, and its request raises
-`InterfaceError`. `close()` returns once the idle slots and the slots being discarded are closed.
+`InterfaceError`. `close()` returns once the idle slots, the slots being discarded and the released slots whose
+connections are still settling (within `release_timeout`) are closed.
 
 ## Events
 

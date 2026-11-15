@@ -2,7 +2,7 @@
 
 ::: info Status
 The installed version provides connection profiles, their hooks, run-time profiles and the default router built
-from them, and connection options in a profile. Slot lifetimes (`purge_stale_connections_at`) are not part of it yet.
+from them, connection options and pool settings in a profile.
 The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run
 profiles' hooks; both execute reads, writes, row locks and savepoints. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
 works.
@@ -66,7 +66,8 @@ configuring adorm imports no ORM.
 | `max_connections` | the maximum number of slots of the profile's pool; `0` opens connections until the database refuses one |
 | `acquire_timeout` | seconds a request waits for a slot, then `SessionTimeout` |
 | `commit_timeout` | seconds a slot inside a transaction waits for the next request before it rolls back; `None` for no limit |
-| `release_timeout` | seconds the `on_release` hook may run before the slot leaves the pool |
+| `release_timeout` | seconds the `on_release` hook may run before the slot leaves the pool, and the time a released slot waits for its connection to settle |
+| `purge_stale_connections_at` | seconds an idle slot stays in the pool before its connection closes (default 300); `None` keeps idle slots until the pool closes |
 
 `acquire_timeout` and `commit_timeout` are also the profile layer of the [connection options](/topics/options) of
 the same names, which a session or a `connection_options()` block can override.
@@ -196,9 +197,14 @@ session = adorm.create_session(f"user:{request.user.username}", "web")
 await session.Member.objects.count()
 ```
 
-Each profile has a pool of its own, and a pool keeps its idle connections until the pool closes. Profiles per user
-therefore hold connections per user that was active; a single profile whose `on_acquire` reads the user from a
-context variable shares its connections between users.
+Each profile has a pool of its own, and a pool closes an idle connection after its `purge_stale_connections_at`
+seconds ([slot lifecycle](/topics/pool#slot-lifecycle)). Profiles per user therefore hold connections for the users
+active within that time; a single profile whose `on_acquire` reads the user from a context variable shares its
+connections between users.
+
+```python
+adorm.configure(providers=[per_user], pool={"max_connections": 2, "purge_stale_connections_at": 120})
+```
 
 Concurrent first uses of one name ask the providers once. A provider that raises fails every waiting request; the
 next request asks again.

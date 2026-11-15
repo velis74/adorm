@@ -178,18 +178,6 @@ async def test_a_database_other_than_postgresql_is_refused(library, monkeypatch)
         await router.close()
 
 
-async def test_the_connect_hook_cannot_bypass_djangos_pool(library):  # noqa: ARG001
-    options = {**connections.settings["default"].get("OPTIONS", {}), "pool": True}
-    previous = set_runner(None)
-    _, router = await open_pool(params={"OPTIONS": options}, connect=lambda profile: None)  # noqa: ARG005
-    try:
-        with pytest.raises(NotSupportedError, match="connection pool"):
-            await Author.objects.count()
-    finally:
-        set_runner(previous)
-        await router.close()
-
-
 def test_capabilities():
     assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists"}
     assert CAPABILITIES.operations == READ_CAPABILITIES.operations | {

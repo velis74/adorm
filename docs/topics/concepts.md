@@ -30,8 +30,9 @@ is in Django. A profile names the driver, the database alias, extra driver param
 - `on_acquire` runs when a session gets a slot (for example `SET ROLE`),
 - `on_release` resets session state when the slot returns to the pool.
 
-Pool settings are `max_connections`, `acquire_timeout`, `commit_timeout` and `release_timeout` (see [Pool](#pool)
-and [Slots](#slots)); a profile's `options` are its database [connection options](#connection-options-and-timeouts).
+Pool settings are `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout` and
+`purge_stale_connections_at` (see [Pool](#pool) and [Slots](#slots)); a profile's `options` are its database
+[connection options](#connection-options-and-timeouts).
 
 ```python
 adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})
@@ -104,10 +105,10 @@ sent, then commits; an operation that arrives after the end (from a task that in
 arrives within its [`commit_timeout`](/topics/options#adorm-s-own-options), the value in effect when the transaction
 started. The [transactions topic](/topics/transactions) covers all of this.
 
-Acquiring a slot does nothing to the connection. A slot leaves the pool, and the next request gets a fresh
-connection, when a session ends without commit or rollback, when the driver reports that the connection is no
-longer usable, or when a lease is released with `discard=True`. Idle slots are not closed after a period of
-inactivity yet (`purge_stale_connections_at`).
+Acquiring a slot does nothing to the connection, and adorm, not the ORM, decides how long a connection lives. A slot
+leaves the pool, and the next request gets a fresh connection, when a session ends without commit or rollback (a
+lost client), when the driver gets a connection error, when the slot ran custom SQL (even after a commit), and after
+`purge_stale_connections_at` seconds of inactivity ([slot lifecycle](/topics/pool#slot-lifecycle)).
 
 ### Connection options and timeouts
 

@@ -6,6 +6,7 @@ import asyncio
 import inspect
 import itertools
 import logging
+import time
 
 from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator
@@ -19,6 +20,7 @@ from adorm.executor.options import check_profile_options, check_timeout, resolve
 from adorm.executor.slot import (
     CancellationOutcome,
     carry_cancellation,
+    CloseReason,
     failure_outcome,
     mark_cancellation,
     Slot,
@@ -38,6 +40,10 @@ logger = logging.getLogger("adorm.executor")
 DEFAULT_ACQUIRE_TIMEOUT = 30.0
 DEFAULT_COMMIT_TIMEOUT = 60.0
 DEFAULT_RELEASE_TIMEOUT = 30.0
+DEFAULT_PURGE_STALE_CONNECTIONS_AT = 300.0
+
+# The event loop runs a timer up to this much early.
+_CLOCK_RESOLUTION = time.get_clock_info("monotonic").resolution
 
 _held: ContextVar[tuple[SlotLease, ...]] = ContextVar("adorm_held_leases", default=())
 
@@ -106,6 +112,11 @@ class Pool:
     request waits. ``commit_timeout`` is the number of seconds a slot inside a transaction waits for its lease's next
     request before it rolls the transaction back and leaves the pool; ``None`` sets no limit.
 
+    ``purge_stale_connections_at`` is the number of seconds a slot may stay idle: then it closes its connection and
+    leaves the pool (``None``: idle slots stay until the pool closes). A request takes the idle slot returned last, so
+    the slots a smaller load no longer needs reach that age. Acquiring a slot does nothing to its connection; when the
+    slot leaves the pool at the end of a lease is up to the slot (`Slot`).
+
     The profile's ``on_acquire`` and ``on_release`` attributes, when present and not ``None``, are its hooks: the
     router calls ``on_acquire`` when it assigns a slot to a session, after setting the session's database connection
     options, the slot calls ``on_release`` when the session returns it usable. After either hook the slot sets its
@@ -129,6 +140,7 @@ class Pool:
         acquire_timeout: float = DEFAULT_ACQUIRE_TIMEOUT,
         commit_timeout: float | None = DEFAULT_COMMIT_TIMEOUT,
         release_timeout: float = DEFAULT_RELEASE_TIMEOUT,
+        purge_stale_connections_at: float | None = DEFAULT_PURGE_STALE_CONNECTIONS_AT,
     ) -> None:
         if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections < 0:
             raise ValueError(f"max_connections is a non-negative integer, not {max_connections!r}")
@@ -138,6 +150,11 @@ class Pool:
         self.acquire_timeout = check_timeout(acquire_timeout, "acquire_timeout")
         self.commit_timeout = None if commit_timeout is None else check_timeout(commit_timeout, "commit_timeout")
         self.release_timeout = check_timeout(release_timeout, "release_timeout")
+        self.purge_stale_connections_at = (
+            None
+            if purge_stale_connections_at is None
+            else check_timeout(purge_stale_connections_at, "purge_stale_connections_at")
+        )
         check_hook(getattr(profile, "connect", None), "connect", profile.name, driver.mode)
         self.on_acquire = self._hook(profile, "on_acquire")
         self.on_release = self._hook(profile, "on_release")
@@ -154,6 +171,7 @@ class Pool:
         self._refused_at: int | None = None
         self._waiters: deque[_Waiter] = deque()
         self._closing: set[asyncio.Task] = set()
+        self._purge_handle: asyncio.TimerHandle | None = None
 
     def _hook(self, profile: Profile, what: str) -> Any:
         hook = getattr(profile, what, None)
@@ -204,19 +222,57 @@ class Pool:
         return not self.closed and (limit is None or self.size < limit)
 
     def _take_idle(self) -> Slot | None:
+        """The idle slot returned last; stale and unusable idle slots met on the way leave the pool."""
+        now = asyncio.get_running_loop().time()
         while self._idle:
-            slot = self._idle.popleft()
-            if slot.is_usable():
+            slot = self._idle.pop()
+            if self._stale(slot, now):
+                self._discard(slot, CloseReason.STALE)
+            elif not slot.is_usable():
+                self._discard(slot, CloseReason.UNUSABLE)
+            else:
+                slot.idle_since = None
+                self._schedule_purge()
                 return slot
-            self._discard(slot)
+        self._schedule_purge()
         return None
 
-    def _discard(self, slot: Slot) -> None:
+    def _stale(self, slot: Slot, now: float) -> bool:
+        after = self.purge_stale_connections_at
+        return after is not None and slot.idle_since is not None and now - slot.idle_since >= after
+
+    def _schedule_purge(self) -> None:
+        """Have `_purge()` run when the oldest idle slot becomes stale."""
+        handle, after = self._purge_handle, self.purge_stale_connections_at
+        if after is None or self.closed or not self._idle:
+            if handle is not None:
+                handle.cancel()
+                self._purge_handle = None
+            return
+        when = cast("float", self._idle[0].idle_since) + after
+        if handle is not None:
+            if handle.when() == when:
+                return
+            handle.cancel()
+        self._purge_handle = asyncio.get_running_loop().call_at(when, self._purge)
+
+    def _purge(self) -> None:
+        """Close the idle slots that are stale; the oldest are first in the idle queue."""
+        self._purge_handle = None
+        now = asyncio.get_running_loop().time() + _CLOCK_RESOLUTION
+        while self._idle and self._stale(self._idle[0], now):
+            self._discard(self._idle.popleft(), CloseReason.STALE)
+        self._schedule_purge()
+
+    def _discard(self, slot: Slot, reason: CloseReason) -> None:
         self._slots.discard(slot)
-        task = asyncio.get_running_loop().create_task(slot.close())
+        self._track(asyncio.get_running_loop().create_task(slot.close(reason)))
+        self._refused_at = None
+
+    def _track(self, task: asyncio.Task) -> None:
+        """Have `close()` wait for ``task``, which closes a slot or returns it to the pool."""
         self._closing.add(task)
         task.add_done_callback(self._closing.discard)
-        self._refused_at = None
 
     async def _open(self) -> Slot:
         """Open a slot in capacity reserved by the caller (``_opening``)."""
@@ -250,7 +306,9 @@ class Pool:
             if not waiter.future.done():
                 waiter.future.set_result(slot)
                 return
+        slot.idle_since = asyncio.get_running_loop().time()
         self._idle.append(slot)
+        self._schedule_purge()
 
     def _removed(self, slot: Slot) -> None:
         """A slot left the pool after its connection closed."""
@@ -269,11 +327,12 @@ class Pool:
 
     async def close(self) -> None:
         """Close idle slots and refuse further requests; waiting requests raise `InterfaceError`. Returns once the
-        idle slots and the slots being discarded are closed. A held slot closes when its lease is released, a slot
-        still opening as soon as it is open."""
+        idle slots, the slots being discarded and the released slots whose connections are settling are closed. A held
+        slot closes when its lease is released, a slot still opening as soon as it is open."""
         if self.closed:
             return
         self.closed = True
+        self._schedule_purge()
         while self._waiters:
             waiter = self._waiters.popleft()
             if not waiter.future.done():
@@ -281,7 +340,9 @@ class Pool:
         idle, self._idle = list(self._idle), deque()
         for slot in idle:
             self._slots.discard(slot)
-        await asyncio.gather(*(slot.close() for slot in idle), *self._closing, return_exceptions=True)
+        await asyncio.gather(
+            *(slot.close(CloseReason.POOL_CLOSED) for slot in idle), *self._closing, return_exceptions=True
+        )
 
 
 class Router:
@@ -493,7 +554,7 @@ class Router:
             slot.forget_options()
         except BaseException as exc:
             # The hook may have left the connection in any state.
-            await lease.release(discard=True)
+            await lease._release(CloseReason.HOOK_FAILED)
             if isinstance(exc, TimeoutError) and hook_timeout.expired():
                 message = f"on_acquire of profile {pool.name!r} did not finish within {timeout:g} s"
                 raise self._timeout(lease.session, timeout, message) from None

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import logging
+import sys
 import threading
 
 from collections.abc import Callable, Iterator
@@ -181,6 +182,33 @@ _INERROR = 3
 """libpq's ``PQTRANS_INERROR``: the open transaction failed (psycopg 3 ``TransactionStatus``, psycopg 2 constants)."""
 
 
+_CURSOR_MODULE = "django.db.backends.utils"
+_ORM_SQL_MODULES = ("django.db.models.sql.compiler", "django.db.backends.")
+_CALLBACK_RUNNERS = frozenset({"on_commit", "run_and_clear_commit_hooks", "run_commit_hooks_on_set_autocommit_on"})
+"""Functions of Django's backend that call application callbacks."""
+_SIGNAL_MODULE = "django.dispatch.dispatcher"
+
+
+def _custom_sql_call(frame: Any, trusted: tuple[str, ...], entries: frozenset[Any]) -> bool:
+    """Whether the statement Django's cursor wrapper is executing, seen from ``frame`` inside the wrapper, comes from
+    code other than Django's query compiler and database backend (the modules whose names start with ``trusted``).
+
+    The frames above the cursor wrapper are searched, up to a frame running one of the ``entries`` code objects. The
+    first one in a ``trusted`` module decides for the compiler or backend; frames of other modules in between
+    (instrumentation wrapping the cursor) are passed. A signal dispatch or a backend function that runs application
+    callbacks met first decides for custom SQL, as does reaching the end of the search."""
+    while frame is not None and frame.f_globals.get("__name__") != _CURSOR_MODULE:
+        frame = frame.f_back
+    while frame is not None and frame.f_code not in entries:
+        module = str(frame.f_globals.get("__name__", ""))
+        if module == _SIGNAL_MODULE:
+            return True
+        if module != _CURSOR_MODULE and module.startswith(trusted):
+            return frame.f_code.co_name in _CALLBACK_RUNNERS
+        frame = frame.f_back
+    return True
+
+
 def _transaction_failed(db: Any) -> bool:
     """Whether the database connection of Django's wrapper ``db`` is in a failed transaction."""
     info = getattr(db.connection, "info", None)
@@ -197,6 +225,15 @@ class DjangoConnection(ThreadedConnection):
     ``get_connection_params()``), and Django configures it as its own (isolation level, time zone, role).
     ``target`` (what profile hooks receive) is Django's connection wrapper. Every call sees Django's active language and
     time zone of the caller (`adopt_context_locals()`) and runs its ORM calls on the profile's alias.
+
+    The slot decides how long the connection lives: the wrapper runs without ``CONN_MAX_AGE`` and
+    ``CONN_HEALTH_CHECKS``, and opens its connection directly also when the alias uses Django's connection pool. When
+    the connection closes, the wrapper gets the alias's settings back (for a ``direct`` driver, the event loop thread's
+    wrapper). A statement that an operation, or one of Django's ``on_commit()`` callbacks, runs through the wrapper's
+    cursor from code other than Django's query compiler and database backend (raw SQL of a signal receiver,
+    ``Manager.raw()``, ``cursor.execute()``) marks the connection with `mark_custom_sql()`; SQL sent past Django's
+    execute wrappers (``callproc()``, the DB-API connection) is not seen. SQL of profile hooks and of
+    ``set_options()`` does not count.
 
     A transaction is an outermost ``transaction.atomic()`` block of the alias, entered by ``begin()`` and left by
     ``commit()`` or ``rollback()``; a savepoint is a Django savepoint inside it, so Django's ``on_commit()`` callbacks
@@ -226,19 +263,36 @@ class DjangoConnection(ThreadedConnection):
         db = connections[self.profile.alias]
         if db.vendor != "postgresql":
             raise NotSupportedError(f"the Django driver supports PostgreSQL databases, not {db.vendor!r}")
-        if self.profile.params:
-            # The wrapper belongs to this thread; the alias's own settings stay as they are.
-            db.settings_dict = {**db.settings_dict, **self.profile.params}
+        if db.connection is not None and db.settings_dict.get("OPTIONS", {}).get("pool"):
+            # A direct driver's thread holds a connection of Django's pool: it goes back to that pool.
+            db.close()
+        self._restore = (db.settings_dict, db.Database, db.health_check_enabled, db.close_at)
+        # The slot's connection is opened directly, never taken from Django's pool, and lives until the slot closes.
+        settings = {**db.settings_dict, **self.profile.params, "CONN_HEALTH_CHECKS": False, "CONN_MAX_AGE": None}
+        settings["OPTIONS"] = {key: value for key, value in settings.get("OPTIONS", {}).items() if key != "pool"}
+        db.settings_dict = settings
         connect = self.profile.connect
         if connect is not None:
-            if db.settings_dict.get("OPTIONS", {}).get("pool"):
-                raise NotSupportedError("a profile's connect hook cannot be combined with Django's connection pool")
             db.Database = _HookDatabase(db.Database, lambda: connect(self.profile))
         self.db = db
         self._savepoints = []
+        package = type(db).__module__.rpartition(".")[0]
+        self._trusted = (*_ORM_SQL_MODULES, f"{package}.") if package else _ORM_SQL_MODULES
         db.ensure_connection()
+        # Also for a connection the thread's wrapper already had open.
+        db.health_check_enabled = False
+        db.close_at = None
+
+    def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
+        if not self.ran_custom_sql and _custom_sql_call(sys._getframe(1), self._trusted, _ENTRIES):
+            self.mark_custom_sql()
+        return execute(sql, params, many, context)
 
     def execute_sync(self, operation: Any) -> Any:
+        with self.db.execute_wrapper(self._watch_sql):
+            return self._execute_operation(operation)
+
+    def _execute_operation(self, operation: Any) -> Any:
         kind = operation.kind
         write = _WRITES.get(kind)
         if write is not None:
@@ -339,13 +393,14 @@ class DjangoConnection(ThreadedConnection):
     def _run_on_commit(self, callbacks: list[tuple[Any, Callable[[], Any], bool]]) -> None:
         """Run Django's ``on_commit()`` callbacks of a committed transaction in order. A failure is logged, since the
         commit stands; a callback without ``robust`` that fails stops the remaining ones, as in Django."""
-        for _, func, robust in callbacks:
-            try:
-                func()
-            except Exception:
-                logger.exception("Django on_commit callback %r failed", func)
-                if not robust:
-                    return
+        with self.db.execute_wrapper(self._watch_sql):
+            for _, func, robust in callbacks:
+                try:
+                    func()
+                except Exception:
+                    logger.exception("Django on_commit callback %r failed", func)
+                    if not robust:
+                        return
 
     def rollback_sync(self) -> None:
         atomic = self._atomic
@@ -374,19 +429,26 @@ class DjangoConnection(ThreadedConnection):
             return
         atomic, self._atomic = self._atomic, None
         self._savepoints = []
-        if atomic is None:
-            db.close()
-            return
-        # Closing inside the transaction leaves its rollback to the database; leaving the block resets Django's
-        # transaction state of the wrapper, which a direct driver's next connection on this thread reuses.
-        db.savepoint_ids = []
         try:
-            db.close()
+            if atomic is None:
+                db.close()
+                return
+            # Closing inside the transaction leaves its rollback to the database; leaving the block resets Django's
+            # transaction state of the wrapper, which a direct driver's next connection on this thread reuses.
+            db.savepoint_ids = []
+            try:
+                db.close()
+            finally:
+                atomic.__exit__(None, None, None)
         finally:
-            atomic.__exit__(None, None, None)
+            # A direct driver's thread uses the wrapper with the alias's own settings again.
+            db.settings_dict, db.Database, db.health_check_enabled, db.close_at = self._restore
 
     def map_error(self, exc: BaseException) -> BaseException:
         return map_django_error(exc)
+
+
+_ENTRIES = frozenset({DjangoConnection.execute_sync.__code__, DjangoConnection._run_on_commit.__code__})
 
 
 # Writes: each runs on the connection's thread and returns plain data.

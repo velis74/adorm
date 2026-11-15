@@ -270,8 +270,10 @@ def test_pool_settings_defaults_and_kwargs():
         "acquire_timeout": 30.0,
         "commit_timeout": 60.0,
         "release_timeout": 30.0,
+        "purge_stale_connections_at": 300.0,
     }
     assert PoolSettings(commit_timeout=None).commit_timeout is None
+    assert PoolSettings(purge_stale_connections_at=None).purge_stale_connections_at is None
 
 
 @pytest.mark.parametrize(
@@ -282,6 +284,8 @@ def test_pool_settings_defaults_and_kwargs():
         ({"acquire_timeout": 0}, "acquire_timeout"),
         ({"commit_timeout": float("inf")}, "commit_timeout"),
         ({"release_timeout": -1}, "release_timeout"),
+        ({"purge_stale_connections_at": 0}, "purge_stale_connections_at"),
+        ({"purge_stale_connections_at": float("nan")}, "purge_stale_connections_at"),
     ],
 )
 def test_pool_settings_validation(kwargs, match):
@@ -292,6 +296,12 @@ def test_pool_settings_validation(kwargs, match):
 def test_pool_release_timeout_is_validated():
     with pytest.raises(ValueError, match="release_timeout"):
         Pool(FakeDriver(), profile(), release_timeout=0)
+
+
+@pytest.mark.parametrize("value", [0, -5, float("inf"), "300"])
+def test_pool_purge_stale_connections_at_is_validated(value):
+    with pytest.raises(ValueError, match="purge_stale_connections_at"):
+        Pool(FakeDriver(), profile(), purge_stale_connections_at=value)
 
 
 # ProfileRegistry
@@ -470,14 +480,17 @@ async def test_router_creates_a_pool_from_the_profile_on_first_use():
 
 
 async def test_router_uses_the_registry_pool_settings_when_the_profile_has_none():
-    router, _ = routed(profile(), max_connections=3, commit_timeout=None, release_timeout=7)
-    pool = await router.get_pool("default")
-    assert (pool.max_connections, pool.acquire_timeout, pool.commit_timeout, pool.release_timeout) == (
-        3,
-        LONG,
-        None,
-        7.0,
+    router, _ = routed(
+        profile(), max_connections=3, commit_timeout=None, release_timeout=7, purge_stale_connections_at=None
     )
+    pool = await router.get_pool("default")
+    assert (
+        pool.max_connections,
+        pool.acquire_timeout,
+        pool.commit_timeout,
+        pool.release_timeout,
+        pool.purge_stale_connections_at,
+    ) == (3, LONG, None, 7.0, None)
 
 
 async def test_an_added_pool_wins_over_a_profile_of_the_same_name():

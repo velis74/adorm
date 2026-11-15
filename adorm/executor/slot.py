@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 __all__ = [
     "REQUEST_METHODS",
     "CancellationOutcome",
+    "CloseReason",
     "Request",
     "RequestQueue",
     "Slot",
@@ -76,6 +77,33 @@ class CancellationOutcome(enum.StrEnum):
     """It finished with an error before the cancellation reached it: it had no effect."""
     UNKNOWN = "unknown"
     """It was cancelled while running, or failed with a lost connection: it may or may not have taken effect."""
+
+
+class CloseReason(enum.StrEnum):
+    """Why a slot closed its connection and left the pool."""
+
+    DISCARDED = "discarded"
+    """Its lease was released with ``discard=True``."""
+    ABORTED = "aborted"
+    """It rolled back a transaction that received no request within the lease's ``commit_timeout``."""
+    UNCLEAN_END = "unclean_end"
+    """Its lease ended inside a transaction: no successful ``commit`` or ``rollback`` ended it."""
+    CONNECTION_ERROR = "connection_error"
+    """A request failed with an error that leaves the connection unusable (`DriverConnection.is_connection_lost()`)."""
+    CUSTOM_SQL = "custom_sql"
+    """The connection ran SQL adorm did not generate (`DriverConnection.ran_custom_sql`)."""
+    UNUSABLE = "unusable"
+    """The connection reported itself unusable, or the slot stopped serving requests."""
+    UNSETTLED = "unsettled"
+    """The connection did not finish the work of its last call within the pool's ``release_timeout``
+    (`DriverConnection.settle()`)."""
+    HOOK_FAILED = "hook_failed"
+    """Setting the session's options and running the profile's ``on_acquire`` hook, or running its ``on_release``
+    hook, failed or timed out."""
+    STALE = "stale"
+    """It stayed idle for the pool's ``purge_stale_connections_at`` seconds."""
+    POOL_CLOSED = "pool_closed"
+    """Its pool was closed."""
 
 
 _OUTCOME = "_adorm_cancellation_outcome"
@@ -321,10 +349,14 @@ class SlotLease:
         the pool. The lease's channel then closes: callbacks and backend events left unread on ``events`` go to the
         pool's `EventBus`.
         """
+        await self._release(CloseReason.DISCARDED if discard else None)
+
+    async def _release(self, reason: CloseReason | None) -> None:
+        """`release()`; a ``reason`` closes the slot with that `CloseReason`."""
         if self._released:
             return
         self._released = True
-        await self.slot._finish(self, discard)
+        await self.slot._finish(self, reason)
 
     async def _wait_returned(self) -> None:
         """Wait until the slot has finished returning this released lease, through any cancellation meanwhile."""
@@ -367,6 +399,12 @@ class Slot:
     ends and restored by a rollback to a savepoint. An option whose setting failed or was cancelled is set again by
     the next request with options. After a profile hook has run on the connection, every remembered option counts as
     unknown and is set again, since the hook may have set or reset it.
+
+    When its lease ends, the slot waits for the connection to settle (`DriverConnection.settle()`; the release does not
+    wait for it), then leaves the pool, closing the connection, when the lease was released with ``discard``, the
+    lease ended inside a transaction, a request failed with an error that leaves the connection unusable, the
+    connection ran custom SQL (`DriverConnection.ran_custom_sql`), even after a commit, or the connection is no longer
+    usable. ``close_reason`` tells which. Acquiring the slot does nothing to the connection.
     """
 
     _ids = itertools.count(1)
@@ -389,6 +427,9 @@ class Slot:
         self._idle.set()
         self._server: asyncio.Task | None = None
         self._finisher: asyncio.Task | None = None
+        self._broken = False
+        self.idle_since: float | None = None
+        self.close_reason: CloseReason | None = None
 
     def __repr__(self) -> str:
         return f"<Slot {self.slot_id} of {self.pool.name!r}, {self.state}>"
@@ -404,6 +445,7 @@ class Slot:
         """Whether the slot can serve another lease."""
         return (
             self.state != _CLOSED
+            and not self._broken
             and self.connection is not None
             and self.connection.is_usable()
             and self._server is not None
@@ -595,7 +637,7 @@ class Slot:
         self._end_transaction_options()
         self._deliver(lease, CallbackEvent(ON_ROLLBACK))
         self.state = _FINISHING
-        self._finisher = asyncio.get_running_loop().create_task(self._return(lease, True))
+        self._finisher = asyncio.get_running_loop().create_task(self._return(lease, CloseReason.ABORTED))
 
     async def _run(self, lease: SlotLease, request: Request, context: contextvars.Context) -> None:
         connection = cast("DriverConnection", self.connection)
@@ -629,13 +671,13 @@ class Slot:
                 call.cancel()
                 raise
             if not call.cancelled():
-                event = ErrorEvent(request_id, cast("BaseException", call.exception()))
+                event = self._failed(request_id, cast("BaseException", call.exception()))
             elif self._cancelled is request:
                 event = CancelledEvent(request_id, started=started[0])
             else:
                 event = ErrorEvent(request_id, InterfaceError(f"{request.method}() was cancelled by the driver"))
         except Exception as exc:
-            event = ErrorEvent(request_id, exc)
+            event = self._failed(request_id, exc)
         finally:
             self._running = None
             self._cancelled = None
@@ -648,28 +690,105 @@ class Slot:
                 self._deliver(lease, CallbackEvent(ON_COMMIT if request.method == "commit" else ON_ROLLBACK))
         self._deliver(lease, event)
 
-    async def _finish(self, lease: SlotLease, discard: bool) -> None:
+    def _failed(self, request_id: Any, error: BaseException) -> ErrorEvent:
+        """The outcome of a request whose connection call raised ``error``; an error that leaves the connection unusable
+        (`DriverConnection.is_connection_lost()`) makes the slot leave the pool at the end of the lease."""
+        try:
+            lost = bool(cast("DriverConnection", self.connection).is_connection_lost(error))
+        except Exception:
+            logger.exception("%s.is_connection_lost failed", type(self.connection).__name__)
+            lost = True
+        if lost:
+            self._broken = True
+        return ErrorEvent(request_id, error)
+
+    async def _finish(self, lease: SlotLease, reason: CloseReason | None) -> None:
         if self.lease is not lease or self.state != _LEASED:
             return
         self.state = _FINISHING
-        self._finisher = asyncio.get_running_loop().create_task(self._return(lease, discard))
+        self._finisher = asyncio.get_running_loop().create_task(self._return(lease, reason))
         await asyncio.shield(self._finisher)
 
-    async def _return(self, lease: SlotLease, discard: bool) -> None:
+    def _end_reason(self) -> CloseReason | None:
+        """Why the slot leaves the pool at the end of a lease; ``None`` when it stays."""
+        if self.pool.closed:
+            return CloseReason.POOL_CLOSED
+        if self._broken:
+            return CloseReason.CONNECTION_ERROR
+        if self._in_transaction:
+            return CloseReason.UNCLEAN_END
+        connection = self.connection
+        if connection is not None and connection.ran_custom_sql:
+            return CloseReason.CUSTOM_SQL
+        if not self.is_usable():
+            return CloseReason.UNUSABLE
+        return None
+
+    async def _return(self, lease: SlotLease, reason: CloseReason | None) -> None:
         try:
             await self._idle.wait()
         finally:
             self.lease = None
             lease.channel.close()
-            keep = not (discard or self.pool.closed or self._in_transaction or not self.is_usable())
-            if keep and self.pool.on_release is not None:
-                keep = await self._on_release(lease) and self.is_usable() and not self.pool.closed
-            if keep:
-                self.state = _IDLE
-                self.pool._returned(self)
+            connection = self.connection
+            if reason is None and connection is not None and not connection.settled and self.is_usable():
+                # The connection still works for the last request (Django's on_commit() callbacks): the release
+                # completes now, and the slot decides once that work is done; closing the pool waits for it.
+                self._finisher = asyncio.get_running_loop().create_task(self._conclude(lease, reason))
+                self.pool._track(self._finisher)
             else:
-                await self.close()
-                self.pool._removed(self)
+                await self._conclude(lease, reason)
+
+    async def _conclude(self, lease: SlotLease, reason: CloseReason | None) -> None:
+        """Return the slot of the ended ``lease`` to the pool, or close it for ``reason`` or the slot's own reason."""
+        try:
+            if reason is None:
+                reason = await self._release_reason(lease)
+        except BaseException:
+            await self._leave(CloseReason.UNUSABLE)
+            raise
+        if reason is None:
+            self.state = _IDLE
+            self.pool._returned(self)
+        else:
+            await self._leave(reason)
+
+    async def _release_reason(self, lease: SlotLease) -> CloseReason | None:
+        """Why the slot leaves the pool once the connection has settled; ``None`` when it stays."""
+        settled = await self._settle()
+        reason = self._end_reason()
+        if reason is None and not settled:
+            return CloseReason.UNSETTLED
+        if reason is None and self.pool.on_release is not None:
+            return self._end_reason() if await self._on_release(lease) else CloseReason.HOOK_FAILED
+        return reason
+
+    async def _leave(self, reason: CloseReason) -> None:
+        try:
+            await self.close(reason)
+        finally:
+            self.pool._removed(self)
+
+    async def _settle(self) -> bool:
+        """Wait, within the pool's ``release_timeout``, until the connection has finished the work of the lease's
+        last request (`DriverConnection.settle()`); return whether it did."""
+        connection = self.connection
+        if connection is None or not self.is_usable():
+            return True
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            return False
+        timeout = self.pool.release_timeout
+        try:
+            async with asyncio.timeout(timeout):
+                await connection.settle()
+        except TimeoutError:
+            logger.error("%r did not settle within %g s; the slot leaves the pool", self, timeout)
+            return False
+        except Exception:
+            logger.exception("settling %r failed; the slot leaves the pool", self)
+            return False
+        return True
 
     async def _on_release(self, lease: SlotLease) -> bool:
         """Run the profile's ``on_release`` hook for ``lease``'s session within the pool's ``release_timeout``;
@@ -691,11 +810,15 @@ class Slot:
             return False
         return True
 
-    async def close(self) -> None:
-        """Stop serving and close the connection. Logs errors instead of raising them."""
+    async def close(self, reason: CloseReason = CloseReason.POOL_CLOSED) -> None:
+        """Stop serving and close the connection; ``close_reason`` becomes ``reason``. Logs errors instead of raising
+        them; a second call does nothing."""
         if self.state == _CLOSED:
             return
         self.state = _CLOSED
+        self.close_reason = CloseReason(reason)
+        self.idle_since = None
+        logger.debug("%r leaves the pool: %s", self, self.close_reason)
         server = self._server
         if server is not None and not server.done():
             server.cancel()

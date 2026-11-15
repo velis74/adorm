@@ -133,10 +133,10 @@ privilege on raises `ProgrammingError` with SQLSTATE `42501`.
 - **A profile per user**: a [profile provider](/topics/profiles#profiles-created-at-run-time) creates
   `ConnectionProfile(f"user:{name}", ..., params={"role": name}, on_acquire=..., on_release=...)` on the user's first
   request, and the hooks read `profile.params["role"]`. Each such profile has a pool of its own: connections are not
-  shared between users, `max_connections` applies per user, and a pool keeps its idle connections until the profile
-  is unregistered (`adorm.settings.unregister_profile()`), so the connection count grows with the number of users who
-  were active. The database's connection limit for the login role (`ALTER ROLE app_login CONNECTION LIMIT ...`)
-  caps them all together.
+  shared between users, `max_connections` applies per user, and a pool closes an idle connection after its
+  `purge_stale_connections_at` seconds (300 by default), so the connection count follows the number of users active
+  within that time; `adorm.settings.unregister_profile()` closes a user's pool at once. The database's connection
+  limit for the login role (`ALTER ROLE app_login CONNECTION LIMIT ...`) caps them all together.
 - **Row-level security without roles**: keep one role and set a variable instead, `SELECT set_config('app.user_id',
   %s, false)` in `on_acquire` (`$1` with asyncpg) and `RESET app.user_id` in `on_release`; policies read
   `current_setting('app.user_id')`.

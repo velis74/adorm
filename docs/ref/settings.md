@@ -107,11 +107,12 @@ A class method: `value` when it is a profile named `name` (`ValueError` for anot
 
 ### `adorm.PoolSettings`
 
-`PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0)`
+`PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0)`
 
-The settings of a profile's pool, frozen; see [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0)
-for their meaning. `max_connections` is a non-negative integer; the timeouts are positive, finite numbers of seconds,
-and `commit_timeout` may be `None`. Other values raise `ValueError`.
+The settings of a profile's pool, frozen; see [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0)
+for their meaning. `max_connections` is a non-negative integer; the timeouts and `purge_stale_connections_at` are
+positive, finite numbers of seconds, and `commit_timeout` and `purge_stale_connections_at` may be `None`. Other values
+raise `ValueError`.
 
 | Method | Returns |
 |---|---|
@@ -120,7 +121,9 @@ and `commit_timeout` may be `None`. Other values raise `ValueError`.
 
 ```python
 PoolSettings(max_connections=10, commit_timeout=None).as_kwargs()
-# {'max_connections': 10, 'acquire_timeout': 30.0, 'commit_timeout': None, 'release_timeout': 30.0}
+# {'max_connections': 10, 'acquire_timeout': 30.0, 'commit_timeout': None, 'release_timeout': 30.0,
+#  'purge_stale_connections_at': 300.0}
+PoolSettings(purge_stale_connections_at=None)     # idle connections stay until the pool closes
 ```
 
 ## Run-time profiles

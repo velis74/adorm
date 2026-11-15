@@ -23,6 +23,7 @@ from adorm.executor.pool import (
     check_timeout,
     DEFAULT_ACQUIRE_TIMEOUT,
     DEFAULT_COMMIT_TIMEOUT,
+    DEFAULT_PURGE_STALE_CONNECTIONS_AT,
     DEFAULT_RELEASE_TIMEOUT,
     Router,
 )
@@ -61,6 +62,7 @@ class PoolSettings:
     acquire_timeout: float = DEFAULT_ACQUIRE_TIMEOUT
     commit_timeout: float | None = DEFAULT_COMMIT_TIMEOUT
     release_timeout: float = DEFAULT_RELEASE_TIMEOUT
+    purge_stale_connections_at: float | None = DEFAULT_PURGE_STALE_CONNECTIONS_AT
 
     def __post_init__(self) -> None:
         value = self.max_connections
@@ -70,6 +72,8 @@ class PoolSettings:
         if self.commit_timeout is not None:
             check_timeout(self.commit_timeout, "commit_timeout")
         check_timeout(self.release_timeout, "release_timeout")
+        if self.purge_stale_connections_at is not None:
+            check_timeout(self.purge_stale_connections_at, "purge_stale_connections_at")
 
     @classmethod
     def coerce(cls, value: PoolSettings | Mapping[str, Any]) -> PoolSettings:

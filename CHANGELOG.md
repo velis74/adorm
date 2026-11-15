@@ -326,3 +326,17 @@
   `asyncio.timeout()` and raises `OperationTimeout` with the `phase` (`"waiting_for_slot"` or `"executing"`), the
   `operation` and its `session` (new attribute, encoded with the error) of the operation the expiry interrupted, also
   in tasks created in the block; `cancellation_outcome()` of the error is that operation's outcome.
+- Slot lifecycle: adorm sets how long a connection lives. `Pool(purge_stale_connections_at=300.0)` (also in
+  `PoolSettings`, `None` to keep idle slots) closes a slot that stayed idle that long; a request takes the idle slot
+  returned last and never one past that age. Acquiring a slot does nothing to its connection. At the end of a lease
+  the slot closes its connection and leaves the pool when the lease ended inside a transaction, a request failed
+  with an error `is_connection_lost()` accepts (whatever `is_usable()` says), or the connection ran custom SQL
+  (`DriverConnection.mark_custom_sql()`, `ran_custom_sql`), also after a commit; `Slot.close_reason` holds the
+  `CloseReason` (`adorm.executor`) and `Slot.idle_since` the time it became idle. `DriverConnection.settled` and
+  `settle()` report work that runs after a call's outcome (`ThreadedConnection.after_call_sync()`); a lease's release
+  does not wait for it, and the slot decides once it has run, within `release_timeout` (else `CloseReason.UNSETTLED`);
+  `Pool.close()` waits for such slots. The Django driver marks custom SQL that an operation or an `on_commit()`
+  callback runs through the connection's cursor, judged by the nearest caller in Django's query compiler or a
+  database backend (cursor instrumentation in between does not count), and runs its connections without
+  `CONN_MAX_AGE`, `CONN_HEALTH_CHECKS` and Django's connection pool (`OPTIONS["pool"]`), so a connection the slot
+  closes ends on the server; a `direct` driver's thread gets its wrapper's settings back when the slot closes.

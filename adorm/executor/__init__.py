@@ -17,6 +17,7 @@ from adorm.executor.sessions import (
 from adorm.executor.slot import (
     cancellation_outcome,
     CancellationOutcome,
+    CloseReason,
     Request,
     REQUEST_METHODS,
     RequestQueue,
@@ -38,6 +39,7 @@ __all__ = [
     "Atomic",
     "BoundModel",
     "CancellationOutcome",
+    "CloseReason",
     "Pool",
     "Request",
     "RequestQueue",

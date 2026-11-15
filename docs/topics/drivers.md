@@ -170,7 +170,22 @@ default, [`is_connection_error`](/ref/drivers#adorm-drivers-is-connection-error-
 `InterfaceError`, and `OperationalError` without a SQLSTATE or with a connection or shutdown SQLSTATE. A target
 that reports ordinary statement errors as `OperationalError` without a SQLSTATE (`sqlite3` for a missing table
 or a locked database, MySQL drivers for lock wait timeouts) overrides it, so that only a lost connection counts.
-A slot drops an unusable connection; the next request gets a fresh one.
+A slot drops an unusable connection, and one whose request failed with such an error even when the driver still
+reports it usable; the next request gets a fresh one.
+
+## Custom SQL
+
+A connection that runs SQL adorm did not generate, such as SQL of application code the target ORM runs on the
+driver side, calls [`mark_custom_sql()`](/ref/drivers#mark-custom-sql). Its slot then closes the connection when the
+lease ends, also after a commit, since that SQL may have changed the connection's state. Work that runs after a
+call's outcome (Django's `on_commit()` callbacks) counts too: the slot waits for the connection to settle
+([`settle()`](/ref/drivers#async-settle)) before it decides.
+
+```python
+def execute_sync(self, operation):
+    with self.db.execute_wrapper(self.watch):          # the Django driver's way to see what SQL code runs
+        return run(operation)
+```
 
 ## Profiles
 

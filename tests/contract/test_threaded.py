@@ -545,6 +545,65 @@ async def test_work_after_a_call_runs_after_its_outcome_and_before_the_next_call
     assert conn.is_usable()
 
 
+@pytest.mark.parametrize("repeat", range(5))
+async def test_the_connection_settles_once_the_work_after_a_call_has_run(fake, repeat):  # noqa: ARG001
+    conn, _, _ = fake
+    running, release = threading.Event(), threading.Event()
+    done = []
+
+    def after():
+        running.set()
+        assert release.wait(TIMEOUT)
+        done.append(True)
+
+    def action(c):
+        c.after_call_sync(after)
+        return "done"
+
+    assert conn.settled
+    assert await conn.execute(Op(action)) == "done"
+    # Visible as soon as the outcome is: the work is pending until it has run.
+    assert not conn.settled
+    settling = asyncio.create_task(conn.settle())
+    await started(running)
+    assert not settling.done()
+    release.set()
+    async with asyncio.timeout(TIMEOUT):
+        await settling
+    assert done == [True]
+    assert conn.settled
+    assert await conn.execute(Op(lambda _: "plain")) == "plain"
+    assert conn.settled
+
+
+async def test_cancelling_settle_leaves_the_work_running(fake):
+    conn, _, _ = fake
+    release = threading.Event()
+    done = []
+
+    def action(c):
+        c.after_call_sync(lambda: release.wait(TIMEOUT) and done.append(True))
+        return "done"
+
+    await conn.execute(Op(action))
+    settling = asyncio.create_task(conn.settle())
+    await asyncio.sleep(0)
+    settling.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await settling
+    release.set()
+    async with asyncio.timeout(TIMEOUT):
+        await conn.settle()
+    assert done == [True]
+
+
+def test_a_connection_is_not_marked_for_custom_sql_until_it_says_so():
+    conn = FakeConnection.__new__(FakeConnection)
+    assert not conn.ran_custom_sql
+    conn.mark_custom_sql()
+    assert conn.ran_custom_sql
+
+
 async def test_failing_work_after_a_call_is_logged(fake, caplog):
     conn, _, _ = fake
 

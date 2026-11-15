@@ -352,6 +352,12 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
   raises `asyncio.CancelledError` only when the statement's effect is unknown, which reports `UNKNOWN`
   ([driver contract](/ref/drivers#cancellation)). `ThreadedConnection` does this for a threaded driver.
 - `is_connection_lost()` is true only for errors after which the connection cannot be used; override it when the
-  target reports statement errors as `OperationalError` without a SQLSTATE.
+  target reports statement errors as `OperationalError` without a SQLSTATE. The slot closes a connection whose
+  request failed with such an error.
+- Code the driver runs for an operation that executes SQL of its own (application code of the target ORM) calls
+  `mark_custom_sql()`, so that the slot closes the connection when the lease ends; work handed to `after_call_sync()`
+  is part of the call it came from ([custom SQL](/ref/drivers#mark-custom-sql)).
+- Nothing in the driver closes or pings a connection on a schedule of its own: the slot decides its lifetime
+  (`purge_stale_connections_at`).
 - `close()` never raises and can be called twice.
 - The driver's ORM is imported in the driver's own module only, never by `adorm` itself.

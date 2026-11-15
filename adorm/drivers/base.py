@@ -9,6 +9,7 @@ how it runs in ``mode``. Every error a connection raises is an adorm exception.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextvars
 import enum
 import inspect
@@ -189,7 +190,8 @@ class DriverConnection(ABC):
     The slot awaits one call at a time from one event loop. Methods raise adorm exceptions only;
     ``asyncio.CancelledError`` passes through. Cancelling the task that awaits ``execute()`` cancels the running
     statement; the connection stays usable. A slot whose lease ends inside a transaction closes the
-    connection.
+    connection, as does one whose request failed with an error ``is_connection_lost()`` accepts and one whose
+    connection ran custom SQL (``mark_custom_sql()``).
 
     ``execute()``, ``set_options()`` and the savepoint calls check the driver's `Capabilities` and raise
     `NotSupportedError` before calling the subclass's ``_execute()``, ``_set_options()`` and ``_savepoint()``
@@ -198,6 +200,7 @@ class DriverConnection(ABC):
 
     def __init__(self, driver: Driver) -> None:
         self.driver = driver
+        self._custom_sql = False
 
     async def execute(self, operation: Operation) -> Any:
         """Execute ``operation``; return plain data: rows as dicts keyed by adorm field names, a scalar or a count.
@@ -232,6 +235,27 @@ class DriverConnection(ABC):
     def target(self) -> Any:
         """The target's connection that profile hooks receive. Defaults to the driver connection itself."""
         return self
+
+    @property
+    def ran_custom_sql(self) -> bool:
+        """Whether the connection ran SQL that adorm did not generate (`mark_custom_sql()`)."""
+        return getattr(self, "_custom_sql", False)
+
+    def mark_custom_sql(self) -> None:
+        """Record that the connection ran SQL that adorm did not generate, such as SQL of code the target runs on the
+        driver side; such SQL may have changed the connection's state. The slot closes the connection when its lease
+        ends, also after a commit or rollback. Callable from any thread; there is no way to clear the mark."""
+        self._custom_sql = True
+
+    @property
+    def settled(self) -> bool:
+        """Whether the connection has finished the work of its last call that runs after the call's outcome
+        (`ThreadedConnection.after_call_sync()`). Always ``True`` unless overridden."""
+        return True
+
+    async def settle(self) -> None:  # noqa: B027 - optional hook
+        """Wait until the connection is ``settled``. The slot awaits it before it decides whether the connection stays
+        in the pool; a lease's release does not wait for it. Returns at once unless overridden."""
 
     async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
         """Call ``hook(self.target, *args)``, await its result when it is awaitable, and return it.
@@ -433,6 +457,7 @@ class ThreadedConnection(DriverConnection):
         self._usable = True
         self._stuck = False
         self._closed = False
+        self._settling: concurrent.futures.Future[None] | None = None
         self._requests: queue.SimpleQueue[_Call | None] = queue.SimpleQueue()
         if self._direct:
             self._thread = threading.current_thread()
@@ -572,6 +597,18 @@ class ThreadedConnection(DriverConnection):
 
     def is_usable(self) -> bool:
         return self._usable and not self._closed and self._thread.is_alive()
+
+    @property
+    def settled(self) -> bool:
+        """Whether the work the last call handed to ``after_call_sync()`` has run."""
+        settling = self._settling
+        return settling is None or settling.done()
+
+    async def settle(self) -> None:
+        """Wait until the work the last call handed to ``after_call_sync()`` has run on the connection's thread."""
+        settling = self._settling
+        if settling is not None and not settling.done():
+            await asyncio.shield(asyncio.wrap_future(settling))
 
     async def close(self) -> None:
         if self._closed:
@@ -785,6 +822,10 @@ class ThreadedConnection(DriverConnection):
             if outcome is None:
                 continue
             ok, value = outcome
+            settling: concurrent.futures.Future[None] | None = None
+            if self._after:
+                # Set before the outcome is delivered, so that settle() after the outcome sees it.
+                settling = self._settling = concurrent.futures.Future()
             if call.future is None:
                 if not ok:
                     logger.error("closing %s connection failed", self.driver.name, exc_info=value)
@@ -793,7 +834,11 @@ class ThreadedConnection(DriverConnection):
                     self._loop.call_soon_threadsafe(_resolve, call.future, ok, value)
                 except RuntimeError:
                     logger.warning("event loop closed, dropping the result of a %s call", self.driver.name)
-            self._run_after(call.context)
+            try:
+                self._run_after(call.context)
+            finally:
+                if settling is not None:
+                    settling.set_result(None)
 
     def _map(self, exc: BaseException) -> BaseException:
         try:

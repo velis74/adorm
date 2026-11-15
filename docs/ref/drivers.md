@@ -63,7 +63,7 @@ driver.check(Select(Member.objects.annotate(n=Length("first_name")).query))
 #### `is_refusal(exc)`
 
 Returns whether `exc`, an adorm exception `open_connection()` raised, means the database refuses more connections.
-A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0) with `max_connections=0` then stops opening connections and queues the
+A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0) with `max_connections=0` then stops opening connections and queues the
 request. Defaults to [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc). A driver whose library reports a refused
 connection without a SQLSTATE overrides it:
 
@@ -201,7 +201,9 @@ The contract the slot calls:
 | `target` | the target's connection that the profile's `on_acquire` and `on_release` hooks receive; defaults to the driver connection itself |
 | `async call_hook(hook, *args)` | calls `hook(self.target, *args)`, awaits the result when it is awaitable and returns it; an exception the hook raises is mapped with `map_error()` |
 | `map_error(exc)` | returns the adorm exception for an exception the target raised; defaults to `wrap_driver_error(exc)` |
-| `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it |
+| `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it. The slot closes a connection whose request failed with such an error when the lease ends, whatever `is_usable()` says |
+| `ran_custom_sql` | whether the connection ran SQL adorm did not generate ([below](#ran-custom-sql)) |
+| `settled`, `async settle()` | whether, and until when, the connection still works for its last call after the call's outcome ([below](#settled)) |
 
 A failed check raises `NotSupportedError` before the subclass is called: `execute()` runs
 [`Driver.check()`](#check-operation), and the savepoint calls and `set_options()` check `savepoints` and
@@ -214,6 +216,40 @@ implements:
 | `begin()`, `commit()`, `rollback()`, `cancel()`, `is_usable()`, `close()` | yes | as above |
 | `async _savepoint(name)`, `async _release_savepoint(name)`, `async _rollback_to_savepoint(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
 | `async _set_options(options, local)` | no | sets supported options from a dict, `None` values to their default; raises `NotSupportedError` for any option unless overridden |
+
+#### `ran_custom_sql`
+
+Whether the connection ran SQL that adorm did not generate; `False` until `mark_custom_sql()` is called. The slot
+closes such a connection when its lease ends, also after a successful commit or rollback, since that SQL may have
+changed the connection's state (a `SET`, a temporary table, a prepared statement, an advisory lock).
+
+#### `mark_custom_sql()`
+
+Marks the connection as having run custom SQL. A driver calls it when code it runs for an operation executes SQL of
+its own: the [Django driver](#adorm-drivers-django-djangoconnection) for raw SQL of signal receivers, managers and
+`on_commit()` callbacks. SQL of profile hooks, which set and reset the connection's state on purpose, and of
+`set_options()`, which the slot tracks, is not custom. Callable from any thread; the mark is never cleared.
+
+```python
+class ReportsConnection(ThreadedConnection):
+    def execute_sync(self, operation):
+        if operation.kind == "report":
+            self.mark_custom_sql()                 # the report's SQL comes from the application
+            return run_report(self.db, operation.name)
+        ...
+```
+
+#### `settled`
+
+Whether the connection has finished the work of its last call that runs after the call's outcome, such as Django's
+`on_commit()` callbacks ([`after_call_sync()`](#adorm-drivers-threadedconnection)). `True` unless overridden.
+
+#### `async settle()`
+
+Waits until the connection is `settled`; returns at once unless overridden. When a lease ends on a connection that is
+not settled, `release()` returns at once and the slot awaits `settle()`, within the pool's `release_timeout`, before
+it decides whether the connection stays in the pool, so custom SQL of that work is seen. Until then the slot is in
+use.
 
 #### Managers and driver methods
 
@@ -333,7 +369,8 @@ What the connection does around those methods:
 - `after_call_sync(fn)`, called from a `*_sync` method, runs `fn()` on the thread once that call has ended and its
   outcome is delivered, before the next call starts, in the call's context. `cancel()` never reaches it, and an
   exception it raises is logged on the `adorm.drivers` logger. Work that must not decide or delay the call's outcome
-  goes there, such as Django's `on_commit()` callbacks after `commit_sync()`.
+  goes there, such as Django's `on_commit()` callbacks after `commit_sync()`. Until that work has run, `settled` is
+  `False` and `settle()` waits for it; both see the work as soon as the call's outcome is delivered.
 - `call_hook(hook, *args)` runs `hook(self.target, *args)` on the thread like a `*_sync` method; a hook that returns
   an awaitable raises `InterfaceError`. A subclass sets `target` to what profile hooks receive, such as Django's
   connection wrapper.
@@ -399,17 +436,17 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 
 | Method | Does |
 |---|---|
-| `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread (a backend other than PostgreSQL raises `NotSupportedError`); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged); `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; with Django's `OPTIONS["pool"]` it raises `NotSupportedError`; then `ensure_connection()` |
-| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool`; a write runs as the table below shows |
+| `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread (a backend other than PostgreSQL raises `NotSupportedError`); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged), and then `CONN_HEALTH_CHECKS` becomes `False`, `CONN_MAX_AGE` `None` and `OPTIONS["pool"]` is left out, so the connection is opened directly, never taken from Django's pool, and Django neither pings nor closes the connection the slot keeps; a connection of Django's pool that a `direct` driver's thread holds goes back to that pool first; `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; then `ensure_connection()` |
+| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool`; a write runs as the table below shows. A statement it runs through the wrapper's cursor (an execute wrapper, `connection.execute_wrapper()`) whose nearest caller in Django's query compiler or a database backend (Django's or the package of the alias's backend) is not reached before a signal receiver, an `on_commit()` callback or the driver's own code, such as raw SQL of a `post_save` receiver or `Manager.raw()`, calls [`mark_custom_sql()`](#mark-custom-sql); instrumentation wrapping the cursor in between does not count |
 | `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block; a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError` |
 | `savepoint_sync(name)` | creates a Django savepoint (`savepoint()`) and adds it to the block's savepoint ids, so Django's `on_commit()` callbacks registered inside it belong to it; `name` already open, or no transaction, raises `TransactionManagementError` |
 | `release_savepoint_sync(name)` | releases the savepoint and the savepoints opened after it |
 | `rollback_to_savepoint_sync(name)` | rolls back to the savepoint, which stays open, discarding the savepoints opened after it and the `on_commit()` callbacks registered since; clears Django's `needs_rollback` first, since Django refuses every statement of a transaction marked for rollback |
-| `commit_sync()` | leaves the block, which commits, and hands Django's `on_commit()` callbacks to `after_call_sync()` (see below); raises `TransactionManagementError` and rolls back when Django marked the transaction for rollback or the database transaction failed, `InterfaceError` when the connection was closed inside it |
+| `commit_sync()` | leaves the block, which commits, and hands Django's `on_commit()` callbacks to `after_call_sync()` (see below), watched for custom SQL as in `execute_sync()`; raises `TransactionManagementError` and rolls back when Django marked the transaction for rollback or the database transaction failed, `InterfaceError` when the connection was closed inside it |
 | `rollback_sync()` | leaves the block with a rollback; nothing without an open transaction |
 | `set_options_sync(options, local)` | [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the wrapper, one `execute()` without parameters; nothing for no options |
 | `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
-| `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's) |
+| `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's); then the wrapper gets back the settings, DB-API module, health check flag and closing time it had before `connect_sync()` |
 | `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals) |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc) |
 

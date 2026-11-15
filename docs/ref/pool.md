@@ -8,6 +8,7 @@ importable from `adorm`. The [pool topic](/topics/pool) explains how they fit to
 from adorm.executor import (
     cancellation_outcome,
     CancellationOutcome,
+    CloseReason,
     held_leases,
     holding,
     Pool,
@@ -22,7 +23,7 @@ from adorm.executor import (
 
 ## Pool
 
-### `adorm.executor.Pool(driver, profile, *, max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0)`
+### `adorm.executor.Pool(driver, profile, *, max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0)`
 
 The slots of one connection profile. `driver` is a [`Driver`](/ref/drivers#adorm-drivers-driver), `profile` a
 [`Profile`](/ref/drivers#adorm-drivers-profile), usually a [`ConnectionProfile`](/ref/settings#adorm-connectionprofile);
@@ -34,7 +35,8 @@ with profiles creates its pools itself.
 | `max_connections` | the maximum number of slots, a non-negative integer (`ValueError` otherwise). `0` opens new slots until the driver reports a refusal ([`Driver.is_refusal()`](/ref/drivers#is-refusal-exc)). After a refusal, with any `max_connections`, the pool holds at most as many slots as it had at that moment, until a slot leaves the pool |
 | `acquire_timeout` | the default number of seconds an acquisition waits, positive and finite (`ValueError` otherwise); the profile layer of the `acquire_timeout` [connection option](/ref/options) |
 | `commit_timeout` | the default number of seconds a slot inside a transaction waits for its lease's next request before it rolls the transaction back, ends the lease and leaves the pool; positive and finite (default 60), or `None` for no limit; the profile layer of the `commit_timeout` connection option |
-| `release_timeout` | the number of seconds the profile's `on_release` hook may run before it is cancelled and the slot leaves the pool; positive and finite (default 30) |
+| `release_timeout` | the number of seconds the profile's `on_release` hook may run before it is cancelled and the slot leaves the pool, and the number of seconds a released slot waits for its connection to settle ([`DriverConnection.settle()`](/ref/drivers#async-settle)); positive and finite (default 30) |
+| `purge_stale_connections_at` | the number of seconds a slot may stay idle; then it closes its connection and leaves the pool ([`CloseReason.STALE`](#adorm-executor-closereason)). Positive and finite (default 300), or `None`: idle slots stay until the pool closes |
 
 The profile's `on_acquire` and `on_release` attributes, when present and not `None`, are its
 [hooks](/topics/profiles#hooks); a profile without them has none. A hook or `connect` that is not callable raises
@@ -48,18 +50,22 @@ A threaded driver cancels a hook by asking its thread to stop the running call
 ([`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection)). A hook that does not stop extends the
 release, or the acquisition, by up to the driver's `cancel_grace` seconds; the connection is then given up.
 
-Slots open on demand: a request takes an idle slot, else opens a new one when the limit allows and no other
-request waits, else waits in a first-in, first-out queue; a request whose open was refused goes back to the head of
-the queue. A pool serves one event loop and is used through a [`Router`](#adorm-executor-router-pools-profiles-none).
+Slots open on demand: a request takes the idle slot returned last, else opens a new one when the limit allows and no
+other request waits, else waits in a first-in, first-out queue; a request whose open was refused goes back to the head
+of the queue. Taking an idle slot does nothing to its connection: no query, no check beyond the connection's own
+`is_usable()`. An idle slot past `purge_stale_connections_at`, or no longer usable, met on the way leaves the pool
+instead. Since requests take the slot returned last, the slots a smaller load no longer needs stay idle and age
+out. A pool serves one event loop and is used through a [`Router`](#adorm-executor-router-pools-profiles-none).
 
 ```python
 pool = Pool(DjangoDriver(), profile, max_connections=10, acquire_timeout=5, commit_timeout=60)
+pool = Pool(AsyncpgDriver(), profile, purge_stale_connections_at=60)     # idle connections live a minute
 ```
 
 | Member | Meaning |
 |---|---|
 | `name` | the profile name |
-| `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout` | the constructor arguments |
+| `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout`, `purge_stale_connections_at` | the constructor arguments |
 | `on_acquire`, `on_release` | the profile's hooks, `None` when it has none |
 | `options` | the profile's database connection options, checked, as a read-only mapping |
 | `limit` | the current maximum number of slots: the lower of `max_connections` and the slot count at the last refusal, `None` when neither applies |
@@ -78,9 +84,10 @@ The unreleased leases holding a slot of the pool.
 #### `async close()`
 
 Closes the idle slots and refuses further acquisitions with [`InterfaceError`](/ref/exceptions); waiting requests
-raise `InterfaceError`. Returns once the idle slots and the slots being discarded are closed. A held slot closes when
-its lease is released; a slot still opening closes once open, and its request raises `InterfaceError`. A second call
-does nothing.
+raise `InterfaceError`. Returns once the idle slots, the slots being discarded and the released slots whose
+connections are settling are closed; the last wait at most the pool's `release_timeout`. A held slot closes when its
+lease is released; a slot still opening closes once open, and its request raises `InterfaceError`. A second call does
+nothing.
 
 ## Router
 
@@ -281,15 +288,17 @@ await lease.call("savepoint", "s1")
 
 #### `async release(*, discard=False)`
 
-Returns the slot to the pool once every queued request has run. `discard=True` closes the slot's connection
-instead, as does a connection that reports itself unusable, and one that a `begin` request left in a transaction no
-successful `commit` or `rollback` ended; the slot then leaves the pool. The lease's channel then closes: callbacks
-and backend events left unread on `events` go to the pool's `events` bus; unread outcomes are dropped. The return completes
-also when the caller is cancelled meanwhile. A slot that stays in the pool first runs the profile's `on_release` hook
-with the connection's target, the profile and the lease's session; when the hook raises or runs longer than the
-pool's `release_timeout`, the error is logged and the slot leaves the pool. The next request gets the slot only after
-the hook has finished. After the first call, the lease takes no requests (`InterfaceError`) and a second call does
-nothing.
+Returns the slot to the pool once every queued request has run. The slot closes its connection and leaves the pool
+instead ([`Slot.close_reason`](#adorm-executor-slot)) when `discard=True`, when a `begin` request left a transaction
+no successful `commit` or `rollback` ended, when a request failed with an error that leaves the connection unusable,
+when the connection ran custom SQL, also after a successful commit, and when the connection reports itself unusable.
+The lease's channel then closes: callbacks and backend events left unread on `events` go to the pool's `events` bus;
+unread outcomes are dropped. The return completes also when the caller is cancelled meanwhile. A slot that stays in
+the pool first runs the profile's `on_release` hook with the connection's target, the profile and the lease's
+session; when the hook raises or runs longer than the pool's `release_timeout`, the error is logged and the slot
+leaves the pool. The next request gets the slot only after the hook has finished. When the connection has not settled
+([`DriverConnection.settled`](/ref/drivers#settled)), `release()` returns at once and the slot makes these decisions
+once it has. After the first call, the lease takes no requests (`InterfaceError`) and a second call does nothing.
 
 ### `adorm.cancellation_outcome(exc)`
 
@@ -398,6 +407,34 @@ then does not run, and its outcome is the error, or `CancelledEvent(started=Fals
 profile hook has run on the connection, every remembered option is unknown, since the hook may have set or reset it.
 Options that a `set_options` request or the driver itself set are not remembered.
 
+When its lease ends, the slot waits, within the pool's `release_timeout`, for the connection to settle
+([`DriverConnection.settle()`](/ref/drivers#async-settle)), then decides whether it stays in the pool. It closes its
+connection and leaves the pool for the first of these reasons that applies; the next request gets a fresh connection:
+
+| Reason | When |
+|---|---|
+| `DISCARDED` | the lease was released with `discard=True` |
+| `ABORTED` | the slot aborted the lease's transaction (`commit_timeout`) |
+| `POOL_CLOSED` | the pool is closed |
+| `CONNECTION_ERROR` | a request of the lease failed with an error that [`is_connection_lost()`](/ref/drivers#adorm-drivers-driverconnection) accepts (a detector that raises counts as accepting), whether or not the connection reports itself unusable |
+| `UNCLEAN_END` | the lease ended inside a transaction: no successful `commit` or `rollback` ended its `begin` |
+| `CUSTOM_SQL` | the connection ran SQL adorm did not generate ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), even when the transaction committed |
+| `UNUSABLE` | the connection reports itself unusable, the slot's serving task stopped, or deciding raised an unexpected error |
+| `UNSETTLED` | the connection did not settle within `release_timeout` |
+| `HOOK_FAILED` | the profile's `on_release` hook failed or timed out |
+
+A lease whose `on_acquire` hook failed ends with `HOOK_FAILED` before any of these. A slot that leaves the pool skips
+the `on_release` hook. Acquiring a slot does nothing to the connection; the
+profile's `on_acquire` hook, when there is one, is the only work done for a new lease before its first request.
+
+```python
+lease = await router.acquire(session)
+await lease.call("begin")
+await lease.call("execute", operation)
+await lease.release()                       # no commit: the connection closes
+lease.slot.close_reason                     # CloseReason.UNCLEAN_END
+```
+
 ```python
 await lease.call("execute", count, options={"statement_timeout": 5})   # set_options({"statement_timeout": 5}, False)
 await lease.call("execute", count, options={"statement_timeout": 5})   # nothing to set
@@ -411,6 +448,8 @@ await lease.call("execute", count, options={})                         # set_opt
 | `connection` | the [`DriverConnection`](/ref/drivers#adorm-drivers-driverconnection) |
 | `lease` | the current lease, `None` while idle |
 | `state` | `"idle"`, `"leased"`, `"finishing"` or `"closed"` |
+| `idle_since` | the event loop time (`loop.time()`) the slot became idle, `None` while it is not idle |
+| `close_reason` | the [`CloseReason`](#adorm-executor-closereason) the slot left the pool for, `None` while it is open |
 | `options` | the database options in effect by what the slot set: those set for the connection, replaced inside a transaction by those set for it; `None` stands for the database's default, unknown ones are left out |
 
 #### `async open()`
@@ -430,6 +469,25 @@ Makes every option the slot remembers unknown, so the next request with options 
 
 Whether the slot can serve another lease: not closed, its connection usable and its serving task running.
 
-#### `async close()`
+#### `async close(reason=CloseReason.POOL_CLOSED)`
 
-Stops serving and closes the connection; logs errors instead of raising them.
+Stops serving and closes the connection; `close_reason` becomes `reason`. Logs errors instead of raising them; a
+second call does nothing.
+
+### `adorm.executor.CloseReason`
+
+A `StrEnum` of why a slot closed its connection and left the pool, the value of
+[`Slot.close_reason`](#adorm-executor-slot).
+
+| Member | Value | Meaning |
+|---|---|---|
+| `DISCARDED` | `"discarded"` | its lease was released with `discard=True` |
+| `ABORTED` | `"aborted"` | it rolled back a transaction that received no request within the lease's `commit_timeout` |
+| `UNCLEAN_END` | `"unclean_end"` | its lease ended inside a transaction |
+| `CONNECTION_ERROR` | `"connection_error"` | a request failed with an error that leaves the connection unusable |
+| `CUSTOM_SQL` | `"custom_sql"` | the connection ran SQL adorm did not generate |
+| `UNUSABLE` | `"unusable"` | the connection reported itself unusable, or the slot stopped serving requests |
+| `UNSETTLED` | `"unsettled"` | the connection did not finish the work of its last call within the pool's `release_timeout` |
+| `HOOK_FAILED` | `"hook_failed"` | setting the session's options and running the profile's `on_acquire` hook, or running its `on_release` hook, failed or timed out |
+| `STALE` | `"stale"` | it stayed idle for the pool's `purge_stale_connections_at` seconds |
+| `POOL_CLOSED` | `"pool_closed"` | its pool was closed |

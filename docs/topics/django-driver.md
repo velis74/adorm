@@ -39,14 +39,18 @@ The driver supports PostgreSQL databases: a profile whose alias uses another dat
 `NotSupportedError` when its first connection opens.
 
 A connection is `django.db.connections[profile.alias]` on the slot's thread: Django's connection wrapper for that
-`DATABASES` entry, opened when the slot opens and closed when the slot leaves the pool. Its lifetime is the slot's;
-Django's `CONN_MAX_AGE` does not apply. The profile's `params` replace keys of the `DATABASES` entry for the
-connections of that profile, and the shared `DATABASES` entry stays as it is. The `connect` hook, when set, returns
-the DB-API connection (a psycopg connection) the wrapper uses instead of opening one; Django then configures it as
-its own (`OPTIONS["isolation_level"]`, time zone, `assume_role`). A psycopg 3 connection needs the parameters Django
-opens its own with (its cursor class and type adapters); the hook runs on the slot's thread, so it gets them from
-the thread's wrapper. A `connect` hook together with Django's connection pool (`OPTIONS["pool"]`) raises
-`NotSupportedError`.
+`DATABASES` entry, opened when the slot opens and closed when the slot leaves the pool. Its lifetime is the slot's
+([slot lifecycle](/topics/pool#slot-lifecycle)): the wrapper runs with `CONN_MAX_AGE = None` and
+`CONN_HEALTH_CHECKS = False`, so neither Django's `close_old_connections()` (which its request signals and Celery's
+Django integration call) nor a health check closes or pings it. With Django's own connection pool configured on the
+alias (`OPTIONS["pool"]`), the slot's connection is still opened directly, not taken from that pool, and closing the
+slot ends it on the server. The profile's `params` replace keys of the `DATABASES` entry for the connections of that
+profile, and the shared `DATABASES` entry stays as it is. On a `direct` driver the event loop thread's wrapper gets
+its own settings back when the slot closes. The `connect` hook, when set, returns the DB-API connection (a psycopg
+connection) the wrapper uses instead of opening one; Django then configures it as its own
+(`OPTIONS["isolation_level"]`, time zone, `assume_role`). A psycopg 3 connection needs the parameters Django opens its
+own with (its cursor class and type adapters); the hook runs on the slot's thread, so it gets them from the thread's
+wrapper.
 
 ```python
 import psycopg
@@ -366,6 +370,51 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 
 An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is
 dropped by its slot; the next request gets a new one. Other errors leave the connection in the pool.
+
+## Custom SQL
+
+Code that Django runs inside an operation can execute SQL of its own: a `post_save` receiver, a manager's `create()`
+or `delete()` override, a model's `save()`, or an `on_commit()` callback. When such code runs a statement through
+the connection's cursor that does not come from Django's query compiler or database backend, the driver marks the
+connection ([`mark_custom_sql()`](/ref/drivers#mark-custom-sql)), and its slot closes the connection when the lease
+ends, also after a commit: the statement may have changed the connection's state.
+
+The driver looks at the callers of Django's cursor wrapper. The nearest one in Django's query compiler or in a
+database backend (Django's, or the package of the alias's own backend, such as PostGIS) makes the statement ORM SQL;
+code between them, such as instrumentation that wraps the cursor (Sentry, tracers, django-debug-toolbar), does not
+change that. A signal receiver or an `on_commit()` callback reached first makes it custom SQL.
+
+| On the slot's thread, inside an operation | Custom SQL |
+|---|---|
+| query sets, `save()`, `delete()`, `bulk_create()`, `update()`, `select_for_update()` | no |
+| Django's `transaction.atomic()` and savepoints | no |
+| `connection.cursor().execute(...)`, `Manager.raw()` | yes |
+| the same in an `on_commit()` callback, of the transaction or run at once outside one | yes; after a commit the slot decides once the callbacks have run |
+| the profile's `on_acquire` and `on_release` hooks, connection options | no |
+
+```python
+from django.db import connection
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+
+@receiver(post_save, sender=Member)
+def refresh_stats(instance, **kwargs):
+    with connection.cursor() as cursor:                     # custom SQL: the connection is closed after the lease
+        cursor.execute("REFRESH MATERIALIZED VIEW member_stats")
+
+
+@receiver(post_save, sender=Member)
+def audit(instance, **kwargs):
+    AuditEntry.objects.create(member_id=instance.pk)       # the ORM: the connection stays in the pool
+```
+
+Not detected:
+
+- SQL sent past Django's execute wrappers: through the DB-API connection itself (`connection.connection.execute()`),
+  the cursor wrapper's `callproc()`, and psycopg 3 cursor methods the wrapper passes through (`copy()`, `stream()`);
+- SQL embedded in ORM expressions (`RawSQL`, `extra()`, a `Func` with its own template), and SQL that a custom field
+  or expression runs while Django compiles or executes a query: it counts as the compiler's.
 
 ## Connection options
 

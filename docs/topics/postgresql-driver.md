@@ -46,7 +46,9 @@ a process that runs only this driver.
 A connection belongs to one slot. It is opened with the `DATABASES` entry the profile's `alias` names, whose backend
 must be Django's PostgreSQL backend on psycopg 3 (another backend raises `NotSupportedError` before anything
 connects). The profile's `params` replace keys of that entry for the profile's connections; the shared `DATABASES`
-entry stays as it is.
+entry stays as it is. `CONN_MAX_AGE` and `CONN_HEALTH_CHECKS` have no effect: the slot decides how long a connection
+lives ([slot lifecycle](/topics/pool#slot-lifecycle)). The driver runs only the SQL it compiles, so it never marks a
+connection for custom SQL.
 
 | `DATABASES` key | asyncpg |
 |---|---|
@@ -89,8 +91,7 @@ adorm.configure(
 )
 ```
 
-The connection lives as long as its slot; Django's `CONN_MAX_AGE` does not apply. The SQL is compiled for the
-server's version, read when the connection opens.
+The SQL is compiled for the server's version, read when the connection opens.
 
 ### The `connect` hook
 
