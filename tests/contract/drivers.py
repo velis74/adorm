@@ -265,6 +265,12 @@ class AsyncpgConnection(DriverConnection):
 
         self._loop.call_soon_threadsafe(cancel_statement)
 
+    def map_error(self, exc: BaseException) -> BaseException:
+        # asyncpg's protocol is left in an unexpected state after the server ends an idle connection.
+        if isinstance(exc, asyncpg.InternalClientError):
+            return InterfaceError(str(exc), original=exc)
+        return super().map_error(exc)
+
     def is_usable(self) -> bool:
         return self._usable and not self._closed and not self.conn.is_closed()
 
