@@ -17,7 +17,7 @@ from django.core.exceptions import SynchronousOnlyOperation
 
 from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
-from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
+from adorm.drivers.django.driver import map_django_error, READ_CAPABILITIES
 from adorm.drivers.django.translation import translate
 from adorm.events import Emit
 from adorm.exceptions import (
@@ -43,11 +43,12 @@ __all__ = [
 logger = logging.getLogger("adorm.drivers.asyncpg")
 
 CAPABILITIES = Capabilities(
-    operations=DJANGO_CAPABILITIES.operations,
-    constructs=DJANGO_CAPABILITIES.constructs,
+    operations=READ_CAPABILITIES.operations,
+    constructs=READ_CAPABILITIES.constructs,
     cancellation=True,
 )
-"""What `AsyncpgDriver` supports: the reads and constructs of the Django driver."""
+"""What `AsyncpgDriver` supports: the reads and constructs of the Django query translation
+(`adorm.drivers.django.READ_CAPABILITIES`)."""
 
 MAX_GET_RESULTS = 21
 """How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""

@@ -514,6 +514,50 @@ async def test_cancelling_the_task_cancels_the_running_call(fake, repeat):  # no
     assert await conn.execute(Op(lambda _: "next")) == "next"
 
 
+@pytest.mark.parametrize("repeat", range(5))
+async def test_work_after_a_call_runs_after_its_outcome_and_before_the_next_call(fake, repeat):  # noqa: ARG001
+    conn, control, _ = fake
+    running, release = threading.Event(), threading.Event()
+    order = []
+
+    def after():
+        running.set()
+        assert release.wait(TIMEOUT)
+        order.append(("after", threading.get_ident()))
+
+    def action(c):
+        c.after_call_sync(after)
+        return "done"
+
+    assert await conn.execute(Op(action)) == "done"
+    await started(running)
+    # The next call waits for the work; cancelling it never reaches the work.
+    task = asyncio.create_task(conn.execute(Op(lambda _: order.append(("next", 0)))))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    later = asyncio.create_task(conn.execute(Op(lambda _: order.append(("later", 0)) or "later")))
+    release.set()
+    assert await later == "later"
+    assert order == [("after", conn.thread.ident), ("later", 0)]
+    assert control.cancel_threads == []
+    assert conn.is_usable()
+
+
+async def test_failing_work_after_a_call_is_logged(fake, caplog):
+    conn, _, _ = fake
+
+    def action(c):
+        c.after_call_sync(lambda: 1 / 0)
+        raise SqlError("23505")
+
+    with caplog.at_level(logging.ERROR, logger="adorm.drivers"), pytest.raises(IntegrityError):
+        await conn.execute(Op(action))
+    assert await conn.execute(Op(lambda _: "next")) == "next"
+    assert [r.exc_info[0] for r in caplog.records if "work after" in r.getMessage()] == [ZeroDivisionError]
+
+
 async def test_cancel_waits_for_the_call_to_finish(fake):
     conn, _, _ = fake
     running = threading.Event()
@@ -950,6 +994,25 @@ async def test_direct_calls_see_no_running_loop(direct):
         return "sync"
 
     assert await conn.execute(Op(action)) == "sync"
+    assert asyncio.get_running_loop() is not None
+
+
+async def test_direct_work_after_a_call_runs_without_the_loop(direct):
+    conn, _, _ = direct
+    seen = []
+
+    def after():
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            seen.append("no loop")
+
+    def action(c):
+        c.after_call_sync(after)
+        return "done"
+
+    assert await conn.execute(Op(action)) == "done"
+    assert seen == ["no loop"]
     assert asyncio.get_running_loop() is not None
 
 

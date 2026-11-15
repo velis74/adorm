@@ -27,6 +27,7 @@ from adorm import (
     QuerySet,
     ReverseForeignKey,
     Session,
+    TransactionManagementError,
 )
 from adorm.executor import active_transaction, bind_transaction, Runner, set_runner, Transaction
 from adorm.models import set_executor_resolver
@@ -407,6 +408,24 @@ async def test_operations_outside_a_transaction_go_to_the_runner(runner, log):
     runner.result = 3
     assert await session.Venue.count() == 3
     assert log == [("runner", session, Count(session.Venue.all().query))]
+
+
+async def test_reading_rows_for_update_needs_a_transaction(runner, log):
+    session = unique_session()
+    locked = session.Venue.select_for_update()
+
+    async def listed():
+        return [v async for v in locked]
+
+    for read in (lambda: locked.get(pk=1), locked.first, locked.last, listed):
+        with pytest.raises(TransactionManagementError, match="outside of a transaction"):
+            await read()
+    assert log == []
+    runner.result = 2
+    assert await locked.count() == 2  # no row is read, so none is locked
+    with bind_transaction(session, FakeTransaction("tx", log, result=[])):
+        assert [v async for v in locked] == []
+    assert [entry[0] for entry in log] == ["runner", "tx"]
 
 
 async def test_without_a_runner_execution_raises_interface_error():

@@ -21,6 +21,7 @@ from adorm.operations import (
     Save,
     Select,
     Update,
+    UpdateOrCreate,
 )
 from adorm.query import Case, Coalesce, Count, Exists, F, Lower, Now, OuterRef, Q, Query, Subquery, Sum, Value, When
 from tests.club_schema import Level, SCHEMA
@@ -70,12 +71,18 @@ OPERATION_EXAMPLES = [
     Update(MEMBERS, {}),
     Delete(MEMBERS.filter(Exists(Query("club.Payment").filter(member=OuterRef("pk"), amount__lt=decimal.Decimal(1))))),
     Delete(MEMBERS.filter(pk=5)),
+    operations.DeleteInstance("club.Member", 5),
+    operations.DeleteInstance("club.Payment", uuid.UUID(int=9)),
     GetOrCreate(MEMBERS.filter(club_id=3), {"name": "Ann", "club__name": "Chess"}, {"age": 30}),
     GetOrCreate(MEMBERS, {"token": uuid.UUID(int=2), "club": None}, defaults={"fee": decimal.Decimal(1)}),
     GetOrCreate(
         MEMBERS,
         {"pk__in": [1, 2], "club__in": Query("club.Club").filter(name="x")},
         {"joined": Now()},
+    ),
+    UpdateOrCreate(MEMBERS, {"name": "Ann"}, {"age": 31}),
+    UpdateOrCreate(
+        MEMBERS.filter(club_id=3), {"token": uuid.UUID(int=3)}, {"age": 2}, {"name": "New", "joined": Now()}
     ),
 ]
 
@@ -93,10 +100,12 @@ def test_registry():
         "count": operations.Count,
         "exists": operations.Exists,
         "delete": Delete,
+        "delete_instance": operations.DeleteInstance,
         "update": Update,
         "create": Create,
         "save": Save,
         "get_or_create": GetOrCreate,
+        "update_or_create": UpdateOrCreate,
         "call": operations.Call,
     }
     for kind, cls in OPERATIONS.items():
@@ -260,6 +269,19 @@ def test_save_errors(kwargs, error, message):
         Save(**arguments)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"model": "Member"}, ValueError, "model label"),
+        ({"pk": None}, ValueError, "needs its primary key"),
+        ({"pk": F("id")}, TypeError, "primary key is a value"),
+    ],
+)
+def test_delete_instance_errors(kwargs, error, message):
+    with pytest.raises(error, match=message):
+        operations.DeleteInstance(**{"model": "club.Member", "pk": 1, **kwargs})
+
+
 def test_last_refuses_a_sliced_query():
     with pytest.raises(TypeError, match="cannot reverse a query once a slice has been taken"):
         Last(MEMBERS[:3])
@@ -315,6 +337,34 @@ def test_get_or_create_errors(kwargs, error, message):
         return
     with pytest.raises(error, match=message):
         GetOrCreate(**arguments)
+
+
+def test_update_or_create_keeps_create_defaults_apart():
+    operation = UpdateOrCreate(MEMBERS, {"name": "Ann"}, {"age": 31}, {"age": 1, "joined": Now()})
+    assert operation.kind == "update_or_create"
+    assert operation.model == "club.Member"
+    assert operation.defaults == (("age", 31),)
+    assert operation.create_defaults == (("age", 1), ("joined", Now()))
+    assert sorted(set(operation.constructs())) == ["function.Now", "lookup.exact"]
+    assert UpdateOrCreate(MEMBERS, {"name": "Ann"}).create_defaults is None
+    assert UpdateOrCreate(MEMBERS, {"name": "Ann"}, create_defaults={}).create_defaults == ()
+    assert not isinstance(operation, GetOrCreate)
+    assert operation.to_dict(SCHEMA)["create_defaults"] == {"age": {"value": 1}, "joined": Now().to_dict()}
+    assert UpdateOrCreate(MEMBERS, {"name": "Ann"}).to_dict()["create_defaults"] is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"create_defaults": {"age": F("age") + 1}}, TypeError, "cannot refer to a field"),
+        ({"create_defaults": {"club__name": "x"}}, ValueError, "not a field name"),
+        ({"defaults": {"age": F("age")}}, TypeError, "cannot refer to a field"),
+        ({"query": MEMBERS[:1]}, TypeError, "slice"),
+    ],
+)
+def test_update_or_create_errors(kwargs, error, message):
+    with pytest.raises(error, match=message):
+        UpdateOrCreate(**{"query": MEMBERS, **kwargs})
 
 
 def test_create_is_typed_by_the_model():
@@ -450,6 +500,11 @@ def test_invalid_values_for_their_fields():
         ),
         ({"operation": "get_or_create", "query": MEMBERS.to_dict(), "lookups": {}}, "list of"),
         ({"operation": "get_or_create", "query": MEMBERS.to_dict(), "lookups": [["a"]]}, "pair"),
+        ({**UpdateOrCreate(MEMBERS).to_dict(), "create_defaults": []}, "create defaults are a mapping"),
+        (
+            {key: v for key, v in UpdateOrCreate(MEMBERS).to_dict().items() if key != "create_defaults"},
+            "create_defaults",
+        ),
         ({**Save("club.Member", 1, {}).to_dict(), "force_insert": "yes"}, "force_insert is a bool"),
         ({**Save("club.Member", 1, {}).to_dict(), "force_update": 1}, "force_update is a bool"),
         ({**Select(MEMBERS).to_dict(), "operation": "last", "query": MEMBERS[:2].to_dict()}, "invalid last operation"),

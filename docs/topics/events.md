@@ -152,3 +152,4 @@ instead.
 | [Pool, router and slots](/topics/pool#events) | outcomes, `on_commit`, `on_rollback` | callbacks and backend events of idle connections and of released leases (the pool's `EventBus`) |
 | [Connection profiles](/topics/profiles#events) | nothing | nothing; events emitted during `on_acquire` / `on_release` follow the pool's rules |
 | [Drivers](/topics/drivers#events) | callbacks, backend events | nothing; a remote driver decodes the server's events into return values, errors and `emit` |
+| [Django driver](/topics/django-driver#events) | nothing: outcomes only; Django's signals and `on_commit()` callbacks stay on the driver side | nothing |

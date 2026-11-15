@@ -1,9 +1,10 @@
 # The Django driver
 
 ::: info Status
-The installed version of the Django driver executes reads: `select`, `get`, `first`, `last`, `count` and `exists`.
-Writes (`create`, `save`, `update`, `delete`, `get_or_create`), savepoints, connection options and driver methods
-raise `NotSupportedError` before anything runs.
+The installed version of the Django driver executes reads (`select`, `get`, `first`, `last`, `count`, `exists`),
+writes (`create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks
+(`select_for_update()`), transactions and savepoints. Connection options and driver methods raise
+`NotSupportedError` before anything runs.
 :::
 
 [`DjangoDriver`](/ref/drivers#adorm-drivers-django-djangodriver) executes adorm operations with Django's ORM. It is
@@ -75,14 +76,8 @@ adorm.configure(
 Profile hooks (`on_acquire`, `on_release`) receive the wrapper and run on the slot's thread; see
 [Multiple database users](/howto/multiple-database-users).
 
-`begin()` turns Django's autocommit off and `commit()` / `rollback()` end the transaction and turn it back on, so
-reads inside `adorm.atomic()` run in one database transaction on the transaction's slot:
-
-```python
-async with adorm.atomic():
-    member = await Member.objects.get(email="ann@example.com")
-    count = await member.memberships.count()      # same transaction, same slot
-```
+Every ORM call of the driver runs on the profile's alias: query sets with `using(alias)`, `save(using=alias)`,
+`transaction.atomic(using=alias)`.
 
 ## The caller's context
 
@@ -187,6 +182,173 @@ tags = [tag.name async for tag in (await Activity.objects.get(pk=1)).tags.order_
 content_type_id = await ContentType.objects.values_list("id", flat=True).get(app_label="billing", model="invoice")
 ```
 
+## Writes
+
+Writes run through Django's model and query set methods, so a model's `save()` and `delete()` overrides, Django's
+signals and the overrides of the query's manager run as in Django code, on the slot's thread:
+
+| adorm | Django |
+|---|---|
+| `Model.objects.create(**values)` | `create(**values)` of `_base_manager`, or of the manager the query names (`Query.manager`), so its `create()` override receives arguments that are not fields |
+| `obj.save()` of a new instance (no primary key, or `force_insert`) | `Model(**values).save()` |
+| `obj.save()` with a primary key | the instance with the adorm instance's fields loaded and the others deferred, then `save()`: Django updates only the loaded fields |
+| `obj.save(update_fields=[...])`, `force_update=True` | `save(update_fields=[...])`, `save(force_update=True)`: a missing row raises `DatabaseError` |
+| `qs.update(**values)` | `update(**values)` on the query's query set |
+| `qs.delete()` | `delete()` on the query's query set (its manager's overrides apply): Django's collector cascades, sets NULL and fires `pre_delete` / `post_delete`; no model's `delete()` runs |
+| `obj.delete()` | the instance read with `_base_manager`, then its `delete()`: the model's `delete()` override runs, and Django's own deletes it with the collector; a missing row deletes nothing |
+| `qs.get_or_create(...)`, `qs.update_or_create(...)` | `get_or_create(...)`, `update_or_create(...)` on the query's query set |
+
+A save of an instance with a primary key that the database has no row for inserts the row when the instance was not
+loaded with every field, as Django does for a complete instance; the driver checks the row with one `exists()` query
+first, and the target's defaults fill the fields the instance never set. The values the target set (the primary key,
+`default`, `auto_now_add`, a `save()` override's changes) come back to the instance:
+
+```python
+book = await Book.objects.create(isbn="9780000000099", title="New", pages=10)
+book.added, book.published       # set by Django: auto_now_add and default=timezone.now
+
+ann = await Author.objects.only("rating").get(slug="ann")
+ann.rating = 4
+await ann.save()                 # UPDATE library_author SET rating = 4 WHERE id = ...
+```
+
+Field names and lookup keys are adorm names: the driver renames them with `orm_names` and passes a foreign key named
+by its relation as its column, so `get_or_create()` also creates the row with it:
+
+```python
+note = await Note.objects.create(content_type_id=book_type, object_id=isbn, json_="[]")   # Django: json="[]"
+tagging, created = await Tagging.objects.get_or_create(book=dune, tag=rare, defaults={"weight": 2})
+# Django: get_or_create(book_id=dune.pk, tag_id=rare.pk, defaults={"weight": 2})
+```
+
+Arithmetic (`F("rating") + 1`) becomes Django's `CombinedExpression` in updates, saves and annotations:
+
+```python
+await Activity.objects.filter(name="Crag day").update(capacity=F("capacity") + 5)
+crag.capacity = F("capacity") + 1
+await crag.save(update_fields=["capacity"])      # crag.capacity stays the expression, as in Django
+```
+
+A `delete()` override that deletes nothing (a soft delete) returns `(0, {})` to adorm unless it returns Django's
+`(total, {label: count})` itself, and the adorm instance keeps its primary key:
+
+```python
+class Fine(models.Model):                       # Django
+    def delete(self, using=None, keep_parents=False):
+        self.waived = True
+        self.save(using=using, update_fields=["waived"])
+
+await fine.delete()                             # (0, {}): the fine is waived, fine.pk is unchanged
+await Fine.objects.filter(pk=fine.pk).delete()  # (1, {"library.Fine": 1}): no model's delete() runs
+```
+
+A delete that an `on_delete=PROTECT` or `RESTRICT` reference forbids raises `ProtectedError` or `RestrictedError`
+before anything is deleted. The driver reads the referencing rows again with every field, so the exception's objects
+are complete instances of the registered models. The refusal leaves the transaction usable, as in Django:
+
+```python
+async with adorm.atomic():
+    try:
+        await member.delete()
+    except adorm.ProtectedError as exc:
+        numbers = [invoice.number for invoice in exc.protected_objects]     # Invoice instances
+    await member.save(update_fields=["level"])                             # the transaction goes on
+```
+
+## Transactions and savepoints
+
+`begin()` enters an outermost Django `transaction.atomic()` block and `commit()` / `rollback()` leave it, so the
+operations inside `adorm.atomic()` run in one database transaction on the transaction's slot, and Django code that
+runs on the driver side (a `save()` override, `get_or_create()`, a signal receiver) sees an atomic block as it would
+in a Django view. A nested `adorm.atomic()` is a Django savepoint in that block:
+
+```python
+async with adorm.atomic():
+    member = await Member.objects.create(first_name="Ana", last_name="Novak", email="ana@example.org", joined=now)
+    try:
+        async with adorm.atomic():                       # SAVEPOINT
+            await Membership.objects.create(club_id=club.pk, member_id=member.pk, since=today, fee=fee)
+            raise Full
+    except Full:
+        pass                                             # ROLLBACK TO SAVEPOINT: only the membership is undone
+# COMMIT: the member is stored
+```
+
+A database error inside a savepoint (an `IntegrityError`, a cancelled statement) is rolled back to the savepoint, which
+clears Django's mark for rollback, so the enclosing block goes on and commits:
+
+```python
+async with adorm.atomic():
+    await Tag.objects.create(name="outer")
+    try:
+        async with adorm.atomic():
+            await Tag.objects.create(name="rare")        # a duplicate: IntegrityError
+    except adorm.IntegrityError:
+        pass
+    await Tag.objects.create(name="after")               # stored with "outer"
+```
+
+`begin()` on a [direct](/topics/drivers#execution-mode) connection whose thread is already inside a Django atomic
+block raises `TransactionManagementError`.
+
+A commit that the database refuses (a deferred foreign key, which is how Django creates foreign keys on PostgreSQL,
+checked at `COMMIT`) raises its error, here `IntegrityError` with SQLSTATE `23503`, and the transaction is rolled back.
+A transaction that failed on the driver side without the core seeing the error (Django marked it for rollback, or
+PostgreSQL aborted it) is rolled back by `commit()`, which raises `TransactionManagementError`, so the commit is never
+reported for it.
+
+### Row locks
+
+`select_for_update()` becomes Django's `select_for_update()` with `nowait`, `skip_locked`, `of` (adorm paths, `"self"`)
+and `no_key`. A read of rows with `select_for_update()` outside a transaction raises `TransactionManagementError`
+in the core, as Django does:
+
+```python
+async with adorm.atomic():
+    invoice = await Invoice.objects.select_for_update().get(pk=pk)      # other flows wait for the row
+    invoice.status = "paid"
+    await invoice.save(update_fields=["status"])
+
+async with adorm.atomic():
+    free = [job async for job in Job.objects.select_for_update(skip_locked=True).filter(state="new")[:10]]
+```
+
+`nowait` on a locked row raises `OperationalError` with SQLSTATE `55P03`. Django's `update_or_create()` locks the row
+it updates the same way, and `get_or_create()` retries its read after a concurrent insert of the same unique key, so
+two flows creating the same row create it once.
+
+### Django's `on_commit()` callbacks
+
+Code that runs on the driver side may register Django `on_commit()` callbacks, typically a signal receiver or a
+`save()` override that queues a job. Inside an adorm transaction they run once the commit's outcome is delivered, on
+the slot's thread, in registration order, and before the slot's next request; the callbacks registered with
+[`tx.on_commit()`](/topics/transactions#running-code-after-the-commit) run on the client when the slot delivers
+`CallbackEvent("on_commit")`, which does not wait for Django's. Cancelling the client task while Django's callbacks
+run cancels neither them nor the commit:
+
+```python
+def queue_welcome(sender, instance, created, **kwargs):           # a Django post_save receiver
+    if created:
+        transaction.on_commit(lambda: send_welcome.delay(instance.pk))
+
+async with adorm.atomic() as tx:
+    member = await Member.objects.create(...)
+    tx.on_commit(lambda: cache.invalidate("members"))
+# after COMMIT: send_welcome.delay() on the slot's thread, cache.invalidate() on the client
+```
+
+A callback registered in a savepoint that rolls back, or in a transaction that rolls back, does not run. A callback
+that raises after the commit is logged on the `adorm.drivers.django` logger and does not undo the commit; one
+registered without `robust=True` stops the callbacks after it, as in Django. Outside an adorm transaction Django runs
+a callback at once, inside the write that registers it.
+
+### Signals
+
+Django's signals (`pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` …) fire on the driver side,
+on the slot's thread, in a copy of the context of the task that awaits the write, so a receiver reads the caller's
+context variables and Django's active language. adorm has no signals of its own and the client does not see Django's:
+they produce no event. Reads build no Django model instances, so `pre_init` and `post_init` fire only for writes.
+
 ## Errors
 
 The driver raises adorm's [exceptions](/ref/exceptions)
@@ -198,6 +360,7 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | `FieldError` (an unknown field or lookup) | `ProgrammingError` |
 | `ValidationError` (a value Django rejects, such as an invalid UUID) | `ValidationError` |
 | `TransactionManagementError` | `TransactionManagementError` |
+| `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |
 | `django.db` errors | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01` |
 | anything else (Django's `ValueError` for a value of the wrong type) | `DatabaseError` with the original exception in `original` |
 
@@ -206,7 +369,7 @@ dropped by its slot; the next request gets a new one. Other errors leave the con
 
 ## Cancellation
 
-Cancelling the task that awaits a read cancels the running statement: the driver calls psycopg's `cancel_safe()`
+Cancelling the task that awaits an operation cancels the running statement: the driver calls psycopg's `cancel_safe()`
 (`cancel()` on psycopg 2) from another thread, the statement ends with `57014`, the task gets
 `asyncio.CancelledError` and the connection stays in the pool. A read that completes just before the cancellation
 arrives is discarded.
@@ -216,8 +379,15 @@ task = asyncio.create_task(Report.objects.filter(year=2026).count())
 task.cancel()          # the database stops the statement
 ```
 
+A cancelled write inside a transaction, such as one waiting for a row lock, rolls the transaction back: the writes
+before it are undone with it, and the slot returns to the pool. Inside a nested `adorm.atomic()` only that savepoint is
+rolled back and the enclosing block goes on. A write outside a transaction that completes just before the
+cancellation arrives stays written.
+
 ## Events
 
-The driver emits no events: a read reports its outcome as the result of the call, which the slot delivers as a
-`ResultEvent` or `ErrorEvent` (`CancelledEvent` for a cancelled read). It consumes none. Reads build no Django model
-instances, so Django's `pre_init` and `post_init` signals do not fire.
+The driver emits no events and consumes none. Each operation reports its outcome as the result of the call, which
+the slot delivers as a `ResultEvent` or `ErrorEvent` (`CancelledEvent` for a cancelled operation). The slot delivers
+`CallbackEvent("on_commit")` after a successful `commit()`, and `CallbackEvent("on_rollback")` after a rollback; the
+transaction's own `on_commit()` callbacks run on that event. Django's `on_commit()` callbacks run on the slot's thread
+after the commit's outcome, before the slot's next request. Django's signals and `on_commit()` callbacks stay on the driver side and produce no event.

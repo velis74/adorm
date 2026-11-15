@@ -10,9 +10,9 @@ API has two groups of endpoints:
   executor, and answer the calls the driver received.
 
 The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. The
-[Django driver](/topics/django-driver), the first available one, and the
-[native PostgreSQL driver](/topics/postgresql-driver) (`--driver asyncpg`) execute the reads; the demo's
-[in-memory driver](#memory-driver) (`--driver memory`) also executes the writes. The writes run on the active driver;
+[Django driver](/topics/django-driver), the first available one, and the demo's [in-memory driver](#memory-driver)
+(`--driver memory`) execute the reads and the writes; the [native PostgreSQL driver](/topics/postgresql-driver)
+(`--driver asyncpg`) executes the reads. The writes run on the active driver;
 a read runs on any available driver its request names in the header `X-Adorm-Driver`
 (see [Choosing the driver of a read](#choosing-the-driver-of-a-read)).
 
@@ -355,7 +355,7 @@ The read endpoints (`GET /api/data/members`, `/members/{pk}`, `/invoices/{pk}` a
 header `X-Adorm-Driver`: the name of an available driver, as `GET /api/drivers` lists it. The request then runs in
 the session `(<driver>, <session name>)` on that driver's profile and pool; without the header it runs on `default`.
 A name that is not an available driver answers 422 with the header in `loc`. The writing endpoints ignore the header
-and run on the active driver: the Django and asyncpg drivers execute reads only.
+and run on the active driver: the asyncpg driver executes reads only.
 
 ```bash
 curl http://127.0.0.1:8000/api/data/members/3 -H 'X-Adorm-Driver: asyncpg' -H 'X-Adorm-Session: alice'
@@ -435,7 +435,7 @@ through Django, once; writes stay in memory and are gone when the API stops.
 
 | Supported | Not supported (raises `NotSupportedError`) |
 |---|---|
-| `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `get_or_create` | `call` operations, connection options |
+| `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create` | `call` operations, connection options |
 | conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`, `club=club`) or column | field paths across relations (`club__slug`, construct `path.nested`), conditions on a reverse or many-to-many relation name (`clubs=club`), subqueries |
 | `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, functions, aggregates, `only()`, `defer()`, `select_related()`, `select_for_update()` |
 | transactions, savepoints, cancellation | inserting or deleting a row of an MTI child, deleting a row a foreign key references |

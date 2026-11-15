@@ -252,3 +252,29 @@
   concurrently and reports whether they agree, with an adorm error of one read in that read's `error`. Tests run the
   reads on the Django and asyncpg drivers in one process: the same answers, concurrent reads on both, a full pool of
   one driver not delaying the other, cancellation of a waiting read cancelling its statement, and no slot left in use.
+- Django driver writes and transactions: `create` (through the query's manager), `save` (`update_fields`,
+  `force_insert`, `force_update`; an instance with a primary key is saved with only its fields loaded, and inserted
+  when its row is missing), `update`, `delete` (Django's collector: cascades, `SET_NULL`, `ProtectedError` and
+  `RestrictedError` with the referencing objects read again in full), `delete_instance` (the model's own `delete()`,
+  an override included), `get_or_create`, `update_or_create`, `select_for_update()` with `nowait`, `skip_locked`, `of`
+  and `no_key`, and savepoints. A transaction is an outermost Django atomic block and a savepoint a Django savepoint in
+  it, so Django's `on_commit()` callbacks run on the slot's thread after the commit's outcome is delivered and before
+  the next call, out of reach of cancellation, and are dropped with a rolled-back savepoint; a failing callback is
+  logged and does not undo the commit. A database error inside a savepoint is rolled back to it and the enclosing
+  block goes on. A commit of a transaction Django marked for rollback, or that PostgreSQL aborted, rolls back and
+  raises `TransactionManagementError`; `begin()` inside a Django atomic block of a direct connection's thread raises
+  it too. Django's signals fire on the driver side only. Every ORM call runs on the profile's alias.
+  `adorm.drivers.django.READ_CAPABILITIES` holds the reads and arithmetic (`expression.CombinedExpression`), which
+  the asyncpg driver declares;
+  `model_row()` turns a Django instance into a `ModelRow`; `adorm.drivers.django.translation` gains
+  `model_queryset()`, `field_kwargs()`, `lookup_kwargs()` and `instance_row()`.
+- `adorm.operations.UpdateOrCreate` (`defaults`, `create_defaults`), `QuerySet.update_or_create()` and the bound
+  model's `update_or_create()`; the demo memory driver executes it.
+- `adorm.operations.DeleteInstance` (kind `delete_instance`) and `Model.delete()`: deletes the instance's row as the
+  target deletes one instance and, when rows were deleted, sets its primary key to `None`; the demo memory driver
+  executes it. A `ProtectedError` or `RestrictedError` from `QuerySet.delete()` or `Model.delete()` carries instances
+  of the registered models, and one without a SQLSTATE leaves the transaction usable.
+- A read of rows with `select_for_update()` outside a transaction raises `TransactionManagementError` in the session,
+  on every driver.
+- `ThreadedConnection.after_call_sync(fn)`: work that runs on the connection's thread after a call's outcome is
+  delivered and before the next call, out of reach of `cancel()`.

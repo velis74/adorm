@@ -197,7 +197,10 @@ A constraint was violated: unique, foreign key, not null, check, exclusion (SQLS
 ### `adorm.ProtectedError(message=None, protected_objects=(), **kwargs)`
 
 A delete was refused because `on_delete=PROTECT` references point at the objects being deleted.
-`protected_objects` holds the referencing objects.
+`protected_objects` holds the referencing objects: a driver raises it with
+[`ModelRow`](./operations#adorm-operations-modelrow-model-row) values, which `QuerySet.delete()` and `Model.delete()`
+turn into instances of the registered models (a row of a model that is not registered stays a `ModelRow`). Without
+a SQLSTATE it leaves an open transaction usable: the references are checked before any statement changes data.
 
 ```python
 try:
@@ -209,7 +212,7 @@ except adorm.ProtectedError as exc:
 ### `adorm.RestrictedError(message=None, restricted_objects=(), **kwargs)`
 
 A delete was refused because `on_delete=RESTRICT` references point at the objects being deleted.
-`restricted_objects` holds the referencing objects.
+`restricted_objects` holds the referencing objects, as `protected_objects` of `ProtectedError` does.
 
 ### `adorm.InternalError`
 
@@ -245,7 +248,7 @@ except adorm.NotSupportedError as exc:
 A transaction was used incorrectly. An [`atomic()`](/ref/transactions) block raises it for an operation after an
 operation of the block failed, at a normal end after such a failure (once it has rolled back, with the failure as
 `__cause__`), when it is entered a second time, and when it would nest in an active transaction that is not an
-`Atomic`.
+`Atomic`. A session raises it for a read of rows with `select_for_update()` outside a transaction.
 
 ```python
 async with adorm.atomic():

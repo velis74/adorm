@@ -22,6 +22,8 @@ from adorm.exceptions import (
     DeadlockError,
     InterfaceError,
     NotSupportedError,
+    ProtectedError,
+    RestrictedError,
     TransactionClosed,
     TransactionManagementError,
 )
@@ -129,6 +131,8 @@ def _leaves_transaction_failed(exc: BaseException) -> bool:
         return not cancelled_before_start(exc)
     if isinstance(exc, NotSupportedError) and exc.sqlstate is None and exc.original is None:
         return False  # a capability check on the client side
+    if isinstance(exc, (ProtectedError, RestrictedError)) and exc.sqlstate is None:
+        return False  # the delete's check of the references, before any statement changed data
     return isinstance(exc, (DatabaseError, InterfaceError))
 
 

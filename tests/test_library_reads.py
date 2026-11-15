@@ -28,8 +28,8 @@ from adorm import (
     ValidationError,
 )
 from adorm.executor import Pool, Router, set_runner
-from adorm.operations import Count as CountOperation, Select, Update
-from adorm.query import Count, Query, Subquery, Value
+from adorm.operations import Call, Count as CountOperation, Select
+from adorm.query import Count, Length, Query, Subquery, Value
 from adorm.query.lookups import Exact, IStartsWith
 from demo.models.contenttypes import ContentType
 from tests.djangoproject.library import models as dj
@@ -584,11 +584,10 @@ async def test_unsupported_operations_and_constructs_are_refused_before_executio
     kinds = record_operations()
     with pytest.raises(NotSupportedError, match="aggregate.Count"):
         await Author.objects.annotate(n=Count("books")).first()
-    with pytest.raises(NotSupportedError, match="'update' operation"):
-        await adorm.create_session().execute(Update(Query("library.Author"), {"rating": 1}))
-    with pytest.raises(NotSupportedError, match="clause.select_for_update"):
-        async with adorm.atomic():
-            await Author.objects.select_for_update().first()
+    with pytest.raises(NotSupportedError, match="'call' operation"):
+        await adorm.create_session().execute(Call(Query("library.Loan", manager="objects"), "archive"))
+    with pytest.raises(NotSupportedError, match="function.Length"):
+        await Author.objects.annotate(n=Length("name")).first()
     mentor = Author.objects.filter(pk=adorm.OuterRef("mentor")).values("rating")
     with pytest.raises(NotSupportedError, match="expression.OuterRef"):
         await Author.objects.filter(rating=Subquery(mentor)).first()

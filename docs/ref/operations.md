@@ -6,7 +6,7 @@ connection: one read or write, described without I/O, models by their label and 
 ```python
 from adorm import F, Now, Q
 from adorm.models import registry
-from adorm.operations import Call, Count, Create, Delete, Get, GetOrCreate, ModelRow, Save, Select, Update
+from adorm.operations import Call, Count, Create, Delete, Get, GetOrCreate, ModelRow, Save, Select, Update, UpdateOrCreate
 from adorm.query import Query
 ```
 
@@ -28,8 +28,9 @@ expressions.
 | `Model.objects.create(**values)` | `Create(label, values)`, `Create(label, values, manager)` on a manager with an ORM name |
 | `obj.save(update_fields=...)` | `Save(label, pk, values, update_fields)` |
 | `qs.update(**values)` | `Update(query, values)` |
-| `qs.delete()`, `obj.delete()` | `Delete(query)`, `Delete(Query(label).filter(pk=pk))` |
+| `qs.delete()`, `obj.delete()` | `Delete(query)`, `DeleteInstance(label, pk)` |
 | `qs.get_or_create(defaults=..., **lookups)` | `GetOrCreate(query, lookups, defaults)` |
+| `qs.update_or_create(defaults=..., create_defaults=..., **lookups)` | `UpdateOrCreate(query, lookups, defaults, create_defaults)` |
 | `qs.archive(...)`, `Model.objects.lend(...)` (driver methods) | `Call(query, "archive", "queryset", ...)`, `Call(Query(label, manager=...), "lend", "manager", ...)` |
 
 `filter()`, `exclude()`, `order_by()`, `distinct()`, slicing, `values()`, `values_list()`, `only()`, `defer()`,
@@ -84,7 +85,9 @@ A read-only mapping of kind to operation class:
 | `save` | `Save` | the values the database set |
 | `update` | `Update` | the number of rows |
 | `delete` | `Delete` | `(total, {label: count})` |
+| `delete_instance` | `DeleteInstance` | `(total, {label: count})` |
 | `get_or_create` | `GetOrCreate` | `(row, created)` |
+| `update_or_create` | `UpdateOrCreate` | `(row, created)` |
 
 A row is a dict keyed by adorm field names and annotation names, for every `row_format`: the core builds model
 instances, tuples and named tuples from it.
@@ -190,12 +193,22 @@ Update(Query("club.Member").filter(club__name="Chess"), {"fee": F("fee") * 1.1, 
 
 ### `adorm.operations.Delete(query)`
 
-Deletes the rows of `query` and the rows that cascade from them. An instance is deleted with
-`Delete(Query(label).filter(pk=pk))`. A sliced query, a query distinct on fields and one after `values()` or
+Deletes the rows of `query` and the rows that cascade from them; [`DeleteInstance`](#adorm-operations-deleteinstance-model-pk)
+deletes an instance. A sliced query, a query distinct on fields and one after `values()` or
 `values_list()` raise `TypeError`. Result: `(total, {label: count})`, the rows deleted per model.
 
 ```python
 Delete(Query("club.Member").filter(active=False, joined__lt=cutoff))
+```
+
+### `adorm.operations.DeleteInstance(model, pk)`
+
+Deletes the instance of `model` with primary key `pk` as the target deletes one instance, with the rows that cascade
+from it: on the Django driver the model's `delete()` runs, an override included. A missing row deletes nothing.
+`pk` as `None` raises `ValueError`, as an expression `TypeError`. Result: `(total, {label: count})`.
+
+```python
+DeleteInstance("billing.Payment", 7)          # Model.delete() of a Payment with pk 7
 ```
 
 ### `adorm.operations.GetOrCreate(query, lookups=(), defaults=())`
@@ -213,6 +226,25 @@ GetOrCreate(
     Query("club.Member").filter(club_id=3),
     {"email": "ann@example.org"},
     defaults={"name": "Ann"},
+)
+```
+
+### `adorm.operations.UpdateOrCreate(query, lookups=(), defaults=(), create_defaults=None)`
+
+Sets `defaults` on the row of `query` matching `lookups`, or inserts a new row when there is none. The new row has
+the values of the lookups whose keys have no `__`, updated with `create_defaults`, or with `defaults` when
+`create_defaults` is `None`. Result: `(row, created)`, the row as stored.
+
+`lookups`, `defaults` and `create_defaults` follow the rules of `GetOrCreate`: neither defaults may refer to a field of
+the row (`TypeError`), and a sliced query raises `TypeError`. `create_defaults` is kept as a tuple of pairs, or
+`None`; the encoded form always has `"create_defaults"`, `null` for `None`.
+
+```python
+UpdateOrCreate(
+    Query("club.Member"),
+    {"email": "ann@example.org"},
+    defaults={"level": "advanced"},
+    create_defaults={"name": "Ann", "level": "beginner"},
 )
 ```
 

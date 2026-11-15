@@ -92,8 +92,9 @@ async with reports.atomic() as tx:
 Run `operation` and return its result: in this session's transaction active in the current context
 ([`active_transaction()`](/ref/transactions#adorm-executor-active-transaction-session)), or else on the
 [runner](#adorm-executor-runner).
-Without a transaction and without a runner it raises [`InterfaceError`](./exceptions). Errors of the transaction or the
-runner propagate unchanged.
+Without a transaction and without a runner it raises [`InterfaceError`](./exceptions). Without a transaction, a read
+of rows (`select`, `get`, `first`, `last`) whose query has `select_for_update()` raises `TransactionManagementError`
+before it reaches the runner. Errors of the transaction or the runner propagate unchanged.
 
 ```python
 from adorm.operations import Count
@@ -135,7 +136,7 @@ it runs.
 The query methods of [`QuerySet`](./queryset) are also methods of the bound model, applied to `all()`: `filter`,
 `exclude`, `annotate`, `order_by`, `values`, `values_list`, `only`, `defer`, `select_related`, `distinct`, `none`,
 `select_for_update`, and the coroutines `get`, `first`, `last`, `count`, `exists`, `create`, `get_or_create`,
-`update` and `delete`. `async for` iterates over every row. A public method of `queryset_class` that `QuerySet`
+`update_or_create`, `update` and `delete`. `async for` iterates over every row. A public method of `queryset_class` that `QuerySet`
 does not define is a method of the bound model too, applied to `get_queryset()`, unless it is a driver method
 declared `queryset_only` or a function with a true `queryset_only` attribute.
 

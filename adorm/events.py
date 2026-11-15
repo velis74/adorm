@@ -262,7 +262,8 @@ def encode_error(error: BaseException) -> dict[str, Any]:
 
     An adorm exception keeps its class (a model's ``DoesNotExist`` and ``MultipleObjectsReturned`` also its model
     label), ``sqlstate``, ``timeout``, ``phase``, the sessions it names and the messages of a `ValidationError`. The
-    driver's ``original`` exception and an operation it names stay behind. Any other exception becomes a
+    driver's ``original`` exception, the objects of a `ProtectedError` or `RestrictedError` and an operation it names
+    stay behind. Any other exception becomes a
     `DatabaseError` whose message starts with the exception's class name.
     """
     cls = type(error)

@@ -21,5 +21,6 @@ MODELS: tuple[type[Model], ...] = (
     library.Reader,
     library.LoanPolicy,
     library.Loan,
+    library.Fine,
 )
 """Every generated model class."""

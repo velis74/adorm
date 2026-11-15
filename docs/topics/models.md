@@ -178,3 +178,17 @@ await member.save(update_fields=["active"])  # updates one column
 
 `save()` builds a [`Save`](/ref/operations) operation and runs it on the instance's executor: the session of the query
 set that loaded the instance, or else the [current session](/topics/sessions#the-current-session). See the [Model API](/ref/models) for every option and error.
+
+## Deleting
+
+`await instance.delete()` deletes the instance's row and the rows that cascade from it, and returns
+`(total, {label: count})`. When rows were deleted, the instance's primary key becomes `None`. On the Django driver the
+Django model's own `delete()` runs, so an override (a soft delete) applies.
+
+```python
+total, per_model = await member.delete()     # (3, {"clubs.Member": 1, "clubs.Membership": 2}); member.pk is None
+```
+
+A `PROTECT` or `RESTRICT` reference forbids the delete: it raises `ProtectedError` or `RestrictedError` with the
+referencing objects as instances of the registered models, and the instance keeps its primary key. See
+[`delete()`](/ref/models#delete) in the Model API.

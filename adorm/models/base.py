@@ -11,7 +11,7 @@ from typing import Any, ClassVar, Protocol, runtime_checkable, TYPE_CHECKING
 from pydantic import BaseModel, ConfigDict, model_validator, PrivateAttr, ValidationInfo
 from pydantic_core.core_schema import ValidatorFunctionWrapHandler
 
-from adorm.exceptions import InterfaceError, ModelExceptionsMixin
+from adorm.exceptions import InterfaceError, ModelExceptionsMixin, ProtectedError, RestrictedError
 from adorm.models.managers import BoundModel, Manager
 from adorm.models.meta import ModelMeta
 from adorm.models.registry import registry
@@ -394,6 +394,31 @@ class Model(ModelExceptionsMixin, BaseModel):
         )
         executor = self._executor()
         self._stored(await executor.execute(operation), executor)
+
+    async def delete(self) -> tuple[int, dict[str, int]]:
+        """Delete the instance's row and the rows that cascade from it with a `DeleteInstance` operation, which runs
+        the target's delete of an instance (a Django model's ``delete()`` override included); returns
+        ``(total, {label: count})`` and, when rows were deleted, sets the primary key to ``None``.
+
+        Raises ``ValueError`` without a primary key value, and `ProtectedError` or `RestrictedError` (with instances of
+        the registered models as objects) when a reference forbids the delete.
+        """
+        from adorm.operations import DeleteInstance
+        from adorm.query.queryset import _bind_error_objects
+
+        meta = self._require_meta()
+        pk = self.pk
+        if pk is None:
+            raise ValueError(f"cannot delete a {meta.label} instance without a primary key value")
+        executor = self._executor()
+        try:
+            total, counts = await executor.execute(DeleteInstance(meta.label, pk))
+        except (ProtectedError, RestrictedError) as exc:
+            _bind_error_objects(exc, executor)
+            raise
+        if total:
+            self.__dict__[meta.pk] = None
+        return total, dict(counts)
 
     def _stored(self, result: Any, executor: Executor) -> None:
         """Set the field values a write returned and mark the instance as stored by ``executor``."""

@@ -24,6 +24,7 @@ __all__ = [
     "Count",
     "Create",
     "Delete",
+    "DeleteInstance",
     "Exists",
     "First",
     "Get",
@@ -34,6 +35,7 @@ __all__ = [
     "Save",
     "Select",
     "Update",
+    "UpdateOrCreate",
 ]
 
 _OPERATIONS: dict[str, type[Operation]] = {}
@@ -271,8 +273,8 @@ class Exists(_QueryOperation):
 class Delete(_QueryOperation):
     """Delete the rows of ``query`` and the rows that cascade from them. Result: ``(total, {label: count})``.
 
-    A model instance is deleted with ``Delete(Query(label).filter(pk=pk))``. The query is not sliced, not distinct on
-    fields and selects model rows (no ``values()``); otherwise ``TypeError``.
+    The query is not sliced, not distinct on fields and selects model rows (no ``values()``); otherwise
+    ``TypeError``. `DeleteInstance` deletes a model instance.
     """
 
     kind: ClassVar[str] = "delete"
@@ -285,6 +287,38 @@ class Delete(_QueryOperation):
             raise TypeError("cannot delete from a query distinct on fields")
         if self.query.row_format != "model":
             raise TypeError("cannot delete from a query after values() or values_list()")
+
+
+@dataclass(frozen=True, eq=False)
+class DeleteInstance(Operation):
+    """Delete the instance of ``model`` with primary key ``pk`` as the target deletes one instance (a Django model's
+    ``delete()`` runs), with the rows that cascade from it. Result: ``(total, {label: count})``; a missing row
+    deletes nothing.
+
+    ``pk`` is a value, not ``None`` (``ValueError``) and not an expression (``TypeError``).
+    """
+
+    kind: ClassVar[str] = "delete_instance"
+    model: str
+    pk: Any
+
+    def __post_init__(self) -> None:
+        check_model_label(self.model)
+        if self.pk is None:
+            raise ValueError("deleting an instance needs its primary key")
+        if isinstance(self.pk, Node):
+            raise TypeError("the primary key is a value, not an expression")
+        object.__setattr__(self, "pk", freeze_value(self.pk))
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        with encoder.scope(self.model):
+            return {"model": self.model, "pk": encoder.operand(self.pk, encoder.field_type("pk"))}
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        model = check_model_label(_get(data, "model"))
+        with decoder.scope(model):
+            return cls(model, decoder.operand(_get(data, "pk"), decoder.field_type("pk")))
 
 
 @dataclass(frozen=True, eq=False)
@@ -465,17 +499,9 @@ def _lookups(lookups: FieldValues) -> tuple[tuple[str, Any], ...]:
 
 
 @dataclass(frozen=True, eq=False)
-class GetOrCreate(Operation):
-    """The row of ``query`` matching ``lookups``, or a new row when there is none.
+class _LookupWrite(Operation):
+    """The common part of `GetOrCreate` and `UpdateOrCreate`: a query, lookups and defaults."""
 
-    The new row has the values of the ``lookups`` whose keys have no ``__``, updated with ``defaults``. Result:
-    ``(row, created)``.
-
-    ``lookups`` and ``defaults`` are mappings or pairs; lookup values are prepared as for ``filter()``. The query is
-    not sliced and a default refers to no field and contains no aggregate; otherwise ``TypeError``.
-    """
-
-    kind: ClassVar[str] = "get_or_create"
     query: Query
     lookups: tuple[tuple[str, Any], ...] = ()
     defaults: tuple[tuple[str, Any], ...] = ()
@@ -512,7 +538,9 @@ class GetOrCreate(Operation):
         return data
 
     @classmethod
-    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+    def _decode_parts(
+        cls, decoder: Decoder, data: Mapping[str, Any]
+    ) -> tuple[Query, tuple[tuple[str, Any], ...], tuple[tuple[str, Any], ...]]:
         query = _decode_query(decoder, data)
         raw = _get(data, "lookups")
         if not isinstance(raw, list):
@@ -528,7 +556,67 @@ class GetOrCreate(Operation):
                 lookups.append((item[0], decoder.operand(item[1], hint, sequence=lookup.rhs_is_sequence)))
         with decoder.scope(query.model):
             defaults = _decode_values(decoder, _get(data, "defaults"), "defaults")
-        return cls(query, tuple(lookups), defaults)
+        return query, tuple(lookups), defaults
+
+
+@dataclass(frozen=True, eq=False)
+class GetOrCreate(_LookupWrite):
+    """The row of ``query`` matching ``lookups``, or a new row when there is none.
+
+    The new row has the values of the ``lookups`` whose keys have no ``__``, updated with ``defaults``. Result:
+    ``(row, created)``.
+
+    ``lookups`` and ``defaults`` are mappings or pairs; lookup values are prepared as for ``filter()``. The query is
+    not sliced and a default refers to no field and contains no aggregate; otherwise ``TypeError``.
+    """
+
+    kind: ClassVar[str] = "get_or_create"
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        return cls(*cls._decode_parts(decoder, data))
+
+
+@dataclass(frozen=True, eq=False)
+class UpdateOrCreate(_LookupWrite):
+    """Set ``defaults`` on the row of ``query`` matching ``lookups``, or insert a new row when there is none.
+
+    The new row has the values of the ``lookups`` whose keys have no ``__``, updated with ``create_defaults``, or with
+    ``defaults`` when ``create_defaults`` is ``None``. Result: ``(row, created)``, the row as stored.
+
+    ``lookups``, ``defaults`` and ``create_defaults`` are as for `GetOrCreate`: a default refers to no field and
+    contains no aggregate (``TypeError``). The encoded form has ``"create_defaults"`` (``null`` when there are none).
+    """
+
+    kind: ClassVar[str] = "update_or_create"
+    create_defaults: tuple[tuple[str, Any], ...] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.create_defaults is not None:
+            object.__setattr__(self, "create_defaults", _field_values(self.create_defaults, refs=False))
+
+    def nodes(self) -> Iterator[Node]:
+        yield from super().nodes()
+        yield from (value for _, value in self.create_defaults or () if isinstance(value, Node))
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        data = super()._encode(encoder)
+        with encoder.scope(self.query.model):
+            data["create_defaults"] = (
+                None if self.create_defaults is None else _encode_values(encoder, self.create_defaults)
+            )
+        return data
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        query, lookups, defaults = cls._decode_parts(decoder, data)
+        raw = _get(data, "create_defaults")
+        create_defaults = None
+        if raw is not None:
+            with decoder.scope(query.model):
+                create_defaults = _decode_values(decoder, raw, "create defaults")
+        return cls(query, lookups, defaults, create_defaults)
 
 
 @dataclass(frozen=True)

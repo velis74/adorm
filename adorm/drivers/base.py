@@ -402,7 +402,8 @@ class ThreadedConnection(DriverConnection):
     The thread is the connection's own, or the event loop's thread when the driver is ``direct``. Each ``*_sync``
     call runs in a copy of the awaiting task's context. Errors are mapped with ``map_error()`` on that thread.
     ``cancel_sync()`` runs on another thread while a call is running, and no further call starts until it
-    returns. ``emit()`` may be called from any thread.
+    returns. ``emit()`` may be called from any thread. Work a call hands to ``after_call_sync()`` runs once the call's
+    outcome is delivered, before the next call.
     """
 
     driver: ThreadedDriver
@@ -417,6 +418,7 @@ class ThreadedConnection(DriverConnection):
         self._lock = threading.Lock()
         self._current: _Call | None = None
         self._inline_events: list[Event] | None = None
+        self._after: list[Callable[[], Any]] = []
         self._usable = True
         self._stuck = False
         self._closed = False
@@ -486,6 +488,12 @@ class ThreadedConnection(DriverConnection):
         It returns once the request is delivered, so that it cannot reach a later statement, and never waits for
         the running call to finish. It may run while ``connect_sync()`` runs.
         """
+
+    def after_call_sync(self, fn: Callable[[], Any]) -> None:
+        """Run ``fn()`` on the connection's thread once the running call has ended and its outcome is delivered,
+        before the next call starts. It runs in the call's context, ``cancel()`` never reaches it, and an exception it
+        raises is logged. Called from a ``*_sync`` method."""
+        self._after.append(fn)
 
     # The contract.
 
@@ -628,8 +636,9 @@ class ThreadedConnection(DriverConnection):
     def _call_inline(self, fn: Callable[..., Any], *args: Any) -> Any:
         events: list[Event] = []
         self._inline_events = events
+        call = _Call(fn, args, None)
         try:
-            ok, value = self._run_now(fn, *args, map_errors=True)
+            ok, value = cast("tuple[bool, Any]", self._invoke(call, map_errors=True))
         finally:
             self._inline_events = None
         for event in events:
@@ -637,9 +646,28 @@ class ThreadedConnection(DriverConnection):
                 self._emit(event)
             except Exception:
                 logger.exception("delivering %r failed", event)
+        self._run_after(call.context)
         if ok:
             return value
         raise value
+
+    def _run_after(self, context: contextvars.Context) -> None:
+        """Run the work handed to ``after_call_sync()`` in ``context``."""
+        after, self._after = self._after, []
+        if not after:
+            return
+        running = asyncio._get_running_loop() if self._direct else None
+        if running is not None:
+            asyncio._set_running_loop(None)
+        try:
+            for fn in after:
+                try:
+                    context.run(fn)
+                except Exception:
+                    logger.exception("work after a %s call failed", self.driver.name)
+        finally:
+            if running is not None:
+                asyncio._set_running_loop(running)
 
     def _run_now(self, fn: Callable[..., Any], *args: Any, map_errors: bool) -> tuple[bool, Any]:
         # A new call is never cancelled, so there is always an outcome.
@@ -740,11 +768,12 @@ class ThreadedConnection(DriverConnection):
             if call.future is None:
                 if not ok:
                     logger.error("closing %s connection failed", self.driver.name, exc_info=value)
-                continue
-            try:
-                self._loop.call_soon_threadsafe(_resolve, call.future, ok, value)
-            except RuntimeError:
-                logger.warning("event loop closed, dropping the result of a %s call", self.driver.name)
+            else:
+                try:
+                    self._loop.call_soon_threadsafe(_resolve, call.future, ok, value)
+                except RuntimeError:
+                    logger.warning("event loop closed, dropping the result of a %s call", self.driver.name)
+            self._run_after(call.context)
 
     def _map(self, exc: BaseException) -> BaseException:
         try:

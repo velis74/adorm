@@ -2,8 +2,9 @@
 
 ::: info Status
 The installed version of the native PostgreSQL driver executes reads: `select`, `get`, `first`, `last`, `count` and
-`exists`, with the lookups, functions and clauses of the [Django driver](/topics/django-driver). Writes, savepoints,
-connection options and driver methods raise `NotSupportedError` before anything runs.
+`exists`, with the lookups, functions and clauses of the [Django driver](/topics/django-driver)'s reads
+([`READ_CAPABILITIES`](/ref/drivers#adorm-drivers-django-read-capabilities)), arithmetic included. Writes, row
+locks, savepoints, connection options and driver methods raise `NotSupportedError` before anything runs.
 :::
 
 [`AsyncpgDriver`](/ref/drivers#adorm-drivers-asyncpg-asyncpgdriver) executes adorm operations on

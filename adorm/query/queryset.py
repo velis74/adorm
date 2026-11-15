@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from functools import lru_cache
 from typing import Any, Self, TYPE_CHECKING
 
-from adorm.exceptions import MultipleObjectsReturned, ObjectDoesNotExist
+from adorm.exceptions import MultipleObjectsReturned, ObjectDoesNotExist, ProtectedError, RestrictedError
 from adorm.query.query import Query
 
 if TYPE_CHECKING:
@@ -25,6 +25,30 @@ __all__ = ["QuerySet"]
 @lru_cache(maxsize=256)
 def _row_class(names: tuple[str, ...]) -> type:
     return namedtuple("Row", names, rename=True)  # noqa: PYI024 - field names are only known at run time
+
+
+def _bind_error_objects(exc: BaseException, executor: Executor) -> None:
+    """Turn the `adorm.operations.ModelRow` values in the objects of a `ProtectedError` or `RestrictedError` into
+    instances of the registered models, bound to ``executor``; a row of a model that is not registered stays a
+    `ModelRow`."""
+    from adorm.models.registry import registry
+    from adorm.operations import ModelRow
+
+    if isinstance(exc, ProtectedError):
+        attribute = "protected_objects"
+    elif isinstance(exc, RestrictedError):
+        attribute = "restricted_objects"
+    else:
+        return
+    objects = []
+    for item in getattr(exc, attribute):
+        if isinstance(item, ModelRow):
+            try:
+                item = registry.get(item.model).from_row(item.row, executor=executor)
+            except LookupError:
+                pass
+        objects.append(item)
+    setattr(exc, attribute, tuple(objects))
 
 
 class QuerySet:
@@ -180,6 +204,9 @@ class QuerySet:
             if type(exc) is not MultipleObjectsReturned:
                 raise
             raise self.model.MultipleObjectsReturned(*exc.args) from exc
+        except (ProtectedError, RestrictedError) as exc:
+            _bind_error_objects(exc, self.executor)
+            raise
 
     # Terminal: one operation each
 
@@ -243,7 +270,8 @@ class QuerySet:
 
     async def delete(self) -> tuple[int, dict[str, int]]:
         """Delete the rows and those that cascade from them (a `Delete` operation); returns
-        ``(total, {label: count})``."""
+        ``(total, {label: count})``. A reference that forbids the delete raises `ProtectedError` or `RestrictedError`,
+        whose objects are instances of the registered models."""
         from adorm.operations import Delete
 
         operation = Delete(self.query)
@@ -281,5 +309,22 @@ class QuerySet:
         from adorm.operations import GetOrCreate
 
         operation = GetOrCreate(self.query, lookups, defaults or {})
+        row, created = await self._run(operation)
+        return self._instance(row), bool(created)
+
+    async def update_or_create(
+        self,
+        defaults: Mapping[str, Any] | None = None,
+        create_defaults: Mapping[str, Any] | None = None,
+        **lookups: Any,
+    ) -> tuple[Model, bool]:
+        """Set ``defaults`` on the instance matching ``lookups``, or create one from the plain lookups and
+        ``create_defaults`` (``defaults`` when it is ``None``), with an `UpdateOrCreate` operation; returns
+        ``(instance, created)``."""
+        from adorm.operations import UpdateOrCreate
+
+        operation = UpdateOrCreate(
+            self.query, lookups, defaults or {}, None if create_defaults is None else create_defaults
+        )
         row, created = await self._run(operation)
         return self._instance(row), bool(created)

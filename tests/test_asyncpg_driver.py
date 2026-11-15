@@ -22,7 +22,7 @@ from adorm.drivers.asyncpg import (
     ISOLATION_LEVELS,
     server_version_num,
 )
-from adorm.drivers.django import CAPABILITIES as DJANGO_CAPABILITIES
+from adorm.drivers.django import READ_CAPABILITIES
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Count, Select
 from adorm.query import Query
@@ -119,8 +119,10 @@ def test_server_version_num():
 
 
 def test_capabilities():
-    assert CAPABILITIES.operations == DJANGO_CAPABILITIES.operations
-    assert CAPABILITIES.constructs == DJANGO_CAPABILITIES.constructs
+    assert (
+        CAPABILITIES.operations == READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists"}
+    )
+    assert CAPABILITIES.constructs == READ_CAPABILITIES.constructs
     assert CAPABILITIES.cancellation
     assert not CAPABILITIES.savepoints
     assert (AsyncpgDriver.name, AsyncpgDriver.mode) == ("asyncpg", "async")

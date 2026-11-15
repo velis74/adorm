@@ -55,8 +55,9 @@ The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`,
 combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
 placement, slicing, `distinct()` and `DISTINCT ON`, the row formats, `only()` and `defer()`, foreign keys, reverse and
 many-to-many relations, multi-table inheritance, generic relations, JSON keys, subqueries, annotations, every function
-and aggregate, `select_for_update()` with its options, and the writes (`create`, `save`, `update`, `delete`,
-`get_or_create`).
+and aggregate, `select_for_update()` with its options, and the writes (`create`, `save` also with arithmetic,
+`update`, `delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught inside a
+transaction that then commits, `get_or_create`, `update_or_create`).
 
 Coverage tests fail when:
 
@@ -76,6 +77,7 @@ Coverage tests fail when:
 | Test | What holds |
 |---|---|
 | nested `atomic()` blocks, on a driver with `savepoints` | a nested block commits on normal exit and rolls back on an exception; the outer block keeps its own writes |
+| a database error (`IntegrityError` of a duplicate primary key) in a nested block, on a driver with `savepoints` and `create` | the nested block rolls back; the outer block writes again and commits both writes; one slot, released |
 | nested `atomic()` blocks, on a driver without `savepoints` | `NotSupportedError` with the driver's name and `unsupported == ("savepoints",)`; the outer block goes on reading and commits; one slot, released |
 | a connection option the driver declares | `set_options()` accepts the value in `OPTIONS` and the connection executes the next operation |
 | a connection option the driver does not declare | `NotSupportedError` naming it, with `local` false and true; the connection stays usable |

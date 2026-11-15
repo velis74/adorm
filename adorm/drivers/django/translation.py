@@ -1,7 +1,9 @@
 """Translation of adorm queries into Django query sets, and of the rows they return into adorm rows.
 
 `translate()` turns a `Query` into a `TranslatedQuery`: a Django query set that selects the query's columns with
-``values_list()`` and the plan that turns each tuple into a row keyed by adorm names. Building it needs no database
+``values_list()`` and the plan that turns each tuple into a row keyed by adorm names. `model_queryset()`,
+`field_kwargs()` and `lookup_kwargs()` give the model query set and the keyword arguments that writes pass to Django,
+and `instance_row()` turns a Django model instance into an adorm row. Building them needs no database
 connection, only Django's app registry. Field paths are translated segment by segment with the `ModelMeta.orm_names`
 of the registered adorm model each segment reaches; a model without a registered adorm model uses Django's names.
 """
@@ -21,6 +23,7 @@ from django.apps import apps
 from django.core.exceptions import FieldDoesNotExist
 from django.db import models as dj
 from django.db.models import functions as djf
+from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
 from adorm.exceptions import NotSupportedError, ProgrammingError
@@ -28,7 +31,7 @@ from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
 from adorm.query import expressions as ax
 from adorm.query.expressions import split_field_path
-from adorm.query.lookups import Lookup
+from adorm.query.lookups import build_lookup, Lookup, split_lookup
 from adorm.query.query import Query
 
 __all__ = [
@@ -36,6 +39,10 @@ __all__ = [
     "SELECT_RELATED_DEPTH",
     "TranslatedQuery",
     "django_model",
+    "field_kwargs",
+    "instance_row",
+    "lookup_kwargs",
+    "model_queryset",
     "orm_path",
     "output_field",
     "subquery",
@@ -278,6 +285,12 @@ class _Translator:
             raise NotSupportedError("the Django driver does not translate Exists")
         if isinstance(node, ax.Subquery):
             return dj.Subquery(subquery(node.query))
+        if isinstance(node, ax.CombinedExpression):
+            connector = Combinable.MOD if node.connector == "%" else node.connector
+            output = None if node.output_type is None else output_field(node.output_type)
+            return CombinedExpression(
+                self.expression(node.lhs), connector, self.expression(node.rhs), output_field=output
+            )
         if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate) and type(node).__name__ in FUNCTIONS:
             return FUNCTIONS[type(node).__name__](*(self.expression(e) for e in node.expressions))
         raise NotSupportedError(f"the Django driver does not translate {type(node).__name__}")
@@ -319,6 +332,30 @@ class _Translator:
             value = self.operand(rhs, field)
         return dj.Q(**{f"{key}__{node.lookup_name}": value})
 
+    def write_value(self, name: str, value: Any) -> tuple[str, Any]:
+        """The Django keyword and value of the adorm field ``name`` set to ``value``."""
+        key = _orm_name(_adorm_model(self.model), name)
+        return key, self.operand(value, _field(self.model, key))
+
+    def lookup_item(self, key: str, value: Any) -> tuple[str, Any]:
+        """The Django keyword and value of the lookup ``key=value``. A key without a lookup name and without ``__``
+        names a field Django can also create the row with: a foreign key by its attname (``club_id``)."""
+        path, name = split_lookup(key)
+        if key == path and len(split_field_path(path)) == 1 and path not in self.annotation_names:
+            orm = "pk" if path == "pk" else _orm_name(_adorm_model(self.model), path)
+            field = _field(self.model, orm)
+            if field is not None and field.concrete and field.is_relation and orm == field.name:
+                orm = field.attname
+            return orm, self.operand(value, field)
+        if key == path and value is None:
+            return self.path(path), None
+        q = self.lookup(build_lookup(key, value))
+        ((django_key, django_value),) = q.children
+        if key == path:
+            # Written without a lookup name, as the key was; its "__" keeps it out of the created row's values.
+            django_key = django_key.rpartition("__")[0]
+        return django_key, django_value
+
     def order(self, order: ax.OrderBy) -> Any:
         expression = self.expression(order.expression)
         options = {"nulls_first": order.nulls_first, "nulls_last": order.nulls_last}
@@ -327,10 +364,9 @@ class _Translator:
     # The query set
 
     def base(self) -> Any:
-        """The Django query set of the model rows: manager, annotations, filters, ordering, distinct, slice."""
+        """The Django query set of the model rows: manager, annotations, filters, ordering, distinct, slice, none and
+        row locks."""
         query = self.query
-        if query.for_update is not None:
-            raise NotSupportedError("the Django driver does not translate select_for_update() for reads")
         if query.manager is None:
             queryset = self.model._base_manager.all()
         else:
@@ -355,6 +391,14 @@ class _Translator:
             queryset = queryset[query.low_mark : query.high_mark]
         if query.is_none:
             queryset = queryset.none()
+        lock = query.for_update
+        if lock is not None:
+            queryset = queryset.select_for_update(
+                nowait=lock.nowait,
+                skip_locked=lock.skip_locked,
+                of=tuple(name if name == "self" else self.path(name) for name in lock.of),
+                no_key=lock.no_key,
+            )
         return queryset
 
     # Columns and rows
@@ -511,3 +555,53 @@ def subquery(query: Query) -> Any:
         names = translator.annotation_names
         queryset = queryset.values_list(*(n if n in names else translator.path(n) for n in query.select))
     return queryset
+
+
+def model_queryset(query: Query) -> Any:
+    """The Django query set of the model rows of ``query``, as `translate()` starts it: manager, annotations, filters,
+    ordering, distinct, slice, ``none()`` and ``select_for_update()``, without selecting columns. Writes (``update()``,
+    ``delete()``, ``get_or_create()``, ``update_or_create()``) run on it."""
+    return _Translator(query).base()
+
+
+def field_kwargs(query: Query | str, values: Mapping[str, Any] | Iterable[tuple[str, Any]]) -> dict[str, Any]:
+    """The keyword arguments Django takes for the adorm field values ``values`` (a mapping or pairs) of the model of
+    ``query`` (a `Query` or a model label): each name translated with the model's `ModelMeta.orm_names`, expressions
+    translated as in ``query``, a model instance replaced by the value it stands for."""
+    translator = _Translator(query if isinstance(query, Query) else Query(query))
+    items = values.items() if isinstance(values, Mapping) else values
+    return dict(translator.write_value(name, value) for name, value in items)
+
+
+def lookup_kwargs(query: Query, lookups: Iterable[tuple[str, Any]]) -> dict[str, Any]:
+    """The keyword arguments of Django's ``get_or_create()`` and ``update_or_create()`` for the adorm ``lookups``
+    (lookup key and value pairs) on ``query``'s model. A key without ``__`` stays a field name (a foreign key by its
+    attname), which Django also creates the row with; a lookup across relations or with a lookup name only filters."""
+    translator = _Translator(query)
+    return dict(translator.lookup_item(key, value) for key, value in lookups)
+
+
+def instance_row(instance: dj.Model) -> dict[str, Any]:
+    """The adorm row of a Django model instance: the fields of the registered adorm model (the concrete fields by
+    attname without one) that the instance has loaded. A deferred field and a field that holds an expression (the
+    value is known only to the database) are left out."""
+    model = type(instance)
+    adorm = _adorm_model(model)
+    deferred = instance.get_deferred_fields()
+    if adorm is None:
+        names = [(field.attname, field.attname) for field in model._meta.concrete_fields]
+    else:
+        names = []
+        for name in adorm.__pydantic_fields__:
+            field = _field(model, _orm_name(adorm, name))
+            if field is not None and getattr(field, "attname", None) is not None:
+                names.append((name, field.attname))
+    row: dict[str, Any] = {}
+    for name, attname in names:
+        if attname in deferred or attname not in instance.__dict__:
+            continue
+        value = instance.__dict__[attname]
+        if hasattr(value, "resolve_expression"):
+            continue
+        row[name] = value
+    return row

@@ -4,7 +4,8 @@
 The installed version provides connection profiles, their hooks, run-time profiles and the default router built
 from them. Connection options in a profile and slot lifetimes (`purge_stale_connections_at`) are not part of it yet.
 The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run
-profiles' hooks and execute reads. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
+profiles' hooks; the Django driver executes reads, writes, row locks and savepoints, the native PostgreSQL driver
+reads. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
 works.
 :::
 

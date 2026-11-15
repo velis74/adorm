@@ -2,8 +2,9 @@
 
 ::: info Status
 The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`), the
-[slots and pool](/topics/pool) that call drivers, and two drivers for reads: the [Django driver](/topics/django-driver)
-and the [native PostgreSQL driver](/topics/postgresql-driver).
+[slots and pool](/topics/pool) that call drivers, and two drivers: the [Django driver](/topics/django-driver), which
+executes reads, writes, row locks and savepoints, and the [native PostgreSQL driver](/topics/postgresql-driver), which
+executes reads.
 :::
 
 A driver executes adorm operations on one target: an ORM such as Django's or SQLAlchemy, or a database library

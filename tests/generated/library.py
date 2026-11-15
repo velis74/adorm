@@ -23,6 +23,7 @@ __all__ = [
     "Reader",
     "LoanPolicy",
     "Loan",
+    "Fine",
 ]
 
 
@@ -196,5 +197,17 @@ class Loan(Model):
     note: str = Field(default="", max_length=200)
     reader = ForeignKey("library.Reader")
     book = ForeignKey("library.Book")
+    fines = ReverseForeignKey("library.Fine", column="loan_id")
     objects = LoanManager("objects")
     all_loans = Manager()
+
+
+class Fine(Model):
+    """A fine for a loan: the loan cannot be deleted while it has fines, and deleting a fine waives it."""
+
+    _meta = ModelMeta("library.Fine", schema_hash="d08442a5437d5bb8")
+    id: int | None = None
+    loan_id: int
+    amount: decimal.Decimal = Field(max_digits=6, decimal_places=2)
+    waived: bool = False
+    loan = ForeignKey("library.Loan")

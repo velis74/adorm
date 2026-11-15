@@ -166,3 +166,15 @@ class Loan(models.Model):
 
     objects = LoanManager()
     all_loans = models.Manager()
+
+
+class Fine(models.Model):
+    """A fine for a loan: the loan cannot be deleted while it has fines, and deleting a fine waives it."""
+
+    loan = models.ForeignKey(Loan, on_delete=models.RESTRICT, related_name="fines")
+    amount = models.DecimalField(max_digits=6, decimal_places=2)
+    waived = models.BooleanField(default=False)
+
+    def delete(self, using=None, keep_parents=False):  # noqa: ARG002 - Django's signature
+        self.waived = True
+        self.save(using=using, update_fields=["waived"])

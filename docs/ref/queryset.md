@@ -76,7 +76,7 @@ executor:
 | `select_related(*fields)` | related rows in the same query |
 | `distinct(*fields)` | duplicate removal |
 | `none()` | no rows |
-| `select_for_update(nowait=, skip_locked=, of=, no_key=)` | row locks |
+| `select_for_update(nowait=, skip_locked=, of=, no_key=)` | row locks; reading the rows outside a transaction raises `TransactionManagementError` |
 | `qs[start:stop]` | slice; an integer index raises `TypeError` |
 | `qs1 \| qs2`, `qs1 & qs2` | OR / AND of the conditions |
 
@@ -96,7 +96,7 @@ Combining query sets of different executors raises `TypeError`.
 Each terminal method builds one [operation](./operations), awaits `executor.execute(operation)` and shapes the
 result. On a query set built with `none()`, `async for`, `get()`, `first()`, `last()`, `count()`, `exists()`,
 `update()` and `delete()` return an empty result (`get()` raises `DoesNotExist`) without running an operation;
-`create()` and `get_or_create()` run their operation.
+`create()`, `get_or_create()` and `update_or_create()` run their operation.
 
 A generic `ObjectDoesNotExist` or `MultipleObjectsReturned` from the executor (not a model's own) is raised as the
 model's `DoesNotExist` or `MultipleObjectsReturned`, with the original as `__cause__`. A model's own exception, also
@@ -178,6 +178,20 @@ operation. Returns `(instance, created)`.
 member, created = await Member.objects.get_or_create(name="Ana", defaults={"fee": 5})
 ```
 
+#### `async update_or_create(defaults=None, create_defaults=None, **lookups)`
+
+Set `defaults` on the instance matching `lookups`, or create one from the lookups without `__` and
+`create_defaults` (`defaults` when `create_defaults` is `None`), with an `UpdateOrCreate` operation. Returns
+`(instance, created)`; the instance has the row as stored.
+
+```python
+member, created = await Member.objects.update_or_create(
+    email="ana@example.org",
+    defaults={"level": "advanced"},
+    create_defaults={"name": "Ana", "level": "beginner"},
+)
+```
+
 #### `async update(**values)`
 
 Set `values` (field name → value or expression) on the rows with an `Update` operation; returns the number of rows.
@@ -191,8 +205,18 @@ await Member.objects.filter(active=False).update(fee=F("fee") * 0)
 #### `async delete()`
 
 Delete the rows and the rows that cascade from them with a `Delete` operation; returns `(total, {label: count})`. A
-sliced query set, one distinct on fields or one after `values()` raises `TypeError`.
+sliced query set, one distinct on fields or one after `values()` raises `TypeError`. A reference that forbids the
+delete (`on_delete=PROTECT` or `RESTRICT`) raises [`ProtectedError`](./exceptions) or `RestrictedError`; their
+`protected_objects` / `restricted_objects` are instances of the registered models, bound to the query set's executor
+(a row of a model that is not registered stays a [`ModelRow`](./operations#adorm-operations-modelrow-model-row)).
+The refusal comes before any row is deleted, so a transaction that catches it goes on. No model's own `delete()` runs;
+[`Model.delete()`](./models#delete) runs it for one instance.
 
 ```python
 total, per_model = await Member.objects.filter(active=False).delete()
+
+try:
+    await Member.objects.filter(pk=member_id).delete()
+except adorm.ProtectedError as exc:
+    numbers = [invoice.number for invoice in exc.protected_objects]
 ```

@@ -5,7 +5,7 @@ import pytest
 
 import adorm
 
-from adorm import ConnectionProfile, NotSupportedError
+from adorm import ConnectionProfile, IntegrityError, NotSupportedError
 from adorm.operations import Count
 from adorm.query import Query
 from demo.models.clubs import Club
@@ -46,6 +46,26 @@ async def _savepoints_commit_and_roll_back(city):
         assert await Club.objects.filter(city=city).count() == 1
     assert await Club.objects.filter(city=city).count() == 1
     assert await Club.objects.filter(city="Lost").count() == 0
+
+
+async def test_a_database_error_inside_a_savepoint_leaves_the_transaction_usable(driver, pool):
+    if not driver.capabilities.savepoints or "create" not in driver.capabilities.operations:
+        pytest.skip(f"the {driver.name} driver does not declare savepoints and create")
+    koper = Club.objects.filter(slug="koper-sailing")
+    for n in REPEAT:
+        existing = await koper.get()
+        async with adorm.atomic():
+            assert await koper.update(city=f"Before {n}") == 1
+            with pytest.raises(IntegrityError):
+                async with adorm.atomic():
+                    await Club.objects.create(
+                        pk=existing.pk, name="Twin", slug="twin", founded=existing.founded, city="Piran"
+                    )
+            assert await koper.update(name=f"Koper {n}") == 1
+        stored = await koper.get()
+        assert (stored.city, stored.name) == (f"Before {n}", f"Koper {n}")
+        assert await Club.objects.filter(slug="twin").count() == 0
+        assert (pool.size, pool.in_use) == (1, 0)
 
 
 async def _savepoints_are_refused(driver):

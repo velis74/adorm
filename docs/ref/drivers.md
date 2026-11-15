@@ -314,6 +314,10 @@ What the connection does around those methods:
 - `cancel()` runs `cancel_sync()` for the running call: on a thread of its own when called on the event loop's
   thread, otherwise on the calling thread. It does nothing when no call is running.
 - `close()` runs `close_sync()` on the thread and stops the thread; a call after it raises `InterfaceError`.
+- `after_call_sync(fn)`, called from a `*_sync` method, runs `fn()` on the thread once that call has ended and its
+  outcome is delivered, before the next call starts, in the call's context. `cancel()` never reaches it, and an
+  exception it raises is logged on the `adorm.drivers` logger. Work that must not decide or delay the call's outcome
+  goes there, such as Django's `on_commit()` callbacks after `commit_sync()`.
 - `call_hook(hook, *args)` runs `hook(self.target, *args)` on the thread like a `*_sync` method; a hook that returns
   an awaitable raises `InterfaceError`. A subclass sets `target` to what profile hooks receive, such as Django's
   connection wrapper.
@@ -351,8 +355,8 @@ class SQLiteConnection(ThreadedConnection):
 
 ## Django driver
 
-`adorm.drivers.django` executes adorm operations with Django's ORM; `adorm.drivers.django.translation` turns adorm
-queries into Django query sets. Importing either imports Django; operations need Django set up (`django.setup()`).
+`adorm.drivers.django` executes adorm reads and writes with Django's ORM; `adorm.drivers.django.translation` turns
+adorm queries, values and lookups into Django query sets and keyword arguments. Importing either imports Django; operations need Django set up (`django.setup()`).
 The [Django driver topic](/topics/django-driver) shows them in use.
 
 ```python
@@ -380,15 +384,43 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | Method | Does |
 |---|---|
 | `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread (a backend other than PostgreSQL raises `NotSupportedError`); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged); `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; with Django's `OPTIONS["pool"]` it raises `NotSupportedError`; then `ensure_connection()` |
-| `execute_sync(operation)` | [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool` |
-| `begin_sync()` | `set_autocommit(False)` |
-| `commit_sync()`, `rollback_sync()` | `commit()` / `rollback()`, then `set_autocommit(True)` |
+| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool`; a write runs as the table below shows |
+| `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block; a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError` |
+| `savepoint_sync(name)` | creates a Django savepoint (`savepoint()`) and adds it to the block's savepoint ids, so Django's `on_commit()` callbacks registered inside it belong to it; `name` already open, or no transaction, raises `TransactionManagementError` |
+| `release_savepoint_sync(name)` | releases the savepoint and the savepoints opened after it |
+| `rollback_to_savepoint_sync(name)` | rolls back to the savepoint, which stays open, discarding the savepoints opened after it and the `on_commit()` callbacks registered since; clears Django's `needs_rollback` first, since Django refuses every statement of a transaction marked for rollback |
+| `commit_sync()` | leaves the block, which commits, and hands Django's `on_commit()` callbacks to `after_call_sync()` (see below); raises `TransactionManagementError` and rolls back when Django marked the transaction for rollback or the database transaction failed, `InterfaceError` when the connection was closed inside it |
+| `rollback_sync()` | leaves the block with a rollback; nothing without an open transaction |
 | `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
-| `close_sync()` | the wrapper's `close()` |
+| `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's) |
 | `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals) |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc) |
 
-`target`, what profile hooks receive, is the wrapper (`self.db`).
+| Write | Django call | Result |
+|---|---|---|
+| `create` | `create(**values)` of the manager `manager` names (`_base_manager` without one), through `db_manager(profile.alias)` | [`instance_row()`](#adorm-drivers-django-translation-instance-row-instance) of the new instance |
+| `save` without `pk`, or with `force_insert` | `Model(**values)`, the `pk` set when given, `save(force_insert=...)` | the instance's row |
+| `save` with `pk` | `Model.from_db()` with the given fields loaded and the others deferred, then `save(update_fields=..., force_update=...)`; Django updates a partly loaded instance's loaded fields only. Without `update_fields` and `force_update`, a partly loaded instance whose row is missing is inserted (`force_insert`), the target's defaults filling the other fields; the check is one `exists()` query | the instance's row, without fields that hold an expression |
+| `update` | `update(**values)` on [`model_queryset()`](#adorm-drivers-django-translation-model-queryset-query) | the number of rows |
+| `delete` | `delete()` on `model_queryset()`: Django's collector cascades, sets NULL, and refuses `PROTECT` and `RESTRICT` references; the objects of a refusal are read again with every field; no model's `delete()` runs | `(total, {label: count})` |
+| `delete_instance` | the instance read with `_base_manager.get(pk=pk)`, then its `delete(using=...)`, so the model's `delete()` override runs; refusals as for `delete` | Django's `(total, {label: count})`; `(0, {})` for a missing row or an override that returns something else |
+| `get_or_create` | `get_or_create(defaults=..., **lookups)` on `model_queryset()` | `(row, created)` |
+| `update_or_create` | `update_or_create(defaults=..., create_defaults=..., **lookups)` on `model_queryset()` | `(row, created)` |
+
+Values go through [`field_kwargs()`](#adorm-drivers-django-translation-field-kwargs-query-values) and lookups through
+[`lookup_kwargs()`](#adorm-drivers-django-translation-lookup-kwargs-query-lookups). Every call runs on
+`profile.alias` (`using()`, `save(using=...)`). Django's model methods (`save()` and `delete()` overrides), its signals and its own
+atomic blocks run on the connection's thread as they run in Django code; the signals are not reported to the client.
+
+Django's `on_commit()` callbacks registered during a transaction (by a `save()` override, a signal receiver) run
+after the commit, on the connection's thread, in registration order, once `commit()` has returned and before the
+connection's next call ([`after_call_sync()`](#adorm-drivers-threadedconnection)): cancelling the task that awaits
+the commit reaches neither the commit nor them, and the slot's `CallbackEvent("on_commit")` does not wait for them. A callback that raises is logged on the `adorm.drivers.django` logger,
+since the commit stands; one registered without `robust=True` stops the callbacks after it, as in Django. Callbacks
+of a rolled-back savepoint or transaction do not run. Outside a transaction Django runs a callback at once, inside
+the operation that registers it.
+
+`target`, what profile hooks receive, is the wrapper (`self.db`). `alias` is `profile.alias`.
 
 ### `adorm.drivers.django.CAPABILITIES`
 
@@ -396,13 +428,28 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 
 | Field | Value |
 |---|---|
-| `operations` | `select`, `get`, `first`, `last`, `count`, `exists` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `path.nested`; `clause.annotate`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`; `function.Lower`, `function.Upper`; `expression.Subquery` |
-| `cancellation` | `True` |
-| `savepoints`, `connection_options`, `backend_events` | none |
+| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `path.nested`; `clause.annotate`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `function.Lower`, `function.Upper`; `expression.Subquery`, `expression.CombinedExpression` |
+| `savepoints`, `cancellation` | `True` |
+| `connection_options`, `backend_events` | none |
 
 The constructs are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON
 fields); `DjangoConnection` refuses other database backends.
+
+### `adorm.drivers.django.READ_CAPABILITIES`
+
+The reads of [`CAPABILITIES`](#adorm-drivers-django-capabilities): `operations` `select`, `get`, `first`, `last`,
+`count`, `exists`, the `constructs` without `clause.select_for_update[...]`, and `cancellation`; no savepoints. The [native PostgreSQL driver](#adorm-drivers-asyncpg-capabilities) declares these.
+
+### `adorm.drivers.django.model_row(instance)`
+
+Returns a Django model instance as a [`ModelRow`](./operations#adorm-operations-modelrow-model-row): the model's label
+and [`instance_row(instance)`](#adorm-drivers-django-translation-instance-row-instance).
+
+```python
+model_row(Author.objects.only("name").get(slug="ann"))
+# ModelRow(model='library.Author', row={'id': 1, 'name': 'Ann'})
+```
 
 ### `adorm.drivers.django.map_django_error(exc)`
 
@@ -416,6 +463,7 @@ Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` a
 | Django's `ValidationError` | `ValidationError` with the same messages (by field, a list, or one message with `code` and `params`) |
 | `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
 | `SynchronousOnlyOperation` | `InterfaceError` |
+| `django.db.models.ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with Django's message and the objects as [`model_row()`](#adorm-drivers-django-model-row-instance) values (`protected_objects`, `restricted_objects`) |
 | anything else | [`wrap_driver_error(exc)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name, else `DatabaseError` |
 
 ```python
@@ -458,8 +506,12 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   for that field's value; a `Value` with `output_type` gets
   [`output_field(output_type)`](#adorm-drivers-django-translation-output-field-output-type); a query in an `in`
   lookup becomes a Django query set ([`subquery()`](#adorm-drivers-django-translation-subquery-query)).
+- Arithmetic (`CombinedExpression`) becomes Django's `CombinedExpression` with the same connector (`%` as Django's
+  `MOD`), its `output_type` as the output field.
+- `select_for_update()` becomes Django's `select_for_update()` with the same options; the paths in `of` are
+  translated, `"self"` stays. Django evaluates it only inside a transaction.
 - A node without a translation (`OuterRef`, `Exists`, aggregates, functions not in
-  [`FUNCTIONS`](#adorm-drivers-django-translation-functions)) and `select_for_update()` raise `NotSupportedError`;
+  [`FUNCTIONS`](#adorm-drivers-django-translation-functions)) raises `NotSupportedError`;
   a `select_related()` path that is not a relation of the adorm model, or not a foreign key or one-to-one relation,
   raises `ProgrammingError`. Unknown fields raise Django's `FieldError` when the query set is built.
 
@@ -499,6 +551,53 @@ segment Django does not know is kept, so that Django reports it.
 orm_path(Note, "copy___title")          # "copy__title"
 orm_path(Book, "tagging_set__weight")   # "tagging__weight"
 orm_path(Placement, "order_")           # "_order"
+```
+
+### `adorm.drivers.django.translation.model_queryset(query)`
+
+Returns the Django query set of the model rows of `query`, built as `translate()` builds it (manager, annotations,
+filters, ordering, distinct, slice, `none()`, `select_for_update()`) without selecting columns. The Django driver runs
+`update()`, `delete()`, `get_or_create()` and `update_or_create()` on it, so a manager's `get_queryset()` and the
+overrides of its query set apply.
+
+```python
+model_queryset(Query("library.Loan", manager="objects").filter(due__lt=today)).delete()
+# Django: Loan.objects.all().filter(due__lt=today).delete()
+```
+
+### `adorm.drivers.django.translation.field_kwargs(query, values)`
+
+Returns the keyword arguments Django takes for the adorm field values `values` (a mapping or `(name, value)` pairs)
+of the model of `query`, a `Query` or a model label. Each name is translated with the model's `orm_names`; an
+expression is translated as in `query` (`F`, arithmetic, functions); a model instance stands for the value the field
+refers to, as in a lookup.
+
+```python
+field_kwargs("library.Note", {"json_": "{}", "copy_id": book})     # {"json": "{}", "copy_id": book.pk}
+field_kwargs("library.Author", {"rating": F("rating") + 1})       # {"rating": CombinedExpression(F(rating) + Value(1))}
+```
+
+### `adorm.drivers.django.translation.lookup_kwargs(query, lookups)`
+
+Returns the keyword arguments of Django's `get_or_create()` and `update_or_create()` for the adorm `lookups`
+(`(key, value)` pairs) on the model of `query`. Django creates the row with the arguments without `__`, so a key
+without `__` and without a lookup name stays a field name: renamed by `orm_names`, and a foreign key named by its
+relation (`mentor`) becomes its attname (`mentor_id`) with the key of a model instance as value. A key with a lookup
+name or across relations is translated as in `filter()` and only filters.
+
+```python
+lookup_kwargs(Query("library.Author"), [("mentor", ann), ("name__iexact", "bob")])
+# {"mentor_id": ann.pk, "name__iexact": "bob"}
+```
+
+### `adorm.drivers.django.translation.instance_row(instance)`
+
+Returns the adorm row of a Django model instance: the fields of the registered adorm model by adorm name (a model
+without one: its concrete fields by attname), with the instance's values. A field the instance has not loaded and a
+field holding an expression (its value is known only to the database) are left out; no query runs.
+
+```python
+instance_row(Note.objects.only("json").get(pk=code))      # {"code": code, "json_": "{}"}
 ```
 
 ### `adorm.drivers.django.translation.django_model(label)`
@@ -601,8 +700,8 @@ inside a transaction compiles with `in_transaction=True`.
 ### `adorm.drivers.asyncpg.CAPABILITIES`
 
 The [`Capabilities`](#adorm-drivers-capabilities) of `AsyncpgDriver`: the `operations` and `constructs` of the
-Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (`select`, `get`, `first`, `last`, `count`,
-`exists`; every lookup, `Lower`, `Upper`, `Subquery`, `distinct`, `DISTINCT ON`, `only`, `defer`,
+Django driver's [`READ_CAPABILITIES`](#adorm-drivers-django-read-capabilities) (`select`, `get`, `first`, `last`, `count`,
+`exists`; every lookup, `Lower`, `Upper`, `Subquery`, arithmetic (`CombinedExpression`), `distinct`, `DISTINCT ON`, `only`, `defer`,
 `select_related`, the query's manager, field paths across relations (`path.nested`) and annotations
 (`clause.annotate`)) and `cancellation`. No `savepoints`, `connection_options` or
 `backend_events`.

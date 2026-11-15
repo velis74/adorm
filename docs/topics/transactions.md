@@ -4,8 +4,9 @@
 The installed version provides `atomic()` blocks, savepoints, the transaction in the context and the slot's commit
 deadline and `on_commit` callbacks. Transactions run on the [router](/topics/pool) set as the runner. Connection
 options (`connection_options()`) and `adorm.timeout()` are not part of it yet. The [Django driver](/topics/django-driver)
-and the [native PostgreSQL driver](/topics/postgresql-driver) run reads in transactions; writes and savepoints on them
-are not part of it yet. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver)) works.
+runs reads, writes and savepoints in transactions; the [native PostgreSQL driver](/topics/postgresql-driver) runs reads
+in transactions, and writes and savepoints on it are not part of it yet. Any `Driver` implementation (see
+[Writing a driver](/howto/writing-a-driver)) works.
 :::
 
 A transaction is an `async with` block. It holds one slot of its session's pool from the start of the block to the
@@ -167,7 +168,23 @@ Catch the error around a nested `atomic()` instead, as in [Savepoints](#savepoin
 side, such as `DoesNotExist` from `get()` and a `NotSupportedError` without a SQLSTATE or driver exception (an
 operation the driver does not support), do not affect the transaction. A `NotSupportedError` from the server
 (SQLSTATE class 0A) does. An operation cancelled while it waits behind another one in the slot never reaches the
-database and does not affect the transaction either.
+database and does not affect the transaction either. `ProtectedError` and `RestrictedError` without a SQLSTATE do
+not affect it: the delete checks the references before any statement changes data, so the block can catch the
+refusal and go on, as in Django:
+
+```python
+async with adorm.atomic():
+    try:
+        await member.delete()
+    except adorm.ProtectedError:
+        await Member.objects.filter(pk=member.pk).update(active=False)
+# COMMIT
+```
+
+A database-level `RESTRICT` violation (SQLSTATE `23001`) is an `IntegrityError` that does.
+
+A read of rows with `select_for_update()` (`get()`, `first()`, `last()`, iteration) outside a transaction raises
+`TransactionManagementError` before it is sent, since the lock would end with the statement.
 
 ## Tasks inside a transaction
 

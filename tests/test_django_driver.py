@@ -11,7 +11,7 @@ from django.db import connections
 import adorm
 
 from adorm import ConnectionProfile, NotSupportedError
-from adorm.drivers.django import CAPABILITIES, DjangoConnection, DjangoDriver
+from adorm.drivers.django import CAPABILITIES, DjangoConnection, DjangoDriver, READ_CAPABILITIES
 from adorm.executor import Pool, Router, set_runner
 from tests.generated.library import Author
 
@@ -191,8 +191,27 @@ async def test_the_connect_hook_cannot_bypass_djangos_pool(library):  # noqa: AR
 
 
 def test_capabilities():
-    assert CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists"}
-    assert {"lookup.in", "lookup.iregex", "function.Lower", "expression.Subquery"} <= CAPABILITIES.constructs
-    assert not CAPABILITIES.savepoints
+    assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists"}
+    assert CAPABILITIES.operations == READ_CAPABILITIES.operations | {
+        "create",
+        "save",
+        "update",
+        "delete",
+        "delete_instance",
+        "get_or_create",
+        "update_or_create",
+    }
+    assert {"lookup.in", "function.Lower", "expression.Subquery", "expression.CombinedExpression"} <= (
+        READ_CAPABILITIES.constructs
+    )
+    assert CAPABILITIES.constructs - READ_CAPABILITIES.constructs == {
+        "clause.select_for_update",
+        "clause.select_for_update.nowait",
+        "clause.select_for_update.skip_locked",
+        "clause.select_for_update.of",
+        "clause.select_for_update.no_key",
+    }
+    assert CAPABILITIES.savepoints
+    assert not READ_CAPABILITIES.savepoints
     assert CAPABILITIES.cancellation
     assert DjangoDriver.mode == "threaded"

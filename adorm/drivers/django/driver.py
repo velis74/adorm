@@ -1,26 +1,49 @@
-"""The Django ORM driver: adorm reads executed with Django's synchronous ORM, one thread per connection."""
+"""The Django ORM driver: adorm operations executed with Django's synchronous ORM, one thread per connection."""
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
+import logging
 import threading
 
+from collections.abc import Callable, Iterator
 from typing import Any
 
 from adorm.drivers.base import Capabilities, ThreadedConnection, ThreadedDriver
-from adorm.drivers.django.translation import translate
+from adorm.drivers.django.translation import (
+    django_model,
+    field_kwargs,
+    instance_row,
+    lookup_kwargs,
+    model_queryset,
+    translate,
+)
 from adorm.exceptions import (
     InterfaceError,
     MultipleObjectsReturned,
     NotSupportedError,
     ObjectDoesNotExist,
     ProgrammingError,
+    ProtectedError,
+    RestrictedError,
     TransactionManagementError,
     ValidationError,
     wrap_driver_error,
 )
+from adorm.operations import ModelRow
 
-__all__ = ["CAPABILITIES", "DjangoConnection", "DjangoDriver", "adopt_context_locals", "map_django_error"]
+__all__ = [
+    "CAPABILITIES",
+    "READ_CAPABILITIES",
+    "DjangoConnection",
+    "DjangoDriver",
+    "adopt_context_locals",
+    "map_django_error",
+    "model_row",
+]
+
+logger = logging.getLogger("adorm.drivers.django")
 
 _LOOKUP_NAMES = (
     "exact",
@@ -42,7 +65,7 @@ _LOOKUP_NAMES = (
     "iregex",
 )
 
-CAPABILITIES = Capabilities(
+READ_CAPABILITIES = Capabilities(
     operations={"select", "get", "first", "last", "count", "exists"},
     constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
     | {
@@ -57,20 +80,48 @@ CAPABILITIES = Capabilities(
         "function.Lower",
         "function.Upper",
         "expression.Subquery",
+        "expression.CombinedExpression",
     },
     cancellation=True,
 )
-"""What `DjangoDriver` supports."""
+"""The reads and constructs the Django query translation supports; the native PostgreSQL driver declares them too."""
+
+CAPABILITIES = Capabilities(
+    operations=READ_CAPABILITIES.operations
+    | {"create", "save", "update", "delete", "delete_instance", "get_or_create", "update_or_create"},
+    constructs=READ_CAPABILITIES.constructs
+    | {
+        "clause.select_for_update",
+        "clause.select_for_update.nowait",
+        "clause.select_for_update.skip_locked",
+        "clause.select_for_update.of",
+        "clause.select_for_update.no_key",
+    },
+    savepoints=True,
+    cancellation=True,
+)
+"""What `DjangoDriver` supports: `READ_CAPABILITIES`, the writes, row locks and savepoints."""
+
+
+def model_row(instance: Any) -> ModelRow:
+    """A Django model instance as a `ModelRow`: its label and `instance_row()`."""
+    return ModelRow(instance._meta.label, instance_row(instance))
 
 
 def map_django_error(exc: BaseException) -> BaseException:
     """The adorm exception for ``exc``, raised by Django or its database library; what has no Django-specific mapping
-    goes to `wrap_driver_error`. The result carries ``exc`` as ``__cause__``."""
+    goes to `wrap_driver_error`. The objects of Django's ``ProtectedError`` and ``RestrictedError`` become
+    `model_row()` values. The result carries ``exc`` as ``__cause__``."""
     from django.core import exceptions as django_exceptions
     from django.db import transaction
+    from django.db.models import deletion
 
     mapped: BaseException
-    if isinstance(exc, django_exceptions.ObjectDoesNotExist):
+    if isinstance(exc, deletion.ProtectedError):
+        mapped = ProtectedError(exc.args[0], tuple(map(model_row, exc.protected_objects)), original=exc)
+    elif isinstance(exc, deletion.RestrictedError):
+        mapped = RestrictedError(exc.args[0], tuple(map(model_row, exc.restricted_objects)), original=exc)
+    elif isinstance(exc, django_exceptions.ObjectDoesNotExist):
         mapped = ObjectDoesNotExist(*exc.args)
     elif isinstance(exc, django_exceptions.MultipleObjectsReturned):
         mapped = MultipleObjectsReturned(*exc.args)
@@ -123,6 +174,17 @@ class _HookDatabase:
         return getattr(self._module, name)
 
 
+_INERROR = 3
+"""libpq's ``PQTRANS_INERROR``: the open transaction failed (psycopg 3 ``TransactionStatus``, psycopg 2 constants)."""
+
+
+def _transaction_failed(db: Any) -> bool:
+    """Whether the database connection of Django's wrapper ``db`` is in a failed transaction."""
+    info = getattr(db.connection, "info", None)
+    status = getattr(info, "transaction_status", None)
+    return status is not None and int(status) == _INERROR
+
+
 class DjangoConnection(ThreadedConnection):
     """A Django database connection, the thread's own ``connections[profile.alias]``.
 
@@ -130,16 +192,27 @@ class DjangoConnection(ThreadedConnection):
     alias's ``DATABASES`` entry for this connection; ``profile.connect``, when set, returns the DB-API connection that
     Django's wrapper uses instead of opening one (for psycopg 3, opened with the wrapper's
     ``get_connection_params()``), and Django configures it as its own (isolation level, time zone, role).
-    ``target`` (what profile hooks receive) is Django's connection wrapper. Every call sees Django's active language
-    and time zone of the caller (`adopt_context_locals()`).
+    ``target`` (what profile hooks receive) is Django's connection wrapper. Every call sees Django's active language and
+    time zone of the caller (`adopt_context_locals()`) and runs its ORM calls on the profile's alias.
+
+    A transaction is an outermost ``transaction.atomic()`` block of the alias, entered by ``begin()`` and left by
+    ``commit()`` or ``rollback()``; a savepoint is a Django savepoint inside it, so Django's ``on_commit()`` callbacks
+    and its own atomic blocks behave as in an atomic block of Django code.
     """
 
     driver: DjangoDriver
     db: Any
+    _atomic: Any = None
+    _savepoints: list[tuple[str, str]]
 
     @property
     def target(self) -> Any:
         return self.db
+
+    @property
+    def alias(self) -> str:
+        """The Django database alias of the connection, ``profile.alias``."""
+        return self.profile.alias
 
     def prepare_call_sync(self) -> None:
         adopt_context_locals()
@@ -159,12 +232,16 @@ class DjangoConnection(ThreadedConnection):
                 raise NotSupportedError("a profile's connect hook cannot be combined with Django's connection pool")
             db.Database = _HookDatabase(db.Database, lambda: connect(self.profile))
         self.db = db
+        self._savepoints = []
         db.ensure_connection()
 
     def execute_sync(self, operation: Any) -> Any:
         kind = operation.kind
+        write = _WRITES.get(kind)
+        if write is not None:
+            return write(self.alias, operation)
         translated = translate(operation.query)
-        queryset = translated.queryset
+        queryset = translated.queryset.using(self.alias)
         if kind == "select":
             return translated.rows(queryset)
         if kind == "get":
@@ -178,16 +255,99 @@ class DjangoConnection(ThreadedConnection):
             return queryset.exists()
         raise NotSupportedError(f"the Django driver does not execute {kind!r} operations")
 
+    # Transactions
+
+    def _require_transaction(self) -> Any:
+        if self._atomic is None:
+            raise TransactionManagementError("no transaction is open on this connection")
+        return self._atomic
+
+    def _sync_savepoint_ids(self) -> None:
+        self.db.savepoint_ids = [sid for _, sid in self._savepoints]
+
+    def _savepoint_index(self, name: str) -> int:
+        self._require_transaction()
+        for index, (savepoint, _) in enumerate(self._savepoints):
+            if savepoint == name:
+                return index
+        raise TransactionManagementError(f"no savepoint {name!r} is open")
+
+    def _leave(self, atomic: Any, *, rollback: bool) -> None:
+        """Leave the outermost atomic block ``atomic``: commit, or roll back with ``rollback``."""
+        self._atomic = None
+        self._savepoints = []
+        self.db.savepoint_ids = []
+        if rollback:
+            self.db.needs_rollback = True
+        atomic.__exit__(None, None, None)
+
     def begin_sync(self) -> None:
-        self.db.set_autocommit(False)
+        from django.db import transaction
+
+        if self._atomic is not None:
+            raise TransactionManagementError("a transaction is already open on this connection")
+        if self.db.in_atomic_block:
+            # A direct connection on a thread inside Django's own atomic block.
+            raise TransactionManagementError("the thread's Django connection is inside an atomic block")
+        atomic = transaction.atomic(using=self.alias)
+        atomic.__enter__()
+        self._atomic = atomic
+        self._savepoints = []
+
+    def savepoint_sync(self, name: str) -> None:
+        self._require_transaction()
+        if any(savepoint == name for savepoint, _ in self._savepoints):
+            raise TransactionManagementError(f"the savepoint {name!r} is already open")
+        sid = self.db.savepoint()
+        self._savepoints.append((name, sid))
+        self._sync_savepoint_ids()
+
+    def release_savepoint_sync(self, name: str) -> None:
+        index = self._savepoint_index(name)
+        # Releasing a savepoint releases the savepoints opened after it.
+        self.db.savepoint_commit(self._savepoints[index][1])
+        del self._savepoints[index:]
+        self._sync_savepoint_ids()
+
+    def rollback_to_savepoint_sync(self, name: str) -> None:
+        index = self._savepoint_index(name)
+        # Django refuses every query of a transaction marked for rollback, ROLLBACK TO SAVEPOINT included.
+        self.db.needs_rollback = False
+        # Django drops the on_commit callbacks registered after the savepoint.
+        self.db.savepoint_rollback(self._savepoints[index][1])
+        del self._savepoints[index + 1 :]
+        self._sync_savepoint_ids()
 
     def commit_sync(self) -> None:
-        self.db.commit()
-        self.db.set_autocommit(True)
+        atomic = self._require_transaction()
+        db = self.db
+        if db.closed_in_transaction:
+            self._leave(atomic, rollback=True)
+            raise InterfaceError("the connection was closed inside the transaction")
+        if db.needs_rollback or _transaction_failed(db):
+            self._leave(atomic, rollback=True)
+            raise TransactionManagementError("the transaction failed earlier, so it was rolled back")
+        callbacks, db.run_on_commit = db.run_on_commit, []
+        self._leave(atomic, rollback=False)
+        if callbacks:
+            # After the commit's outcome: cancelling the caller cannot reach them or turn the commit into a cancel.
+            self.after_call_sync(lambda: self._run_on_commit(callbacks))
+
+    def _run_on_commit(self, callbacks: list[tuple[Any, Callable[[], Any], bool]]) -> None:
+        """Run Django's ``on_commit()`` callbacks of a committed transaction in order. A failure is logged, since the
+        commit stands; a callback without ``robust`` that fails stops the remaining ones, as in Django."""
+        for _, func, robust in callbacks:
+            try:
+                func()
+            except Exception:
+                logger.exception("Django on_commit callback %r failed", func)
+                if not robust:
+                    return
 
     def rollback_sync(self) -> None:
-        self.db.rollback()
-        self.db.set_autocommit(True)
+        atomic = self._atomic
+        if atomic is not None:
+            self._leave(atomic, rollback=True)
 
     def cancel_sync(self) -> None:
         # May run before connect_sync() has opened the connection.
@@ -200,15 +360,169 @@ class DjangoConnection(ThreadedConnection):
 
     def close_sync(self) -> None:
         db = getattr(self, "db", None)
-        if db is not None:
+        if db is None:
+            return
+        atomic, self._atomic = self._atomic, None
+        self._savepoints = []
+        if atomic is None:
             db.close()
+            return
+        # Closing inside the transaction leaves its rollback to the database; leaving the block resets Django's
+        # transaction state of the wrapper, which a direct driver's next connection on this thread reuses.
+        db.savepoint_ids = []
+        try:
+            db.close()
+        finally:
+            atomic.__exit__(None, None, None)
 
     def map_error(self, exc: BaseException) -> BaseException:
         return map_django_error(exc)
 
 
+# Writes: each runs on the connection's thread and returns plain data.
+
+
+def _manager(model: Any, name: str | None) -> Any:
+    if name is None:
+        return model._base_manager
+    from django.db import models
+
+    manager = getattr(model, name, None)
+    if not isinstance(manager, models.Manager):
+        raise ProgrammingError(f"{model._meta.label} has no Django manager {name!r}")
+    return manager
+
+
+def _create(alias: str, operation: Any) -> dict[str, Any]:
+    model = django_model(operation.model)
+    kwargs = field_kwargs(operation.model, operation.values)
+    instance = _manager(model, operation.manager).db_manager(alias).create(**kwargs)
+    return instance_row(instance)
+
+
+def _insert(alias: str, model: Any, kwargs: dict[str, Any], pk: Any, force: bool) -> dict[str, Any]:
+    instance = model(**kwargs)
+    if pk is not None:
+        instance.pk = pk
+    instance.save(using=alias, force_insert=force)
+    return instance_row(instance)
+
+
+def _save(alias: str, operation: Any) -> dict[str, Any]:
+    model = django_model(operation.model)
+    names = [name for name, _ in operation.values]
+    kwargs = field_kwargs(operation.model, operation.values)
+    if operation.pk is None or operation.force_insert:
+        return _insert(alias, model, kwargs, operation.pk, operation.force_insert)
+    opts = model._meta
+    by_name = dict(zip(names, kwargs, strict=True))
+    values = {opts.get_field(key).attname: value for key, value in kwargs.items()}
+    # Every primary key on the way to the row (the parents' of a multi-table child too) has the instance's value.
+    loaded = [
+        (field.attname, operation.pk if field.primary_key else values[field.attname])
+        for field in opts.concrete_fields
+        if field.primary_key or field.attname in values
+    ]
+    instance = model.from_db(alias, [name for name, _ in loaded], [value for _, value in loaded])
+    if operation.update_fields is None and len(loaded) < len(opts.concrete_fields):
+        # Django saves a partly loaded instance with update_fields, which never inserts; the row is checked first.
+        if not model._base_manager.using(alias).filter(pk=operation.pk).exists():
+            if operation.force_update:
+                from django.db import DatabaseError
+
+                raise DatabaseError("Forced update did not affect any rows.")
+            return _insert(alias, model, kwargs, operation.pk, True)
+        if not values:
+            return instance_row(instance)
+    update_fields = None if operation.update_fields is None else [by_name[n] for n in operation.update_fields]
+    instance.save(using=alias, update_fields=update_fields, force_update=operation.force_update)
+    return instance_row(instance)
+
+
+def _update(alias: str, operation: Any) -> int:
+    queryset = model_queryset(operation.query).using(alias)
+    return queryset.update(**field_kwargs(operation.query, operation.values))
+
+
+def _delete(alias: str, operation: Any) -> tuple[int, dict[str, int]]:
+    with _complete_error_objects(alias):
+        total, counts = model_queryset(operation.query).using(alias).delete()
+    return total, dict(counts)
+
+
+def _delete_instance(alias: str, operation: Any) -> tuple[int, dict[str, int]]:
+    model = django_model(operation.model)
+    try:
+        instance = model._base_manager.using(alias).get(pk=operation.pk)
+    except model.DoesNotExist:
+        return 0, {}
+    with _complete_error_objects(alias):
+        result = instance.delete(using=alias)
+    # A delete() override (a soft delete) may return something else; it deleted nothing then.
+    if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], int):
+        return result[0], dict(result[1])
+    return 0, {}
+
+
+@contextlib.contextmanager
+def _complete_error_objects(alias: str) -> Iterator[None]:
+    """Replace the objects of a ``ProtectedError`` or ``RestrictedError`` raised in the block with complete ones."""
+    from django.db.models import deletion
+
+    try:
+        yield
+    except deletion.ProtectedError as exc:
+        exc.protected_objects = _reloaded(alias, exc.protected_objects)
+        raise
+    except deletion.RestrictedError as exc:
+        exc.restricted_objects = _reloaded(alias, exc.restricted_objects)
+        raise
+
+
+def _reloaded(alias: str, objects: Any) -> list[Any]:
+    """``objects`` (Django instances that may have deferred fields) read again with every field, one query per
+    model, in the order of their primary keys."""
+    by_model: dict[Any, list[Any]] = {}
+    for instance in objects:
+        by_model.setdefault(type(instance), []).append(instance.pk)
+    reloaded: list[Any] = []
+    for model, pks in by_model.items():
+        reloaded.extend(model._base_manager.using(alias).filter(pk__in=pks).order_by("pk"))
+    return reloaded
+
+
+def _get_or_create(alias: str, operation: Any) -> tuple[dict[str, Any], bool]:
+    queryset = model_queryset(operation.query).using(alias)
+    instance, created = queryset.get_or_create(
+        defaults=field_kwargs(operation.query, operation.defaults), **lookup_kwargs(operation.query, operation.lookups)
+    )
+    return instance_row(instance), created
+
+
+def _update_or_create(alias: str, operation: Any) -> tuple[dict[str, Any], bool]:
+    queryset = model_queryset(operation.query).using(alias)
+    create_defaults = operation.create_defaults
+    instance, created = queryset.update_or_create(
+        defaults=field_kwargs(operation.query, operation.defaults),
+        create_defaults=None if create_defaults is None else field_kwargs(operation.query, create_defaults),
+        **lookup_kwargs(operation.query, operation.lookups),
+    )
+    return instance_row(instance), created
+
+
+_WRITES: dict[str, Callable[[str, Any], Any]] = {
+    "create": _create,
+    "save": _save,
+    "update": _update,
+    "delete": _delete,
+    "delete_instance": _delete_instance,
+    "get_or_create": _get_or_create,
+    "update_or_create": _update_or_create,
+}
+
+
 class DjangoDriver(ThreadedDriver):
-    """Executes adorm reads with Django's ORM.
+    """Executes adorm reads and writes with Django's ORM.
 
     Each connection runs on a thread of its own with that thread's Django connection for the profile's ``alias``;
     only synchronous ORM methods are called, in a copy of the caller's context (Django's active language included).

@@ -117,7 +117,8 @@ through it and drops any other event with an error on the `adorm.executor` logge
 | `ValidationError` | the messages by field, or the list of messages |
 | any other exception | `DatabaseError`, with the message `"<class name>: <message>"` |
 
-The driver's `original` exception and the operation an `OperationTimeout` names are not encoded.
+The driver's `original` exception, the objects of a `ProtectedError` or `RestrictedError` and the operation an
+`OperationTimeout` names are not encoded.
 
 ### `adorm.events.decode_error(data)`
 

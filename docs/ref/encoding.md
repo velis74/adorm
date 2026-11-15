@@ -69,8 +69,8 @@ A value is typed by:
   the text pattern lookups (`iexact`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`) a
   string, except `contains` on a container field (the field's type) or a record field (untyped); the others the
   field's type; each value of `in` and `range` has that type;
-- a field value of `Create`, `Save`, `Update` and the defaults of `GetOrCreate`: the field's type; the primary key of
-  `Save`: the primary key's type;
+- a field value of `Create`, `Save`, `Update` and the defaults of `GetOrCreate` and `UpdateOrCreate`: the field's type; the primary key of
+  `Save` and `DeleteInstance`: the primary key's type;
 - `Value(value, output_type=...)`: the `output_type`;
 - a `Value` without `output_type`: the type of its position. A `Case` passes its `output_type`, or else its own
   position's type, to the results of its `When` branches and its `default`; a `Coalesce` passes it to its arguments.

@@ -20,7 +20,7 @@ from typing import Any
 
 import adorm
 
-from adorm import F, MultipleObjectsReturned, ObjectDoesNotExist, Q, Value
+from adorm import F, MultipleObjectsReturned, ObjectDoesNotExist, ProtectedError, Q, Value
 from adorm.query import (
     Avg,
     Case as CaseWhen,
@@ -1223,6 +1223,152 @@ async def get_or_create():
     new, created_new = await Tag.objects.get_or_create(name="night")
     again, created_again = await Tag.objects.get_or_create(name="night")
     return (created, found.name), (created_new, new.name), (created_again, again.name)
+
+
+def _django_update_or_create():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    ana, created = DjangoMember.objects.update_or_create(email="ana.0@example.com", defaults={"level": "advanced"})
+    new, created_new = DjangoMember.objects.update_or_create(
+        email="new@example.com",
+        defaults={"level": "advanced"},
+        create_defaults={"first_name": "Nina", "last_name": "Nova", "joined": START, "level": "intermediate"},
+    )
+    stored = DjangoMember.objects.get(email="ana.0@example.com")
+    return (created, ana.level, ana.last_name), (created_new, new.level, new.first_name), stored.level
+
+
+@case(
+    "update_or_create",
+    "get",
+    "lookup.exact",
+    expected=((False, "advanced", "Novak"), (True, "intermediate", "Nina"), "advanced"),
+    django=_django_update_or_create,
+)
+async def update_or_create():
+    ana, created = await Member.objects.update_or_create(email="ana.0@example.com", defaults={"level": "advanced"})
+    new, created_new = await Member.objects.update_or_create(
+        email="new@example.com",
+        defaults={"level": "advanced"},
+        create_defaults={"first_name": "Nina", "last_name": "Nova", "joined": START, "level": "intermediate"},
+    )
+    stored = await Member.objects.get(email="ana.0@example.com")
+    return (created, ana.level, ana.last_name), (created_new, new.level, new.first_name), stored.level
+
+
+def _django_delete_an_instance():
+    from demo.backend.billing.models import Payment as DjangoPayment
+
+    payment = DjangoPayment.objects.get(reference="SI00 0001")
+    deleted = payment.delete()
+    return deleted, payment.pk, DjangoPayment.objects.count()
+
+
+@case(
+    "get",
+    "delete_instance",
+    "count",
+    "lookup.exact",
+    expected=((1, {"billing.Payment": 1}), None, 6),
+    django=_django_delete_an_instance,
+)
+async def delete_an_instance():
+    payment = await Payment.objects.get(reference="SI00 0001")
+    deleted = await payment.delete()
+    return deleted, payment.pk, await Payment.objects.count()
+
+
+def _django_delete_protected():
+    from django.db.models import ProtectedError as DjangoProtectedError
+
+    from demo.backend.billing.models import Invoice as DjangoInvoice
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    try:
+        DjangoMember.objects.filter(first_name="Ana").delete()
+    except DjangoProtectedError as exc:
+        objects = exc.protected_objects
+        protected = sorted(o.number for o in objects), all(isinstance(o, DjangoInvoice) for o in objects)
+    return protected, DjangoMember.objects.count()
+
+
+@case(
+    "delete",
+    "count",
+    "lookup.exact",
+    expected=((["2026-0001", "2026-0011"], True), 12),
+    refusals={"memory": "does not cascade"},
+    django=_django_delete_protected,
+)
+async def delete_protected():
+    try:
+        await Member.objects.filter(first_name="Ana").delete()
+    except ProtectedError as exc:
+        objects = exc.protected_objects
+        protected = sorted(o.number for o in objects), all(isinstance(o, Invoice) for o in objects)
+    return protected, await Member.objects.count()
+
+
+def _django_catch_a_protected_error_inside_a_transaction():
+    from django.db import transaction
+    from django.db.models import ProtectedError as DjangoProtectedError
+
+    from demo.backend.clubs.models import Club as DjangoClub, Member as DjangoMember
+
+    refused = False
+    with transaction.atomic():
+        try:
+            DjangoMember.objects.filter(first_name="Ana").delete()
+        except DjangoProtectedError:
+            refused = True
+        DjangoClub.objects.filter(slug="koper-sailing").update(city="Capodistria")
+    return refused, DjangoClub.objects.filter(city="Capodistria").count(), DjangoMember.objects.count()
+
+
+@case(
+    "delete",
+    "update",
+    "count",
+    "lookup.exact",
+    expected=(True, 1, 12),
+    refusals={"memory": "does not cascade"},
+    django=_django_catch_a_protected_error_inside_a_transaction,
+)
+async def catch_a_protected_error_inside_a_transaction():
+    refused = False
+    async with adorm.atomic():
+        try:
+            await Member.objects.filter(first_name="Ana").delete()
+        except ProtectedError:
+            refused = True
+        await Club.objects.filter(slug="koper-sailing").update(city="Capodistria")
+    return refused, await Club.objects.filter(city="Capodistria").count(), await Member.objects.count()
+
+
+def _django_save_with_arithmetic():
+    from django.db.models import F as DjangoF
+
+    from demo.backend.activities.models import Activity as DjangoActivity
+
+    crag = DjangoActivity.objects.get(name="Crag day")
+    crag.capacity = DjangoF("capacity") + 1
+    crag.save(update_fields=["capacity"])
+    return DjangoActivity.objects.get(name="Crag day").capacity
+
+
+@case(
+    "get",
+    "save",
+    "lookup.exact",
+    "expression.CombinedExpression",
+    expected=16,
+    django=_django_save_with_arithmetic,
+)
+async def save_with_arithmetic():
+    crag = await Activity.objects.get(name="Crag day")
+    crag.capacity = F("capacity") + 1
+    await crag.save(update_fields=["capacity"])
+    return (await Activity.objects.get(name="Crag day")).capacity
 
 
 def _django_update_a_parent_row_of_a_multi_table_child():

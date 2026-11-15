@@ -186,6 +186,23 @@ Raises `TypeError` for a string `update_fields` and a result that is not a mappi
 primary key value, and [`InterfaceError`](./exceptions) when no executor is available. A failed or cancelled save
 leaves the instance unchanged.
 
+#### `delete()`
+
+Coroutine: delete the instance's row and the rows that cascade from it with a
+[`DeleteInstance`](./operations#adorm-operations-deleteinstance-model-pk) operation on the instance's executor, which
+runs the target's delete of one instance (on the Django driver the model's `delete()`, an override included). Returns
+`(total, {label: count})`; when rows were deleted it sets the primary key to `None`, otherwise (a missing row, a
+`delete()` override that deletes nothing) the instance keeps it.
+
+```python
+payment = await Payment.objects.get(reference="SI00 0001")
+await payment.delete()        # (1, {"billing.Payment": 1}); payment.pk is None
+```
+
+Raises `ValueError` without a primary key value and [`InterfaceError`](./exceptions) when no executor is available. A
+reference that forbids the delete raises `ProtectedError` or `RestrictedError` with instances of the registered
+models as its objects, as [`QuerySet.delete()`](./queryset#async-delete) does; the instance keeps its primary key.
+
 ### `adorm.ModelMeta(label, pk="id", *, schema_hash=None, orm_names=None)`
 
 The identity of a model: its `label` (`"app_label.ModelName"`) and the name of its primary key field. A frozen

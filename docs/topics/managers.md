@@ -1,9 +1,10 @@
 # Managers and driver methods
 
 ::: info Status
-The installed [Django driver](/topics/django-driver) and [native PostgreSQL driver](/topics/postgresql-driver)
-apply a manager's `get_queryset()` to reads (`clause.manager`). Driver methods (`call` operations) and the write
-overrides (`create()`, `delete()`, `update()` …) raise `NotSupportedError` on both.
+The installed [Django driver](/topics/django-driver) applies a manager's `get_queryset()` (`clause.manager`) and its
+write overrides (`create()`, `update()`, `delete()`, `get_or_create()`, `update_or_create()`); the
+[native PostgreSQL driver](/topics/postgresql-driver) applies `get_queryset()` to reads only. Driver methods (`call`
+operations) raise `NotSupportedError` on both.
 :::
 
 A Django model carries logic in its managers and query sets: a `get_queryset()` that hides soft-deleted rows, a
@@ -50,8 +51,8 @@ class Loan(Model):
     all_loans = Manager()             # the plain rows, on every driver
 ```
 
-`Manager(orm_name)` names the target ORM's manager. Every query, `create()`, `update()`, `delete()` and
-`get_or_create()` of `Loan.objects` carries that name ([`Query.manager`](/ref/query#adorm-query-query-model-manager-none)),
+`Manager(orm_name)` names the target ORM's manager. Every query, `create()`, `update()`, `delete()`,
+`get_or_create()` and `update_or_create()` of `Loan.objects` carries that name ([`Query.manager`](/ref/query#adorm-query-query-model-manager-none)),
 so the driver starts from that manager: Django's `Loan.objects.get_queryset()` decides the rows and Django's
 query set methods run the writes. `Manager()` without a name reads and writes the rows without manager logic.
 

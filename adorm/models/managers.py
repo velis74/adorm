@@ -257,6 +257,12 @@ class BoundModel:
         """``await all().get_or_create(...)``."""
         return await self.all().get_or_create(defaults, **lookups)
 
+    async def update_or_create(
+        self, defaults: Any = None, create_defaults: Any = None, **lookups: Any
+    ) -> tuple[Any, bool]:
+        """``await all().update_or_create(...)``."""
+        return await self.all().update_or_create(defaults, create_defaults, **lookups)
+
     async def update(self, **values: Any) -> int:
         """``await all().update(...)``."""
         return await self.all().update(**values)

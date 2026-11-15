@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
 
-from adorm.exceptions import InterfaceError
+from adorm.exceptions import InterfaceError, TransactionManagementError
 from adorm.executor.transactions import active_transaction, Atomic
 from adorm.models.base import Model, set_executor_resolver
 from adorm.models.managers import BoundModel
@@ -159,10 +159,13 @@ class Session:
 
     async def execute(self, operation: Operation) -> Any:
         """Run ``operation``: in the transaction of this session active in the current context, or else on the
-        `Runner` (`get_runner()`). Without a transaction and a runner it raises `InterfaceError`."""
+        `Runner` (`get_runner()`). Without a transaction and a runner it raises `InterfaceError`; a read of rows with
+        ``select_for_update()`` without a transaction raises `TransactionManagementError`."""
         transaction = active_transaction(self)
         if transaction is not None:
             return await transaction.execute(operation)
+        if operation.kind in _ROW_READS and operation.query.for_update is not None:  # type: ignore[attr-defined]
+            raise TransactionManagementError("select_for_update() cannot be used outside of a transaction")
         runner = get_runner()
         if runner is None:
             raise InterfaceError(f"no runner executes operations outside a transaction (session {self!r})")
@@ -171,6 +174,9 @@ class Session:
     def __repr__(self) -> str:
         return f"Session({self.using!r}, {self.session_name!r})"
 
+
+_ROW_READS = frozenset({"select", "get", "first", "last"})
+"""Operation kinds that read rows and so lock them with ``select_for_update()``."""
 
 _sessions: weakref.WeakValueDictionary[tuple[str, str], Session] = weakref.WeakValueDictionary()
 _sessions_lock = threading.Lock()

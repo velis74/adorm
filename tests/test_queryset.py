@@ -19,11 +19,28 @@ from adorm import (
     ModelMeta,
     MultipleObjectsReturned,
     ObjectDoesNotExist,
+    ProtectedError,
     Q,
     QuerySet,
+    RestrictedError,
 )
 from adorm.executor import bind_transaction
-from adorm.operations import Count, Create, Delete, Exists, First, Get, GetOrCreate, Last, Operation, Select, Update
+from adorm.operations import (
+    Count,
+    Create,
+    Delete,
+    DeleteInstance,
+    Exists,
+    First,
+    Get,
+    GetOrCreate,
+    Last,
+    ModelRow,
+    Operation,
+    Select,
+    Update,
+    UpdateOrCreate,
+)
 from adorm.query import Query
 
 
@@ -334,6 +351,59 @@ async def test_get_or_create():
     assert (await qs.get_or_create(name="Ana"))[1] is False
 
 
+async def test_update_or_create():
+    executor = Executor(({"id": 1, "name": "Ana", "fee": decimal.Decimal(7)}, False), ({"id": 2, "name": "Bo"}, 1))
+    qs = players(executor).filter(team_id=3)
+    player, created = await qs.update_or_create(name="Ana", defaults={"fee": 7})
+    assert (player.pk, player.fee, created) == (1, decimal.Decimal(7), False)
+    assert player._state.executor is executor
+    player, created = await qs.update_or_create({"fee": 1}, {"fee": 2}, name="Bo")
+    assert (player.pk, created) == (2, True)
+    assert executor.operations == [
+        UpdateOrCreate(qs.query, {"name": "Ana"}, {"fee": 7}),
+        UpdateOrCreate(qs.query, {"name": "Bo"}, {"fee": 1}, {"fee": 2}),
+    ]
+
+
+async def test_a_protected_delete_raises_with_instances_of_the_registered_models():
+    rows = (ModelRow("querysettest.Team", {"id": 3, "name": "Red"}), ModelRow("other.Unknown", {"id": 1}))
+    executor = Executor(ProtectedError("referenced", rows), RestrictedError("restricted", rows[:1]))
+    with pytest.raises(ProtectedError) as raised:
+        await players(executor).filter(name="Ana").delete()
+    team, unknown = raised.value.protected_objects
+    assert isinstance(team, Team)
+    assert (team.pk, team.name, team._state.executor) == (3, "Red", executor)
+    assert unknown == rows[1]
+    with pytest.raises(RestrictedError) as restricted:
+        await players(executor).delete()
+    assert [type(o) for o in restricted.value.restricted_objects] == [Team]
+
+
+async def test_deleting_an_instance():
+    executor = Executor(
+        (1, {"querysettest.Player": 1}), ProtectedError("referenced", (ModelRow("querysettest.Team", {"id": 3}),))
+    )
+    player = Player.from_row({"id": 4, "name": "Ana"}, executor=executor)
+    assert await player.delete() == (1, {"querysettest.Player": 1})
+    assert player.pk is None
+    assert executor.operations == [DeleteInstance("querysettest.Player", 4)]
+    with pytest.raises(ValueError, match="without a primary key"):
+        await player.delete()
+    other = Player.from_row({"id": 5, "name": "Bo"}, executor=executor)
+    with pytest.raises(ProtectedError) as raised:
+        await other.delete()
+    assert other.pk == 5
+    assert isinstance(raised.value.protected_objects[0], Team)
+    assert len(executor.operations) == 2
+
+
+async def test_an_instance_keeps_its_key_when_its_delete_deleted_no_row():
+    executor = Executor((0, {}))
+    player = Player.from_row({"id": 4, "name": "Ana"}, executor=executor)
+    assert await player.delete() == (0, {})
+    assert player.pk == 4
+
+
 @pytest.mark.parametrize("attempt", range(20))
 async def test_concurrent_terminal_methods_share_nothing(attempt):  # noqa: ARG001 - repeated
     # Several tasks run terminal methods of one query set at once; each gets its own result.
@@ -360,7 +430,17 @@ async def test_concurrent_terminal_methods_share_nothing(attempt):  # noqa: ARG0
 async def test_bound_model_methods_run_on_its_session():
     session = create_session("default", f"test-{uuid.uuid4().hex}")
     executor = Executor(
-        2, True, {"id": 1}, {"id": 1}, {"id": 2}, [{"id": 3}], 1, (1, {}), {"id": 4}, ({"id": 1}, False)
+        2,
+        True,
+        {"id": 1},
+        {"id": 1},
+        {"id": 2},
+        [{"id": 3}],
+        1,
+        (1, {}),
+        {"id": 4},
+        ({"id": 1}, False),
+        ({"id": 1}, False),
     )
     bound = session.Player
     with bind_transaction(session, executor):
@@ -374,6 +454,7 @@ async def test_bound_model_methods_run_on_its_session():
         assert await bound.delete() == (1, {})
         assert (await bound.create(name="X")).pk == 4
         assert (await bound.get_or_create(name="X"))[1] is False
+        assert (await bound.update_or_create(name="X"))[1] is False
     assert [op.kind for op in executor.operations] == [
         "count",
         "exists",
@@ -385,6 +466,7 @@ async def test_bound_model_methods_run_on_its_session():
         "delete",
         "create",
         "get_or_create",
+        "update_or_create",
     ]
     query = Query("querysettest.Player")
     assert bound.all().executor is session

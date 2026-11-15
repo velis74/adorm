@@ -3,6 +3,7 @@ database access in these tests)."""
 
 import contextvars
 import threading
+import uuid
 import zoneinfo
 
 import pytest
@@ -11,14 +12,26 @@ from django.db.models.functions import Lower as DjangoLower
 from django.utils import timezone, translation
 
 from adorm import Count, Exists, F, Length, Lower, NotSupportedError, OuterRef, ProgrammingError, Q, Subquery
-from adorm.drivers.django import adopt_context_locals, map_django_error
-from adorm.drivers.django.translation import django_model, orm_path, output_field, subquery, translate
+from adorm.drivers.django import adopt_context_locals, map_django_error, model_row
+from adorm.drivers.django.translation import (
+    django_model,
+    field_kwargs,
+    instance_row,
+    lookup_kwargs,
+    model_queryset,
+    orm_path,
+    output_field,
+    subquery,
+    translate,
+)
+from adorm.operations import ModelRow
 from adorm.query import Query
 from adorm.query.lookups import Exact
 from tests.djangoproject.library import models as dj
-from tests.generated import library  # noqa: F401 - registers the adorm models
+from tests.generated import library
 
 AUTHOR = "library.Author"
+NOTE_CODE = uuid.UUID(int=5)
 MENTOR_RATING = Query(AUTHOR).filter(pk=OuterRef("mentor")).values("rating")
 
 
@@ -175,12 +188,90 @@ def test_a_lookup_on_an_expression_is_filtered_through_an_alias():
             "OuterRef",
         ),
         (Query(AUTHOR).filter(Exists(Query(AUTHOR))), "Exists"),
-        (Query(AUTHOR).select_for_update(), "select_for_update"),
     ],
 )
 def test_nodes_without_a_translation_raise_not_supported(query, message):
     with pytest.raises(NotSupportedError, match=message):
         translate(query)
+
+
+def test_select_for_update_locks_with_its_options():
+    query = translate(Query(AUTHOR).select_for_update(nowait=True, of=["self", "mentor"], no_key=True)).queryset.query
+    assert (query.select_for_update, query.select_for_update_nowait, query.select_for_no_key_update) == (True,) * 3
+    assert query.select_for_update_of == ("self", "mentor")
+    skip = model_queryset(Query("library.Note").select_for_update(skip_locked=True, of=["copy_"])).query
+    assert (skip.select_for_update_skip_locked, skip.select_for_update_of) == (True, ("copy",))
+
+
+def test_arithmetic_becomes_a_django_combined_expression():
+    from django.db.models import IntegerField
+    from django.db.models.expressions import CombinedExpression
+
+    annotation = translate(Query(AUTHOR).annotate(n=(F("rating") + 1) % 3)).queryset.query.annotations["n"]
+    assert isinstance(annotation, CombinedExpression)
+    assert annotation.connector == "%%"
+    assert isinstance(annotation.lhs, CombinedExpression)
+    assert annotation.lhs.connector == "+"
+    typed = translate(Query(AUTHOR).annotate(n=F("rating").__mul__(2))).queryset.query.annotations["n"]
+    assert typed.connector == "*"
+    combined = field_kwargs(AUTHOR, {"rating": F("rating") * 2})["rating"]
+    assert isinstance(combined, CombinedExpression)
+    from adorm.query.expressions import CombinedExpression as AdormCombined
+
+    with_type = field_kwargs(AUTHOR, {"rating": AdormCombined(F("rating"), "-", 1, output_type=int)})["rating"]
+    assert isinstance(with_type.output_field, IntegerField)
+
+
+def test_model_queryset_selects_no_columns():
+    queryset = model_queryset(Query(AUTHOR).filter(rating__gt=3).order_by("name"))
+    assert queryset.model is dj.Author
+    assert queryset.query.values_select == ()
+    assert queryset.query.where
+
+
+def test_field_kwargs_use_django_names_and_the_values_instances_stand_for():
+    book = library.Book.from_row({"isbn": "9780000000001"})
+    kwargs = field_kwargs("library.Note", {"json_": "{}", "schema_": "v3", "copy_id": book})
+    assert kwargs == {"json": "{}", "schema": "v3", "copy_id": "9780000000001"}
+
+
+@pytest.mark.parametrize(
+    ("lookups", "expected"),
+    [
+        ({"name": "Ann"}, {"name": "Ann"}),
+        ({"pk": 3}, {"pk": 3}),
+        ({"mentor": None}, {"mentor_id": None}),
+        ({"mentor_id": 2}, {"mentor_id": 2}),
+        ({"name__iexact": "ann"}, {"name__iexact": "ann"}),
+        ({"mentor__name": "Bob"}, {"mentor__name": "Bob"}),
+        ({"mentor__name": None}, {"mentor__name": None}),
+        ({"rating__in": [1, 2]}, {"rating__in": (1, 2)}),
+    ],
+)
+def test_lookup_kwargs_keep_plain_keys_creatable(lookups, expected):
+    assert lookup_kwargs(Query(AUTHOR), lookups.items()) == expected
+
+
+def test_lookup_kwargs_turn_an_instance_into_its_key():
+    mentor = library.Author.from_row({"id": 7})
+    assert lookup_kwargs(Query(AUTHOR), [("mentor", mentor)]) == {"mentor_id": 7}
+    note = lookup_kwargs(Query("library.Note"), [("copy_", library.Book.from_row({"isbn": "9780000000001"}))])
+    assert note == {"copy_id": "9780000000001"}
+
+
+def test_instance_rows_use_adorm_names_and_leave_out_what_is_not_loaded():
+    from django.db.models import F as DjangoF
+
+    note = dj.Note(code=NOTE_CODE, object_id="x", json="{}", schema="v3", content_type_id=1)
+    row = instance_row(note)
+    assert row["json_"] == "{}"
+    assert row["schema_"] == "v3"
+    assert row["code"] == NOTE_CODE
+    assert "json" not in row
+    partial = dj.Author.from_db("default", ["id", "name"], [1, "Ann"])
+    partial.rating = DjangoF("rating") + 1
+    assert instance_row(partial) == {"id": 1, "name": "Ann"}
+    assert model_row(partial) == ModelRow("library.Author", {"id": 1, "name": "Ann"})
 
 
 def test_an_unknown_manager_is_a_programming_error():
@@ -216,6 +307,25 @@ def test_django_errors_map_to_adorm_errors():
     tme = map_django_error(transaction.TransactionManagementError("nested"))
     assert type(tme) is exceptions.TransactionManagementError
     assert type(map_django_error(KeyError("x"))) is exceptions.DatabaseError
+
+
+def test_protected_and_restricted_errors_carry_model_rows():
+    from django.db.models import ProtectedError, RestrictedError
+
+    from adorm import exceptions
+
+    ann = dj.Author(id=1, name="Ann", slug="ann", rating=5)
+    tag = dj.Tag.from_db("default", ["id"], [4])
+    protected = map_django_error(ProtectedError("referenced", {ann}))
+    assert type(protected) is exceptions.ProtectedError
+    assert str(protected) == "referenced"
+    assert protected.protected_objects == (ModelRow("library.Author", instance_row(ann)),)
+    assert protected.protected_objects[0].row["name"] == "Ann"
+    assert isinstance(protected.original, ProtectedError)
+    assert protected.__cause__ is protected.original
+    restricted = map_django_error(RestrictedError("restricted", [tag]))
+    assert type(restricted) is exceptions.RestrictedError
+    assert restricted.restricted_objects == (ModelRow("library.Tag", {"id": 4}),)
 
 
 def test_adopted_context_locals_carry_the_language_and_time_zone_to_another_thread():

@@ -53,7 +53,21 @@ from adorm.exceptions import (
     ProgrammingError,
 )
 from adorm.models import ForeignKey, Model, registry
-from adorm.operations import Count, Create, Delete, Exists, First, Get, GetOrCreate, Last, Save, Select, Update
+from adorm.operations import (
+    Count,
+    Create,
+    Delete,
+    DeleteInstance,
+    Exists,
+    First,
+    Get,
+    GetOrCreate,
+    Last,
+    Save,
+    Select,
+    Update,
+    UpdateOrCreate,
+)
 from adorm.query import CombinedExpression, F, OrderBy, Q, Query, Value
 from adorm.query.expressions import Node, OuterRef
 from adorm.query.lookups import Lookup
@@ -121,7 +135,9 @@ CAPABILITIES = Capabilities(
         "save",
         "update",
         "delete",
+        "delete_instance",
         "get_or_create",
+        "update_or_create",
     },
     constructs={f"lookup.{name}" for name in (*LOOKUPS, "isnull")}
     | {"clause.distinct", "expression.CombinedExpression"},
@@ -678,6 +694,19 @@ class MemoryConnection(DriverConnection):
         values.update(operation.defaults)
         return await self._insert(operation.query.model, values), True
 
+    async def _update_or_create(self, operation: UpdateOrCreate) -> tuple[dict[str, Any], bool]:
+        lookups = dict(operation.lookups)
+        query = operation.query.filter(**lookups)
+        try:
+            row = self._one(query)
+        except ObjectDoesNotExist:
+            values = {name: value for name, value in lookups.items() if "__" not in name}
+            values.update(operation.defaults if operation.create_defaults is None else operation.create_defaults)
+            return await self._insert(operation.query.model, values), True
+        pk = row[_model(operation.query.model)._meta.pk]
+        await self._update(Query(operation.query.model).filter(pk=pk), operation.defaults)
+        return self._one(Query(operation.query.model).filter(pk=pk)), False
+
     async def _execute(self, operation: Any) -> Any:
         self._check_open()
         self.record(f"{operation.kind} {operation.model}")
@@ -714,8 +743,12 @@ class MemoryConnection(DriverConnection):
                 return await self._update(operation.query, operation.values)
             case Delete():
                 return await self._delete(operation.query)
+            case DeleteInstance():
+                return await self._delete(Query(operation.model).filter(pk=operation.pk))
             case GetOrCreate():
                 return await self._get_or_create(operation)
+            case UpdateOrCreate():
+                return await self._update_or_create(operation)
         raise NotSupportedError(f"the memory driver does not execute {operation.kind!r} operations")
 
     # Connection
