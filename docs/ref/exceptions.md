@@ -298,6 +298,7 @@ async with adorm.atomic():                 # holds a slot of the "default" pool
 ### `adorm.OperationTimeout(message=None, *, phase=None, operation=None, timeout=None)`
 
 An `adorm.timeout()` block expired. A subclass of `TimeoutError`, so `except TimeoutError` catches it too.
+`adorm.timeout()` is not provided yet, so nothing raises this exception at present.
 
 | Attribute | Value |
 |---|---|

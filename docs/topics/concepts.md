@@ -30,8 +30,8 @@ is in Django. A profile names the driver, the database alias, extra driver param
 - `on_acquire` runs when a session gets a slot (for example `SET ROLE`),
 - `on_release` resets session state when the slot returns to the pool.
 
-Pool settings are `max_connections`, the timeouts, and `purge_stale_connections_at` (see [Pool](#pool) and
-[Slots](#slots)).
+Pool settings are `max_connections`, `acquire_timeout`, `commit_timeout` and `release_timeout` (see [Pool](#pool)
+and [Slots](#slots)).
 
 ```python
 adorm.configure(profiles={"default": {"driver": "myproject.drivers.DjangoDriver", "alias": "default"}})
@@ -103,40 +103,20 @@ sent, then commits; an operation that arrives after the end (from a task that in
 `TransactionClosed`. A slot aborts its transaction when no request (an operation, the commit or the rollback)
 arrives within the pool's `commit_timeout`. The [transactions topic](/topics/transactions) covers all of this.
 
-The connection in a slot lives until it has been idle for `purge_stale_connections_at` seconds. Acquiring a slot
-does nothing to the connection. A slot leaves the pool, and the next request gets a fresh connection, when a
-session ends without commit or rollback, when the driver reports a connection error, or after the slot ran
-custom SQL.
+Acquiring a slot does nothing to the connection. A slot leaves the pool, and the next request gets a fresh
+connection, when a session ends without commit or rollback, when the driver reports that the connection is no
+longer usable, or when a lease is released with `discard=True`. Idle slots are not closed after a period of
+inactivity yet (`purge_stale_connections_at`).
 
 ### Connection options and timeouts
 
-Database-side limits (`statement_timeout`, `lock_timeout`, …) and adorm's own limits (slot acquisition, commit
-deadline) are connection options held in a context variable. Layers apply in order, the last one wins: profile,
-session, block.
+Database-side limits (`statement_timeout`, `lock_timeout`, …) set per block (`adorm.connection_options()`) and a
+client-side limit for adorm operations (`adorm.timeout()`) are not provided yet. A driver already declares the
+options it supports in `Capabilities.connection_options`, and `DriverConnection.set_options()` sets them (see
+[drivers](/ref/drivers)). `OperationTimeout` is defined for `adorm.timeout()`; nothing raises it yet.
 
-```python
-with adorm.connection_options(statement_timeout=5, lock_timeout=2):
-    await Member.objects.filter(active=False).delete()
-```
-
-The slot remembers the values set on its connection and sends `SET` only when a value differs; inside a
-transaction it sends `SET LOCAL`. A driver publishes the options it supports; an unsupported option raises an
-error.
-
-A client-side limit for adorm operations is `adorm.timeout()`. On expiry it raises `OperationTimeout`
-(a `TimeoutError`), whose `phase` is `"waiting_for_slot"` or `"executing"` and whose `operation` names the
-operation that was running.
-
-```python
-try:
-    async with adorm.timeout(5):
-        rows = [m async for m in Member.objects.all()]
-except adorm.OperationTimeout as exc:
-    log.warning("timed out while %s: %s", exc.phase, exc.operation)
-```
-
-Cancelling the client task cancels the statement running in the slot; the slot rolls back and returns to the
-pool.
+Cancelling the client task cancels its request: a queued request never runs, and a running one is cancelled in
+the driver connection (see [the pool topic](/topics/pool)).
 
 ## Pool
 
