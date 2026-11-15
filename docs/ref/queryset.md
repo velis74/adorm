@@ -247,13 +247,26 @@ The first or last row (`First` / `Last`), `None` when there is none. `last()` on
 `TypeError`, and so does `first()` on a sliced query set without `order_by()`. On a grouped query set
 (`values()` followed by an aggregate annotation) both need `order_by()`, otherwise `TypeError`.
 
+```python
+newest = await Member.objects.order_by("joined").last()
+```
+
 #### `async count()`
 
 The number of rows (`Count`), an `int`.
 
+```python
+active = await Membership.objects.filter(club_id=club.id, active=True).count()
+```
+
 #### `async exists()`
 
 Whether the query has a row (`Exists`), a `bool`.
+
+```python
+if not await Invoice.objects.filter(pk=pk, status="open").exists():
+    raise LookupError(pk)
+```
 
 #### `async in_bulk(id_list=None, *, field_name="pk")`
 

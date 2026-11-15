@@ -277,6 +277,10 @@ Query("club.Member").filter(joined__range=(date(2026, 1, 1), date(2026, 6, 30)))
 
 Any value other than `True` or `False` raises `ValueError`.
 
+```python
+Query("club.Member").filter(birth_date__isnull=True)
+```
+
 ### `adorm.query.StartsWith(lhs, rhs)`
 
 ### `adorm.query.IStartsWith(lhs, rhs)`
@@ -294,6 +298,10 @@ compare the field as text, so their right-hand side is typed as a string whateve
 (`token__startswith="3f2a"` on a UUID field). `contains` on a container field (a list, tuple, set, dict or `Any`)
 takes a value of the field's type; on a record field (a pydantic model or `TypedDict`) a partial record, encoded with
 its inferred types.
+
+```python
+Query("club.Member").filter(last_name__istartswith="nov", email__endswith="@example.com")
+```
 
 ### `adorm.query.Regex(lhs, rhs)`
 

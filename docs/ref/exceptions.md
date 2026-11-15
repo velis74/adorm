@@ -59,6 +59,13 @@ except adorm.AdormError:
 A query that expects one object found none. Base class of every model's `DoesNotExist`; catch it to handle a
 missing object of any model.
 
+```python
+try:
+    club = await Club.objects.get(slug=slug)
+except adorm.ObjectDoesNotExist:
+    club = None
+```
+
 ### `adorm.MultipleObjectsReturned`
 
 A query that expects one object found several. Base class of every model's `MultipleObjectsReturned`.

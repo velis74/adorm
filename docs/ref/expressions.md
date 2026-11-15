@@ -178,6 +178,10 @@ Query("club.Member").order_by(Lower("name"))
 
 ### `adorm.Upper(expression)`
 
+```python
+Query("club.Member").filter(code=Upper(Value("lj-01")))
+```
+
 ### `adorm.Length(expression)`
 
 ```python
@@ -192,10 +196,18 @@ Coalesce("nick", "name", Value("?"))
 
 ### `adorm.Concat(*expressions)`
 
+```python
+Query("club.Member").annotate(full_name=Concat("first_name", Value(" "), "last_name"))
+```
+
 ### `adorm.Now()`
 
 The Django and native PostgreSQL drivers give the start time of the statement (`STATEMENT_TIMESTAMP()`), so
 every row of one statement gets the same value.
+
+```python
+Query("club.Activity").filter(starts_at__gte=Now())
+```
 
 ### `adorm.Trunc(expression, kind, output_type=None)`
 
