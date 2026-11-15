@@ -14,7 +14,8 @@ __all__ = ["ModelRegistry", "model_schema", "registry"]
 
 
 def model_schema(model: type[Model]) -> ModelSchema:
-    """The `ModelSchema` of the model class ``model``: its label, primary key, field types and relation targets.
+    """The `ModelSchema` of the model class ``model``: its label, primary key, field types, relation targets and ORM
+    names.
 
     Raises ``TypeError`` for an abstract model (no ``_meta``).
     """
@@ -28,7 +29,7 @@ def model_schema(model: type[Model]) -> ModelSchema:
         hint = info.annotation
         fields[name] = Annotated[(hint, *info.metadata)] if info.metadata else hint
     relations = {name: relation.target for name, relation in get_relations(model).items()}
-    return ModelSchema(meta.label, meta.pk, fields, relations)
+    return ModelSchema(meta.label, meta.pk, fields, relations, orm_names=meta.orm_names)
 
 
 class ModelRegistry:

@@ -1,10 +1,11 @@
 # Model API
 
 The model base class, model identity, relation descriptors and the model registry, importable from
-`adorm.models`. `Model`, `ModelMeta` and `ForeignKey` are also importable from `adorm`.
+`adorm.models`. `Model`, `ModelMeta` and the relation descriptors `ForeignKey`, `ReverseForeignKey`,
+`ReverseOneToOne` and `ManyToMany` are also importable from `adorm`.
 
 ```python
-from adorm import ForeignKey, Model, ModelMeta
+from adorm import ForeignKey, Model, ModelMeta, ReverseOneToOne
 from adorm.models import get_relations, model_schema, registry, set_executor_resolver
 ```
 
@@ -42,7 +43,7 @@ class Member(Model):
 ### `adorm.Model`
 
 Base class of adorm models, a subclass of pydantic `BaseModel`. A model declares `_meta` (a
-[`ModelMeta`](#adorm-modelmeta-label-pk-id)), its fields as pydantic fields and its relations as [`Relation`](#adorm-models-relation-target)
+[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none)), its fields as pydantic fields and its relations as [`Relation`](#adorm-models-relation-target)
 descriptors. A subclass without its own `_meta` inherits its parent's; a model without any `_meta` is abstract: it
 cannot load or save rows and its instances compare by identity.
 
@@ -54,6 +55,7 @@ The model configuration:
 | `ignored_types` | `(Relation, <the objects descriptor>)` | relations and `objects` are class attributes, absent from validation, serialisation and the JSON schema |
 | `serialize_by_alias` | `True` | a field with an alias is dumped under the alias |
 | `validate_by_name`, `validate_by_alias` | `True` | input may use the field name or the alias |
+| `protected_namespaces` | `()` | field names may start with `model_` (a name equal to a pydantic attribute still raises) |
 
 Input (the constructor, `model_validate()`) also accepts:
 
@@ -183,16 +185,44 @@ Raises `TypeError` for a string `update_fields` and a result that is not a mappi
 primary key value, and [`InterfaceError`](./exceptions) when no executor is available. A failed or cancelled save
 leaves the instance unchanged.
 
-### `adorm.ModelMeta(label, pk="id")`
+### `adorm.ModelMeta(label, pk="id", *, schema_hash=None, orm_names=None)`
 
 The identity of a model: its `label` (`"app_label.ModelName"`) and the name of its primary key field. A frozen
 dataclass; an invalid label or pk name raises `ValueError`.
+
+- `schema_hash`: the hash [`adorm generate`](/howto/generating-models) computed from the ORM model
+  ([`adorm.codegen.compute_schema_hash`](./codegen#adorm-codegen-compute-schema-hash-label-pk-fields-relations-parents)),
+  `None` for a model written by hand. An empty or non-string value raises `ValueError`.
+- `orm_names`: the target ORM's name of each field or relation whose Python name differs, by Python name; `None` is an
+  empty mapping. A generated model fills it for the names it renames. A model class's `_meta` also holds the entries
+  of its model bases for the fields and relations it inherits, so a multi-table inheritance child or a proxy maps an
+  inherited name like its parent. It is stored read-only; a name that is not an identifier raises `ValueError`, a
+  model class whose `orm_names` names no field or relation of it raises `TypeError`.
+- `orm_name(name)`: the ORM name of the field or relation `name`, `name` itself when `orm_names` does not list it.
 
 ```python
 class Payment(Model):
     _meta = ModelMeta("club.Payment", pk="code")
     code: str | None = None
     amount: decimal.Decimal
+
+
+class Note(Model):
+    _meta = ModelMeta("club.Note", schema_hash="387e7a453a16eb5e", orm_names={"json_": "json"})
+    id: int | None = None
+    json_: str = Field(default="", alias="json")
+
+
+Note._meta.orm_name("json_")    # "json"
+Note._meta.orm_name("id")       # "id"
+
+
+class SignedNote(Note):
+    _meta = ModelMeta("club.SignedNote", pk="note_ptr_id")
+    note_ptr_id: int | None = None
+
+
+SignedNote._meta.orm_name("json_")    # "json", inherited from Note
 ```
 
 ### `adorm.models.ModelState`
@@ -279,6 +309,35 @@ await club.members.count()   # Count on the club's session
 Club.members.column          # "club_id"
 ```
 
+### `adorm.ReverseOneToOne(target, *, column)`
+
+The reverse side of a one-to-one `ForeignKey`: the row of `target` whose field `column` holds the owner's primary key
+(Django: the other side of a `OneToOneField`, also the parent's side of multi-table inheritance).
+
+- `await instance.rel` returns that row as an instance of `target`, loaded with a `Get` operation
+  (`Query(target).filter(<column>=instance.pk)`) on the owner's executor and cached on the owner. A row loaded with
+  `select_related()` fills the cache.
+- No such row raises the target's `DoesNotExist`, also when `select_related()` cached no row.
+- An instance without a primary key value raises `ValueError`; `column` that is not an identifier raises
+  `ValueError`. On the class, the attribute is the descriptor.
+
+```python
+class Place(Model):
+    _meta = ModelMeta("club.Place")
+    id: int | None = None
+    restaurant = ReverseOneToOne("club.Restaurant", column="place_id")
+
+
+class Restaurant(Model):
+    _meta = ModelMeta("club.Restaurant", pk="place_id")
+    place_id: int | None = None
+    place = ForeignKey("club.Place")
+
+
+restaurant = await place.restaurant   # Get(Query("club.Restaurant").filter(place_id=place.pk))
+restaurant is await place.restaurant  # True, from the cache
+```
+
 ### `adorm.ManyToMany(target, *, through, source_column, target_column)`
 
 A many-to-many relation through the model labelled `through`. Each `through` row links the owner in `source_column`
@@ -301,8 +360,8 @@ activity.tags.query
 
 ### `adorm.models.RelatedObject`
 
-The awaitable a `ForeignKey` returns on an instance. Nothing runs until it is awaited, so reading the relation
-without awaiting it leaves no coroutine behind; each `await` checks the cache again.
+The awaitable a `ForeignKey` or `ReverseOneToOne` returns on an instance. Nothing runs until it is awaited, so
+reading the relation without awaiting it leaves no coroutine behind; each `await` checks the cache again.
 
 ### `adorm.models.get_relations(model)`
 
@@ -356,7 +415,7 @@ schema.
 | `register(model)` | register under `model._meta.label`; a class with the same module and qualified name replaces the registered one, another class raises `ValueError` |
 | `unregister(label)` | remove the model; an unknown label is ignored |
 | `get(label)` | the model class; `LookupError` when none is registered |
-| `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
+| `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
 | `label in registry`, `iter(registry)`, `len(registry)` | membership, the model classes, their number |
 
 ### `adorm.models.registry`
@@ -372,8 +431,9 @@ assert Operation.from_dict(data, registry) == operation
 
 ### `adorm.models.model_schema(model)`
 
-The [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations) of the model class `model`: its label, primary key, the
-type of every field (with its pydantic constraints) and the target label of every relation. An abstract model raises
+The [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names) of the model class `model`: its label, primary key, the
+type of every field (with its pydantic constraints), the target label of every relation and `_meta.orm_names`. An
+abstract model raises
 `TypeError`.
 
 ```python

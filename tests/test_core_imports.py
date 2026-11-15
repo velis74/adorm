@@ -1,4 +1,5 @@
-"""The core package imports no ORM or database library; drivers do, in their own subpackages."""
+"""The core package imports no ORM or database library; drivers do, in their own subpackages, and so does the
+model generator's Django source (`adorm.codegen.django`)."""
 
 import ast
 import json
@@ -15,10 +16,16 @@ PACKAGE = Path(adorm.__file__).parent
 TARGETS = {"django", "sqlalchemy", "asyncpg", "psycopg", "psycopg2"}
 
 
+ORM_SOURCES = {PACKAGE / "codegen" / "django.py"}
+
+
 def core_modules() -> list[Path]:
-    """Every module of the package outside a driver subpackage (``adorm/drivers/<name>/``)."""
+    """Every module of the package outside a driver subpackage (``adorm/drivers/<name>/``) and the generator's ORM
+    sources."""
     drivers = PACKAGE / "drivers"
-    return sorted(p for p in PACKAGE.rglob("*.py") if not (p.parent != drivers and drivers in p.parents))
+    return sorted(
+        p for p in PACKAGE.rglob("*.py") if not (p.parent != drivers and drivers in p.parents) and p not in ORM_SOURCES
+    )
 
 
 def imported_roots(path: Path) -> set[str]:
@@ -34,6 +41,8 @@ def imported_roots(path: Path) -> set[str]:
 def test_core_modules_found():
     names = {p.relative_to(PACKAGE).as_posix() for p in core_modules()}
     assert {"__init__.py", "exceptions.py", "events.py", "drivers/__init__.py", "drivers/base.py"} <= names
+    assert {"cli.py", "codegen/__init__.py", "codegen/render.py"} <= names
+    assert "codegen/django.py" not in names
 
 
 @pytest.mark.parametrize("path", core_modules(), ids=lambda p: p.relative_to(PACKAGE).as_posix())

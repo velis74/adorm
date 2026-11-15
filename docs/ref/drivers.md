@@ -166,7 +166,7 @@ The contract the slot calls:
 
 | Method | Does |
 |---|---|
-| `async execute(operation)` | checks `operation` against `driver.capabilities`, then awaits `_execute(operation)`; returns rows as dicts keyed by adorm field names, a scalar or a count |
+| `async execute(operation)` | checks `operation` against `driver.capabilities`, then awaits `_execute(operation)`; returns rows as dicts keyed by adorm field names, a scalar or a count; field path segments, value keys and row keys are adorm names, translated to and from the target's with the reached model's `orm_names` ([Drivers](/topics/drivers#operations-in-plain-data-out)) |
 | `async begin()` | starts a transaction |
 | `async savepoint(name)` | checks `capabilities.savepoints`, then creates the savepoint `name` |
 | `async release_savepoint(name)` | checks `capabilities.savepoints`, then releases the savepoint `name` |

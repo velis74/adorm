@@ -98,18 +98,20 @@ operation equals the original when its values already had their fields' types.
 
 ## `adorm.schema`
 
-### `adorm.schema.ModelSchema(label, pk, fields, relations={})`
+### `adorm.schema.ModelSchema(label, pk, fields, relations={}, *, orm_names={})`
 
 The schema of the model `label`: `fields` maps every concrete field name (a foreign key's column field such as
 `club_id` included) to its type hint, `relations` maps every relation name (forward, reverse and many-to-many) to the
-target model's label, and `pk` names the primary key field. A frozen dataclass; the mappings are copied into
-read-only views.
+target model's label, and `pk` names the primary key field. `orm_names` maps a field or relation name to the target
+ORM's name where the two differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none)
+does. A frozen dataclass; the mappings are copied into read-only views.
 
-A label that is not `"app_label.ModelName"` (also among the relation targets), a `pk` that is not one of `fields` and
-a name that is both a field and a relation raise `ValueError`.
+A label that is not `"app_label.ModelName"` (also among the relation targets), a `pk` that is not one of `fields`, a
+name that is both a field and a relation and an `orm_names` key that is neither raise `ValueError`.
 
 ```python
 ModelSchema("club.Payment", "code", {"code": uuid.UUID, "amount": decimal.Decimal}, {"member": "club.Member"})
+ModelSchema("club.Note", "id", {"id": int, "json_": str}, orm_names={"json_": "json"})
 ```
 
 Any hint pydantic adapts can be a field type: scalars, `X | None`, `Literal`, enums, `list[str]`, pydantic models.

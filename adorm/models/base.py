@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, ClassVar, Protocol, runtime_checkable, TYPE_CHECKING
@@ -112,6 +113,16 @@ def _collect_relations(cls: type) -> dict[str, Relation]:
     return relations
 
 
+def _inherited_orm_names(cls: type, fields: Mapping[str, Any], relations: Mapping[str, Relation]) -> dict[str, str]:
+    """The ``orm_names`` entries of ``cls``'s model bases for names that are still fields or relations of ``cls``."""
+    names: dict[str, str] = {}
+    for klass in reversed(cls.__mro__[1:]):
+        meta = klass.__dict__.get("_meta")
+        if isinstance(meta, ModelMeta):
+            names.update(meta.orm_names)
+    return {name: orm_name for name, orm_name in names.items() if name in fields or name in relations}
+
+
 class Model(ModelExceptionsMixin, BaseModel):
     """Base class of adorm models.
 
@@ -132,6 +143,7 @@ class Model(ModelExceptionsMixin, BaseModel):
         serialize_by_alias=True,
         validate_by_name=True,
         validate_by_alias=True,
+        protected_namespaces=(),
     )
 
     _meta: ClassVar[ModelMeta | None] = None
@@ -157,6 +169,13 @@ class Model(ModelExceptionsMixin, BaseModel):
             raise TypeError(f"{cls.__name__}._meta is a ModelMeta, not {type(meta).__name__}")
         if meta.pk not in fields:
             raise TypeError(f"the primary key {meta.pk!r} of {meta.label} is not a field of {cls.__name__}")
+        unknown = sorted(name for name in meta.orm_names if name not in fields and name not in relations)
+        if unknown:
+            raise TypeError(f"orm_names of {meta.label} names no field or relation: {', '.join(unknown)}")
+        inherited = _inherited_orm_names(cls, fields, relations)
+        if any(name not in meta.orm_names for name in inherited):
+            meta = dataclasses.replace(meta, orm_names={**inherited, **meta.orm_names})
+            cls._meta = meta
         registry.register(cls)
 
     @classmethod

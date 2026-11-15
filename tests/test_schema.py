@@ -34,6 +34,16 @@ def test_model_schema_errors(args, error, message):
         ModelSchema(*args)
 
 
+def test_model_schema_orm_names():
+    names = {"json_": "json", "copy_": "copy"}
+    model = ModelSchema("club.Note", "id", {"id": int, "json_": str}, {"copy_": "club.Member"}, orm_names=names)
+    names["id"] = "pk"
+    assert dict(model.orm_names) == {"json_": "json", "copy_": "copy"}
+    assert dict(ModelSchema("club.Note", "id", {"id": int}).orm_names) == {}
+    with pytest.raises(ValueError, match="orm_names of club.Note names no field or relation: nothing"):
+        ModelSchema("club.Note", "id", {"id": int}, orm_names={"nothing": "x"})
+
+
 def test_schema_registry():
     schema = Schema([CLUB])
     assert isinstance(schema, SchemaSource)

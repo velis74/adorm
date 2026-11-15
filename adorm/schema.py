@@ -8,7 +8,7 @@ operation codec (`adorm.codec`) resolves field paths against a source to encode 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
@@ -23,18 +23,24 @@ class ModelSchema:
 
     ``fields`` maps every concrete field name (a foreign key's column field too, e.g. ``club_id``) to its type hint;
     ``relations`` maps every relation name (forward, reverse and many-to-many) to the target model's label; ``pk``
-    names the primary key field, which is one of ``fields``.
+    names the primary key field, which is one of ``fields``. ``orm_names`` maps a field or relation name to the target
+    ORM's name where the two differ (`adorm.ModelMeta.orm_names`).
     """
 
     label: str
     pk: str
     fields: Mapping[str, Any]
     relations: Mapping[str, str] = MappingProxyType({})
+    orm_names: Mapping[str, str] = field(default=MappingProxyType({}), kw_only=True)
 
     def __post_init__(self) -> None:
         check_model_label(self.label)
         object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
         object.__setattr__(self, "relations", MappingProxyType(dict(self.relations)))
+        object.__setattr__(self, "orm_names", MappingProxyType(dict(self.orm_names)))
+        unknown = sorted(name for name in self.orm_names if name not in self.fields and name not in self.relations)
+        if unknown:
+            raise ValueError(f"orm_names of {self.label} names no field or relation: {', '.join(unknown)}")
         if self.pk not in self.fields:
             raise ValueError(f"the primary key {self.pk!r} of {self.label} is not one of its fields")
         for target in self.relations.values():

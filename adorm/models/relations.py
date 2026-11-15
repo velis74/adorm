@@ -1,8 +1,8 @@
 """Relation descriptors of models.
 
 A relation is a class attribute, not a pydantic field: it is absent from validation, serialisation and the JSON
-schema. On an instance, a `ForeignKey` returns an awaitable that loads the related object; a `ReverseForeignKey` or
-`ManyToMany` returns a `QuerySet` of the related rows on the owner's executor.
+schema. On an instance, a `ForeignKey` or `ReverseOneToOne` returns an awaitable that loads the related object; a
+`ReverseForeignKey` or `ManyToMany` returns a `QuerySet` of the related rows on the owner's executor.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from adorm.query.query import check_model_label, Query
 if TYPE_CHECKING:
     from adorm.models.base import Model
 
-__all__ = ["ForeignKey", "ManyToMany", "RelatedObject", "Relation", "ReverseForeignKey"]
+__all__ = ["ForeignKey", "ManyToMany", "RelatedObject", "Relation", "ReverseForeignKey", "ReverseOneToOne"]
 
 _MISSING = object()
 
@@ -58,14 +58,14 @@ class Relation:
 
 
 class RelatedObject:
-    """The awaitable a forward relation returns: ``await member.club`` gives the related instance or ``None``.
+    """The awaitable a `ForeignKey` or `ReverseOneToOne` returns: ``await member.club`` gives the related instance.
 
     Nothing runs until it is awaited; each ``await`` checks the cache again.
     """
 
     __slots__ = ("instance", "relation")
 
-    def __init__(self, relation: ForeignKey, instance: Model) -> None:
+    def __init__(self, relation: ForeignKey | ReverseOneToOne, instance: Model) -> None:
         self.relation = relation
         self.instance = instance
 
@@ -125,24 +125,29 @@ class ForeignKey(Relation):
     async def load(self, instance: Model) -> Model | None:
         """The related instance: from the cache, or loaded with a `Get` operation on the owner's executor and
         cached. A missing row raises the target's ``DoesNotExist``."""
-        from adorm.operations import Get
-
         if self.column not in instance.__dict__:
             raise AttributeError(f"{type(instance).__name__}.{self.name} needs {self.column!r}, which is deferred")
         cached = self.cached(instance)
         if cached is not _MISSING:
             return cached
-        target = self.target_model()
-        executor = instance._executor()
-        try:
-            row = await executor.execute(Get(Query(self.target).filter(pk=instance.__dict__[self.column])))
-        except ObjectDoesNotExist as exc:
-            if type(exc) is not ObjectDoesNotExist:
-                raise
-            raise target.DoesNotExist(*exc.args) from exc
-        related = target.from_row(row, executor=executor)
-        instance._state.related[self.name] = related
-        return related
+        return await _load_one(self, instance, Query(self.target).filter(pk=instance.__dict__[self.column]))
+
+
+async def _load_one(relation: Relation, instance: Model, query: Query) -> Model:
+    """The row of ``query`` as an instance of the relation's target, loaded on the owner's executor and cached."""
+    from adorm.operations import Get
+
+    target = relation.target_model()
+    executor = instance._executor()
+    try:
+        row = await executor.execute(Get(query))
+    except ObjectDoesNotExist as exc:
+        if type(exc) is not ObjectDoesNotExist:
+            raise
+        raise target.DoesNotExist(*exc.args) from exc
+    related = target.from_row(row, executor=executor)
+    instance._state.related[relation.name] = related
+    return related
 
 
 def _related(relation: Relation, instance: Model, query: Query) -> Any:
@@ -174,6 +179,40 @@ class ReverseForeignKey(Relation):
         if instance is None:
             return self
         return _related(self, instance, Query(self.target).filter(**{self.column: _owner_pk(self, instance)}))
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.target!r}, column={self.column!r})"
+
+
+class ReverseOneToOne(Relation):
+    """The reverse side of a one-to-one `ForeignKey`: the row of ``target`` whose field ``column`` holds the owner's
+    primary key.
+
+    ``await instance.rel`` returns that row as an instance of ``target``, loaded with a `Get` operation on the owner's
+    executor and cached on the owner; a row loaded with ``select_related()`` fills the cache. No such row raises the
+    target's ``DoesNotExist`` (also when ``select_related()`` cached ``None``); an instance without a primary key value
+    raises ``ValueError``.
+    """
+
+    def __init__(self, target: str, *, column: str) -> None:
+        super().__init__(target)
+        self.column = _check_field_name(column)
+
+    def __get__(self, instance: Model | None, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        return RelatedObject(self, instance)
+
+    async def load(self, instance: Model) -> Model:
+        """The related instance: from the cache, or loaded on the owner's executor and cached."""
+        pk = _owner_pk(self, instance)
+        cached = instance._state.related.get(self.name, _MISSING)
+        if cached is None:
+            target = self.target_model()
+            raise target.DoesNotExist(f"{type(instance).__name__} has no {self.name}")
+        if cached is not _MISSING:
+            return cached
+        return await _load_one(self, instance, Query(self.target).filter(**{self.column: pk}))
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.target!r}, column={self.column!r})"

@@ -36,3 +36,4 @@ the names it covers:
 | Settings | pool settings and connection profiles |
 | [Drivers](./drivers) | the driver contract (`adorm.drivers`) |
 | [Events](./events) | event types and their dispatch (`adorm.events`) |
+| [Model generator](./codegen) | `adorm generate`, the model description, rendering and files (`adorm.codegen`, `adorm.cli`) |

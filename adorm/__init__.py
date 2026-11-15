@@ -23,7 +23,7 @@ from adorm.exceptions import (
     ValidationError,
 )
 from adorm.executor import BoundModel, create_session, current_session, Session
-from adorm.models import ForeignKey, ManyToMany, Model, ModelMeta, ReverseForeignKey
+from adorm.models import ForeignKey, ManyToMany, Model, ModelMeta, ReverseForeignKey, ReverseOneToOne
 from adorm.query import (
     Aggregate,
     Avg,
@@ -104,6 +104,7 @@ __all__ = [
     "QuerySet",
     "RestrictedError",
     "ReverseForeignKey",
+    "ReverseOneToOne",
     "Session",
     "SessionTimeout",
     "Subquery",

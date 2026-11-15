@@ -3,7 +3,7 @@
 from adorm.models.base import Executor, get_relations, Model, ModelState, set_executor_resolver
 from adorm.models.meta import ModelMeta
 from adorm.models.registry import model_schema, ModelRegistry, registry
-from adorm.models.relations import ForeignKey, ManyToMany, RelatedObject, Relation, ReverseForeignKey
+from adorm.models.relations import ForeignKey, ManyToMany, RelatedObject, Relation, ReverseForeignKey, ReverseOneToOne
 
 __all__ = [
     "Executor",
@@ -16,6 +16,7 @@ __all__ = [
     "RelatedObject",
     "Relation",
     "ReverseForeignKey",
+    "ReverseOneToOne",
     "get_relations",
     "model_schema",
     "registry",

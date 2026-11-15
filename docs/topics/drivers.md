@@ -30,6 +30,18 @@ operation reports to `Capabilities`.
 `execute()` returns plain data: rows as dicts keyed by adorm field names, a scalar or a count. The core builds
 model instances from the rows, so no target object crosses the contract.
 
+An adorm name can differ from the target's: a generated model renames fields that clash with pydantic (`json_` for
+Django's `json`). The driver translates every segment of a field path, every key of the values it writes and every
+key of the rows it returns with the `orm_names` of the model that segment reaches: `ModelMeta.orm_name()` on a model
+class, `ModelSchema.orm_names` from a [schema source](/ref/encoding#adorm-schema-schemasource). A name `orm_names`
+does not list is the same on both sides.
+
+```python
+Note._meta.orm_name("json_")                                     # "json"
+registry.model_schema("library.Note").orm_names["copy_"]         # "copy"
+# copy___title: "copy_" on library.Note, then "title" on library.Book -> Django's "copy__title"
+```
+
 Operations convert to JSON-safe data with every value encoded by its field's type ([Operation
 encoding](/ref/encoding)), so a driver that forwards them to another process sends `operation.to_dict(schema)` and
 the receiving side executes `Operation.from_dict(data, schema)`.
@@ -176,7 +188,7 @@ methods), no direct call reaches the test's connection; the installed contract d
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
 | the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | SQL built from the model metadata (table and column names) by Django's or SQLAlchemy's compiler, run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
-| rows from `values()`, keys renamed from ORM to adorm field names | `Record` to dict | `Row._mapping` to dict |
+| rows from `values()`, keys renamed from ORM to adorm field names (`orm_names`) | `Record` to dict | `Row._mapping` to dict |
 
 ### Transactions and savepoints
 

@@ -274,6 +274,9 @@ request to the server and waits for the statement to end.
 
 - Every method raises adorm exceptions only; `asyncio.CancelledError` passes through.
 - Results are plain data keyed by adorm field names.
+- Every segment of a field path (`copy___title` is `copy_`, then `title`), every key of written values and every key of
+  returned rows is translated with the `orm_names` of the model it reaches (`ModelMeta.orm_name()`, or
+  `ModelSchema.orm_names` from a schema source); a name it does not list is the same in the target.
 - `capabilities` lists exactly what the driver executes, including `savepoints` and `cancellation` when it
   implements them.
 - `connect_sync()` or `open_connection()` uses `profile.connect` when it is set.

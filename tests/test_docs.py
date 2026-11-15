@@ -7,6 +7,8 @@ import pytest
 
 import adorm
 import adorm.codec
+import adorm.codegen
+import adorm.codegen.django
 import adorm.drivers
 import adorm.events
 import adorm.executor
@@ -104,7 +106,7 @@ def test_has_reference_heading(reference, expected):
     ("module", "name"),
     [
         (m.__name__, n)
-        for m in (adorm.codec, adorm.drivers, adorm.events, adorm.operations, adorm.schema)
+        for m in (adorm.codec, adorm.codegen, adorm.drivers, adorm.events, adorm.operations, adorm.schema)
         for n in m.__all__
     ],
 )
@@ -197,3 +199,13 @@ def test_fragment_links_point_at_headings(source, target, fragment):
 )
 def test_slugify(heading, expected):
     assert slugify(heading) == expected
+
+
+@pytest.mark.parametrize("name", adorm.codegen.django.__all__)
+def test_codegen_django_names_are_documented(name):
+    pattern = rf"^#{{2,4}} `adorm\.codegen\.django\.{re.escape(name)}\("
+    assert re.search(pattern, reference_text(), re.MULTILINE), f"no reference heading for adorm.codegen.django.{name}"
+
+
+def test_cli_main_is_documented():
+    assert re.search(r"^### `adorm\.cli\.main\(", reference_text(), re.MULTILINE)

@@ -26,6 +26,28 @@ class Member(Model):
     club = ForeignKey("club.Club")
 ```
 
+## Generated models
+
+Models of an application whose schema Django owns are not written by hand: [`adorm generate`](/howto/generating-models)
+writes one module per Django app, with the same labels, field names and relations as the Django models, and checks in
+CI that the modules are up to date.
+
+```sh
+adorm generate --settings myproject.settings --output myproject/adorm_models clubs billing library
+```
+
+A generated model is an ordinary adorm model. It also carries the hash of the Django model's schema in
+`_meta.schema_hash`, and a field whose name clashes with pydantic (`json`, `copy`, `model_dump` …) gets a `_` suffix
+and an alias with the original name: code and queries use `json_`, JSON and the JSON schema use `json`.
+
+```python
+from myproject.adorm_models.library import Note
+
+note = await Note.objects.get(json_="{}")
+note.json_                     # "{}"
+note.model_dump()["json"]      # "{}"
+```
+
 ## Bound models
 
 `Model.objects` returns the model bound to the current [session](/topics/sessions); its query methods build query sets
@@ -106,6 +128,13 @@ member.club = None             # clears member.club_id
 
 A row loaded with `select_related("club")` carries the related row and fills the cache, so the first `await`
 needs no operation. Changing `club_id` makes the next `await` load the new club.
+
+A `ReverseOneToOne` (the other side of a one-to-one foreign key) returns an awaitable too; no related row raises the
+target's `DoesNotExist`:
+
+```python
+restaurant = await place.restaurant
+```
 
 A `ReverseForeignKey` (the other side of a foreign key) and a `ManyToMany` return a
 [`QuerySet`](/ref/queryset) of the related rows on the owner's session instead; building it needs no connection,

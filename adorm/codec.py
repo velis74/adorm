@@ -33,7 +33,18 @@ import pydantic
 
 from pydantic import PlainSerializer, PlainValidator, TypeAdapter
 
-from adorm.query.expressions import Case, Coalesce, Expression, F, Node, OuterRef, Subquery, Value, When
+from adorm.query.expressions import (
+    Case,
+    Coalesce,
+    Expression,
+    F,
+    Node,
+    OuterRef,
+    split_field_path,
+    Subquery,
+    Value,
+    When,
+)
 from adorm.query.lookups import Lookup, LOOKUPS
 from adorm.query.query import check_model_label, Query
 from adorm.schema import resolve_field_type, SchemaSource
@@ -299,7 +310,7 @@ class _Codec:
         if depth <= 0:
             return None
         scope = self._scopes[depth - 1]
-        segments = path.split("__")
+        segments = split_field_path(path)
         if segments[0] in scope.annotations:
             key = (depth, segments[0])
             if len(segments) > 1 or key in self._resolving:
@@ -333,8 +344,8 @@ class _Codec:
         elif isinstance(expression, Subquery):
             query = expression.query
             names = {name for name, _ in query.annotations}
-            if len(query.select) == 1 and query.select[0].split("__")[0] not in names:
-                return resolve_field_type(self.schema, query.model, query.select[0].split("__"))
+            if len(query.select) == 1 and split_field_path(query.select[0])[0] not in names:
+                return resolve_field_type(self.schema, query.model, split_field_path(query.select[0]))
         for candidate in candidates:
             found = self._expression_type(depth, candidate)
             if found is not None:

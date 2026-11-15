@@ -47,6 +47,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
+    "django.contrib.postgres",
+    "tests.djangoproject.library",
 ]
 
 DATABASES = {"default": database_from_url(os.environ.get("ADORM_TEST_DATABASE_URL", DEFAULT_DATABASE_URL))}

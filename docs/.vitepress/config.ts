@@ -61,6 +61,7 @@ export default defineConfig({
         items: [
           { text: 'How-to guides', link: '/howto/' },
           { text: 'Writing a driver', link: '/howto/writing-a-driver' },
+          { text: 'Generating models', link: '/howto/generating-models' },
         ],
       },
       {
@@ -79,6 +80,7 @@ export default defineConfig({
           { text: 'Exceptions', link: '/ref/exceptions' },
           { text: 'Drivers', link: '/ref/drivers' },
           { text: 'Events', link: '/ref/events' },
+          { text: 'Model generator', link: '/ref/codegen' },
         ],
       },
     ],

@@ -31,6 +31,9 @@ dependencies = [
     "pydantic>=2.11",
 ]
 
+[project.scripts]
+adorm = "adorm.cli:main"
+
 [project.optional-dependencies]
 django = ["django>=4.2"]
 asyncpg = ["asyncpg>=0.30"]
@@ -94,6 +97,8 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 "tests/**" = ["S101", "S301", "S608"]
 # N818: exception names mirror Django's (DoesNotExist, ObjectDoesNotExist …) and the executor's documented names.
 "adorm/exceptions.py" = ["N818"]
+# I001: generated modules sort imports for an application that installs adorm, where adorm is a third-party package.
+"tests/generated/*" = ["I001"]
 
 [tool.ruff.format]
 quote-style = "double"

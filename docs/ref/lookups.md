@@ -23,7 +23,15 @@ A lookup key is a field path followed by an optional lookup name, joined with `_
 
 The last segment is the lookup name when the key has more than one segment and the segment is a registered lookup.
 A field whose name equals a lookup name therefore takes an explicit lookup (`range__exact`). Segments are
-identifiers; a key with an empty segment (`a____b`, `a__`) raises `ValueError`.
+identifiers; a key with an empty segment (`a__`) or a segment containing `__` (`a____b`) raises `ValueError`.
+
+A separator is the last `__` of a run of underscores, so a segment may end in `_`, as the names of
+[generated models](/howto/generating-models#name-clashes) do:
+
+| Key | Field path | Lookup |
+|---|---|---|
+| `json___icontains` | `json_` | `icontains` |
+| `copy___title` | `copy___title` (`copy_`, then `title`) | `exact` |
 
 ### `adorm.query.split_lookup(key)`
 

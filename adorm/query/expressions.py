@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import re
 
 from collections.abc import Iterable, Iterator, Mapping, Set
 from typing import Any, ClassVar, Self, TYPE_CHECKING
@@ -89,11 +90,20 @@ def freeze_value(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
+_PATH_SEPARATOR = re.compile(r"__(?!_)")
+
+
+def split_field_path(name: str) -> list[str]:
+    """The segments of a field path. A separator is the last ``__`` of a run of underscores, so a segment may end in
+    ``_`` (a renamed field such as ``json_``): ``"copy___title"`` is ``["copy_", "title"]``."""
+    return _PATH_SEPARATOR.split(name)
+
+
 def check_field_path(name: Any) -> str:
     """Return ``name`` when it is a field path (``"name"``, ``"club__owner__name"``); raise otherwise."""
     if not isinstance(name, str):
         raise TypeError(f"a field path is a string, not {type(name).__name__}")
-    if not all(segment.isidentifier() for segment in name.split("__")):
+    if not all(segment.isidentifier() and "__" not in segment for segment in split_field_path(name)):
         raise ValueError(f"{name!r} is not a field path: segments are identifiers separated by '__'")
     return name
 
@@ -317,7 +327,7 @@ class F(Expression):
     @property
     def path(self) -> tuple[str, ...]:
         """The field path split at ``__``: relations first, the field last."""
-        return tuple(self.name.split("__"))
+        return tuple(split_field_path(self.name))
 
     def _check_decoded(self) -> None:
         check_field_path(self.name)

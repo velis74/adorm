@@ -4,7 +4,7 @@ Compared: the primary key name; every concrete field's presence, Python type, nu
 ``Literal``), ``max_length``, ``max_digits`` and ``decimal_places``; fields Django lacks; ``Meta.ordering``, which
 adorm models cannot express; every relation's kind, target and join columns (and the through model of a many-to-many
 relation); Django foreign keys and many-to-many fields the adorm model lacks. Defaults, validators and generic foreign
-keys are not compared.
+keys are not compared, nor the reverse of a model's own parent link, which its class inherits.
 """
 
 import datetime
@@ -18,7 +18,7 @@ from typing import Annotated, Any, Literal
 from django.apps import apps
 from django.db import models
 
-from adorm.models import ForeignKey, get_relations, ManyToMany, Model, Relation, ReverseForeignKey
+from adorm.models import ForeignKey, get_relations, ManyToMany, Model, Relation, ReverseForeignKey, ReverseOneToOne
 
 PYTHON_TYPES: dict[str, type] = {
     "AutoField": int,
@@ -116,13 +116,15 @@ def _compare_relation(label: str, name: str, relation: Relation, field: Any) -> 
     if isinstance(relation, ForeignKey):
         if not isinstance(field, models.ForeignKey) or relation.column != field.attname:
             problems.append(f"{where} is a ForeignKey on {relation.column!r}, Django disagrees")
-    elif isinstance(relation, ReverseForeignKey):
+    elif isinstance(relation, ReverseForeignKey | ReverseOneToOne):
+        kind = type(relation).__name__
         if (
             not isinstance(field, models.ForeignObjectRel)
             or field.many_to_many
+            or field.one_to_one != isinstance(relation, ReverseOneToOne)
             or relation.column != field.field.attname
         ):
-            problems.append(f"{where} is a ReverseForeignKey on {relation.column!r}, Django disagrees")
+            problems.append(f"{where} is a {kind} on {relation.column!r}, Django disagrees")
     elif isinstance(relation, ManyToMany):
         if not field.many_to_many:
             problems.append(f"{where} is a ManyToMany, Django disagrees")
@@ -165,6 +167,8 @@ def compare(model: type[Model]) -> list[str]:
     }
     relations = get_relations(model)
     for name, relation in relations.items():
+        if isinstance(relation, ReverseOneToOne) and relation.target == label:
+            continue  # the parent's reverse of this model's own parent link, inherited by the class
         field = django_relations.get(name)
         if field is None:
             problems.append(f"{label}.{name} is not a Django relation")
