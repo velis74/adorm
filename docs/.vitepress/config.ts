@@ -64,6 +64,7 @@ export default defineConfig({
           { text: 'The native PostgreSQL driver', link: '/topics/postgresql-driver' },
           { text: 'SQL compilation for asyncpg', link: '/topics/sql-compilation' },
           { text: 'Driver conformance suite', link: '/topics/conformance' },
+          { text: 'Testing', link: '/topics/testing' },
         ],
       },
       {
@@ -95,6 +96,7 @@ export default defineConfig({
           { text: 'Drivers', link: '/ref/drivers' },
           { text: 'Events', link: '/ref/events' },
           { text: 'Model generator', link: '/ref/codegen' },
+          { text: 'Testing', link: '/ref/testing' },
         ],
       },
     ],

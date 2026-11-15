@@ -424,6 +424,11 @@ A [`ThreadedDriver`](#adorm-drivers-threadeddriver): `name` `"django"`, `mode` `
 [`CAPABILITIES`](#adorm-drivers-django-capabilities). Created without arguments; a profile names it by class,
 instance or import path.
 
+`open_connection(profile, emit)` creates the connection with
+[`adorm.testing.django.django_connection()`](/ref/testing#adorm-testing-django-django-connection-driver-profile-emit) and starts it:
+outside Django's test environment that is a `connection_class` connection; inside a Django `TestCase` it is one that
+shares the test's connection ([test mode](/topics/testing)).
+
 ```python
 adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})
 driver = DjangoDriver()
@@ -438,7 +443,7 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 |---|---|
 | `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread (a backend other than PostgreSQL raises `NotSupportedError`); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged), and then `CONN_HEALTH_CHECKS` becomes `False`, `CONN_MAX_AGE` `None` and `OPTIONS["pool"]` is left out, so the connection is opened directly, never taken from Django's pool, and Django neither pings nor closes the connection the slot keeps; a connection of Django's pool that a `direct` driver's thread holds goes back to that pool first; `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; then `ensure_connection()` |
 | `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool`; a write runs as the table below shows. A statement it runs through the wrapper's cursor (an execute wrapper, `connection.execute_wrapper()`) whose nearest caller in Django's query compiler or a database backend (Django's or the package of the alias's backend) is not reached before a signal receiver, an `on_commit()` callback or the driver's own code, such as raw SQL of a `post_save` receiver or `Manager.raw()`, calls [`mark_custom_sql()`](#mark-custom-sql); instrumentation wrapping the cursor in between does not count |
-| `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block; a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError` |
+| `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block; a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError`. On the shared connection of a Django `TestCase` the block is a savepoint of the test's transaction ([`SharedConnectionMixin`](/ref/testing#adorm-testing-django-sharedconnectionmixin)) |
 | `savepoint_sync(name)` | creates a Django savepoint (`savepoint()`) and adds it to the block's savepoint ids, so Django's `on_commit()` callbacks registered inside it belong to it; `name` already open, or no transaction, raises `TransactionManagementError` |
 | `release_savepoint_sync(name)` | releases the savepoint and the savepoints opened after it |
 | `rollback_to_savepoint_sync(name)` | rolls back to the savepoint, which stays open, discarding the savepoints opened after it and the `on_commit()` callbacks registered since; clears Django's `needs_rollback` first, since Django refuses every statement of a transaction marked for rollback |
@@ -474,7 +479,10 @@ since the commit stands; one registered without `robust=True` stops the callback
 of a rolled-back savepoint or transaction do not run. Outside a transaction Django runs a callback at once, inside
 the operation that registers it.
 
-`target`, what profile hooks receive, is the wrapper (`self.db`). `alias` is `profile.alias`.
+`target`, what profile hooks receive, is the wrapper (`self.db`). `alias` is `profile.alias`. `is_usable()` is also
+false once the `TestCase` atomic blocks on the test's connection differ from those open when the connection was opened
+([`TestDatabase.current()`](/ref/testing#adorm-testing-django-testdatabase)): a connection opened in a `TestCase` test
+after that test, one opened in another Django test while a `TestCase` transaction is open.
 
 ### `adorm.drivers.django.CAPABILITIES`
 
@@ -723,6 +731,11 @@ Opens an [`AsyncpgConnection`](#adorm-drivers-asyncpg-asyncpgconnection) for `pr
 
 A failure closes the connection and raises an adorm exception (`OperationalError` with SQLSTATE `3D000` for an
 unknown database, `53300` for too many connections, which [`is_refusal()`](#is-refusal-exc) recognises).
+
+Inside a Django `TestCase` ([`find_test_database()`](/ref/testing#adorm-testing-django-find-test-database-alias)) it raises
+`NotSupportedError` before anything connects: an asyncpg connection can neither see nor roll back the test's
+transaction. In another Django test the connection's `is_usable()` becomes false once a `TestCase` transaction is open
+on the test's connection.
 
 ```python
 adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDriver", "alias": "default"}})

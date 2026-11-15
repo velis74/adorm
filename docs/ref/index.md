@@ -38,3 +38,4 @@ the names it covers:
 | [Drivers](./drivers) | the driver contract (`adorm.drivers`), the Django driver and its query translation (`adorm.drivers.django`, `adorm.drivers.django.translation`), the native PostgreSQL driver (`adorm.drivers.asyncpg`, its writes in `adorm.drivers.asyncpg.writes`), SQL statements (`adorm.drivers.sql`), Django's compiler for asyncpg (`adorm.drivers.asyncpg.compiler`) |
 | [Events](./events) | event types, their encoded form, the client's event channel and dispatch (`adorm.events`) |
 | [Model generator](./codegen) | `adorm generate`, the model description, rendering and files, `expose` and `client_base` (`adorm.codegen`, `adorm.cli`, `adorm.porting`) |
+| [Testing](./testing) | test mode under Django's `TestCase` and `TransactionTestCase`: the shared test connection (`adorm.testing.django`) |

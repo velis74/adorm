@@ -155,6 +155,7 @@ SUBMODULES = (
     "adorm.query.lookups",
     "adorm.query.query",
     "adorm.query.queryset",
+    "adorm.testing.django",
 )
 
 

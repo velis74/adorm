@@ -20,6 +20,7 @@ from adorm.exceptions import (
     SessionTimeout,
     TransactionClosed,
     TransactionManagementError,
+    TransactionOverlapError,
     ValidationError,
 )
 from adorm.executor import (
@@ -141,6 +142,7 @@ __all__ = [
     "TransactionClosed",
     "TransactionManagementError",
     "TransactionOutcome",
+    "TransactionOverlapError",
     "Trunc",
     "TruncDate",
     "TruncDay",

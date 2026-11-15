@@ -207,6 +207,7 @@ class AsyncpgConnection(DriverConnection):
         self._statements = 0
         self._usable = True
         self._closed = False
+        self._test: Any = None
 
     @property
     def target(self) -> Any:
@@ -426,7 +427,10 @@ class AsyncpgConnection(DriverConnection):
             task.cancel()
 
     def is_usable(self) -> bool:
-        return self._usable and not self._closed and not self.conn.is_closed()
+        """Also false, for a connection opened in a Django test, while a ``TestCase`` transaction is open on the test's
+        connection (`adorm.testing.django.TestDatabase.current()`)."""
+        usable = self._usable and not self._closed and not self.conn.is_closed()
+        return usable and (self._test is None or self._test.current())
 
     async def close(self) -> None:
         if self._closed:
@@ -485,7 +489,16 @@ class AsyncpgDriver(Driver):
         ``asyncpg.connect()`` with `connect_arguments()`. Either way the session time zone is set to Django's for the
         entry and ``OPTIONS["assume_role"]`` is assumed. An alias without a ``DATABASES`` entry raises
         `ProgrammingError` and a backend that is not PostgreSQL `NotSupportedError`, both before anything
-        connects."""
+        connects. Inside Django's ``TestCase`` (`adorm.testing.django.find_test_database()`) it raises
+        `NotSupportedError`: its connection could not see or roll back the test's transaction."""
+        from adorm.testing.django import find_test_database
+
+        test = await find_test_database(profile.alias)
+        if test is not None and test.in_test_case:
+            raise NotSupportedError(
+                f"profile {profile.name!r}: the asyncpg driver cannot run inside the transaction of Django's TestCase; "
+                "use TransactionTestCase"
+            )
         conn = None
         try:
             settings_dict = _settings_dict(profile)
@@ -509,7 +522,9 @@ class AsyncpgDriver(Driver):
             if mapped is exc:
                 raise
             raise mapped from exc
-        return AsyncpgConnection(self, profile, emit, conn, compiler)
+        connection = AsyncpgConnection(self, profile, emit, conn, compiler)
+        connection._test = test
+        return connection
 
 
 def server_version_num(version: Any) -> int:

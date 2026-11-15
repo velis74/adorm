@@ -30,7 +30,8 @@ AdormError
 │       ├── NotSupportedError
 │       └── ProgrammingError
 │           └── TransactionManagementError
-│               └── TransactionClosed
+│               ├── TransactionClosed
+│               └── TransactionOverlapError
 ├── SessionTimeout
 │   └── DeadlockError
 └── OperationTimeout                    also a TimeoutError
@@ -275,6 +276,30 @@ try:
     await task
 except adorm.TransactionClosed:
     ...
+```
+
+### `adorm.TransactionOverlapError`
+
+Two transactions that are not nested overlapped on a connection that cannot isolate them: the test connection that the
+slots share inside Django's `TestCase` ([test mode](/topics/testing)). A transaction, or an operation outside a
+transaction, raises it when it starts while another flow's transaction is open; the end of a transaction raises it
+while a transaction begun inside it is still open, and so does that inner transaction's next operation. A test that
+needs concurrent transactions isolated uses `TransactionTestCase`.
+
+```python
+async def other_flow():
+    async with adorm.atomic():
+        await Member.objects.create(name="bob")
+
+
+class SignupTests(TestCase):
+    async def test_a_second_writer(self):
+        async with adorm.atomic():
+            await Member.objects.create(name="ann")
+            # A flow that does not run inside this transaction: its own transaction overlaps it.
+            task = asyncio.create_task(other_flow(), context=contextvars.Context())
+            with self.assertRaises(adorm.TransactionOverlapError):
+                await task
 ```
 
 ## Executor errors

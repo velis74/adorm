@@ -98,6 +98,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 "tests/**" = ["S101", "S301", "S608"]
 # PT012, PT031: what a transaction block raises depends on the whole block, so the block is inside pytest.raises().
 "tests/test_transactions*.py" = ["PT012", "PT031"]
+"tests/test_testing_django.py" = ["PT012"]
 "tests/conformance/test_transactions.py" = ["PT012", "PT031"]
 "tests/demo/test_memory.py" = ["PT012"]
 "tests/demo/test_data.py" = ["PT012"]

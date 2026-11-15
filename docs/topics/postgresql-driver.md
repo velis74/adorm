@@ -50,6 +50,10 @@ entry stays as it is. `CONN_MAX_AGE` and `CONN_HEALTH_CHECKS` have no effect: th
 lives ([slot lifecycle](/topics/pool#slot-lifecycle)). The driver runs only the SQL it compiles, so it never marks a
 connection for custom SQL.
 
+In Django's tests the driver runs inside `TransactionTestCase`, on the process's test database. Inside a `TestCase` a
+connection raises `NotSupportedError` when it opens: it could neither see nor roll back the test's transaction
+([testing](/topics/testing)).
+
 | `DATABASES` key | asyncpg |
 |---|---|
 | `NAME`, `USER`, `PASSWORD`, `HOST`, `PORT` | `database`, `user`, `password`, `host`, `port`; an empty value leaves asyncpg's default, `NAME` `None` is `postgres` |

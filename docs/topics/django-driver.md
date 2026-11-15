@@ -448,6 +448,18 @@ before it are undone with it, and the slot returns to the pool. Inside a nested 
 rolled back and the enclosing block goes on. A write outside a transaction that completes just before the
 cancellation arrives stays written.
 
+## In Django's tests
+
+Inside Django's `TestCase` the slots share the test's connection, and a transaction is a savepoint in the test's
+transaction; inside `TransactionTestCase` they open connections of their own. [Testing](/topics/testing) describes
+both.
+
+```python
+class MemberTests(TestCase):
+    async def test_count(self):
+        assert await Member.objects.count() == 0       # on the test's connection, rolled back with the test
+```
+
 ## Events
 
 The driver emits no events and consumes none. Each operation reports its outcome as the result of the call, which

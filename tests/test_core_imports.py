@@ -1,5 +1,5 @@
-"""The core package imports no ORM or database library; drivers do, in their own subpackages, and so does the
-model generator's Django source (`adorm.codegen.django`)."""
+"""The core package imports no ORM or database library; drivers do, in their own subpackages, and so do the model
+generator's Django source (`adorm.codegen.django`) and the Django test mode (`adorm.testing.django`)."""
 
 import ast
 import json
@@ -18,7 +18,10 @@ PACKAGE = Path(adorm.__file__).parent
 TARGETS = {"django", "sqlalchemy", "asyncpg", "psycopg", "psycopg2"}
 
 
-ORM_SOURCES = {PACKAGE / "codegen" / "django.py"}
+ORM_SOURCES = {
+    PACKAGE / "codegen" / "django.py",
+    PACKAGE / "testing" / "django.py",
+}
 
 
 def core_modules() -> list[Path]:

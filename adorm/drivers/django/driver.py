@@ -237,13 +237,16 @@ class DjangoConnection(ThreadedConnection):
 
     A transaction is an outermost ``transaction.atomic()`` block of the alias, entered by ``begin()`` and left by
     ``commit()`` or ``rollback()``; a savepoint is a Django savepoint inside it, so Django's ``on_commit()`` callbacks
-    and its own atomic blocks behave as in an atomic block of Django code.
+    and its own atomic blocks behave as in an atomic block of Django code. Inside Django's ``TestCase`` the driver uses
+    a subclass that shares the test's connection (`adorm.testing.django`).
     """
 
     driver: DjangoDriver
     db: Any
     _atomic: Any = None
     _savepoints: list[tuple[str, str]]
+    _base_ids: tuple[Any, ...] = ()
+    _test: Any = None
 
     @property
     def target(self) -> Any:
@@ -274,14 +277,24 @@ class DjangoConnection(ThreadedConnection):
         connect = self.profile.connect
         if connect is not None:
             db.Database = _HookDatabase(db.Database, lambda: connect(self.profile))
-        self.db = db
-        self._savepoints = []
-        package = type(db).__module__.rpartition(".")[0]
-        self._trusted = (*_ORM_SQL_MODULES, f"{package}.") if package else _ORM_SQL_MODULES
+        self._adopt(db)
         db.ensure_connection()
         # Also for a connection the thread's wrapper already had open.
         db.health_check_enabled = False
         db.close_at = None
+
+    def _adopt(self, db: Any) -> None:
+        """Use Django's connection wrapper ``db``."""
+        self.db = db
+        self._savepoints = []
+        package = type(db).__module__.rpartition(".")[0]
+        self._trusted = (*_ORM_SQL_MODULES, f"{package}.") if package else _ORM_SQL_MODULES
+
+    def is_usable(self) -> bool:
+        """Also false once the ``TestCase`` atomic blocks on the test's connection differ from those open when the
+        connection was opened (`adorm.testing.django.TestDatabase.current()`): after the ``TestCase`` test it was opened
+        in, and, for one opened outside a ``TestCase``, while a ``TestCase`` transaction is open."""
+        return super().is_usable() and (self._test is None or self._test.current())
 
     def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
         if not self.ran_custom_sql and _custom_sql_call(sys._getframe(1), self._trusted, _ENTRIES):
@@ -320,7 +333,7 @@ class DjangoConnection(ThreadedConnection):
         return self._atomic
 
     def _sync_savepoint_ids(self) -> None:
-        self.db.savepoint_ids = [sid for _, sid in self._savepoints]
+        self.db.savepoint_ids = [*self._base_ids, *(sid for _, sid in self._savepoints)]
 
     def _savepoint_index(self, name: str) -> int:
         self._require_transaction()
@@ -333,7 +346,7 @@ class DjangoConnection(ThreadedConnection):
         """Leave the outermost atomic block ``atomic``: commit, or roll back with ``rollback``."""
         self._atomic = None
         self._savepoints = []
-        self.db.savepoint_ids = []
+        self.db.savepoint_ids = list(self._base_ids)
         if rollback:
             self.db.needs_rollback = True
         atomic.__exit__(None, None, None)
@@ -350,6 +363,8 @@ class DjangoConnection(ThreadedConnection):
         atomic.__enter__()
         self._atomic = atomic
         self._savepoints = []
+        # The savepoint ids of the enclosing blocks: none for an outermost block.
+        self._base_ids = tuple(self.db.savepoint_ids)
 
     def savepoint_sync(self, name: str) -> None:
         self._require_transaction()
@@ -384,11 +399,16 @@ class DjangoConnection(ThreadedConnection):
         if db.needs_rollback or _transaction_failed(db):
             self._leave(atomic, rollback=True)
             raise TransactionManagementError("the transaction failed earlier, so it was rolled back")
-        callbacks, db.run_on_commit = db.run_on_commit, []
+        callbacks = self._take_commit_callbacks()
         self._leave(atomic, rollback=False)
         if callbacks:
             # After the commit's outcome: cancelling the caller cannot reach them or turn the commit into a cancel.
             self.after_call_sync(lambda: self._run_on_commit(callbacks))
+
+    def _take_commit_callbacks(self) -> list[tuple[Any, Callable[[], Any], bool]]:
+        """Remove Django's ``on_commit()`` callbacks that the commit runs from the wrapper and return them."""
+        callbacks, self.db.run_on_commit = self.db.run_on_commit, []
+        return callbacks
 
     def _run_on_commit(self, callbacks: list[tuple[Any, Callable[[], Any], bool]]) -> None:
         """Run Django's ``on_commit()`` callbacks of a committed transaction in order. A failure is logged, since the
@@ -604,3 +624,12 @@ class DjangoDriver(ThreadedDriver):
     name = "django"
     connection_class = DjangoConnection
     capabilities = CAPABILITIES
+
+    async def open_connection(self, profile: Any, emit: Any) -> ThreadedConnection:
+        """Open a ``connection_class`` connection; inside a Django test, `adorm.testing.django.django_connection()`
+        chooses the connection (the shared test connection of a ``TestCase``)."""
+        from adorm.testing.django import django_connection
+
+        connection = await django_connection(self, profile, emit)
+        await connection.start()
+        return connection

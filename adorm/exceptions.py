@@ -31,6 +31,7 @@ __all__ = [
     "TimeoutPhase",
     "TransactionClosed",
     "TransactionManagementError",
+    "TransactionOverlapError",
     "ValidationError",
     "wrap_driver_error",
 ]
@@ -232,6 +233,11 @@ class TransactionManagementError(ProgrammingError):
 
 class TransactionClosed(TransactionManagementError):
     """An operation arrived for a transaction that has already ended."""
+
+
+class TransactionOverlapError(TransactionManagementError):
+    """A transaction or an operation overlapped a transaction it is not nested in, on a connection that cannot isolate
+    them: the test connection the slots share inside Django's ``TestCase`` (`adorm.testing.django`)."""
 
 
 # SQLSTATE class (first two characters, else the first) to exception, as psycopg maps them, except class 3D:

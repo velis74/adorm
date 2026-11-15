@@ -1,7 +1,7 @@
 """Django settings for the test suite.
 
 The database comes from ``ADORM_TEST_DATABASE_URL``; pytest-django creates and drops the
-``adorm_test`` database on that server.
+``adorm_test`` database on that server (``ADORM_TEST_DATABASE_NAME`` names another).
 """
 
 import os
@@ -9,7 +9,7 @@ import os
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 DEFAULT_DATABASE_URL = "postgres://postgres@127.0.0.1:5432/postgres"
-TEST_DATABASE_NAME = "adorm_test"
+TEST_DATABASE_NAME = os.environ.get("ADORM_TEST_DATABASE_NAME", "adorm_test")
 
 
 def database_from_url(url: str) -> dict:

@@ -340,3 +340,19 @@
   database backend (cursor instrumentation in between does not count), and runs its connections without
   `CONN_MAX_AGE`, `CONN_HEALTH_CHECKS` and Django's connection pool (`OPTIONS["pool"]`), so a connection the slot
   closes ends on the server; a `direct` driver's thread gets its wrapper's settings back when the slot closes.
+- Test mode (`adorm.testing.django`; the `adorm.testing` package imports no ORM): while Django's test environment is
+  set up, the Django driver finds the test's connection when a slot opens one (`find_test_database()`: the thread that
+  waits in `async_to_sync()` under Django's async test methods, else the event loop's thread). Inside a `TestCase` every
+  slot shares it (`SharedConnectionMixin`, `SharedTestConnection`), one call at a time; a transaction is a savepoint in
+  the test's transaction, and a transaction or an operation outside one that starts while another flow's transaction is
+  open raises `TransactionOverlapError` (new), as do an operation of a transaction while a transaction begun inside it
+  is open, and a transaction that ends, or whose slot closes, while one begun inside it is open. Statements of Django
+  ORM code on other threads take turns on the shared connection and follow the same rule. Operations outside a
+  transaction run in savepoints of their own, a failed operation inside a transaction rolls back to its innermost
+  savepoint at once, a call cancelled while it waits for the connection ends its wait, and connection options are
+  applied per call with `SET LOCAL`. Django's `on_commit()` callbacks stay with the test's transaction, so
+  `captureOnCommitCallbacks()` works unchanged. A profile with `params`, a `connect` hook or `on_acquire` /
+  `on_release` hooks raises `NotSupportedError` inside a `TestCase`. Inside a `TransactionTestCase` the slots open
+  connections of their own to the process's test database; `manage.py test --parallel` and pytest-django work
+  unchanged. A connection opened in a `TestCase` test is unusable after that test, one opened in another Django test
+  while a `TestCase` transaction is open. The native PostgreSQL driver raises `NotSupportedError` inside a `TestCase`.
