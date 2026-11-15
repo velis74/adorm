@@ -1,6 +1,7 @@
 """Every driver under the failures that matter in production: refusals racing reads for slots and transactions,
-concurrent tasks on one transaction, cancellation of a waiting operation (also racing its completion) and connections
-lost mid-operation. Each driver's `Blocker` makes an operation wait in the database deterministically."""
+concurrent tasks on one transaction, a full pool, abandoned transactions, cancellation of a waiting operation (also
+racing its completion) and connections lost mid-operation. Each driver's `Blocker` makes an operation wait in the
+database deterministically."""
 
 import asyncio
 
@@ -17,6 +18,8 @@ from adorm import (
     FieldError,
     NotSupportedError,
     OuterRef,
+    SessionTimeout,
+    TransactionClosed,
     TransactionOutcome,
 )
 from adorm.drivers import is_connection_error
@@ -240,6 +243,56 @@ async def test_a_second_session_inside_a_transaction_on_a_full_pool_is_a_deadloc
             assert raised.value.held_sessions == (adorm.current_session(),)
             assert await Club.objects.count() == 3
     assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_a_full_pool_times_out_the_acquisition_of_a_flow_holding_no_slot(make_router):
+    pool = make_router(max_connections=1, acquire_timeout=0.2).pools[0]
+    other = adorm.create_session("default", "other")
+    for _ in REPEAT:
+        held = asyncio.Event()
+        done = asyncio.Event()
+
+        async def holder(held=held, done=done):
+            async with other.atomic():
+                assert await other.bind(Club).count() == 3
+                held.set()
+                await done.wait()
+
+        task = asyncio.create_task(holder())
+        await held.wait()
+        with pytest.raises(SessionTimeout) as raised:
+            await Club.objects.count()
+        assert not isinstance(raised.value, DeadlockError)
+        done.set()
+        await task
+        assert await Club.objects.count() == 3
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_an_abandoned_transaction_is_rolled_back_by_the_slot(make_router):
+    pool = make_router(max_connections=1, acquire_timeout=5, commit_timeout=0.2).pools[0]
+    for _ in range(3):
+        written = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def lost_client(written=written, resume=resume):
+            async with adorm.atomic():
+                assert await Club.objects.filter(slug="koper-sailing").update(city="Abandoned") == 1
+                written.set()
+                await resume.wait()
+                await Club.objects.count()
+
+        task = asyncio.create_task(lost_client())
+        await written.wait()
+        async with asyncio.timeout(10):
+            while pool.leases():
+                await asyncio.sleep(0.01)
+        assert await Club.objects.filter(city="Abandoned").count() == 0
+        resume.set()
+        with pytest.raises(TransactionClosed):
+            await task
+    assert await Club.objects.filter(city="Koper").count() == 1
+    assert pool.in_use == 0
 
 
 # Cancellation
