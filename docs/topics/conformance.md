@@ -134,6 +134,8 @@ repeated:
 | a second session inside a transaction on a full pool | `DeadlockError` at once |
 | cancelling an operation that waits in the database | the operation stops waiting, the slot returns and serves the next operation |
 | cancellation racing completion, cancelled after 0 to 2744 event loop iterations | both outcomes occur, the result and `CancelledError`; the released slot keeps no transaction or lock open, before anything else runs on it |
+| a write cancelled racing its completion, after 0 to 2744 event loop iterations | the result, or a `CancellationOutcome` of `SUCCEEDED` or `UNKNOWN`; the row is changed after a result or `SUCCEEDED` |
+| a block cancelled racing its commit, after 0 to 6859 event loop iterations | `TransactionOutcome.COMMITTED` and a cancelled commit both occur; the row is changed after `COMMITTED` and unchanged after `ROLLED_BACK`; the slot is released |
 | cancelling inside a transaction | the transaction rolls back; no other connection stays in a transaction |
 | a server connection terminated mid-operation, also inside a transaction | a connection error; the slot is dropped, no other connection stays in a transaction and the next operation gets a new one |
 

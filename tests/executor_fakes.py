@@ -23,10 +23,23 @@ class Profile:
     connect: Callable[[Any], Any] | None = None
 
 
+async def _wait(gate: asyncio.Event, finish_when_cancelled: bool) -> None:
+    """Wait for ``gate``; with ``finish_when_cancelled`` a cancellation does not stop the wait, as for a statement that
+    completes before the cancellation reaches the database."""
+    while True:
+        try:
+            await gate.wait()
+            return
+        except asyncio.CancelledError:
+            if not finish_when_cancelled:
+                raise
+
+
 @dataclass(eq=False)
 class Op:
     """An operation: ``started`` is set when it starts, it waits for ``gate``, then raises ``error`` or returns
-    ``result`` (default: ``name``)."""
+    ``result`` (default: ``name``). With ``finishes_when_cancelled`` a cancellation does not end the wait for
+    ``gate``."""
 
     name: str = "op"
     result: Any = None
@@ -35,6 +48,7 @@ class Op:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     effect: Callable[[FakeConnection], None] | None = None
     kind: str = "op"
+    finishes_when_cancelled: bool = False
 
     def constructs(self) -> Iterable[str]:
         return ()
@@ -42,7 +56,9 @@ class Op:
 
 class FakeConnection(DriverConnection):
     """``close_gate`` holds closing. ``gates`` holds a transaction call (``"commit"``, ``"savepoint"`` …) until the
-    event is set; ``errors`` makes it raise. ``entered`` maps a transaction call to an event set when it starts."""
+    event is set; a call named in ``uncancellable`` keeps waiting when cancelled. ``errors`` makes it raise.
+    ``entered`` maps a transaction call to an event set when it starts; ``finished`` lists the calls that ran to
+    completion."""
 
     def __init__(self, driver: FakeDriver, emit: Emit, number: int) -> None:
         super().__init__(driver)
@@ -58,6 +74,8 @@ class FakeConnection(DriverConnection):
         self.gates: dict[str, asyncio.Event] = {}
         self.errors: dict[str, BaseException] = {}
         self.entered: dict[str, asyncio.Event] = {}
+        self.uncancellable: set[str] = set()
+        self.finished: list[str] = []
 
     async def _execute(self, operation: Op) -> Any:
         self.calls.append(("execute", operation.name))
@@ -69,7 +87,7 @@ class FakeConnection(DriverConnection):
         try:
             operation.started.set()
             if operation.gate is not None:
-                await operation.gate.wait()
+                await _wait(operation.gate, operation.finishes_when_cancelled)
             if operation.effect is not None:
                 operation.effect(self)
             if operation.error is not None:
@@ -87,10 +105,11 @@ class FakeConnection(DriverConnection):
         self.entered.setdefault(method, asyncio.Event()).set()
         gate = self.gates.get(method)
         if gate is not None:
-            await gate.wait()
+            await _wait(gate, method in self.uncancellable)
         error = self.errors.get(method)
         if error is not None:
             raise error
+        self.finished.append(method)
 
     async def begin(self) -> None:
         await self._transaction_call("begin")

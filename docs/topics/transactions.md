@@ -240,8 +240,23 @@ asyncio's debug mode (`asyncio.run(..., debug=True)` or `PYTHONASYNCIODEBUG=1`).
 ## Cancellation
 
 Cancelling the task inside a block cancels the statement running in the slot; the block rolls back on its way out
-and the slot returns to the pool. Cancelling the task while the block commits leaves the outcome of the commit to
-the database; the slot then closes its connection and leaves the pool.
+and the slot returns to the pool. Cancelling the task while the block commits cancels the commit in the driver
+connection. The end raises `CancelledError` once the slot has finished the commit, if it was sent, and the block's
+`outcome` tells how the transaction ended: `COMMITTED` when the commit completed first, `UNKNOWN` when it was
+cancelled while it ran (the slot then closes its connection and leaves the pool), `ROLLED_BACK` when the cancellation
+came before the commit was sent. After a confirmed commit the block's `on_commit()` callbacks run in a task of their
+own; otherwise they are dropped.
+
+```python
+block = adorm.atomic()
+task = asyncio.create_task(transfer(block))      # async with block: ...
+task.cancel()
+with contextlib.suppress(asyncio.CancelledError):
+    await task
+block.outcome      # TransactionOutcome.COMMITTED, ROLLED_BACK or UNKNOWN; None if the block never began
+```
+
+[Cancellation](/topics/cancellation) covers the outcome of cancelled operations.
 
 ## The commit deadline
 
@@ -270,7 +285,7 @@ Transactions emit no [events](/topics/events) of their own. They consume:
 | Event | Interpretation |
 |---|---|
 | `ResultEvent`, `ErrorEvent`, `CancelledEvent` of each request they send (`begin`, `execute`, `savepoint`, `commit` …) | the result, error or cancellation of the awaited call |
-| `CallbackEvent("on_commit")`, delivered by the slot before the outcome of a successful `commit` | the block runs its `on_commit` callbacks once the slot is back in the pool |
+| `CallbackEvent("on_commit")`, delivered by the slot before the outcome of a successful `commit` | the block runs its `on_commit` callbacks once the slot is back in the pool; its `outcome` is `COMMITTED` |
 
 Other callbacks and backend events that the connection emits during the transaction reach the lease's `events`
 queue, and the pool's `events` bus when the lease is released. `CallbackEvent("on_rollback")`, which the slot

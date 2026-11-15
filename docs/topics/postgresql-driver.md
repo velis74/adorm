@@ -352,7 +352,9 @@ connection.
 
 Cancelling the task that awaits an operation cancels the running statement: asyncpg sends PostgreSQL a cancel request
 and the task gets `asyncio.CancelledError`. A read that completes just before the cancellation arrives is
-discarded.
+discarded. The `CancelledError` of a statement or commit cancelled while it ran carries
+`CancellationOutcome.UNKNOWN` (`TransactionOutcome.UNKNOWN` for a commit), also when it completed just before the
+cancellation; see [cancellation](/topics/cancellation).
 
 [`AsyncpgConnection.cancel()`](/ref/drivers#adorm-drivers-asyncpg-asyncpgconnection) may be called from any
 thread: it cancels the statement running at that moment, which then raises `OperationalError` with SQLSTATE

@@ -13,13 +13,30 @@ from adorm.executor.sessions import (
     set_runner,
     TransactionRunner,
 )
-from adorm.executor.slot import Request, REQUEST_METHODS, RequestQueue, Slot, SlotLease
-from adorm.executor.transactions import active_transaction, Atomic, atomic, bind_transaction, on_commit, Transaction
+from adorm.executor.slot import (
+    cancellation_outcome,
+    CancellationOutcome,
+    Request,
+    REQUEST_METHODS,
+    RequestQueue,
+    Slot,
+    SlotLease,
+)
+from adorm.executor.transactions import (
+    active_transaction,
+    Atomic,
+    atomic,
+    bind_transaction,
+    on_commit,
+    Transaction,
+    TransactionOutcome,
+)
 
 __all__ = [
     "REQUEST_METHODS",
     "Atomic",
     "BoundModel",
+    "CancellationOutcome",
     "Pool",
     "Request",
     "RequestQueue",
@@ -29,10 +46,12 @@ __all__ = [
     "Slot",
     "SlotLease",
     "Transaction",
+    "TransactionOutcome",
     "TransactionRunner",
     "active_transaction",
     "atomic",
     "bind_transaction",
+    "cancellation_outcome",
     "create_session",
     "current_session",
     "debug_enabled",

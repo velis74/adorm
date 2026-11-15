@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
+import enum
 import itertools
 import logging
 
@@ -30,7 +32,16 @@ if TYPE_CHECKING:
     from adorm.executor.pool import Pool
     from adorm.executor.sessions import Session
 
-__all__ = ["REQUEST_METHODS", "Request", "RequestQueue", "Slot", "SlotLease", "cancelled_before_start"]
+__all__ = [
+    "REQUEST_METHODS",
+    "CancellationOutcome",
+    "Request",
+    "RequestQueue",
+    "Slot",
+    "SlotLease",
+    "cancellation_outcome",
+    "cancelled_before_start",
+]
 
 logger = logging.getLogger("adorm.executor")
 
@@ -50,13 +61,91 @@ REQUEST_METHODS = frozenset(
 
 _request_ids = itertools.count(1)
 
-_UNSENT = "_adorm_cancelled_before_start"
+
+class CancellationOutcome(enum.StrEnum):
+    """What a cancelled request did in the database."""
+
+    NOT_STARTED = "not_started"
+    """It never reached the driver connection: it had no effect."""
+    SUCCEEDED = "succeeded"
+    """It finished with a result before the cancellation reached it: it took effect."""
+    FAILED = "failed"
+    """It finished with an error before the cancellation reached it: it had no effect."""
+    UNKNOWN = "unknown"
+    """It was cancelled while running, or failed with a lost connection: it may or may not have taken effect."""
+
+
+_OUTCOME = "_adorm_cancellation_outcome"
+
+
+class _Outcome:
+    """The outcome of a cancelled request, refined when the slot delivers the request's own outcome later."""
+
+    __slots__ = ("value",)
+
+    def __init__(self, value: CancellationOutcome) -> None:
+        self.value = value
+
+    def follow(self, future: asyncio.Future) -> None:
+        """Take the outcome of ``future``, the request's channel future, now or once it is settled."""
+        if future.done():
+            self._settle(future)
+        else:
+            future.add_done_callback(self._settle)
+
+    def _settle(self, future: asyncio.Future) -> None:
+        if future.cancelled():
+            return  # a CancelledEvent: the request was cancelled while it ran
+        error = future.exception()  # also marks the exception as retrieved
+        self.value = CancellationOutcome.SUCCEEDED if error is None else failure_outcome(error)
+
+
+def failure_outcome(error: BaseException) -> CancellationOutcome:
+    """The `CancellationOutcome` of a request that failed with ``error``: `UNKNOWN` for a lost connection."""
+    from adorm.drivers.base import is_connection_error
+
+    return CancellationOutcome.UNKNOWN if is_connection_error(error) else CancellationOutcome.FAILED
+
+
+def mark_cancellation(exc: BaseException, outcome: CancellationOutcome) -> _Outcome:
+    """Record ``outcome`` on ``exc``, a ``CancelledError``, unless it already carries one; return the record."""
+    record = getattr(exc, _OUTCOME, None)
+    if record is None:
+        record = _Outcome(outcome)
+        setattr(exc, _OUTCOME, record)
+    return record
+
+
+def carry_cancellation(source: BaseException, target: BaseException) -> None:
+    """Give ``target``, a later ``CancelledError`` of the same operation, the outcome record of ``source``."""
+    record = getattr(source, _OUTCOME, None)
+    if record is not None and getattr(target, _OUTCOME, None) is None:
+        setattr(target, _OUTCOME, record)
+
+
+def cancellation_outcome(exc: BaseException) -> CancellationOutcome | None:
+    """The `CancellationOutcome` of the adorm operation or request whose cancellation raised ``exc``.
+
+    ``exc`` is the ``CancelledError`` itself or an exception it caused, such as the ``TimeoutError`` of
+    ``asyncio.timeout()``. ``None`` when no cancelled operation or request raised it. `UNKNOWN` becomes the
+    request's actual outcome when the slot delivers it later; it is final once the slot has finished the request,
+    which releasing the lease waits for.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        record = getattr(current, _OUTCOME, None)
+        if record is not None:
+            return record.value
+        current = current.__cause__
+    return None
 
 
 def cancelled_before_start(exc: BaseException) -> bool:
-    """Whether ``exc`` is the cancellation of a `SlotLease.call()` whose request was still queued, so that it never
-    reached the driver connection."""
-    return getattr(exc, _UNSENT, False)
+    """Whether ``cancellation_outcome(exc)`` is `CancellationOutcome.NOT_STARTED`: ``exc`` is the cancellation of an
+    operation or request that never reached the driver connection."""
+    return cancellation_outcome(exc) is CancellationOutcome.NOT_STARTED
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,9 +263,9 @@ class SlotLease:
         """Send ``Request(method, args)`` and return its result or raise its error.
 
         Cancelling the caller cancels the request: a queued one never runs, a running one is cancelled in the
-        driver connection. `cancelled_before_start()` tells the two apart on the raised ``CancelledError``. A
-        `CancelledEvent` for a request the caller did not cancel raises `InterfaceError`. A lease that is released
-        raises `InterfaceError`, one the slot aborted `TransactionClosed`.
+        driver connection. The raised ``CancelledError`` carries the request's `CancellationOutcome`
+        (`cancellation_outcome()`). A `CancelledEvent` for a request the caller did not cancel raises
+        `InterfaceError`. A lease that is released raises `InterfaceError`, one the slot aborted `TransactionClosed`.
         """
         request = Request(method, args)
         self._check_open()
@@ -187,14 +276,16 @@ class SlotLease:
             self.channel.forget(request.request_id)
             raise
         try:
-            return await future
+            # Shielded, so that the outcome still arrives after the caller is cancelled.
+            return await asyncio.shield(future)
         except asyncio.CancelledError as exc:
             task = asyncio.current_task()
             if future.cancelled() and task is not None and not task.cancelling():
                 raise InterfaceError(f"request {request.request_id!r} ({method}) was cancelled by the slot") from None
-            # The request's CancelledEvent, or an outcome that won the race, settles the already cancelled future.
-            if future.cancelled() and self.slot._cancel(request):
-                setattr(exc, _UNSENT, True)
+            if not future.done() and self.slot._cancel(request):
+                mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
+            else:
+                mark_cancellation(exc, CancellationOutcome.UNKNOWN).follow(future)
             raise
 
     async def release(self, *, discard: bool = False) -> None:
@@ -211,6 +302,13 @@ class SlotLease:
             return
         self._released = True
         await self.slot._finish(self, discard)
+
+    async def _wait_returned(self) -> None:
+        """Wait until the slot has finished returning this released lease, through any cancellation meanwhile."""
+        finisher = self.slot._finisher
+        while finisher is not None and not finisher.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait({finisher})
 
     async def __aenter__(self) -> SlotLease:
         return self

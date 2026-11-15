@@ -146,6 +146,7 @@ def _on(driver: str | None) -> str:
     return "" if driver is None else f" (driver {driver!r})"
 
 
+_QUERY_CANCELED = "57014"
 _CONNECTION_LOST_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
 
 
@@ -369,6 +370,13 @@ def _resolve(future: asyncio.Future, ok: bool, value: Any) -> None:
         future.set_exception(value)
 
 
+def _finished_uncancelled(future: asyncio.Future) -> bool:
+    """Whether the cancelled call behind ``future`` finished with a result, or an error other than its cancellation."""
+    if not future.done() or future.cancelled():
+        return False
+    return getattr(future.exception(), "sqlstate", None) != _QUERY_CANCELED
+
+
 def _consume(future: asyncio.Future) -> None:
     if not future.cancelled():
         future.exception()
@@ -509,28 +517,28 @@ class ThreadedConnection(DriverConnection):
             raise
 
     async def _execute(self, operation: Operation) -> Any:
-        return await self._call(self.execute_sync, operation)
+        return await self._request(self.execute_sync, operation)
 
     async def begin(self) -> None:
-        await self._call(self.begin_sync)
+        await self._request(self.begin_sync)
 
     async def _savepoint(self, name: str) -> None:
-        await self._call(self.savepoint_sync, name)
+        await self._request(self.savepoint_sync, name)
 
     async def _release_savepoint(self, name: str) -> None:
-        await self._call(self.release_savepoint_sync, name)
+        await self._request(self.release_savepoint_sync, name)
 
     async def _rollback_to_savepoint(self, name: str) -> None:
-        await self._call(self.rollback_to_savepoint_sync, name)
+        await self._request(self.rollback_to_savepoint_sync, name)
 
     async def commit(self) -> None:
-        await self._call(self.commit_sync)
+        await self._request(self.commit_sync)
 
     async def rollback(self) -> None:
-        await self._call(self.rollback_sync)
+        await self._request(self.rollback_sync)
 
     async def _set_options(self, options: dict[str, Any], local: bool) -> None:
-        await self._call(self.set_options_sync, options, local)
+        await self._request(self.set_options_sync, options, local)
 
     async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
         """Call ``hook(self.target, *args)`` on the connection's thread and return its result. The hook is a plain
@@ -613,7 +621,13 @@ class ThreadedConnection(DriverConnection):
 
     # Bridge between the event loop and the thread.
 
-    async def _call(self, fn: Callable[..., Any], *args: Any) -> Any:
+    async def _request(self, fn: Callable[..., Any], *args: Any) -> Any:
+        """``_call()`` for a slot's request: a cancelled call that finished before the cancellation reached it
+        returns its result or raises its error; only one the target cancelled (SQLSTATE 57014) or one still running
+        after ``cancel_grace`` raises ``CancelledError``."""
+        return await self._call(fn, *args, report_drained=True)
+
+    async def _call(self, fn: Callable[..., Any], *args: Any, report_drained: bool = False) -> Any:
         if self._closed:
             raise InterfaceError(f"{self.driver.name} connection is closed")
         if self._stuck:
@@ -631,7 +645,9 @@ class ThreadedConnection(DriverConnection):
                     raise
             self._cancel_in_background(call)
             await self._drain(call)
-            raise
+            if not (report_drained and _finished_uncancelled(call.future)):
+                raise
+        return call.future.result()
 
     def _call_inline(self, fn: Callable[..., Any], *args: Any) -> Any:
         events: list[Event] = []

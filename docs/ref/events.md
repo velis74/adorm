@@ -51,8 +51,8 @@ The request `request_id` failed with `error`, an adorm exception. Kind `"error"`
 ### `adorm.events.CancelledEvent(request_id, started)`
 
 The request `request_id` was cancelled at the client's request. `started` is `False` when the request was still
-queued and never reached the driver connection, `True` when it was cancelled in the connection while it ran. Kind
-`"cancelled"`.
+queued and never reached the driver connection, `True` when it was cancelled in the connection while it ran, so that
+whether it took effect is unknown. Kind `"cancelled"`.
 
 ### `adorm.events.CallbackEvent(name, payload=None)`
 

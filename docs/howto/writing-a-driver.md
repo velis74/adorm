@@ -326,6 +326,10 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
 - `target` returns the target's connection object, which the profile's `on_acquire` and `on_release` hooks receive.
 - A cancelled statement reports SQLSTATE `57014`, not a connection error. When the cancellation can leave the
   server connection with an open transaction or locks, `is_usable()` returns `False` so that the slot closes it.
+- A request method cancelled after its statement finished returns that result or raises that error, which the
+  caller's `CancelledError` reports as `CancellationOutcome.SUCCEEDED` or `FAILED` (`COMMITTED` for a commit); it
+  raises `asyncio.CancelledError` only when the statement's effect is unknown, which reports `UNKNOWN`
+  ([driver contract](/ref/drivers#cancellation)). `ThreadedConnection` does this for a threaded driver.
 - `is_connection_lost()` is true only for errors after which the connection cannot be used; override it when the
   target reports statement errors as `OperationalError` without a SQLSTATE.
 - `close()` never raises and can be called twice.

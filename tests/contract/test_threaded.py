@@ -558,7 +558,7 @@ async def test_failing_work_after_a_call_is_logged(fake, caplog):
     assert [r.exc_info[0] for r in caplog.records if "work after" in r.getMessage()] == [ZeroDivisionError]
 
 
-async def test_cancel_waits_for_the_call_to_finish(fake):
+async def test_cancel_waits_for_the_call_to_finish_and_returns_its_result(fake):
     conn, _, _ = fake
     running = threading.Event()
     finish = threading.Event()
@@ -569,6 +569,7 @@ async def test_cancel_waits_for_the_call_to_finish(fake):
         assert c.control.cancel_requested.wait(TIMEOUT)
         assert finish.wait(TIMEOUT)
         finished.set()
+        return "finished"
 
     task = asyncio.create_task(conn.execute(Op(action)))
     await started(running)
@@ -576,9 +577,46 @@ async def test_cancel_waits_for_the_call_to_finish(fake):
     await asyncio.sleep(0)
     assert not task.done()
     finish.set()
+    # The call finished before the cancellation reached the target: its result stands.
+    assert await task == "finished"
+    assert finished.is_set()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(SqlError("23505"), IntegrityError), (SqlError("57014"), asyncio.CancelledError)],
+)
+async def test_a_cancelled_call_raises_its_own_error_unless_the_target_cancelled_it(fake, error, expected):
+    conn, _, _ = fake
+    running = threading.Event()
+
+    def action(c):
+        running.set()
+        assert c.control.cancel_requested.wait(TIMEOUT)
+        raise error
+
+    task = asyncio.create_task(conn.execute(Op(action)))
+    await started(running)
+    task.cancel()
+    with pytest.raises(expected):
+        await task
+    assert conn.is_usable()
+
+
+async def test_a_cancelled_hook_raises_cancelled_error_even_when_it_finished(fake):
+    conn, _, _ = fake
+    running = threading.Event()
+
+    def hook(target):
+        running.set()
+        assert target.control.cancel_requested.wait(TIMEOUT)
+        return "done"
+
+    task = asyncio.create_task(conn.call_hook(hook))
+    await started(running)
+    task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert finished.is_set()
 
 
 async def test_repeated_cancellation_while_draining(fake):
@@ -642,11 +680,9 @@ async def test_cancellation_racing_completion(fake, repeat):  # noqa: ARG001
     await asyncio.to_thread(barrier.wait)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        if task.cancel():
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        else:
-            assert await task == "completed"
+        task.cancel()
+        # The call is running past the barrier, so it completes whenever the cancellation arrives.
+        assert await task == "completed"
         gc.collect()
     assert conn.is_usable()
     assert await conn.execute(Op(lambda _: "next")) == "next"
@@ -790,13 +826,13 @@ async def test_failing_cancel_sync_is_logged(fake, caplog):
     def action(_conn):
         running.set()
         assert finish.wait(TIMEOUT)
+        return "finished"
 
     task = asyncio.create_task(conn.execute(Op(action)))
     await started(running)
     with caplog.at_level(logging.ERROR, logger="adorm.drivers"):
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert await task == "finished"
     assert "cancelling the running fake call failed" in caplog.text
     assert conn.is_usable()
 

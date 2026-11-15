@@ -95,7 +95,7 @@ unsubscribe = pool.events.subscribe(
 
 A cancelled request ends with a `CancelledEvent`. `started=False` means the request was still queued and never
 reached the database; `started=True` means it was cancelled in the driver connection while it ran, so part of its
-work may have reached the database and an open transaction is unusable.
+work may have reached the database and an open transaction is unusable. Whether it took effect is unknown.
 
 ```python
 lease.requests.put_nowait(request := Request("execute", (slow_report,)))
@@ -108,8 +108,9 @@ match await lease.events.get():
 
 A request that finishes before the cancellation reaches it delivers its result or error instead; either way it has
 exactly one outcome. Cancelling the task that awaits `lease.call()` cancels its request the same way; the
-`CancelledError` it raises tells the two cases apart with
-[`cancelled_before_start()`](/ref/pool#adorm-executor-slot-cancelled-before-start-exc).
+`CancelledError` it raises carries the request's
+[`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome), which the request's outcome event completes when it
+arrives after the caller has left (see [cancellation](/topics/cancellation#events)).
 
 ## In process and remote
 

@@ -22,7 +22,18 @@ from adorm.exceptions import (
     TransactionManagementError,
     ValidationError,
 )
-from adorm.executor import Atomic, atomic, BoundModel, create_session, current_session, on_commit, Session
+from adorm.executor import (
+    Atomic,
+    atomic,
+    BoundModel,
+    cancellation_outcome,
+    CancellationOutcome,
+    create_session,
+    current_session,
+    on_commit,
+    Session,
+    TransactionOutcome,
+)
 from adorm.models import (
     driver_method,
     ForeignKey,
@@ -80,6 +91,7 @@ __all__ = [
     "Atomic",
     "Avg",
     "BoundModel",
+    "CancellationOutcome",
     "Case",
     "Coalesce",
     "Concat",
@@ -126,6 +138,7 @@ __all__ = [
     "Sum",
     "TransactionClosed",
     "TransactionManagementError",
+    "TransactionOutcome",
     "Trunc",
     "TruncDate",
     "TruncDay",
@@ -142,6 +155,7 @@ __all__ = [
     "Value",
     "When",
     "atomic",
+    "cancellation_outcome",
     "client_base",
     "configure",
     "create_session",

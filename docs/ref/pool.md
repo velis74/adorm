@@ -1,10 +1,13 @@
 # Pool and router
 
 Pools of slots, the router that assigns their slots to sessions, and the leases and queues through which a flow
-talks to a slot, importable from `adorm.executor`. The [pool topic](/topics/pool) explains how they fit together.
+talks to a slot, importable from `adorm.executor`. `cancellation_outcome` and `CancellationOutcome` are also
+importable from `adorm`. The [pool topic](/topics/pool) explains how they fit together.
 
 ```python
 from adorm.executor import (
+    cancellation_outcome,
+    CancellationOutcome,
     held_leases,
     holding,
     Pool,
@@ -183,7 +186,11 @@ current task (the default), those of `held_leases()`.
 
 Acquires a slot for `session`, executes `operation`, releases the slot and returns the result; the slot is released
 also after an error or a cancellation. An operation the pool's driver does not support raises `NotSupportedError`
-([`Driver.check()`](/ref/drivers#check-operation)) before a slot is acquired.
+([`Driver.check()`](/ref/drivers#check-operation)) before a slot is acquired. A cancellation raises `CancelledError` with
+the operation's [`CancellationOutcome`](#adorm-cancellationoutcome), final when it is raised, also after repeated
+cancellations, since it waits for the slot to be returned: `NOT_STARTED` while waiting for a slot, else that of
+[`call()`](#async-call-method-args), or of the operation's own outcome (`SUCCEEDED`, `FAILED`, `UNKNOWN` for a lost
+connection) when only the release was cancelled.
 
 ```python
 await router.run(session, Select(Member.objects.annotate(n=Length("first_name")).query))
@@ -247,8 +254,10 @@ async with await router.acquire(session) as lease:
 Sends `Request(method, args)` and returns its result or raises its error: the lease's channel awaits the
 request's outcome, which therefore does not appear on `events`. A lease the slot aborted raises `TransactionClosed`,
 a released lease `InterfaceError`. Cancelling the caller cancels the request: a queued request never runs; a running one is
-cancelled in the driver connection. Either way its `CancelledEvent` is consumed by the channel. On the raised `CancelledError`,
-[`cancelled_before_start()`](#adorm-executor-slot-cancelled-before-start-exc) tells the two apart. A request the
+cancelled in the driver connection. The raised `CancelledError` carries the request's
+[`CancellationOutcome`](#adorm-cancellationoutcome): `NOT_STARTED` for a queued request, `SUCCEEDED` or `FAILED` when
+its outcome had arrived, else `UNKNOWN`, which becomes `SUCCEEDED` or `FAILED` when the request finishes first after all.
+The channel consumes the request's outcome also after the caller has left. A request the
 driver cancels on its own, a `CancelledEvent` for a request the caller did not cancel, and a driver method that
 returns no coroutine fail with `InterfaceError`.
 
@@ -269,11 +278,40 @@ pool's `release_timeout`, the error is logged and the slot leaves the pool. The 
 the hook has finished. After the first call, the lease takes no requests (`InterfaceError`) and a second call does
 nothing.
 
+### `adorm.cancellation_outcome(exc)`
+
+The [`CancellationOutcome`](#adorm-cancellationoutcome) of the adorm operation or request whose cancellation raised
+`exc`: the `CancelledError` itself, or an exception it caused through `__cause__`, such as the `TimeoutError` of
+`asyncio.timeout()`. `None` for any other exception. Set by [`call()`](#async-call-method-args), by
+[`Router.run()`](#async-run-session-operation) (`NOT_STARTED` while it waits for a slot) and by
+[`Atomic.execute()`](/ref/transactions#async-execute-operation) (`NOT_STARTED` while it waits for a savepoint of another
+task). `UNKNOWN` turns into the request's outcome when the slot delivers it later; the value is final once the slot has
+finished the request, which releasing its lease waits for. See [cancellation](/topics/cancellation).
+
+```python
+try:
+    await Member.objects.filter(pk=1).update(active=False)
+except asyncio.CancelledError as exc:
+    if adorm.cancellation_outcome(exc) is adorm.CancellationOutcome.UNKNOWN:
+        log.warning("member 1 may or may not be deactivated")
+    raise
+```
+
+### `adorm.CancellationOutcome`
+
+A `StrEnum` of what a cancelled request did in the database.
+
+| Member | Value | Meaning |
+|---|---|---|
+| `NOT_STARTED` | `"not_started"` | it never reached the driver connection: no effect |
+| `SUCCEEDED` | `"succeeded"` | it finished with a result before the cancellation reached it: it took effect |
+| `FAILED` | `"failed"` | it finished with an error, other than a lost connection, before the cancellation reached it: no effect |
+| `UNKNOWN` | `"unknown"` | it was cancelled while it ran, or failed with a lost connection ([`is_connection_error()`](/ref/drivers#adorm-drivers-is-connection-error-exc)): it may or may not have taken effect |
+
 ### `adorm.executor.slot.cancelled_before_start(exc)`
 
-Whether `exc` is the `CancelledError` of a [`call()`](#async-call-method-args) whose request was still queued, so
-that it never reached the driver connection. `False` for a request cancelled while it ran, and for any other
-exception.
+Whether `cancellation_outcome(exc)` is `CancellationOutcome.NOT_STARTED`: `exc` is the cancellation of a request that
+never reached the driver connection.
 
 ```python
 try:

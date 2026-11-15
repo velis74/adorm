@@ -116,7 +116,9 @@ options it supports in `Capabilities.connection_options`, and `DriverConnection.
 [drivers](/ref/drivers)). `OperationTimeout` is defined for `adorm.timeout()`; nothing raises it yet.
 
 Cancelling the client task cancels its request: a queued request never runs, and a running one is cancelled in
-the driver connection (see [the pool topic](/topics/pool)).
+the driver connection. The `CancelledError` tells whether the operation took effect, did not, or whether that is
+unknown because the cancellation raced its completion; an atomic block reports whether its transaction committed
+(see [cancellation](/topics/cancellation)).
 
 ## Pool
 

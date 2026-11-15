@@ -8,7 +8,16 @@ import pytest
 
 import adorm
 
-from adorm import DatabaseError, DeadlockError, Exists, NotSupportedError, OuterRef
+from adorm import (
+    cancellation_outcome,
+    CancellationOutcome,
+    DatabaseError,
+    DeadlockError,
+    Exists,
+    NotSupportedError,
+    OuterRef,
+    TransactionOutcome,
+)
 from adorm.drivers import is_connection_error
 from adorm.query import Length
 from demo.models.clubs import Club, Member, Membership
@@ -220,6 +229,98 @@ async def test_cancelling_an_operation_inside_a_transaction_rolls_it_back(make_r
         async with asyncio.timeout(5):
             async with adorm.atomic():
                 assert await blocker.blocked("koper-sailing") == 1
+    assert pool.size <= 1
+
+
+async def _recorded(awaitable, raised):
+    try:
+        return await awaitable
+    except BaseException as exc:
+        raised.append(exc)
+        raise
+
+
+async def _city(slug="koper-sailing"):
+    return (await Club.objects.get(slug=slug)).city
+
+
+async def test_a_write_cancelled_racing_completion_reports_its_effect(make_router, blocker):
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    seen = set()
+    try:
+        for attempt in range(120):
+            city = f"Race {attempt}"
+            await blocker.hold()
+            raised = []
+            write = Club.objects.filter(slug="koper-sailing").update(city=city)
+            task = asyncio.create_task(_recorded(write, raised))
+            await blocker.waiting()
+            await blocker.release()
+            for _ in range(attempt % 15 if attempt < 90 else (attempt % 15) ** 3):
+                if task.done():
+                    break
+                await asyncio.sleep(0)
+            task.cancel()
+            try:
+                assert await task == 1
+                outcome = None
+            except asyncio.CancelledError:
+                outcome = cancellation_outcome(raised[0])
+            seen.add(outcome)
+            assert pool.in_use == 0
+            await blocker.transactions_ended()
+            applied = await _city() == city
+            if outcome in (None, CancellationOutcome.SUCCEEDED):
+                assert applied, outcome
+            elif outcome is not CancellationOutcome.UNKNOWN:
+                assert not applied, outcome
+    finally:
+        await Club.objects.filter(slug="koper-sailing").update(city="Koper")
+    assert None in seen
+    assert seen - {None}, "no attempt was cancelled"
+    assert seen <= {None, CancellationOutcome.SUCCEEDED, CancellationOutcome.UNKNOWN}
+    assert pool.size <= 1
+
+
+async def test_a_block_cancelled_racing_its_commit_reports_the_outcome(make_router, blocker):
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    seen = set()
+    try:
+        for attempt in range(80):
+            city = f"Commit {attempt}"
+            block = adorm.atomic()
+            ended = asyncio.Event()
+
+            async def run(block=block, city=city, ended=ended):
+                async with block:
+                    await Club.objects.filter(slug="koper-sailing").update(city=city)
+                    ended.set()
+
+            task = asyncio.create_task(run())
+            await ended.wait()
+            for _ in range(attempt % 20 if attempt < 60 else (attempt % 20) ** 3):
+                if task.done():
+                    break
+                await asyncio.sleep(0)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            outcome = block.outcome
+            seen.add(outcome)
+            assert outcome is not None
+            assert pool.in_use == 0
+            await blocker.transactions_ended()
+            applied = await _city() == city
+            if outcome is TransactionOutcome.COMMITTED:
+                assert applied
+            elif outcome is TransactionOutcome.ROLLED_BACK:
+                assert not applied
+    finally:
+        await Club.objects.filter(slug="koper-sailing").update(city="Koper")
+    assert TransactionOutcome.COMMITTED in seen
+    assert seen - {TransactionOutcome.COMMITTED}, "no commit was cancelled"
     assert pool.size <= 1
 
 

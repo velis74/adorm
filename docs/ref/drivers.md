@@ -242,6 +242,19 @@ A driver that cannot run the target ORM's code, such as a native SQL driver, lis
 Cancelling the task that awaits `execute()` cancels the running statement; the call raises
 `asyncio.CancelledError`, the connection stays usable, and the slot rolls back an open transaction.
 
+What a cancelled `execute()`, `commit()` or other request method does decides the
+[`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome) of the caller's `CancelledError` and the
+[`TransactionOutcome`](/ref/transactions#adorm-transactionoutcome) of a cancelled commit:
+
+| The method | Outcome |
+|---|---|
+| returns its result | `SUCCEEDED`; a `commit()` is `COMMITTED` |
+| raises an error | `FAILED`; `UNKNOWN` for a connection error ([`is_connection_error()`](#adorm-drivers-is-connection-error-exc)); a `commit()` is `ROLLED_BACK`, or `UNKNOWN` for a connection error |
+| raises `asyncio.CancelledError` | `UNKNOWN` |
+
+A method whose statement finished before the cancellation reached it returns that result or raises that error; it
+raises `CancelledError` only when the statement's effect is unknown, such as a statement the target cancelled.
+
 ```python
 task = asyncio.create_task(connection.execute(operation))
 ...
@@ -307,9 +320,11 @@ What the connection does around those methods:
   `KeyboardInterrupt` or `SystemExit` becomes `InterfaceError`; on a direct connection it propagates. An error for
   which `is_connection_lost()` is true makes `is_usable()` return `False`.
 - Cancelling the awaiting task: a call that has not started never runs; for a running call `cancel_sync()` runs
-  on a short-lived thread of its own, and the task waits for the call to finish, then raises
-  `asyncio.CancelledError`. When the call does not finish within `cancel_grace`, the connection becomes unusable
-  and further calls raise `InterfaceError`. Cancelling `open_connection()` during `connect_sync()` works the same
+  on a short-lived thread of its own, and the task waits for the call to finish. A request method (`execute()`,
+  `begin()`, `commit()`, `rollback()`, the savepoint methods, `set_options()`) then returns the call's result or
+  raises its error, and raises `asyncio.CancelledError` when the call failed with SQLSTATE `57014`; `start()` and
+  `call_hook()` always raise `asyncio.CancelledError`. When the call does not finish within `cancel_grace`, the
+  connection becomes unusable, the task raises `asyncio.CancelledError`, and further calls raise `InterfaceError`. Cancelling `open_connection()` during `connect_sync()` works the same
   way, then runs `close_sync()` and stops the thread.
 - `cancel()` runs `cancel_sync()` for the running call: on a thread of its own when called on the event loop's
   thread, otherwise on the calling thread. It does nothing when no call is running.

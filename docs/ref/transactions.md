@@ -1,11 +1,11 @@
 # Transactions
 
 `atomic()` blocks, `on_commit` callbacks and the active transactions of a context, importable from
-`adorm.executor`. `atomic`, `Atomic` and `on_commit` are also importable from `adorm`. The
+`adorm.executor`. `atomic`, `Atomic`, `on_commit` and `TransactionOutcome` are also importable from `adorm`. The
 [transactions topic](/topics/transactions) explains how they behave together.
 
 ```python
-from adorm import atomic, Atomic, on_commit
+from adorm import atomic, Atomic, on_commit, TransactionOutcome
 from adorm.executor import active_transaction, bind_transaction, debug_enabled, set_debug, Transaction
 ```
 
@@ -73,6 +73,25 @@ block as failed.
 | `savepoint` | the savepoint name, `None` for a transaction |
 | `lease` | the [`SlotLease`](/ref/pool#adorm-executor-slotlease) of the transaction's slot, `None` before entry |
 | `closed` | whether the block no longer takes operations: it is ending or has ended |
+| `outcome` | the [`TransactionOutcome`](#adorm-transactionoutcome) of the transaction; for a savepoint `ROLLED_BACK` when it or a savepoint around it was rolled back, else the outermost block's; `None` while the transaction is open and for a block that never began; final once the end of the block has returned or raised |
+
+When the end of the block is cancelled while it commits, the end raises `CancelledError` once the slot has finished
+the commit, if it was sent, and `outcome` tells whether it committed. After a confirmed commit its `on_commit()`
+callbacks run in a task of their own, which logs an exception a callback raises on the `adorm.executor` logger. When
+the block was ended by another task's `commit()` that was cancelled before the commit was confirmed, the end of the
+owner's `async with` raises `TransactionManagementError` with that `CancelledError` as `__cause__`. See
+[cancellation](/topics/cancellation).
+
+```python
+block = adorm.atomic()
+try:
+    async with block:
+        await Member.objects.filter(pk=1).update(active=False)
+except asyncio.CancelledError:
+    if block.outcome is TransactionOutcome.UNKNOWN:
+        ...                                   # the update may or may not be committed
+    raise
+```
 
 #### `async execute(operation)`
 
@@ -82,7 +101,9 @@ directly inside this block, it first waits until that savepoint ends; after the 
 transaction, and `TransactionManagementError` after an operation of the block failed. An operation that fails with
 a `DatabaseError` or `InterfaceError`, or is cancelled after it reached the slot's connection, marks the block as
 failed. A `NotSupportedError` without `sqlstate` and `original` (a capability check on the client side) and a
-cancellation of an operation still queued do not. Operations of a session's bound models reach the block
+cancellation of an operation still queued do not. A cancellation while the operation waits for a savepoint carries
+[`CancellationOutcome.NOT_STARTED`](/ref/pool#adorm-cancellationoutcome); a cancellation after the request was sent
+carries the outcome [`SlotLease.call()`](/ref/pool#async-call-method-args) gives it. Operations of a session's bound models reach the block
 through [`Session.execute()`](/ref/sessions#async-execute-operation).
 
 #### `async commit()`
@@ -115,7 +136,8 @@ without arguments; an awaitable it returns is awaited.
 - A savepoint passes its callbacks to the enclosing block when it is released and drops them when it rolls back or
   the enclosing block closes it.
 - A rollback, an exit with an exception, a failed operation and an abort by the slot drop the callbacks. So does a
-  commit that is cancelled.
+  commit cancelled before the slot confirmed it. After a confirmed commit whose end was cancelled, the callbacks run
+  in a task of their own, which logs an exception a callback raises on the `adorm.executor` logger.
 - A callback that raises stops the remaining ones; the exception propagates from the end of the outermost block, or
   from `commit()`, after the commit. It does not reach other tasks waiting for that end. With `robust=True` the
   exception is logged on the `adorm.executor` logger and the next callback runs.
@@ -142,6 +164,16 @@ async def close_account(member_id):
     await Member.objects.filter(pk=member_id).update(active=False)
     await adorm.on_commit(lambda: billing.cancel_subscription(member_id))   # after COMMIT, or now outside one
 ```
+
+### `adorm.TransactionOutcome`
+
+A `StrEnum` of how a transaction ended in the database, the value of [`Atomic.outcome`](#atomic-class).
+
+| Member | Value | When |
+|---|---|---|
+| `COMMITTED` | `"committed"` | the slot delivered `CallbackEvent("on_commit")`: the commit succeeded, also when the end of the block was cancelled while it ran |
+| `ROLLED_BACK` | `"rolled_back"` | the block rolled back, the slot aborted the transaction, the commit failed with an error other than a lost connection, or the end was cancelled before the commit reached the driver connection |
+| `UNKNOWN` | `"unknown"` | the commit was cancelled after it reached the slot, or failed with a lost connection ([`is_connection_error()`](/ref/drivers#adorm-drivers-is-connection-error-exc)): the transaction may have committed |
 
 ## Transactions in the context
 

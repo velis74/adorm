@@ -16,7 +16,14 @@ from typing import Any, cast, TYPE_CHECKING
 
 from adorm.events import EventBus
 from adorm.exceptions import DeadlockError, InterfaceError, SessionTimeout
-from adorm.executor.slot import Slot, SlotLease
+from adorm.executor.slot import (
+    CancellationOutcome,
+    carry_cancellation,
+    failure_outcome,
+    mark_cancellation,
+    Slot,
+    SlotLease,
+)
 
 if TYPE_CHECKING:
     from adorm.drivers.base import Driver, DriverConnection, Profile
@@ -630,14 +637,38 @@ class Router:
         """Acquire a slot for ``session``, execute ``operation``, release the slot and return the result.
 
         An operation the pool's driver does not support raises `NotSupportedError` before a slot is acquired
-        (`Driver.check()`)."""
-        pool = await self.get_pool(session.using)
-        pool.driver.check(operation)
-        lease = await self._acquire_bound(session, None)
+        (`Driver.check()`). A cancellation carries the operation's `CancellationOutcome`, final when the
+        ``CancelledError`` is raised: `NOT_STARTED` while it waits for a slot, else that of `SlotLease.call()`."""
         try:
-            return await lease.call("execute", operation)
+            pool = await self.get_pool(session.using)
+            pool.driver.check(operation)
+            lease = await self._acquire_bound(session, None)
+        except asyncio.CancelledError as exc:
+            mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
+            raise
+        cancelled: asyncio.CancelledError | None = None
+        outcome = CancellationOutcome.UNKNOWN
+        try:
+            result = await lease.call("execute", operation)
+            outcome = CancellationOutcome.SUCCEEDED
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+            raise
+        except Exception as exc:
+            outcome = failure_outcome(exc)
+            raise
         finally:
-            await lease.release()
+            try:
+                await lease.release()
+            except asyncio.CancelledError as exc:
+                # Cancelled again, or only now: the outcome is the operation's, final once the slot is returned.
+                await lease._wait_returned()
+                if cancelled is not None:
+                    carry_cancellation(cancelled, exc)
+                else:
+                    mark_cancellation(exc, outcome)
+                raise
+        return result
 
     async def close(self) -> None:
         """Close every pool, those retired after a profile change included."""

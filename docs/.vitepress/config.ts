@@ -54,6 +54,7 @@ export default defineConfig({
           { text: 'Managers and driver methods', link: '/topics/managers' },
           { text: 'Sessions and bound models', link: '/topics/sessions' },
           { text: 'Transactions', link: '/topics/transactions' },
+          { text: 'Cancellation', link: '/topics/cancellation' },
           { text: 'Connection profiles', link: '/topics/profiles' },
           { text: 'Pool and router', link: '/topics/pool' },
           { text: 'Events', link: '/topics/events' },

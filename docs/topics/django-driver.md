@@ -371,8 +371,11 @@ dropped by its slot; the next request gets a new one. Other errors leave the con
 
 Cancelling the task that awaits an operation cancels the running statement: the driver calls psycopg's `cancel_safe()`
 (`cancel()` on psycopg 2) from another thread, the statement ends with `57014`, the task gets
-`asyncio.CancelledError` and the connection stays in the pool. A read that completes just before the cancellation
-arrives is discarded.
+`asyncio.CancelledError` and the connection stays in the pool. The `CancelledError` carries
+`CancellationOutcome.UNKNOWN` for a statement the database cancelled. A statement that completed on the connection's
+thread before the cancellation reached the database delivers its outcome to the slot: the task still gets
+`CancelledError`, with `CancellationOutcome.SUCCEEDED`, or `FAILED` for an error, and a commit is
+`TransactionOutcome.COMMITTED`; a read's rows are discarded. See [cancellation](/topics/cancellation).
 
 ```python
 task = asyncio.create_task(Report.objects.filter(year=2026).count())

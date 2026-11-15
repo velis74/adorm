@@ -128,7 +128,9 @@ for _ in range(4):
 
 `lease.requests.cancel(request)` cancels a request: a queued one never runs, a running one is cancelled in the driver
 connection. Its outcome is a `CancelledEvent`, or its result or error when it finished first. The `CancelledEvent` of
-a queued request arrives as soon as it is cancelled, ahead of the outcomes of earlier requests.
+a queued request arrives as soon as it is cancelled, ahead of the outcomes of earlier requests. Cancelling the task
+that awaits `lease.call()` cancels its request the same way; the raised `CancelledError` carries the request's
+[`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome) ([cancellation](/topics/cancellation)).
 
 `lease.call(method, *args)` sends one request and returns its result or raises its error; the channel settles
 the call with the outcome, so it does not appear on `events`. Concurrent calls on one lease queue behind each other. A request that the driver or the slot

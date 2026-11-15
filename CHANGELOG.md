@@ -298,3 +298,13 @@
   what it does with Python code of the target ORM: model `save()` / `delete()` overrides, query set `create()` /
   `update()` overrides, custom `on_delete` handlers, Django's signals and `on_commit()` callbacks, `pre_init` /
   `post_init` (`tests/conformance/test_driver_code.py`).
+- Outcome of a cancellation: the `CancelledError` of a cancelled operation or `SlotLease.call()` carries a
+  `CancellationOutcome` (`NOT_STARTED`, `SUCCEEDED`, `FAILED`, `UNKNOWN`), read with `adorm.cancellation_outcome(exc)`,
+  also through the `TimeoutError` of `asyncio.timeout()`. A cancellation racing the completion of a request is
+  `UNKNOWN` until the slot delivers the request's own outcome, which `Router.run()` waits for. `Atomic.outcome`
+  reports the `TransactionOutcome` of a block (`COMMITTED`, `ROLLED_BACK`, `UNKNOWN` for a cancelled or lost commit;
+  `ROLLED_BACK` for a savepoint that was rolled back). After a confirmed commit whose end was cancelled, the block's
+  `on_commit` callbacks run in a task of their own; a commit by another task cancelled before it was confirmed makes the
+  owner's end of the block raise `TransactionManagementError`. A cancelled `ThreadedConnection` request method returns
+  the result, or raises the error, of a call that finished before the cancellation reached the target, so the Django
+  driver reports `SUCCEEDED`, `FAILED` and `COMMITTED` for statements that completed despite a cancellation.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import enum
 import inspect
 import itertools
 import logging
@@ -16,6 +17,7 @@ from contextvars import ContextVar, Token
 from types import MappingProxyType, TracebackType
 from typing import Any, cast, Protocol, runtime_checkable, TYPE_CHECKING
 
+from adorm.drivers.base import is_connection_error
 from adorm.events import ON_COMMIT
 from adorm.exceptions import (
     DatabaseError,
@@ -28,14 +30,27 @@ from adorm.exceptions import (
     TransactionManagementError,
 )
 from adorm.executor.debug import debug_enabled
-from adorm.executor.slot import cancelled_before_start
+from adorm.executor.slot import (
+    cancellation_outcome,
+    CancellationOutcome,
+    cancelled_before_start,
+    mark_cancellation,
+)
 
 if TYPE_CHECKING:
     from adorm.executor.sessions import Session
     from adorm.executor.slot import SlotLease
     from adorm.operations import Operation
 
-__all__ = ["Atomic", "Transaction", "active_transaction", "atomic", "bind_transaction", "on_commit"]
+__all__ = [
+    "Atomic",
+    "Transaction",
+    "TransactionOutcome",
+    "active_transaction",
+    "atomic",
+    "bind_transaction",
+    "on_commit",
+]
 
 logger = logging.getLogger("adorm.executor")
 
@@ -125,6 +140,29 @@ def _unbind(session: Session) -> None:
 _NEW, _OPEN, _CLOSING, _ENDED = "new", "open", "closing", "ended"
 
 
+class TransactionOutcome(enum.StrEnum):
+    """How a transaction ended in the database."""
+
+    COMMITTED = "committed"
+    """The slot confirmed the commit, also when the end of the block was cancelled while it ran."""
+    ROLLED_BACK = "rolled_back"
+    """The block rolled back, the slot aborted the transaction, the commit failed, or the end was cancelled before
+    the commit was sent."""
+    UNKNOWN = "unknown"
+    """The commit was cancelled while it ran, or its connection was lost: the transaction may have committed."""
+
+
+_UNSENT = object()  # the commit was not sent
+
+_detached: set[asyncio.Task] = set()  # on_commit callbacks of a commit whose end was cancelled
+
+
+def _detached_done(task: asyncio.Task) -> None:
+    _detached.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.error("on_commit callback failed", exc_info=task.exception())
+
+
 def _leaves_transaction_failed(exc: BaseException) -> bool:
     """Whether ``exc``, raised by a request, may leave the database transaction aborted or in an unknown state."""
     if isinstance(exc, asyncio.CancelledError):
@@ -159,6 +197,7 @@ class Atomic:
         "__weakref__",
         "_callbacks",
         "_child",
+        "_commit_error",
         "_committed",
         "_drained",
         "_end_error",
@@ -169,6 +208,7 @@ class Atomic:
         "_ids",
         "_lease",
         "_pending",
+        "_rolled_back",
         "_slot_cm",
         "_state",
         "_tasks",
@@ -203,6 +243,8 @@ class Atomic:
         self._ids = itertools.count(1)
         self._callbacks: list[tuple[Callback, bool]] = []
         self._committed = False
+        self._commit_error: BaseException | None | object = _UNSENT
+        self._rolled_back = False
 
     def __repr__(self) -> str:
         kind = f"savepoint {self.savepoint!r}" if self.savepoint else "transaction"
@@ -225,6 +267,30 @@ class Atomic:
     def closed(self) -> bool:
         """Whether the block no longer takes operations: it is ending or has ended."""
         return self._state in (_CLOSING, _ENDED)
+
+    @property
+    def outcome(self) -> TransactionOutcome | None:
+        """How the transaction ended. ``None`` while it has not ended or when it never began.
+        `TransactionOutcome.UNKNOWN` for a commit that was cancelled or lost its connection; final once the end of the
+        block has returned or raised. A savepoint reports `TransactionOutcome.ROLLED_BACK` when it, or a savepoint
+        around it, was rolled back, and the outermost block's outcome otherwise."""
+        root = self.root
+        if root._state != _ENDED or root._lease is None:
+            return None
+        if any(block._rolled_back or block._forced for block in self._chain() if block.parent is not None):
+            return TransactionOutcome.ROLLED_BACK
+        if root._committed:
+            return TransactionOutcome.COMMITTED
+        error = root._commit_error
+        if error is _UNSENT:
+            return TransactionOutcome.ROLLED_BACK
+        if isinstance(error, asyncio.CancelledError):
+            if cancellation_outcome(error) in (CancellationOutcome.NOT_STARTED, CancellationOutcome.FAILED):
+                return TransactionOutcome.ROLLED_BACK
+            return TransactionOutcome.UNKNOWN
+        if error is None or is_connection_error(cast("BaseException", error)):
+            return TransactionOutcome.UNKNOWN  # no confirmation, or the connection was lost during the commit
+        return TransactionOutcome.ROLLED_BACK
 
     def _chain(self) -> Iterator[Atomic]:
         block: Atomic | None = self
@@ -296,16 +362,21 @@ class Atomic:
     async def execute(self, operation: Operation) -> Any:
         """Run ``operation`` in this block, after a savepoint open inside it ends. Raises `TransactionClosed` once
         the block ends and `TransactionManagementError` after an operation of the block failed."""
-        await self._wait_for_savepoint()
+        try:
+            await self._wait_for_savepoint()
+        except asyncio.CancelledError as exc:
+            mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
+            raise
         return await self._request("execute", operation)
 
     def on_commit(self, func: Callback, *, robust: bool = False) -> None:
         """Run ``func()`` after the transaction commits, once the slot has been released, in registration order and
         outside the transaction: operations in ``func`` use a slot of their own. An awaitable ``func()`` returns is
-        awaited. Callbacks are dropped when the transaction, or the savepoint they were registered in, rolls back.
-        With ``robust`` an exception ``func`` raises is logged; otherwise it is raised by the end of the outermost
-        block (or `commit()`), after the commit, and the remaining callbacks do not run. Raises `TransactionClosed`
-        once the block has ended."""
+        awaited. Callbacks are dropped when the transaction, or the savepoint they were registered in, rolls back or
+        does not commit. With ``robust`` an exception ``func`` raises is logged; otherwise it is raised by the end of
+        the outermost block (or `commit()`), after the commit, and the remaining callbacks do not run. After a
+        confirmed commit whose end was cancelled, the callbacks run in a task of their own, which logs that exception.
+        Raises `TransactionClosed` once the block has ended."""
         if not callable(func):
             raise TypeError(f"an on_commit callback is callable, not {func!r}")
         if self._state != _OPEN:
@@ -320,9 +391,12 @@ class Atomic:
         callbacks, self._callbacks = self._callbacks, []
         if not (self._committed and callbacks):
             return
+        await self._callbacks_task(callbacks)
+
+    def _callbacks_task(self, callbacks: list[tuple[Callback, bool]]) -> asyncio.Task:
         context = contextvars.copy_context()
         context.run(_unbind, self.session)
-        await asyncio.get_running_loop().create_task(_run_callbacks(callbacks), context=context)
+        return asyncio.get_running_loop().create_task(_run_callbacks(callbacks), context=context)
 
     # Entering
 
@@ -467,6 +541,22 @@ class Atomic:
             self._end_error = exc
             self._callbacks.clear()
             raise
+        except BaseException as exc:
+            callbacks, self._callbacks = self._callbacks, []
+            if self._committed:
+                if callbacks:
+                    task = self._callbacks_task(callbacks)
+                    _detached.add(task)
+                    task.add_done_callback(_detached_done)
+            elif commit:
+                # Raised by the owner's end of the block when another task's commit() was cancelled.
+                outcome = self.outcome
+                detail = "the enclosing block rolls back" if outcome is None else f"outcome {outcome}"
+                self._end_error = TransactionManagementError(
+                    f"the end of {self!r} was cancelled before it committed; {detail}"
+                )
+                self._end_error.__cause__ = exc
+            raise
         finally:
             self._ended.set()
         if self.parent is None:
@@ -496,7 +586,12 @@ class Atomic:
                 if commit:
                     raise TransactionClosed(lease._aborted)
             elif commit and failed is None:
-                await lease.call("commit")
+                self._commit_error = None
+                try:
+                    await lease.call("commit")
+                except BaseException as exc:
+                    self._commit_error = exc
+                    raise
             else:
                 try:
                     await lease.call("rollback")
@@ -526,6 +621,7 @@ class Atomic:
                 await parent._request("release_savepoint", self.savepoint)
                 parent._callbacks.extend(self._callbacks)
             else:
+                self._rolled_back = True
                 try:
                     await parent._request("rollback_to_savepoint", self.savepoint)
                     await parent._request("release_savepoint", self.savepoint)
