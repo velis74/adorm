@@ -8,8 +8,9 @@ Supported: the operations in `CAPABILITIES` on a query of one model: conditions 
 on the model's own fields and foreign key columns, with a model instance standing for its primary key, arithmetic
 with `F`, ordering by fields, ``distinct()``, slicing and ``values()`` / ``values_list()`` of fields. Constructs
 outside `CAPABILITIES` (``path.nested`` for field paths across relations, ``clause.annotate`` …) are refused before
-execution; a reverse relation named in a condition raises `NotSupportedError`. A negated condition keeps a row whose
-field in a lookup is NULL, as Django's ``exclude()`` does.
+execution; a reverse relation named in a condition raises `NotSupportedError`, and so does ``in_bulk()`` on a field
+other than the primary key. A negated condition keeps a row whose field in a lookup is NULL, as Django's ``exclude()``
+does.
 
 Each model is its own table. An update of a row copies the values to the row with the same primary key of the models
 it shares rows with through multi-table inheritance; inserting or deleting a row of a multi-table inheritance child
@@ -66,6 +67,7 @@ from adorm.operations import (
     First,
     Get,
     GetOrCreate,
+    InBulk,
     Last,
     Save,
     Select,
@@ -135,6 +137,7 @@ CAPABILITIES = Capabilities(
         "last",
         "count",
         "exists",
+        "in_bulk",
         "create",
         "save",
         "update",
@@ -788,6 +791,12 @@ class MemoryConnection(DriverConnection):
                 return len(await self._fetch(operation.query))
             case Exists():
                 return bool(await self._fetch(operation.query))
+            case InBulk():
+                if operation.field_name not in ("pk", _model(operation.model)._meta.pk):
+                    raise NotSupportedError(
+                        "the memory driver does not know unique constraints: in_bulk() takes the primary key"
+                    )
+                return await self._fetch(operation.select_query())
             case Create():
                 return await self._insert(operation.model, dict(operation.values))
             case Save():

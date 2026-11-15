@@ -183,7 +183,9 @@ class FieldSpec:
         return self.orm_name if self.orm_name != self.name else None
 
 
-RelationKind = Literal["foreign_key", "reverse_foreign_key", "reverse_one_to_one", "many_to_many"]
+RelationKind = Literal[
+    "foreign_key", "reverse_foreign_key", "reverse_one_to_one", "many_to_many", "generic_foreign_key"
+]
 
 
 @dataclass(frozen=True)
@@ -193,8 +195,10 @@ class RelationSpec:
     ``foreign_key``: `adorm.ForeignKey` stored in the field ``column``; ``reverse_foreign_key`` and
     ``reverse_one_to_one``: `adorm.ReverseForeignKey` / `adorm.ReverseOneToOne` on the field ``column`` of
     ``target``; ``many_to_many``: `adorm.ManyToMany` through the model ``through``, linking ``source_column`` to
-    ``target_column``; ``reverse`` marks the reverse side of a many-to-many relation declared on ``target``. ``name``
-    is the Python name, ``orm_name`` the ORM's.
+    ``target_column``; ``reverse`` marks the reverse side of a many-to-many relation declared on ``target``;
+    ``generic_foreign_key``: `adorm.GenericForeignKey` with the content type in the foreign key ``ct_field`` (to
+    ``target``, the content type model) and the object id in the field ``column``. ``name`` is the Python name,
+    ``orm_name`` the ORM's.
     """
 
     kind: RelationKind
@@ -206,8 +210,11 @@ class RelationSpec:
     source_column: str | None = None
     target_column: str | None = None
     reverse: bool = False
+    ct_field: str | None = None
 
     def __post_init__(self) -> None:
+        if self.kind == "generic_foreign_key" and not self.ct_field:
+            raise ValueError(f"the generic foreign key {self.name} needs ct_field")
         if self.kind == "many_to_many":
             if not (self.through and self.source_column and self.target_column):
                 raise ValueError(f"the many-to-many relation {self.name} needs through, source_column, target_column")
@@ -406,7 +413,8 @@ class ModelSpec:
     @property
     def orm_names(self) -> dict[str, str]:
         """ORM names of the class's own renamed fields and relations, by Python name."""
-        items = [(f.name, f.orm_name) for f in self.fields] + [(r.name, r.orm_name) for r in self.relations]
+        relations = [(r.name, r.orm_name) for r in self.relations if r.kind != "generic_foreign_key"]
+        items = [(f.name, f.orm_name) for f in self.fields] + relations
         return {name: orm_name for name, orm_name in items if name != orm_name}
 
 

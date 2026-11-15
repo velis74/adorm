@@ -108,6 +108,9 @@ def test_registry():
         "get_or_create": GetOrCreate,
         "update_or_create": UpdateOrCreate,
         "call": operations.Call,
+        "in_bulk": operations.InBulk,
+        "create_from_parent": operations.CreateFromParent,
+        "full_clean": operations.FullClean,
     }
     for kind, cls in OPERATIONS.items():
         assert cls.kind == kind

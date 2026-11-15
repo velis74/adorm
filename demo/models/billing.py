@@ -6,7 +6,7 @@ import decimal
 import uuid
 from typing import Literal
 
-from adorm import ForeignKey, Model, ModelMeta, ReverseForeignKey
+from adorm import ForeignKey, GenericForeignKey, Model, ModelMeta, ReverseForeignKey
 from pydantic import Field
 
 __all__ = ["Invoice", "InvoiceLine", "Payment"]
@@ -41,6 +41,7 @@ class InvoiceLine(Model):
     unit_price: decimal.Decimal = Field(max_digits=8, decimal_places=2)
     invoice = ForeignKey("billing.Invoice")
     content_type = ForeignKey("contenttypes.ContentType")
+    item = GenericForeignKey()
 
 
 class Payment(Model):

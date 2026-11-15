@@ -186,6 +186,41 @@ Raises `TypeError` for a string `update_fields` and a result that is not a mappi
 primary key value, and [`InterfaceError`](./exceptions) when no executor is available. A failed or cancelled save
 leaves the instance unchanged.
 
+#### `full_clean(*, exclude=None, validate_unique=True, validate_constraints=True)`
+
+Coroutine: validate the instance as the target validates one before a save, with a
+[`FullClean`](./operations#adorm-operations-fullclean-model-pk-values-exclude-validate-unique-true-validate-constraints-true-adding-true)
+operation on the instance's executor. On the Django driver it is Django's `Model.full_clean()`: field validation
+(`clean_fields()`), the model's `clean()`, the unique checks (`validate_unique()`) and the model's constraints
+(`validate_constraints()`).
+
+- The instance validated is the one `save()` would write: its loaded and assigned fields over the stored row (for an
+  instance with a primary key that is not `_state.adding`; the row is read when fields are missing), otherwise over
+  the target's defaults. A unique check of a stored instance leaves its own row out.
+- `exclude` names fields (or relations, for their column; `"pk"` for the primary key) that are not validated.
+  `validate_unique` and `validate_constraints` switch the unique checks and the constraints off.
+- Errors raise [`ValidationError`](./exceptions) with `message_dict` by adorm name: a field's errors under the field
+  name, a foreign key's under its relation's name (`"club"`, not `"club_id"`), errors of the whole model (`clean()`,
+  a constraint over several fields) under `"__all__"`.
+- Without errors, the values the validation cleaned (Django's `to_python()`, changes `clean()` made) are set on the
+  instance's loaded fields; deferred fields stay deferred and `model_fields_set` does not change.
+
+```python
+invoice = await Invoice.objects.get(number="2026-0001")
+invoice.due = datetime.date(2025, 1, 1)
+await invoice.full_clean()
+# ValidationError({'due': ['The due date cannot be before the issue date.']})
+
+copy = Membership(club_id=board.club_id, member_id=board.member_id, since=today, fee=1)
+await copy.full_clean()
+# ValidationError({'__all__': ['Membership with this Club and Member already exists.']})
+await copy.full_clean(exclude=["member"])          # the constraint names an excluded field: no error
+```
+
+Raises `ValueError` for an `exclude` name that is neither a field nor a relation, `TypeError` for a string
+`exclude`, and [`InterfaceError`](./exceptions) when no executor is available. A driver that does not declare
+`full_clean` raises `NotSupportedError` (the demo's memory driver).
+
 #### `delete()`
 
 Coroutine: delete the instance's row and the rows that cascade from it with a
@@ -252,7 +287,7 @@ Per-instance state outside the fields, the instance's private attribute `_state`
 |---|---|
 | `adding` | `True` until the instance is loaded or saved |
 | `executor` | the executor that loaded or last saved the instance, `None` otherwise |
-| `related` | cached related instances by relation name |
+| `related` | cached related instances by relation name; the prefetched rows of a reverse or many-to-many relation; for a generic foreign key the content type, the object id and the instance they were loaded for |
 
 A copy (`copy.copy()`, `model_copy()`) gets its own state with the same executor and a copy of the cache; a deep copy
 deep-copies the cache. A pickled instance comes back without its executor.
@@ -382,10 +417,117 @@ activity.tags.query
 #     pk__in=Query("club.Activity_tags").filter(activity_id=activity.pk).values("tag_id"))
 ```
 
+### Prefetched rows
+
+After [`prefetch_related()`](./queryset#prefetch-related-lookups) of a `ReverseForeignKey` or a `ManyToMany`, the
+query set the relation returns on the instance holds the prefetched rows: `async for`, `count()` and `exists()` read
+them without an operation. Its building methods (`filter()`, `order_by()` …) return query sets that run again, and so
+do its other terminal methods. A prefetched `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` fills the
+relation's cache, so `await instance.rel` runs no operation.
+
+```python
+club = await Club.objects.prefetch_related("memberships").get(slug="koper-sailing")
+[m.role async for m in club.memberships]          # no operation
+await club.memberships.count()                    # 3, no operation
+await club.memberships.filter(active=True).count()   # a Count operation
+```
+
+### `adorm.GenericForeignKey(ct_field="content_type", fk_field="object_id")`
+
+A relation to a row of any model (Django's `GenericForeignKey`): the content type's primary key in the content type
+field and the row's primary key in the field `fk_field`. The content type field is the `ForeignKey` named `ct_field`,
+whose column and target are used, or a field `<ct_field>_id` holding a primary key of
+[`CONTENT_TYPE_MODEL`](#adorm-models-content-type-model).
+
+- `await instance.rel` returns the related instance. The content type row's `app_label` and `model` name the
+  registered model ([`registry.get_for_content_type()`](#adorm-models-modelregistry)); its row with the primary key
+  in `fk_field` (converted to the primary key's type, `"7"` to `7`) is loaded with a `Get` operation on the owner's
+  executor. The content type is read with a `Get` operation (`values("app_label", "model")`), or taken from the
+  content type relation's cache (`select_related("content_type")`).
+- The instance is cached on the owner for the values of both fields it was loaded for, and serves while they keep
+  them; a field changed while a load or prefetch runs leaves the cache for the old values. A prefetch fills the
+  cache.
+- Either field `None`, or no row with that primary key, gives `None`. A content type of a model that is not
+  registered raises `LookupError`; reading the relation while either field is deferred raises `AttributeError`.
+- Assigning `None` sets both fields to `None`; assigning an instance raises `TypeError` (set the two fields); the
+  relation's name as a constructor argument fails validation (pydantic `ValidationError`).
+- It is not a `Relation`: query paths do not traverse it, it is not part of the
+  [schema](#adorm-models-model-schema-model), and [`get_relations()`](#adorm-models-get-relations-model) leaves it out.
+  A model class checks that both fields exist (`TypeError`).
+
+```python
+class InvoiceLine(Model):
+    _meta = ModelMeta("billing.InvoiceLine")
+    id: int | None = None
+    content_type_id: int
+    object_id: int
+    content_type = ForeignKey("contenttypes.ContentType")
+    item = GenericForeignKey()            # GenericForeignKey("content_type", "object_id")
+
+
+item = await line.item                    # a Membership or an Activity
+item is await line.item                   # True, from the cache
+line.object_id = 7                        # the next await loads again
+lines = InvoiceLine.objects.prefetch_related("item")    # one query per content type
+```
+
+### `adorm.models.CONTENT_TYPE_MODEL`
+
+`"contenttypes.ContentType"`: the content type model a `GenericForeignKey` reads when its content type field is not a
+`ForeignKey` of the model.
+
+### `adorm.models.get_generic_foreign_keys(model)`
+
+The `GenericForeignKey` descriptors of the model class `model`, inherited ones included, by attribute name.
+
+```python
+get_generic_foreign_keys(InvoiceLine)    # {"item": InvoiceLine.item}
+```
+
+### `adorm.models.parent_link(model)`
+
+The `ForeignKey` stored in the primary key field of the model class `model`, the link of a multi-table inheritance
+child to its parent; `None` when the primary key is no relation's column. It names the parent model for
+[`create_from_parent()`](./queryset#async-create-from-parent-parent-values).
+
+```python
+parent_link(Competition).target    # "activities.Activity"
+parent_link(Activity)              # None
+```
+
+### `adorm.models.inheritance.own_fields(model, parent)`
+
+The fields of the model class `model` that the model class `parent` does not have, the primary key excepted: the
+fields a multi-table inheritance child declares itself.
+
+```python
+own_fields(Competition, Activity)     # ["discipline", "entry_deadline"]
+```
+
+### `adorm.models.inheritance.child_values(model, values)`
+
+`(parent_link(model), parent model class, validated values)` for `create_from_parent()`: `values` validated with the
+field types of the child's own fields; a `ForeignKey` of the child given by name stands for its column (an instance
+for its primary key). Raises `TypeError` when `model` is not a multi-table inheritance child, `ValueError` for a name
+that is not one of the child's own fields or relations and for a value its type rejects (the message names the field).
+
+```python
+child_values(Competition, {"discipline": "Sprint", "entry_deadline": "2026-05-01"})
+# (Competition.activity_ptr, Activity, {"discipline": "Sprint", "entry_deadline": datetime.date(2026, 5, 1)})
+```
+
+### `adorm.models.prefetch.normalize_lookups(current, lookups, prefix="")`
+
+`current` (a tuple of `Prefetch` objects) followed by `lookups` (relation paths or `Prefetch` objects) as `Prefetch`
+objects, with `prefix` put before each new path; what `prefetch_related()` keeps. A path that is already there is kept
+once; a new one with a query set or `to_attr` whose `prefetch_to` is already there raises `ValueError`, a lookup that
+is neither a string nor a `Prefetch` `TypeError`.
+
 ### `adorm.models.RelatedObject`
 
-The awaitable a `ForeignKey` or `ReverseOneToOne` returns on an instance. Nothing runs until it is awaited, so
-reading the relation without awaiting it leaves no coroutine behind; each `await` checks the cache again.
+The awaitable a `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` returns on an instance. Nothing runs until it
+is awaited, so reading the relation without awaiting it leaves no coroutine behind; each `await` checks the cache
+again.
 
 ### `adorm.models.get_relations(model)`
 
@@ -581,6 +723,7 @@ schema.
 | `register(model)` | register under `model._meta.label`; a class with the same module and qualified name replaces the registered one, another class raises `ValueError` |
 | `unregister(label)` | remove the model; an unknown label is ignored |
 | `get(label)` | the model class; `LookupError` when none is registered |
+| `get_for_content_type(app_label, model_name)` | the model class whose label has the app part `app_label` and the model part `model_name`, compared case-insensitively (Django's `ContentType.model`); `LookupError` when none is registered |
 | `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
 | `label in registry`, `iter(registry)`, `len(registry)` | membership, the model classes, their number |
 

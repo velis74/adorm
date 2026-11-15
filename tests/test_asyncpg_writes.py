@@ -933,6 +933,7 @@ def test_the_connection_runs_every_write_kind():
         "count",
         "exists",
         "aggregate",
+        "in_bulk",
     }
     assert all(callable(write) for write in WRITES.values())
     assert AsyncpgConnection.__dict__.get("_savepoint") is not None

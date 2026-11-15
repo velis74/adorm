@@ -497,7 +497,7 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 
 | Field | Value |
 |---|---|
-| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create` |
+| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean` |
 | `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` |
@@ -509,8 +509,8 @@ fields); `DjangoConnection` refuses other database backends.
 ### `adorm.drivers.django.READ_CAPABILITIES`
 
 The reads of [`CAPABILITIES`](#adorm-drivers-django-capabilities): `operations` `select`, `get`, `first`, `last`,
-`count`, `exists`, `aggregate`, the `constructs` without `clause.select_for_update[...]`, and `cancellation`; no
-savepoints.
+`count`, `exists`, `aggregate`, `in_bulk`, the `constructs` without `clause.select_for_update[...]`, and
+`cancellation`; no savepoints.
 
 ### `adorm.drivers.django.model_row(instance)`
 
@@ -686,6 +686,56 @@ instance_row(Note.objects.only("json").get(pk=code))      # {"code": code, "json
 Returns the installed Django model with the label `label` (`"app_label.ModelName"`), auto-created many-to-many
 through models included (`"library.Book_authors"`). Raises `ProgrammingError` when there is none.
 
+### `adorm.drivers.django.translation.check_in_bulk_field(operation)`
+
+Raises `ProgrammingError` unless the field of the [`InBulk`](./operations#adorm-operations-inbulk-query-field-name-pk-ids-none)
+`operation` is the primary key, a field unique on its own (`unique=True` or a single-field `UniqueConstraint` without
+a condition) or the only field the query is distinct on, as Django's `in_bulk()` requires; `FieldError` for a name
+that is no concrete field. Both drivers call it before the select.
+
+### `adorm.drivers.django.translation.parent_link_field(model)`
+
+The primary key of the Django model `model` when it is the parent link of a multi-table inheritance child
+(`parent_link=True`); `ProgrammingError` otherwise.
+
+### `adorm.drivers.django.translation.child_instance(operation, parent)`
+
+The Django instance a [`CreateFromParent`](./operations#adorm-operations-createfromparent-model-parent-pk-values)
+`operation` saves: the field values of `parent` (the stored parent instance), the operation's values and the parent
+link set to the parent's primary key. A value of a field the child does not declare itself raises
+`ProgrammingError`.
+
+```python
+parent = dj.Book.objects.get(pk=isbn)
+edition = child_instance(CreateFromParent("library.Edition", isbn, {"released": day}), parent)
+edition.title == parent.title     # True
+```
+
+### `adorm.drivers.django.translation.clean_needs_row(operation)`
+
+Whether the instance of a [`FullClean`](./operations#adorm-operations-fullclean-model-pk-values-exclude-validate-unique-true-validate-constraints-true-adding-true)
+`operation` is built on its stored row: the operation is not `adding`, has a primary key and its values lack some of
+the model's concrete fields.
+
+### `adorm.drivers.django.translation.clean_instance(operation, alias, stored)`
+
+The Django instance a `FullClean` `operation` validates: the operation's values over `stored` (the row the driver read
+when `clean_needs_row()` is true; `None` when there is none), over the values alone when they are complete
+(`Model.from_db()`), or over a new instance's defaults with the operation's primary key. Its `_state.adding` is the
+operation's `adding` and its `_state.db` is `alias`, the database Django's constraint validation reads.
+
+### `adorm.drivers.django.translation.clean_exclude(operation)`
+
+The Django field names of the `exclude` names of a `FullClean` operation (adorm field or relation names, mapped
+through `ModelMeta.orm_names`); names without a Django field are left out.
+
+### `adorm.drivers.django.translation.validation_error(label, exc)`
+
+The `adorm.ValidationError` for Django's `ValidationError` `exc` raised while validating an instance of the model
+`label`: messages by adorm name, a foreign key's under the adorm relation's name when the adorm model declares it
+(else its column field), errors of the whole model under `"__all__"`. An error without a dict of messages keeps its
+list of messages.
+
 ### `adorm.drivers.django.translation.subquery(query)`
 
 Returns the Django query set of `query` used inside another query: its model rows (Django compares their primary
@@ -789,7 +839,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 
 | Method | Does |
 |---|---|
-| `_execute(operation)` | a read: [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`), `aggregate` → a dict by name ([`compile_aggregate()`](#compile-aggregate-query-aggregates) of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations); no statement runs when the query matches no rows). A write: the [`WRITES`](#adorm-drivers-asyncpg-writes-writes) method of a new [`Writer`](#adorm-drivers-asyncpg-writes-writer-connection), with the results of the Django driver. Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while a query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement, or a cancellation inside a transaction the write opened, can make the connection unusable. While the transaction is rollback-only (a write failed after its first statement, outside a savepoint of its own) every operation raises `TransactionManagementError` |
+| `_execute(operation)` | a read: [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`), `aggregate` → a dict by name ([`compile_aggregate()`](#compile-aggregate-query-aggregates) of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations); no statement runs when the query matches no rows), `in_bulk` → list of rows ([`check_in_bulk_field()`](#adorm-drivers-django-translation-check-in-bulk-field-operation), then one statement per [`IN_BULK_BATCH_SIZE`](#adorm-drivers-asyncpg-in-bulk-batch-size) ids). A write: the [`WRITES`](#adorm-drivers-asyncpg-writes-writes) method of a new [`Writer`](#adorm-drivers-asyncpg-writes-writer-connection), with the results of the Django driver. Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while a query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement, or a cancellation inside a transaction the write opened, can make the connection unusable. While the transaction is rollback-only (a write failed after its first statement, outside a savepoint of its own) every operation raises `TransactionManagementError` |
 | `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)); inside a transaction `TransactionManagementError` |
 | `commit()`, `rollback()` | `COMMIT`, `ROLLBACK`; a `COMMIT` whose status is `ROLLBACK` (the transaction failed earlier) raises `TransactionManagementError`, and so does `commit()` of a rollback-only transaction, after sending `ROLLBACK` instead |
 | `savepoint(name)`, `release_savepoint(name)`, `rollback_to_savepoint(name)` | `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` with `name` quoted. Outside a transaction, for a savepoint name already open (`savepoint`) and for one that is not open (the others) `TransactionManagementError`. Releasing a savepoint releases those opened after it; rolling back to one discards those opened after it and keeps it open, and ends the rollback-only state of a write that failed after it was opened |
@@ -832,6 +882,8 @@ Django's, built with the model's constructor or `Model.from_db()`.
 | Method | Django's counterpart |
 |---|---|
 | `create(operation)`, `save(operation)`, `update(operation)`, `delete(operation)`, `delete_instance(operation)`, `get_or_create(operation)`, `update_or_create(operation)` | what the [Django driver](#adorm-drivers-django-djangoconnection) calls for that operation; the same results |
+| `create_from_parent(operation)` | `save_base(raw=True)` of a multi-table inheritance child: the parent's row read with `get()`, the child's table inserted as `Model.save()` inserts it |
+| `full_clean(operation)` | `Model.full_clean()`, run as Python on the event loop with [`DjangoCompiler.replay()`](#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none): each statement the validation runs is awaited, then the validation runs again with its rows, so the model's `clean()` and overrides run as on the Django driver, once per statement plus once |
 | `save_instance(instance, *, force_insert=False, force_update=False, update_fields=None)` | `Model.save()`: parents' tables first, an `UPDATE` then an `INSERT` per table, `RETURNING` the primary key and the values the database sets |
 | `create_instance(model, values)` | `QuerySet.create()` |
 | `update_queryset(queryset, values)`, `execute_update(query)` | `QuerySet.update()`, the update compiler; an update of multi-table inheritance parent fields selects the keys, then updates each table |
@@ -873,8 +925,12 @@ total, counts = await collector.delete()
 
 ### `adorm.drivers.asyncpg.writes.WRITES`
 
-The `Writer` method for each write operation kind: `create`, `save`, `update`, `delete`, `delete_instance`,
-`get_or_create`, `update_or_create`.
+The `Writer` method for each write operation kind: `create`, `create_from_parent`, `full_clean`, `save`, `update`,
+`delete`, `delete_instance`, `get_or_create`, `update_or_create`.
+
+### `adorm.drivers.asyncpg.writes.MAX_VALIDATION_STATEMENTS`
+
+How many statements one `full_clean` operation runs at most (100); one more raises `NotSupportedError`.
 
 ### `adorm.drivers.asyncpg.writes.BATCH_SIZE`
 
@@ -932,6 +988,11 @@ The isolation level `begin()` names for each value of psycopg's `IsolationLevel`
 ### `adorm.drivers.asyncpg.MAX_GET_RESULTS`
 
 `21`: the most rows a `get` fetches, as Django's `get()`; with that many it reports `it returned more than 20!`.
+
+### `adorm.drivers.asyncpg.IN_BULK_BATCH_SIZE`
+
+`10_000`: the most ids one statement of an `in_bulk` names. An `in_bulk` with more ids runs one statement per
+batch of ids on the operation's connection and returns the rows of all of them.
 
 ### `adorm.drivers.asyncpg.server_version_num(version)`
 
@@ -1010,7 +1071,7 @@ installs (`pip install "adorm[asyncpg]"`). [SQL compilation for asyncpg](/topics
 behaviour it relies on.
 
 ```python
-from adorm.drivers.asyncpg.compiler import bind_param, DjangoCompiler, DjangoStatement, MAX_QUERY_PARAMS
+from adorm.drivers.asyncpg.compiler import bind_param, DjangoCompiler, DjangoStatement, MAX_QUERY_PARAMS, StatementNeeded
 ```
 
 ### `adorm.drivers.asyncpg.compiler.DjangoCompiler(alias="default", *, server_version, params=None)`
@@ -1112,6 +1173,37 @@ aggregation.statement.sql     # 'SELECT SUM("library_book"."pages") AS "pages" F
 aggregation.result(await conn.fetchrow(aggregation.statement.sql, *aggregation.statement.params))
 # {"pages": 1525}
 ```
+
+#### `replay(fn, answers, aliases=())`
+
+Runs `fn`, synchronous Django code that reads the database (Django's `Model.full_clean()`), and returns its result.
+While `fn` runs, the compiler's database wrapper is the connection of `aliases` and `DEFAULT_DB_ALIAS` in the calling
+thread, and every statement `fn` runs is answered in order from `answers`: `(sql, rows)` pairs of the statement as
+compiled and its rows as asyncpg returns them, loaded as [`rows()`](#rows-records) loads them before Django's own
+converters. A statement past the answers raises [`StatementNeeded`](#adorm-drivers-asyncpg-compiler-statementneeded)
+with that statement compiled, also when `fn` catches the exception (it is a `BaseException`, and a statement requested
+while `fn` returns or raises another exception still raises it); the caller runs it, appends its answer and calls
+again, so `fn` runs once per statement plus once and must run the same statements each time (a different statement
+raises `NotSupportedError`).
+The aliases get their previous connections back when `fn` returns. On an event loop's thread no other task runs while
+`fn` does, so the replacement is visible to `fn` only.
+
+```python
+answers = []
+while True:
+    try:
+        result = compiler.replay(validate, answers, ("default",))
+        break
+    except StatementNeeded as needed:
+        rows = await conn.fetch(needed.statement.sql, *needed.statement.params)
+        answers.append((needed.statement.sql, [tuple(row) for row in rows]))
+```
+
+### `adorm.drivers.asyncpg.compiler.StatementNeeded`
+
+The `BaseException` subclass `replay()` raises for a statement it has no answer for: `statement` is that statement as a
+[`DjangoStatement`](#adorm-drivers-asyncpg-compiler-djangostatement), with numbered placeholders and asyncpg
+parameters.
 
 ### `adorm.drivers.asyncpg.compiler.DjangoAggregation`
 

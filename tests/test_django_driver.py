@@ -179,9 +179,11 @@ async def test_a_database_other_than_postgresql_is_refused(library, monkeypatch)
 
 
 def test_capabilities():
-    assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists", "aggregate"}
+    assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"}
     assert CAPABILITIES.operations == READ_CAPABILITIES.operations | {
         "create",
+        "create_from_parent",
+        "full_clean",
         "save",
         "update",
         "delete",

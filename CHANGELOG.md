@@ -396,3 +396,31 @@
   `NotSupportedError` when the operation also lacks a construct. `adorm.schema.resolve_field_type()` resolves paths
   as `resolve_lookup()` does and raises `FieldError`. A `FieldError` without a SQLSTATE leaves the transaction it is
   raised in usable.
+- `QuerySet.prefetch_related(*lookups)` (`QuerySet.prefetch_lookups`), `adorm.Prefetch(lookup, queryset=None,
+  to_attr=None)`, `adorm.GenericPrefetch(lookup, querysets, to_attr=None)` and
+  `adorm.prefetch_related_objects(instances, *lookups, executor=None)`: related objects of forward and reverse
+  foreign keys, reverse one-to-one, many-to-many and generic foreign keys read with one `Select` per relation,
+  level and batch of `adorm.models.prefetch.BATCH_SIZE` keys (the links first for a many-to-many relation, the
+  content types first for a generic foreign key), on the
+  executor of the instances, after `async for`, `get()`, `first()`, `last()` and `in_bulk()`. Prefetched rows fill
+  the relation caches; the query set of a reverse or many-to-many relation reads them for `async for`, `count()` and
+  `exists()`. A `Prefetch` query set filters, orders and continues with its own lookups; `to_attr` stores the rows as
+  an extra value, which a later path segment may follow, also across the models of a generic foreign key.
+- `adorm.GenericForeignKey(ct_field="content_type", fk_field="object_id")`: `await obj.item` reads the content type,
+  finds the registered model (`ModelRegistry.get_for_content_type()`) and loads the row, cached for the field values it
+  was loaded for; a missing row is `None`. `adorm.models.get_generic_foreign_keys()`, `CONTENT_TYPE_MODEL`.
+  `adorm generate` writes it for Django's `GenericForeignKey` (`RelationSpec` kind `generic_foreign_key`, `ct_field`).
+- `QuerySet.in_bulk(id_list=None, *, field_name="pk")` and the `InBulk` operation (kind `in_bulk`): instances keyed by
+  the primary key, a unique field or a unique foreign key (keyed by its column), which the Django and native
+  PostgreSQL drivers check as Django does (`adorm.drivers.django.translation.check_in_bulk_field()`); the native
+  PostgreSQL driver runs one statement per `adorm.drivers.asyncpg.IN_BULK_BATCH_SIZE` ids; the demo's memory driver
+  takes the primary key.
+- `QuerySet.create_from_parent(parent, **values)` and the `CreateFromParent` operation (kind `create_from_parent`):
+  the row of a multi-table inheritance child for an existing parent row, the child's table only
+  (`adorm.models.parent_link()`); the Django driver saves it with `save_base(raw=True)`, the native PostgreSQL driver
+  inserts the child's table and refuses a child model that overrides `save_base()`.
+- `Model.full_clean(*, exclude=None, validate_unique=True, validate_constraints=True)` and the `FullClean` operation
+  (kind `full_clean`): Django's `full_clean()` of the instance over its stored row, errors as `ValidationError` keyed by
+  adorm names. The native PostgreSQL driver runs it as Python on the event loop with
+  `DjangoCompiler.replay()` (`StatementNeeded`, a `BaseException`; `MAX_VALIDATION_STATEMENTS`), awaiting each
+  statement the validation runs.

@@ -55,9 +55,11 @@ The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`,
 combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
 placement, slicing, `distinct()` and `DISTINCT ON`, the row formats, `only()` and `defer()`, foreign keys, reverse and
 many-to-many relations, multi-table inheritance, generic relations, JSON keys, subqueries, annotations, every function
-and aggregate, `select_for_update()` with its options, and the writes (`create`, `save` also with arithmetic,
-`update`, `delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught inside a
-transaction that then commits, `get_or_create`, `update_or_create`).
+and aggregate, `select_for_update()` with its options, `prefetch_related()` (reverse, forward and many-to-many
+relations, a `Prefetch` query set into `to_attr`, across a generic foreign key), generic foreign key objects,
+`in_bulk()`, `full_clean()`, and the writes (`create`, `create_from_parent`, `save` also with arithmetic, `update`,
+`delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught inside a transaction
+that then commits, `get_or_create`, `update_or_create`).
 
 Coverage tests fail when:
 

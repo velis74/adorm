@@ -67,12 +67,20 @@ FieldSpec("json_", "json", TypeSpec("str"), default="", constraints={"max_length
 # json_: str = Field(default="", alias="json", max_length=20)
 ```
 
-### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False)`
+### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False, ct_field=None)`
 
 A relation, rendered as `ForeignKey` (`kind="foreign_key"`), `ReverseForeignKey` (`"reverse_foreign_key"`),
-`ReverseOneToOne` (`"reverse_one_to_one"`) or `ManyToMany` (`"many_to_many"`, with `through`, `source_column` and
-`target_column`; `reverse` for the side that did not declare it). `is_forward` is true for a foreign key and a
-declared many-to-many relation. A missing column raises `ValueError`.
+`ReverseOneToOne` (`"reverse_one_to_one"`), `ManyToMany` (`"many_to_many"`, with `through`, `source_column` and
+`target_column`; `reverse` for the side that did not declare it) or `GenericForeignKey` (`"generic_foreign_key"`:
+the content type foreign key `ct_field` to `target`, the object id field `column`). `is_forward` is true for a foreign
+key and a declared many-to-many relation; the schema hash covers only those. A missing column, and a generic foreign
+key without `ct_field`, raise `ValueError`.
+
+```python
+RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id",
+             ct_field="content_type")
+# renders:  item = GenericForeignKey()
+```
 
 ### `adorm.codegen.TypeSpec(name, args=(), values=(), nullable=False, model=False)`
 
@@ -172,7 +180,7 @@ that the generator did not write, no settings module.
 
 ### `adorm.codegen.CodegenWarning`
 
-A `UserWarning` for a construct that is not generated (a generic foreign key or relation, a relation that references a
+A `UserWarning` for a construct that is not generated (a generic relation, a relation that references a
 field other than the target's primary key, a manager that would hide an attribute of `adorm.Model`, an exposed method
 that is a coroutine function, returns a query set or has a default that is not a literal) or is generated as `Any`
 (an unknown field type, a method annotation it cannot write), for a validator pattern pydantic cannot compile and for a

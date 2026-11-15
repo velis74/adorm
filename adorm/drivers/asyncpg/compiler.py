@@ -18,7 +18,7 @@ import math
 import uuid
 import zoneinfo
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, NoReturn
 
@@ -38,7 +38,14 @@ from psycopg.types.range import Range
 from adorm.drivers.sql import numbered_placeholders, Statement
 from adorm.exceptions import NotSupportedError, TransactionManagementError
 
-__all__ = ["bind_param", "DjangoAggregation", "DjangoCompiler", "DjangoStatement", "MAX_QUERY_PARAMS"]
+__all__ = [
+    "MAX_QUERY_PARAMS",
+    "DjangoAggregation",
+    "DjangoCompiler",
+    "DjangoStatement",
+    "StatementNeeded",
+    "bind_param",
+]
 
 MAX_QUERY_PARAMS = 32767
 """The most parameters asyncpg sends with one statement."""
@@ -255,7 +262,60 @@ class _Cursor:
         pass
 
 
-_CURSOR: contextvars.ContextVar[_Cursor | None] = contextvars.ContextVar("adorm_aggregate_cursor", default=None)
+class StatementNeeded(BaseException):  # noqa: N818 - a request, not a failure
+    """`DjangoCompiler.replay()` ran a statement without an answer yet: ``statement`` is that statement, compiled. A
+    `BaseException`, so validation code catching ``Exception`` around a query does not stop the request."""
+
+    def __init__(self, statement: DjangoStatement) -> None:
+        super().__init__(statement.sql)
+        self.statement = statement
+
+
+class _ReplayCursor:
+    """The cursor `DjangoCompiler.replay()` gives Django: the statements run in order, each one answered with the rows
+    recorded for it."""
+
+    def __init__(self, compiler: DjangoCompiler, answers: Sequence[tuple[str, Sequence[Sequence[Any]]]]) -> None:
+        self.compiler = compiler
+        self.answers = answers
+        self.index = 0
+        self.rows: list[Sequence[Any]] = []
+        self.rowcount = -1
+        self.needed: DjangoStatement | None = None
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
+        if self.needed is not None:
+            raise StatementNeeded(self.needed)
+        statement = self.compiler._statement(sql, params, None)
+        if self.index >= len(self.answers):
+            self.needed = statement
+            raise StatementNeeded(statement)
+        recorded, rows = self.answers[self.index]
+        if recorded != statement.sql:
+            raise NotSupportedError("the validation ran other statements when it ran again")
+        self.index += 1
+        timezone, naive = _result_timezone(self.compiler.connection)
+        self.rows = [tuple(_psycopg_value(v, timezone, naive) for v in tuple(row)) for row in rows]
+        self.rowcount = len(self.rows)
+
+    def fetchone(self) -> Sequence[Any] | None:
+        return self.rows.pop(0) if self.rows else None
+
+    def fetchmany(self, size: int = 1) -> list[Sequence[Any]]:
+        taken, self.rows = self.rows[:size], self.rows[size:]
+        return taken
+
+    def fetchall(self) -> list[Sequence[Any]]:
+        taken, self.rows = self.rows, []
+        return taken
+
+    def close(self) -> None:
+        pass
+
+
+_CURSOR: contextvars.ContextVar[_Cursor | _ReplayCursor | None] = contextvars.ContextVar(
+    "adorm_aggregate_cursor", default=None
+)
 _ALIAS_NUMBERS = itertools.count()
 
 
@@ -408,6 +468,43 @@ class DjangoCompiler:
         else:
             return DjangoAggregation(DjangoStatement("", ()), lambda _record: dict(empty))
         return DjangoAggregation(statement, replay)
+
+    def replay(
+        self,
+        fn: Callable[[], Any],
+        answers: Sequence[tuple[str, Sequence[Sequence[Any]]]],
+        aliases: Iterable[str] = (),
+    ) -> Any:
+        """Run ``fn``, synchronous Django code, on this compiler's wrapper as the connection of ``aliases`` and
+        ``DEFAULT_DB_ALIAS``, its statements answered in order from ``answers`` (``(sql, rows)`` pairs). A statement
+        past the answers raises `StatementNeeded`, also when ``fn`` catches it; another statement than the answer's
+        raises ``NotSupportedError``."""
+        from django.db import DEFAULT_DB_ALIAS
+
+        names = list(dict.fromkeys((DEFAULT_DB_ALIAS, *aliases)))
+        storage = connections._connections
+        previous = {name: getattr(storage, name, None) for name in names}
+        for name in names:
+            connections[name] = self.connection
+        cursor = _ReplayCursor(self, answers)
+        token = _CURSOR.set(cursor)
+        try:
+            try:
+                result = fn()
+            except Exception:
+                if cursor.needed is not None:
+                    raise StatementNeeded(cursor.needed) from None
+                raise
+            if cursor.needed is not None:
+                raise StatementNeeded(cursor.needed)
+            return result
+        finally:
+            _CURSOR.reset(token)
+            for name, connection in previous.items():
+                if connection is None:
+                    del connections[name]
+                else:
+                    connections[name] = connection
 
     def _compiler(self, query: Any, in_transaction: bool) -> Any:
         if getattr(query, "select_for_update", False) and not in_transaction:

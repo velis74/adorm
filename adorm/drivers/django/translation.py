@@ -40,6 +40,11 @@ __all__ = [
     "SELECT_RELATED_DEPTH",
     "TranslatedQuery",
     "aggregation",
+    "check_in_bulk_field",
+    "child_instance",
+    "clean_exclude",
+    "clean_instance",
+    "clean_needs_row",
     "django_model",
     "field_kwargs",
     "instance_row",
@@ -47,6 +52,8 @@ __all__ = [
     "model_queryset",
     "orm_path",
     "output_field",
+    "parent_link_field",
+    "validation_error",
     "subquery",
     "translate",
 ]
@@ -767,3 +774,136 @@ def instance_row(instance: dj.Model) -> dict[str, Any]:
             continue
         row[name] = value
     return row
+
+
+# in_bulk(), children of existing parents, full_clean()
+
+
+def check_in_bulk_field(operation: Any) -> None:
+    """Raise `ProgrammingError` unless the field of the `adorm.operations.InBulk` ``operation`` is the primary key, a
+    field unique on its own (``unique=True`` or a single-field ``UniqueConstraint`` without a condition) or the only
+    field the query is distinct on, as Django's ``in_bulk()`` requires; `FieldError` for a name that is no field."""
+    name = operation.field_name
+    if name == "pk":
+        return
+    query = operation.query
+    model = django_model(query.model)
+    field = _field(model, _orm_name(_adorm_model(model), name))
+    if field is None or not getattr(field, "concrete", False):
+        raise FieldError(f"{query.model} has no field {name!r}")
+    opts = model._meta
+    unique = {constraint.fields[0] for constraint in opts.total_unique_constraints if len(constraint.fields) == 1}
+    if not (field.unique or field.name in unique or query.distinct_fields == (name,)):
+        raise ProgrammingError(f"in_bulk()'s field_name must be a unique field but {name!r} isn't")
+
+
+def parent_link_field(model: type[dj.Model]) -> Any:
+    """The primary key of ``model`` when it is the link of a multi-table inheritance child to its parent;
+    `ProgrammingError` otherwise."""
+    pk = model._meta.pk
+    if pk.remote_field is None or not pk.remote_field.parent_link:
+        raise ProgrammingError(f"{model._meta.label} is not a multi-table inheritance child")
+    return pk
+
+
+def child_instance(operation: Any, parent: dj.Model) -> dj.Model:
+    """The Django instance of the `adorm.operations.CreateFromParent` ``operation``: the stored ``parent``'s field
+    values, the child's own field values and the parent link. A value of a field the child does not declare itself
+    raises `ProgrammingError`."""
+    model = django_model(operation.model)
+    opts = model._meta
+    link = parent_link_field(model)
+    kwargs = field_kwargs(operation.model, operation.values)
+    own = {name for f in opts.local_concrete_fields if f is not link for name in (f.name, f.attname)}
+    inherited = sorted(name for name in kwargs if name not in own)
+    if inherited:
+        raise ProgrammingError(
+            f"{', '.join(map(repr, inherited))} are not fields of {opts.label} itself: give the child's own fields"
+        )
+    values = {field.attname: getattr(parent, field.attname) for field in parent._meta.concrete_fields}
+    instance = model(**values, **kwargs)
+    setattr(instance, link.attname, parent.pk)
+    return instance
+
+
+def _loaded_values(model: type[dj.Model], operation: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    kwargs = field_kwargs(operation.model, operation.values)
+    opts = model._meta
+    return kwargs, {opts.get_field(key).attname: value for key, value in kwargs.items()}
+
+
+def clean_needs_row(operation: Any) -> bool:
+    """Whether the instance of the `adorm.operations.FullClean` ``operation`` is built on its stored row: a stored
+    instance whose values lack some of the model's fields."""
+    if operation.adding or operation.pk is None:
+        return False
+    model = django_model(operation.model)
+    _, values = _loaded_values(model, operation)
+    return any(not f.primary_key and f.attname not in values for f in model._meta.concrete_fields)
+
+
+def clean_instance(operation: Any, alias: str, stored: dj.Model | None) -> dj.Model:
+    """The Django instance the `adorm.operations.FullClean` ``operation`` validates: the operation's values over
+    ``stored`` (the row read for `clean_needs_row()`), over the loaded values alone when they are complete, or over a
+    new instance's defaults; ``_state.adding`` as the operation says and ``_state.db`` ``alias``."""
+    model = django_model(operation.model)
+    opts = model._meta
+    kwargs, values = _loaded_values(model, operation)
+    if stored is not None:
+        instance = stored
+        for attname, value in values.items():
+            setattr(instance, attname, value)
+    elif not operation.adding and operation.pk is not None and not clean_needs_row(operation):
+        loaded = [
+            (field.attname, operation.pk if field.primary_key else values[field.attname])
+            for field in opts.concrete_fields
+        ]
+        instance = model.from_db(alias, [name for name, _ in loaded], [value for _, value in loaded])
+    else:
+        instance = model(**kwargs)
+        if operation.pk is not None:
+            instance.pk = operation.pk
+    instance._state.adding = operation.adding
+    instance._state.db = alias
+    return instance
+
+
+def clean_exclude(operation: Any) -> set[str]:
+    """The Django field names of the ``exclude`` names (adorm fields or relations) of a `adorm.operations.FullClean`;
+    names without a Django field are left out."""
+    model = django_model(operation.model)
+    adorm = _adorm_model(model)
+    names = set()
+    for name in operation.exclude:
+        field = _field(model, _orm_name(adorm, name))
+        if field is not None and not isinstance(field, ForeignObjectRel):
+            names.add(field.name)
+    return names
+
+
+def _error_key(model: type[dj.Model], adorm: Any, key: str) -> str:
+    field = None if key == "__all__" else _field(model, key)
+    if field is None or adorm is None:
+        return key
+    if field.many_to_one or field.one_to_one:
+        relation = _adorm_name(adorm, field.name)
+        if isinstance(adorm.__adorm_relations__.get(relation), ForeignKey):
+            return relation
+        return _adorm_name(adorm, field.attname)
+    return _adorm_name(adorm, field.name)
+
+
+def validation_error(label: str, exc: Any) -> Exception:
+    """The `adorm.ValidationError` for Django's ``ValidationError`` ``exc`` raised by validating an instance of the
+    model ``label``: messages by adorm name (a foreign key's under the adorm relation's name, when the adorm model
+    declares it), the model's errors under ``"__all__"``."""
+    from adorm.exceptions import ValidationError
+
+    if not hasattr(exc, "error_dict"):
+        return ValidationError(exc.messages)
+    model = django_model(label)
+    adorm = _adorm_model(model)
+    messages: dict[str, list[str]] = {}
+    for key, items in exc.message_dict.items():
+        messages.setdefault(_error_key(model, adorm, key), []).extend(str(item) for item in items)
+    return ValidationError(messages)

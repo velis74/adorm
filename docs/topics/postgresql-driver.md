@@ -134,7 +134,7 @@ async def on_acquire(connection, profile, session):
 A read translates the operation's query into a Django query set exactly as the Django driver does
 ([what a query becomes](/topics/django-driver#what-a-query-becomes)), compiles it on the event loop with a
 [`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none)
-of the connection, which never connects, and runs one statement:
+of the connection, which never connects, and runs one statement (`in_bulk` with many ids one per batch):
 
 | Operation | Statement | Result |
 |---|---|---|
@@ -144,6 +144,7 @@ of the connection, which never connects, and runs one statement:
 | `count` | `SELECT COUNT(*) FROM (<query>) subquery` | `int` |
 | `exists` | `SELECT 1 AS "a" … LIMIT 1`, Django's `exists()` query | `bool` |
 | `aggregate` | the statement of Django's `aggregate()`: `SELECT <aggregates> FROM …`, or `FROM (<query>) subquery` over a sliced, distinct or grouped query or one with aggregate annotations; none for a query that matches no rows | a dict by name, converted as Django converts it |
+| `in_bulk` | the field checked as Django's `in_bulk()` checks it (`ProgrammingError` otherwise), then the query's `SELECT` filtered with `<field> IN (...)`, one statement per [`IN_BULK_BATCH_SIZE`](/ref/drivers#adorm-drivers-asyncpg-in-bulk-batch-size) ids | the rows |
 
 `count` counts the rows the query returns, so a slice, `distinct()` and `DISTINCT ON` are applied before counting:
 
@@ -189,6 +190,8 @@ statements Django's own method would run, one after the other on the slot's conn
 | `qs.update(**values)` | Django's `UPDATE`; one that sets fields of a multi-table inheritance parent selects the keys first and updates each table, in a transaction |
 | `qs.delete()`, `obj.delete()` | Django's deletion collector: the referencing rows by `on_delete` (`CASCADE`, `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `SET()`, `DO_NOTHING`, and the `DB_*` handlers of Django 6.1, which the database applies), generic relations, multi-table inheritance parents, then the `UPDATE`s and `DELETE`s, in a transaction |
 | `qs.get_or_create(...)`, `qs.update_or_create(...)` | Django's steps: the `get()`, then the create in a savepoint (in a transaction outside one) and a second `get()` after an `IntegrityError`; `update_or_create()` reads the row with `select_for_update()` and saves it in one atomic block |
+| `Child.objects.create_from_parent(parent, **values)` | the parent's row read as Django's `get()`, then Django's insert of the child's own table only, with the parent link and the child's fields |
+| `obj.full_clean(exclude=[...])` | Django's `full_clean()` as Python on the event loop: each statement the validation runs (unique checks, constraints, queries of the model's `clean()`) is compiled and awaited, and the validation runs again with the rows until it needs no more statements |
 
 ```python
 book = await Book.objects.create(isbn="9780000000099", title="New", pages=10)
@@ -249,6 +252,7 @@ The driver runs no Python code of the target ORM beyond building queries and ins
 | | Django driver | native PostgreSQL driver |
 |---|---|---|
 | a model's `save()` (or `save_base()`) override | runs when the write saves | `create`, `save`, `get_or_create` and `update_or_create` raise `NotSupportedError` before anything runs; `get_or_create()` and `update_or_create()` are refused before the lookup, also when the row exists |
+| a child model's `save_base()` override in `create_from_parent` | runs (`save()` does not run) | `create_from_parent` raises `NotSupportedError` before anything runs; a `save()` override is not called, as on the Django driver |
 | a model's `delete()` override | runs for `obj.delete()` | `obj.delete()` raises `NotSupportedError` before anything runs |
 | a manager's or query set's override of the method the write calls | runs | the write raises `NotSupportedError` before anything runs: `create()` for `create`; `update()` for `update`; `delete()` for `qs.delete()`; `get_or_create()`, `get()`, `create()` for `get_or_create`; `update_or_create()`, `select_for_update()`, `get_or_create()`, `get()`, `create()` for `update_or_create` |
 | a manager's `get_queryset()` | applies | applies (it must only build a query) |
@@ -257,6 +261,7 @@ The driver runs no Python code of the target ORM beyond building queries and ins
 | Django's `transaction.on_commit()` | runs after the commit, on the slot's thread | no Django code runs that could register one |
 | an `on_delete` handler other than Django's own | runs | raises `NotSupportedError` before anything is deleted |
 | fields' `pre_save()` (`auto_now`, `auto_now_add`), defaults, `get_db_prep_save()` | run | run |
+| the model's `clean()` and validation overrides in `full_clean()` | run once | run once per statement the validation runs, plus once; validation that runs other statements when it runs again raises `NotSupportedError`, and so does one that runs more than [`MAX_VALIDATION_STATEMENTS`](/ref/drivers#adorm-drivers-asyncpg-writes-max-validation-statements) |
 
 The refusals name the override:
 

@@ -11,7 +11,7 @@ from django.core.validators import MaxLengthValidator, MinValueValidator, RegexV
 from django.db import models
 from django.test.utils import isolate_apps
 
-from adorm.codegen import CodegenError, CodegenWarning, NO_DEFAULT, TypeSpec
+from adorm.codegen import CodegenError, CodegenWarning, NO_DEFAULT, RelationSpec, TypeSpec
 from adorm.codegen.django import field_spec, introspect, model_spec, schema_hash
 from tests.djangoproject.library import models as library
 
@@ -183,10 +183,14 @@ def test_docstrings():
     assert model_spec(library.Tag).doc is None, "Django's generated docstring is left out"
 
 
-def test_generic_relations_are_reported_and_left_out():
-    with pytest.warns(CodegenWarning, match=r"library\.Note\.item: GenericForeignKey is not generated"):
-        model = model_spec(library.Note)
-    assert "item" not in {relation.name for relation in model.relations}
+def test_generic_foreign_keys_are_generated_and_generic_relations_reported():
+    model = model_spec(library.Note)
+    (item,) = [relation for relation in model.relations if relation.name == "item"]
+    assert item == RelationSpec(
+        "generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id", ct_field="content_type"
+    )
+    assert not item.is_forward
+    assert "item" not in model.orm_names
     with pytest.warns(CodegenWarning, match=r"library\.Book\.reviews: GenericRelation is not generated"):
         model_spec(library.Book)
 

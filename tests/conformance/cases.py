@@ -20,7 +20,7 @@ from typing import Any
 
 import adorm
 
-from adorm import F, MultipleObjectsReturned, ObjectDoesNotExist, ProtectedError, Q, Value
+from adorm import F, MultipleObjectsReturned, ObjectDoesNotExist, Prefetch, ProtectedError, Q, ValidationError, Value
 from adorm.query import (
     Avg,
     Case as CaseWhen,
@@ -1963,3 +1963,171 @@ async def create_a_multi_table_child():
         discipline="Laser",
     )
     return await Activity.objects.count(), await Competition.objects.count()
+
+
+# Prefetching, in_bulk(), generic foreign keys
+
+
+@case(
+    "select",
+    "lookup.in",
+    expected=[
+        ("koper-sailing", ["Igor", "Jana", "Klemen"]),
+        ("ljubljana-rowing", ["Ana", "Bojan", "Cvetka", "David", "Lara"]),
+        ("maribor-climbing", ["Cvetka", "Eva", "Filip", "Gaja", "Hana"]),
+    ],
+)
+async def prefetch_a_reverse_and_a_forward_relation():
+    clubs = [club async for club in Club.objects.order_by("slug").prefetch_related("memberships__member")]
+    return [
+        (club.slug, sorted([(await membership.member).first_name async for membership in club.memberships]))
+        for club in clubs
+    ]
+
+
+@case("select", "lookup.exact", "lookup.in", expected=["Ana", "Cvetka", "David"])
+async def prefetch_a_many_to_many_relation_through_a_model():
+    (sculling,) = [a async for a in Activity.objects.filter(name="Morning sculling").prefetch_related("participants")]
+    return sorted([member.first_name async for member in sculling.participants])
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "lookup.in",
+    expected=[
+        ("Bouldering basics", ["Filip", "Gaja"]),
+        ("Crag day", []),
+        ("Dinghy handling", ["Jana"]),
+        ("Ergometer session", []),
+        ("Morning sculling", ["Ana", "Cvetka"]),
+        ("Regional bouldering cup", []),
+        ("Spring regatta", []),
+    ],
+)
+async def prefetch_with_a_query_set_into_an_attribute():
+    attended = Attendance.objects.filter(status="attended").order_by("member_id")
+    activities = Activity.objects.order_by("name").prefetch_related(
+        Prefetch("attendances", queryset=attended, to_attr="attended"), "attended__member"
+    )
+    return [
+        (activity.name, [(await attendance.member).first_name for attendance in activity.attended])
+        async for activity in activities
+    ]
+
+
+@case("first", "get", "lookup.exact", expected=("Membership", Decimal("120.00"), "Ana", "Ana"))
+async def generic_foreign_key_object():
+    line = await InvoiceLine.objects.order_by("id").first()
+    item = await line.item
+    again = await line.item
+    return type(item).__name__, item.fee, (await item.member).first_name, (await again.member).first_name
+
+
+@case(
+    "select",
+    "lookup.in",
+    expected=(
+        [("Activity", 9), ("Membership", 10)],
+        [("koper-sailing", 4), ("ljubljana-rowing", 7), ("maribor-climbing", 8)],
+    ),
+)
+async def prefetch_across_a_generic_foreign_key_into_an_attribute():
+    lines = [
+        line
+        async for line in InvoiceLine.objects.order_by("id").prefetch_related(
+            Prefetch("item", to_attr="billed"), "billed__club"
+        )
+    ]
+    kinds: dict[str, int] = {}
+    clubs: dict[str, int] = {}
+    for line in lines:
+        kinds[type(line.billed).__name__] = kinds.get(type(line.billed).__name__, 0) + 1
+        slug = (await line.billed.club).slug
+        clubs[slug] = clubs.get(slug, 0) + 1
+    return sorted(kinds.items()), sorted(clubs.items())
+
+
+@case("in_bulk", "lookup.in", expected=(SLUGS, True, ["koper-sailing"]))
+async def in_bulk_by_primary_key():
+    every = await Club.objects.in_bulk()
+    koper = next(pk for pk, club in every.items() if club.slug == "koper-sailing")
+    some = await Club.objects.in_bulk([koper, 0])
+    return (
+        sorted(club.slug for club in every.values()),
+        all(pk == club.pk for pk, club in every.items()),
+        [club.slug for club in some.values()],
+    )
+
+
+@case(
+    "in_bulk",
+    "lookup.in",
+    expected={"koper-sailing": "Koper Sailing Club"},
+    refusals={"memory": "unique constraints"},
+)
+async def in_bulk_by_a_unique_field():
+    found = await Club.objects.in_bulk(["koper-sailing", "nowhere"], field_name="slug")
+    return {slug: club.name for slug, club in found.items()}
+
+
+def _django_create_a_multi_table_child_of_an_existing_parent():
+    from demo.backend.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
+
+    crag = DjangoActivity.objects.get(name="Crag day")
+    DjangoCompetition(activity_ptr=crag, discipline="Climbing").save_base(raw=True)
+    competition = DjangoCompetition.objects.get(name="Crag day")
+    return (
+        DjangoActivity.objects.count(),
+        DjangoCompetition.objects.count(),
+        competition.name,
+        competition.discipline,
+        competition.capacity,
+    )
+
+
+@case(
+    "get",
+    "create_from_parent",
+    "count",
+    "lookup.exact",
+    expected=(7, 3, "Crag day", "Climbing", 15),
+    django=_django_create_a_multi_table_child_of_an_existing_parent,
+)
+async def create_a_multi_table_child_of_an_existing_parent():
+    crag = await Activity.objects.get(name="Crag day")
+    competition = await Competition.objects.create_from_parent(crag, discipline="Climbing")
+    return (
+        await Activity.objects.count(),
+        await Competition.objects.count(),
+        competition.name,
+        competition.discipline,
+        competition.capacity,
+    )
+
+
+@case(
+    "get",
+    "full_clean",
+    "lookup.exact",
+    expected=(
+        {"due": ["The due date cannot be before the issue date."]},
+        {"__all__": ["Membership with this Club and Member already exists."]},
+        None,
+    ),
+)
+async def full_clean_runs_the_model_clean_and_constraints():
+    invoice = await Invoice.objects.get(number="2026-0001")
+    await invoice.full_clean()
+    invoice.due = datetime.date(2025, 1, 1)
+    try:
+        await invoice.full_clean()
+    except ValidationError as exc:
+        clean = exc.message_dict
+    board = await Membership.objects.get(role="board")
+    copy = Membership(club_id=board.club_id, member_id=board.member_id, since=datetime.date(2026, 1, 1), fee=1)
+    try:
+        await copy.full_clean()
+    except ValidationError as exc:
+        unique = exc.message_dict
+    return clean, unique, await copy.full_clean(exclude=["member"])

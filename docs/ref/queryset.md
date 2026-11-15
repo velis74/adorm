@@ -16,13 +16,15 @@ qs = reports.Member.order_by("name")             # QuerySet on reports
 
 A query set is immutable: a copy and a deep copy are the same object, and it pickles when its executor does (a
 session does). Building methods return a new query set and do no I/O; terminal methods are coroutines
-that run one operation each on `executor`.
+that run one operation each on `executor`, followed by the prefetch operations of
+[`prefetch_related()`](#prefetch-related-lookups).
 
 | Attribute | Meaning |
 |---|---|
 | `model` | the model class |
 | `executor` | what runs the operations |
 | `query` | the [`Query`](./query) |
+| `prefetch_lookups` | the [`Prefetch`](#adorm-prefetch-lookup-queryset-none-to-attr-none) lookups of `prefetch_related()`, a tuple |
 
 Because `query` is a `Query`, a query set stands wherever a query is accepted:
 
@@ -92,11 +94,109 @@ recent = (
 
 Combining query sets of different executors raises `TypeError`.
 
+### `prefetch_related(*lookups)`
+
+Load the related objects of the relation paths `lookups` for every instance the query set returns, with separate
+operations after the query's own ([`prefetch_related_objects()`](#adorm-prefetch-related-objects-instances-lookups-executor-none)
+runs them). A lookup is a relation path (`"memberships__member"`) or a [`Prefetch`](#adorm-prefetch-lookup-queryset-none-to-attr-none).
+The lookups are kept in `qs.prefetch_lookups`; they add up over calls, a path given again is kept once, every
+building method keeps them and `prefetch_related(None)` clears them.
+
+`async for`, `get()`, `first()`, `last()` and [`in_bulk()`](#async-in-bulk-id-list-none-field-name-pk) run the
+prefetches on the instances they return; no instances, no prefetch operation.
+
+```python
+clubs = Club.objects.order_by("slug").prefetch_related("memberships__member", "activities")
+async for club in clubs:            # 4 Select operations: clubs, memberships, members, activities
+    members = [(await m.member).first_name async for m in club.memberships]   # no operation
+```
+
+A `Prefetch` with a query set or `to_attr` whose path (with `to_attr`) is already given raises `ValueError`;
+`prefetch_related()` after `values()` or `values_list()`, and `values()` or `values_list()` after it, raise
+`TypeError`.
+
+### `adorm.Prefetch(lookup, queryset=None, to_attr=None)`
+
+A prefetch lookup: the relation path `lookup`, with the related rows of its last relation read from `queryset` and
+stored in `to_attr`.
+
+- `queryset` is a `QuerySet` (or a [`Query`](./query) on a registered model) on the last relation's target model; it
+  filters, orders and selects the related rows (`only()`, `defer()`, `select_related()`; the join column is loaded
+  even when `only()` leaves it out). Its own `prefetch_related()` lookups continue from the rows it returns. Its
+  operations run on the executor of the instances prefetched for, not the query set's. A query set with `values()`
+  or a slice raises `ValueError`; one on another model raises `ValueError` when the prefetch runs.
+- `to_attr` stores the related rows of the last relation as an extra value of each instance (a list for a
+  `ReverseForeignKey` or `ManyToMany`, an instance or `None` otherwise) and leaves the relation's cache alone. A
+  later path may continue from it (`"attended__member"`). It names no attribute of the model (`ValueError` when the
+  prefetch runs).
+- `prefetch_through` is `lookup`; `prefetch_to` is `lookup` with `to_attr` in place of its last segment. Two prefetches
+  are equal when their `prefetch_to` is.
+
+```python
+attended = Attendance.objects.filter(status="attended").order_by("member_id")
+activities = Activity.objects.prefetch_related(
+    Prefetch("attendances", queryset=attended, to_attr="attended"),
+    "attended__member",
+)
+async for activity in activities:
+    names = [(await a.member).first_name for a in activity.attended]
+```
+
+### `adorm.GenericPrefetch(lookup, querysets, to_attr=None)`
+
+A prefetch lookup whose last relation is a [`GenericForeignKey`](./models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id),
+with a query set per related model: the related rows of a content type are read from the query set on its model, the
+plain rows of models without one. Two query sets on the same model raise `ValueError`. A plain `Prefetch` with a query
+set on a generic foreign key raises `ValueError`, and so does a `GenericPrefetch` on another relation.
+
+```python
+lines = InvoiceLine.objects.prefetch_related(
+    GenericPrefetch("item", [Membership.objects.filter(active=True)], to_attr="billed")
+)
+```
+
+### `adorm.prefetch_related_objects(instances, *lookups, executor=None)`
+
+Coroutine: load the related objects of `lookups` (relation paths or `Prefetch` objects) for `instances`, model
+instances of one or more models, and cache them on the instances.
+
+| Relation | Operations | Cached |
+|---|---|---|
+| `ForeignKey` | `Select` of the targets by `pk__in` (without the target's manager) | the relation's cache |
+| `ReverseOneToOne` | `Select` of the targets by `<column>__in` | the relation's cache; `None` for no row |
+| `ReverseForeignKey` | `Select` from the target's `objects` manager by `<column>__in` | the rows, which the relation's query set reads; each row gets the owner in its foreign key's cache |
+| `ManyToMany` | `Select` of the links (`values(source_column, target_column)`), then of the targets from the `objects` manager by `pk__in` | the rows |
+| `GenericForeignKey` | `Select` of the content types, then one `Select` per model by `pk__in` | the relation's cache; `None` for a missing row |
+
+Each relation on a path is read once for all the instances of its level, and the rows of a generic foreign key, of
+several models, continue on each model's relation of the next segment. An instance whose relation is already cached
+(by `select_related()` or an earlier prefetch), or that has the prefetch's `to_attr`, is skipped. The operations run
+one after another on `executor`, by default the first instance's, so inside a transaction they use its slot and see
+its writes; outside one each operation takes a slot and returns it. Each operation filters on at most
+[`BATCH_SIZE`](#adorm-models-prefetch-batch-size) keys; more keys run the operations of a relation once per batch
+(for a many-to-many relation, the targets of a group of owners with at most `BATCH_SIZE` targets in all, in the
+order of the query set; an owner with more gets them in that order per batch). A cancelled prefetch caches nothing
+for the relation it was reading. A generic foreign key's object is cached for the content type and object id read before its operations ran.
+
+```python
+members = [m async for m in Member.objects.filter(level="advanced")]
+await adorm.prefetch_related_objects(members, "memberships__club")
+```
+
+A segment that names nothing on a model raises `AttributeError`; one that names a field or anything else that is not
+a relation raises `ValueError`.
+
+### `adorm.models.prefetch.BATCH_SIZE`
+
+`10_000`: the most keys one `Select` of a prefetch filters on, within the parameters a statement can carry on every
+driver.
+
 ## Terminal methods
 
 Each terminal method builds one [operation](./operations), awaits `executor.execute(operation)` and shapes the
 result. On a query set built with `none()`, `async for`, `get()`, `first()`, `last()`, `count()`, `exists()`,
-`update()` and `delete()` return an empty result (`get()` raises `DoesNotExist`) without running an operation;
+`in_bulk()` (`{}`), `update()` and `delete()` return an empty result (`get()` raises `DoesNotExist`) without running
+an operation;
 `aggregate()` does so when the result over no rows is known without the database (see
 [`aggregate()`](#async-aggregate-args-kwargs)); `create()`, `get_or_create()` and `update_or_create()` run their
 operation.
@@ -119,7 +219,8 @@ Rows come back by the query's row format:
 
 #### `async for row in qs`
 
-The rows of a `Select` operation.
+The rows of a `Select` operation, then the prefetches of `prefetch_related()`; the query set of a relation that
+holds prefetched rows yields them without an operation.
 
 ```python
 async for member in Member.objects.filter(active=True):
@@ -153,6 +254,25 @@ The number of rows (`Count`), an `int`.
 #### `async exists()`
 
 Whether the query has a row (`Exists`), a `bool`.
+
+#### `async in_bulk(id_list=None, *, field_name="pk")`
+
+The instances whose field `field_name` holds one of `id_list` (every instance for `None`), as a dict keyed by that
+field's value, with one [`InBulk`](./operations#adorm-operations-inbulk-query-field-name-pk-ids-none) operation, then
+the prefetches of `prefetch_related()`. `field_name` is `"pk"` or a field that is unique on its own (or the only
+field of `distinct()`); the driver raises `ProgrammingError` for another field. The name of a unique
+[`ForeignKey`](./models#adorm-foreignkey-target-column-none) (a one-to-one relation) stands for its column: the
+operation names the column and the dict is keyed by the related primary key. An empty `id_list` returns `{}` without
+an operation.
+
+```python
+clubs = await Club.objects.in_bulk([1, 2, 99])                     # {1: <Club>, 2: <Club>}
+by_slug = await Club.objects.in_bulk(["koper-sailing"], field_name="slug")
+by_activity = await Competition.objects.in_bulk([3], field_name="activity_ptr")  # field_name="activity_ptr_id"
+```
+
+A sliced query set, one after `values()` and a field the query set defers raise `TypeError`; outside a transaction a
+query set with `select_for_update()` raises `TransactionManagementError`.
 
 #### `async aggregate(*args, **kwargs)`
 
@@ -208,6 +328,30 @@ member = await Member.objects.create(name="Ana", club=club)
 member.pk          # set by the database
 reader = await Reader.objects.create(name="Ann", username="ann")   # Create(..., manager="objects")
 ```
+
+#### `async create_from_parent(parent, **values)`
+
+A new instance of a multi-table inheritance child for an existing row of its parent, with a
+[`CreateFromParent`](./operations#adorm-operations-createfromparent-model-parent-pk-values) operation: only the
+child's own table gets a row; the parent's row is not written (Django: `Child(parent_ptr=parent, ...).save_base(raw=True)`).
+
+- `parent` is an instance of the parent model (the target of the
+  [parent link](./models#adorm-models-parent-link-model), the `ForeignKey` stored in the primary key field) or its
+  primary key.
+- `values` are the child's own fields, validated with their field types; a `ForeignKey` of the child stands for its
+  column. Fields not given take the target's defaults.
+- The instance has the child's row as stored, the parent's fields included, and is bound to `executor`.
+
+```python
+crag = await Activity.objects.get(name="Crag day")
+competition = await Competition.objects.create_from_parent(crag, discipline="Climbing")
+competition.name, competition.capacity     # ("Crag day", 15), the parent's values
+```
+
+Raises `TypeError` for a model that is not a multi-table inheritance child and for a parent of another model,
+`ValueError` for a parent without a primary key value and for a value of an inherited or unknown field or one its
+type rejects, the parent model's `DoesNotExist` when the parent has no row and `IntegrityError` when the child already
+has one.
 
 #### `async get_or_create(defaults=None, **lookups)`
 

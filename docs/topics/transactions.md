@@ -197,7 +197,7 @@ async with adorm.atomic():
 # COMMIT
 ```
 
-A read of rows with `select_for_update()` (`get()`, `first()`, `last()`, iteration) outside a transaction raises
+A read of rows with `select_for_update()` (`get()`, `first()`, `last()`, `in_bulk()`, iteration) outside a transaction raises
 `TransactionManagementError` before it is sent, since the lock would end with the statement.
 
 ## Tasks inside a transaction

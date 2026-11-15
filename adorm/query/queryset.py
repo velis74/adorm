@@ -1,7 +1,8 @@
 """`QuerySet`: a `Query` on a model class with the executor that runs it.
 
 Building methods return a new `QuerySet` and do no I/O. Terminal methods are coroutines that hand one operation to
-the executor and turn its rows into model instances, dicts or tuples.
+the executor and turn its rows into model instances, dicts or tuples; those that return instances then run the
+prefetches of `prefetch_related()`.
 """
 
 from __future__ import annotations
@@ -70,20 +71,29 @@ def _empty_aggregation(aggregations: Iterable[tuple[str, Any]]) -> dict[str, Any
     return result
 
 
+def _rebuild(cls: type[QuerySet], model: type[Model], executor: Executor, query: Query, prefetch: tuple) -> QuerySet:
+    queryset = cls(model, executor, query)
+    object.__setattr__(queryset, "prefetch_lookups", prefetch)
+    return queryset
+
+
 class QuerySet:
     """The rows of ``query`` on ``model`` (a model class), run by ``executor`` (a session).
 
     ``Model.objects`` and ``session.Model`` create query sets; the building methods are those of `Query`, each
     returning a new query set of the same class. ``query`` is the underlying `Query`, so a query set can stand wherever
-    a query is accepted, e.g. ``filter(pk__in=qs)``. A subclass adds client-side methods that build on these and
-    driver methods (`adorm.driver_method`); a manager's ``queryset_class`` names it.
+    a query is accepted, e.g. ``filter(pk__in=qs)``. ``prefetch_lookups`` holds the `adorm.Prefetch` lookups of
+    `prefetch_related()`, which the terminal methods that return instances run after their operation. A subclass adds
+    client-side methods that build on these and driver methods (`adorm.driver_method`); a manager's
+    ``queryset_class`` names it.
     """
 
-    __slots__ = ("executor", "model", "query")
+    __slots__ = ("_cache", "executor", "model", "prefetch_lookups", "query")
 
     model: type[Model]
     executor: Executor
     query: Query
+    prefetch_lookups: tuple[Any, ...]
 
     def __init__(self, model: type[Model], executor: Executor, query: Query | None = None) -> None:
         meta = model._meta
@@ -96,12 +106,14 @@ class QuerySet:
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "executor", executor)
         object.__setattr__(self, "query", query)
+        object.__setattr__(self, "prefetch_lookups", ())
+        object.__setattr__(self, "_cache", None)
 
     def __setattr__(self, name: str, value: Any) -> None:
         raise AttributeError(f"a query set is immutable: cannot set {name!r}")
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return type(self), (self.model, self.executor, self.query)
+        return _rebuild, (type(self), self.model, self.executor, self.query, self.prefetch_lookups)
 
     def __copy__(self) -> QuerySet:
         return self
@@ -109,8 +121,17 @@ class QuerySet:
     def __deepcopy__(self, memo: dict[int, Any]) -> QuerySet:
         return self
 
-    def _clone(self, query: Query) -> Self:
-        return type(self)(self.model, self.executor, query)
+    def _clone(self, query: Query, prefetch: tuple[Any, ...] | None = None) -> Self:
+        clone = type(self)(self.model, self.executor, query)
+        object.__setattr__(clone, "prefetch_lookups", self.prefetch_lookups if prefetch is None else prefetch)
+        return clone
+
+    def _with_cache(self, instances: Iterable[Model]) -> Self:
+        """A copy whose ``async for``, `count()` and `exists()` use ``instances`` (prefetched rows) without an
+        operation."""
+        clone = self._clone(self.query)
+        object.__setattr__(clone, "_cache", tuple(instances))
+        return clone
 
     @classmethod
     def as_manager(cls, orm_name: str | None = None, *, method_manager: str | None = None) -> Manager:
@@ -121,7 +142,8 @@ class QuerySet:
         return _queryset_as_manager(cls, orm_name, method_manager)
 
     def __repr__(self) -> str:
-        return f"<QuerySet {self.query!r} on {self.executor!r}>"
+        prefetch = f" prefetch_related={list(self.prefetch_lookups)!r}" if self.prefetch_lookups else ""
+        return f"<QuerySet {self.query!r}{prefetch} on {self.executor!r}>"
 
     # Building: no I/O
 
@@ -151,11 +173,29 @@ class QuerySet:
 
     def values(self, *fields: str) -> Self:
         """`Query.values()`: rows as dicts."""
+        self._check_no_prefetch("values")
         return self._clone(self.query.values(*fields))
 
     def values_list(self, *fields: str, flat: bool = False, named: bool = False) -> Self:
         """`Query.values_list()`: rows as tuples, single values (``flat``) or named tuples (``named``)."""
+        self._check_no_prefetch("values_list")
         return self._clone(self.query.values_list(*fields, flat=flat, named=named))
+
+    def _check_no_prefetch(self, action: str) -> None:
+        if self.prefetch_lookups:
+            raise TypeError(f"cannot call {action}() after prefetch_related()")
+
+    def prefetch_related(self, *lookups: Any) -> Self:
+        """A copy that loads the related objects of ``lookups`` (relation paths or `adorm.Prefetch` objects, added to
+        the earlier ones; ``None`` clears them) for every instance it returns. Raises ``ValueError`` for a path given
+        again with another query set, ``TypeError`` after ``values()`` or ``values_list()``."""
+        from adorm.models.prefetch import normalize_lookups
+
+        if lookups == (None,):
+            return self._clone(self.query, ())
+        if self.query.row_format != "model":
+            raise TypeError("cannot call prefetch_related() after values() or values_list()")
+        return self._clone(self.query, normalize_lookups(self.prefetch_lookups, lookups))
 
     def only(self, *fields: str) -> Self:
         """`Query.only()`."""
@@ -233,14 +273,27 @@ class QuerySet:
 
     # Terminal: one operation each
 
+    async def _prefetch(self, instances: list[Any]) -> None:
+        if self.prefetch_lookups and instances:
+            from adorm.models.prefetch import prefetch_related_objects
+
+            await prefetch_related_objects(instances, *self.prefetch_lookups, executor=self.executor)
+
     async def __aiter__(self) -> AsyncIterator[Any]:
-        """The rows of a `Select` operation, formatted by the query's row format."""
+        """The rows of a `Select` operation, formatted by the query's row format, after the prefetches of
+        `prefetch_related()`; the prefetched rows of a relation (no operation) for the query set a relation returns."""
         from adorm.operations import Select
 
+        if self._cache is not None:
+            for instance in self._cache:
+                yield instance
+            return
         if self.query.is_empty:
             return
-        for row in await self._run(Select(self.query)):
-            yield self._format(row)
+        rows = [self._format(row) for row in await self._run(Select(self.query))]
+        await self._prefetch(rows)
+        for row in rows:
+            yield row
 
     async def get(self, *args: Any, **kwargs: Any) -> Any:
         """The single row matching the query and the conditions (arguments as for `filter()`), with a `Get`
@@ -250,7 +303,9 @@ class QuerySet:
         query = self.query.filter(*args, **kwargs) if args or kwargs else self.query
         if query.is_empty:
             raise self.model.DoesNotExist(f"{self.model.__name__} matching query does not exist.")
-        return self._format(await self._run(Get(query)))
+        instance = self._format(await self._run(Get(query)))
+        await self._prefetch([instance])
+        return instance
 
     async def first(self) -> Any:
         """The first row (a `First` operation), ``None`` when there is none."""
@@ -259,7 +314,12 @@ class QuerySet:
         if self.query.is_empty:
             return None
         row = await self._run(First(self.query))
-        return None if row is None else self._format(row)
+        return None if row is None else await self._formatted(row)
+
+    async def _formatted(self, row: Mapping[str, Any]) -> Any:
+        instance = self._format(row)
+        await self._prefetch([instance])
+        return instance
 
     async def last(self) -> Any:
         """The last row (a `Last` operation), ``None`` when there is none."""
@@ -268,19 +328,42 @@ class QuerySet:
         if self.query.is_empty:
             return None
         row = await self._run(Last(self.query))
-        return None if row is None else self._format(row)
+        return None if row is None else await self._formatted(row)
 
     async def count(self) -> int:
         """The number of rows (a `Count` operation)."""
         from adorm.operations import Count
 
+        if self._cache is not None:
+            return len(self._cache)
         return 0 if self.query.is_empty else await self._run(Count(self.query))
 
     async def exists(self) -> bool:
         """Whether the query has a row (an `Exists` operation)."""
         from adorm.operations import Exists
 
+        if self._cache is not None:
+            return bool(self._cache)
         return False if self.query.is_empty else await self._run(Exists(self.query))
+
+    async def in_bulk(self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk") -> dict[Any, Model]:
+        """The instances whose field ``field_name`` (``"pk"``, a unique field or a unique foreign key, which is keyed
+        by its column) holds one of ``id_list``, every instance for ``None``, as a dict keyed by that value; with an
+        `InBulk` operation and the prefetches of `prefetch_related()`."""
+        from adorm.models.relations import ForeignKey
+        from adorm.operations import InBulk
+
+        relation = self.model.__adorm_relations__.get(field_name)
+        if isinstance(relation, ForeignKey):
+            field_name = relation.column
+        ids = None if id_list is None else list(id_list)
+        operation = InBulk(self.query, field_name, ids)
+        if self.query.is_empty or ids == []:
+            return {}
+        key = self.model._require_meta().pk if field_name == "pk" else field_name
+        instances = [self._instance(row) for row in await self._run(operation)]
+        await self._prefetch(instances)
+        return {instance.__dict__[key]: instance for instance in instances}
 
     async def aggregate(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         """The values of aggregate expressions over the rows (an `Aggregate` operation), as a dict by name.
@@ -358,6 +441,29 @@ class QuerySet:
             stored.update(instance.__pydantic_extra__)
         instance._stored(await self._run(Create(self.query.model, stored, manager=manager)), self.executor)
         return instance
+
+    async def create_from_parent(self, parent: Any, **values: Any) -> Model:
+        """A new multi-table inheritance child for the existing parent row ``parent`` (an instance or its primary
+        key), with the child's own field ``values``, inserted with a `CreateFromParent` operation. Raises ``TypeError``
+        or ``ValueError`` for arguments that do not fit, the parent's ``DoesNotExist``, `adorm.IntegrityError`."""
+        from adorm.models.base import Model
+        from adorm.models.inheritance import child_values
+        from adorm.operations import CreateFromParent
+
+        link, parent_model, stored = child_values(self.model, values)
+        if isinstance(parent, Model):
+            link._check_target(parent)
+            parent = parent.pk
+            if parent is None:
+                raise ValueError(f"cannot create a {self.model._require_meta().label} row for an unsaved parent")
+        operation = CreateFromParent(self.model._require_meta().label, parent, stored)
+        try:
+            row = await self.executor.execute(operation)
+        except ObjectDoesNotExist as exc:
+            if type(exc) is not ObjectDoesNotExist:
+                raise
+            raise parent_model.DoesNotExist(*exc.args) from exc
+        return self._instance(row)
 
     async def get_or_create(self, defaults: Mapping[str, Any] | None = None, **lookups: Any) -> tuple[Model, bool]:
         """The instance matching ``lookups``, or a new one from the plain lookups and ``defaults`` (a

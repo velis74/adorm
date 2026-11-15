@@ -72,6 +72,17 @@ class ModelRegistry:
         except KeyError:
             raise LookupError(f"no model is registered under {label!r}") from None
 
+    def get_for_content_type(self, app_label: str, model_name: str) -> type[Model]:
+        """The model class registered for a content type: the label's app part equals ``app_label`` and its model part,
+        compared case-insensitively, ``model_name`` (Django's ``ContentType.model`` is the lowercased class name).
+        ``LookupError`` when there is none."""
+        wanted = model_name.casefold()
+        for label, model in self._models.items():
+            app, _, name = label.partition(".")
+            if app == app_label and name.casefold() == wanted:
+                return model
+        raise LookupError(f"no model is registered for the content type {app_label}.{model_name}")
+
     def model_schema(self, label: str) -> ModelSchema | None:
         """The `ModelSchema` of the model registered under ``label``, ``None`` for an unknown label. It is cached
         once the model class is complete (its forward references resolved)."""

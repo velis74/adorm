@@ -1,11 +1,13 @@
 """Relation descriptors of models.
 
 A relation is a class attribute, not a pydantic field: it is absent from validation, serialisation and the JSON
-schema. On an instance, a `ForeignKey` or `ReverseOneToOne` returns an awaitable that loads the related object; a
-`ReverseForeignKey` or `ManyToMany` returns a `QuerySet` of the related rows on the owner's executor.
+schema. On an instance, a `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` returns an awaitable that loads the
+related object; a `ReverseForeignKey` or `ManyToMany` returns a `QuerySet` of the related rows on the owner's executor.
 """
 
 from __future__ import annotations
+
+import functools
 
 from collections.abc import Generator
 from typing import Any, TYPE_CHECKING
@@ -16,7 +18,20 @@ from adorm.query.query import check_model_label, Query
 if TYPE_CHECKING:
     from adorm.models.base import Model
 
-__all__ = ["ForeignKey", "ManyToMany", "RelatedObject", "Relation", "ReverseForeignKey", "ReverseOneToOne"]
+__all__ = [
+    "CONTENT_TYPE_MODEL",
+    "ForeignKey",
+    "GenericForeignKey",
+    "ManyToMany",
+    "RelatedObject",
+    "Relation",
+    "ReverseForeignKey",
+    "ReverseOneToOne",
+]
+
+CONTENT_TYPE_MODEL = "contenttypes.ContentType"
+"""The label of the content type model a `GenericForeignKey` reads when its content type field is not a `ForeignKey`
+of the model."""
 
 _MISSING = object()
 
@@ -65,7 +80,7 @@ class RelatedObject:
 
     __slots__ = ("instance", "relation")
 
-    def __init__(self, relation: ForeignKey | ReverseOneToOne, instance: Model) -> None:
+    def __init__(self, relation: ForeignKey | ReverseOneToOne | GenericForeignKey, instance: Model) -> None:
         self.relation = relation
         self.instance = instance
 
@@ -150,22 +165,27 @@ async def _load_one(relation: Relation, instance: Model, query: Query) -> Model:
     return related
 
 
-def _related(relation: Relation, instance: Model, **lookups: Any) -> Any:
-    """The target's rows matching ``lookups``, from the target's ``objects`` manager on the owner's executor: the
-    query set has the manager's ``queryset_class`` and starts from its ``get_queryset()``."""
+def target_queryset(relation: Relation, executor: Any) -> Any:
+    """Every row of the relation's target from the target's ``objects`` manager on ``executor``: a query set of the
+    manager's ``queryset_class`` that starts from its ``get_queryset()``."""
     from adorm.executor.sessions import Session
     from adorm.query.queryset import QuerySet
 
     target = relation.target_model()
-    executor = instance._executor()
     manager = target.__adorm_managers__.get("objects")
     if manager is None:
-        return QuerySet(target, executor, Query(relation.target)).filter(**lookups)
+        return QuerySet(target, executor, Query(relation.target))
     if isinstance(executor, Session):
-        queryset = manager._bind(target, executor).get_queryset()
-    else:
-        queryset = manager.queryset_class(target, executor, Query(relation.target, manager=manager.orm_name))
-    return queryset.filter(**lookups)
+        return manager._bind(target, executor).get_queryset()
+    return manager.queryset_class(target, executor, Query(relation.target, manager=manager.orm_name))
+
+
+def _related(relation: Relation, instance: Model, **lookups: Any) -> Any:
+    """The target's rows matching ``lookups`` (`target_queryset()` on the owner's executor, filtered); the rows a
+    prefetch cached for the relation serve the query set's ``async for``, ``count()`` and ``exists()``."""
+    queryset = target_queryset(relation, instance._executor()).filter(**lookups)
+    cached = instance._state.related.get(relation.name, _MISSING)
+    return queryset if cached is _MISSING else queryset._with_cache(cached)
 
 
 def _owner_pk(relation: Relation, instance: Model) -> Any:
@@ -180,8 +200,10 @@ class ReverseForeignKey(Relation):
     key.
 
     On an instance it returns the target's ``objects.filter(<column>=instance.pk)`` on the owner's executor: a query
-    set of the manager's ``queryset_class`` that applies its ``get_queryset()`` and ORM manager. An instance without a
-    primary key value raises ``ValueError``.
+    set of the manager's ``queryset_class`` that applies its ``get_queryset()`` and ORM manager. After a
+    ``prefetch_related()`` of the relation, the query set's ``async for``, ``count()`` and ``exists()`` read the
+    prefetched rows; its building methods return query sets that run again. An instance without a primary key value
+    raises ``ValueError``.
     """
 
     def __init__(self, target: str, *, column: str) -> None:
@@ -237,7 +259,7 @@ class ManyToMany(Relation):
     in ``source_column`` with ``target`` in ``target_column``.
 
     On an instance it returns the related ``target`` rows on the owner's executor, from the target's ``objects`` manager
-    as for `ReverseForeignKey`:
+    and with the prefetched rows as for `ReverseForeignKey`:
     ``objects.filter(pk__in=Query(through).filter(<source_column>=instance.pk).values(<target_column>))``.
     An instance without a primary key value raises ``ValueError``.
     """
@@ -259,3 +281,138 @@ class ManyToMany(Relation):
             f"{type(self).__name__}({self.target!r}, through={self.through!r}, "
             f"source_column={self.source_column!r}, target_column={self.target_column!r})"
         )
+
+
+@functools.lru_cache(maxsize=512)
+def _pk_adapter(model: type[Model]) -> Any:
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(model.__pydantic_fields__[model._require_meta().pk].annotation)
+
+
+def coerce_pk(model: type[Model], value: Any) -> Any:
+    """``value`` (an object id of a `GenericForeignKey`) as a primary key of ``model``: converted to the type of the
+    primary key field (its constraints are not checked), so ``"7"`` becomes ``7`` for an integer key. Raises
+    ``ValueError`` for a value that does not convert."""
+    return _pk_adapter(model).validate_python(value)
+
+
+class GenericForeignKey:
+    """A relation to a row of any model: the content type in the foreign key ``ct_field`` and the primary key in the
+    field ``fk_field`` (Django's ``GenericForeignKey``).
+
+    ``await instance.rel`` returns the related instance: the content type row (``app_label`` and ``model``) names the
+    registered model, whose row with the primary key in ``fk_field`` is loaded with a `Get` operation on the owner's
+    executor and cached on the owner while both fields keep their values. Either field ``None``, or no row with that
+    primary key, gives ``None``. A content type of a model that is not registered raises ``LookupError``. Reading the
+    relation while either field is deferred raises ``AttributeError``.
+
+    The content type field is a `ForeignKey` of the model, whose column and target are used, or a field
+    ``<ct_field>_id`` holding a primary key of `CONTENT_TYPE_MODEL`. Assigning ``None`` sets both fields to ``None``;
+    assigning an instance raises ``TypeError``: set the content type and the object id fields. The descriptor is not
+    a `Relation`: query paths do not traverse it, and it is absent from `adorm.models.get_relations()`.
+    """
+
+    name: str
+
+    def __init__(self, ct_field: str = "content_type", fk_field: str = "object_id") -> None:
+        self.ct_field = _check_field_name(ct_field)
+        self.fk_field = _check_field_name(fk_field)
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.ct_field!r}, {self.fk_field!r})"
+
+    def _content_type_relation(self, model: type[Model]) -> ForeignKey | None:
+        relation = model.__adorm_relations__.get(self.ct_field)
+        return relation if isinstance(relation, ForeignKey) else None
+
+    def ct_column(self, model: type[Model]) -> str:
+        """The field of ``model`` that holds the content type's primary key."""
+        relation = self._content_type_relation(model)
+        return relation.column if relation is not None else f"{self.ct_field}_id"
+
+    def content_type_model(self, model: type[Model]) -> str:
+        """The label of the content type model."""
+        relation = self._content_type_relation(model)
+        return relation.target if relation is not None else CONTENT_TYPE_MODEL
+
+    def values(self, instance: Model) -> tuple[Any, Any]:
+        """The content type's primary key and the object id of ``instance``; ``AttributeError`` when either field is
+        deferred."""
+        values = instance.__dict__
+        for name in (self.ct_column(type(instance)), self.fk_field):
+            if name not in values:
+                raise AttributeError(f"{type(instance).__name__}.{self.name} needs {name!r}, which is deferred")
+        return values[self.ct_column(type(instance))], values[self.fk_field]
+
+    def __get__(self, instance: Model | None, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        self.values(instance)
+        return RelatedObject(self, instance)
+
+    def __set__(self, instance: Model, value: Any) -> None:
+        if value is not None:
+            raise TypeError(
+                f"{self.name} is a generic foreign key: assign {self.ct_column(type(instance))!r} and "
+                f"{self.fk_field!r} instead"
+            )
+        setattr(instance, self.ct_column(type(instance)), None)
+        setattr(instance, self.fk_field, None)
+        instance._state.related[self.name] = (None, None, None)
+
+    def cached(self, instance: Model) -> Any:
+        """The cached related instance (or ``None``) while it matches both fields; a sentinel otherwise."""
+        content_type, object_id = self.values(instance)
+        if content_type is None or object_id is None:
+            return None
+        entry = instance._state.related.get(self.name, _MISSING)
+        if entry is _MISSING or entry[0] != content_type or entry[1] != object_id:
+            return _MISSING
+        return entry[2]
+
+    def cache(self, instance: Model, value: Model | None, key: tuple[Any, Any] | None = None) -> None:
+        """Cache ``value`` as the related instance for ``key`` (the content type and the object id it was loaded
+        for), by default the current values of both fields."""
+        content_type, object_id = self.values(instance) if key is None else key
+        instance._state.related[self.name] = (content_type, object_id, value)
+
+    async def load(self, instance: Model) -> Model | None:
+        """The related instance: from the cache, or loaded on the owner's executor and cached."""
+        from adorm.operations import Get
+
+        content_type, object_id = self.values(instance)
+        cached = self.cached(instance)
+        if cached is not _MISSING:
+            return cached
+        executor = instance._executor()
+        model = await self._model(instance, content_type, executor)
+        try:
+            row = await executor.execute(Get(Query(model._require_meta().label).filter(pk=coerce_pk(model, object_id))))
+        except ObjectDoesNotExist as exc:
+            if type(exc) is not ObjectDoesNotExist:
+                raise
+            related = None
+        else:
+            related = model.from_row(row, executor=executor)
+        self.cache(instance, related, (content_type, object_id))
+        return related
+
+    async def _model(self, instance: Model, content_type: Any, executor: Any) -> type[Model]:
+        """The registered model of the content type ``content_type``: from the content type relation's cache, or
+        read with a `Get` operation."""
+        from adorm.models.registry import registry
+        from adorm.operations import Get
+
+        relation = self._content_type_relation(type(instance))
+        cached = relation.cached(instance) if relation is not None else _MISSING
+        if cached is not _MISSING and cached is not None and {"app_label", "model"} <= cached.__dict__.keys():
+            app_label, name = cached.__dict__["app_label"], cached.__dict__["model"]
+        else:
+            query = Query(self.content_type_model(type(instance))).filter(pk=content_type).values("app_label", "model")
+            row = await executor.execute(Get(query))
+            app_label, name = row["app_label"], row["model"]
+        return registry.get_for_content_type(app_label, name)

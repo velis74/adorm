@@ -19,7 +19,7 @@ from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
 from adorm.drivers.asyncpg.writes import Writer, WRITES
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
 from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
-from adorm.drivers.django.translation import aggregation, translate
+from adorm.drivers.django.translation import aggregation, check_in_bulk_field, translate
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.events import Emit
 from adorm.exceptions import (
@@ -35,6 +35,7 @@ from adorm.exceptions import (
 __all__ = [
     "CAPABILITIES",
     "DSN_PARAMETERS",
+    "IN_BULK_BATCH_SIZE",
     "ISOLATION_LEVELS",
     "MAX_GET_RESULTS",
     "AsyncpgConnection",
@@ -57,6 +58,9 @@ writes, row locks), savepoints, cancellation and the connection options of `ador
 
 MAX_GET_RESULTS = 21
 """How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""
+
+IN_BULK_BATCH_SIZE = 10_000
+"""The most ids an ``in_bulk`` statement names; more ids run one statement per batch."""
 
 ISOLATION_LEVELS = {
     1: "READ UNCOMMITTED",
@@ -296,6 +300,18 @@ class AsyncpgConnection(DriverConnection):
                 return compiled.result(None)
             statement = compiled.statement
             return compiled.result(await self._run(self.conn.fetchrow(statement.sql, *statement.params)))
+        if kind == "in_bulk":
+            check_in_bulk_field(operation)
+            ids = operation.ids
+            if ids is None or len(ids) <= IN_BULK_BATCH_SIZE:
+                translated = translate(operation.select_query())
+                return translated.rows(await self._fetch(self._compile(translated.queryset)))
+            rows = []
+            for start in range(0, len(ids), IN_BULK_BATCH_SIZE):
+                batch = list(ids[start : start + IN_BULK_BATCH_SIZE])
+                translated = translate(operation.query.filter(**{f"{operation.field_name}__in": batch}))
+                rows.extend(translated.rows(await self._fetch(self._compile(translated.queryset))))
+            return rows
         translated = translate(operation.query)
         queryset = translated.queryset
         if kind == "select":

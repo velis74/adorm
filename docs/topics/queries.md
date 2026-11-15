@@ -294,7 +294,7 @@ The [query reference](/ref/query) documents `nowait`, `skip_locked`, `of` and `n
 
 `Model.objects` returns the model bound to the current [session](/topics/sessions); its query methods return a
 [`QuerySet`](/ref/queryset), which has every building method of `Query` and adds the terminal coroutines that run
-one operation each:
+one operation each (and the prefetches of `prefetch_related()`):
 
 ```python
 members = Member.objects.filter(active=True).order_by("name")
@@ -304,6 +304,63 @@ async for member in members[:20]:            # Select
 await members.get(pk=5)                      # Get
 await members.count()                        # Count
 await members.filter(age__lt=18).update(junior=True)   # Update
+```
+
+## Prefetching related objects
+
+`select_related()` joins forward relations into the query. `prefetch_related()` reads related objects of any relation
+with separate operations after the query's own, one per relation and level, and caches them on the instances, so a
+loop over the instances runs no further operation:
+
+```python
+clubs = Club.objects.order_by("slug").prefetch_related("memberships__member", "activities")
+async for club in clubs:                                   # clubs, memberships, members, activities
+    async for membership in club.memberships:             # the prefetched rows
+        member = await membership.member                  # from the cache
+    total = await club.activities.count()                 # the prefetched rows, no Count
+```
+
+A [`Prefetch`](/ref/queryset#adorm-prefetch-lookup-queryset-none-to-attr-none) object chooses the related rows with a
+query set and can store them under another name (`to_attr`, a list or an instance on each object); a later lookup
+continues from that name:
+
+```python
+from adorm import Prefetch
+
+attended = Attendance.objects.filter(status="attended").order_by("member_id")
+activities = Activity.objects.prefetch_related(
+    Prefetch("attendances", queryset=attended, to_attr="attended"),
+    "attended__member",
+)
+async for activity in activities:
+    names = [(await attendance.member).first_name for attendance in activity.attended]
+```
+
+A generic foreign key is prefetched with one operation per related model, after one for the content types; the
+objects of several models then continue on each model's relation of the next segment.
+[`GenericPrefetch`](/ref/queryset#adorm-genericprefetch-lookup-querysets-to-attr-none) gives a query set per model:
+
+```python
+lines = InvoiceLine.objects.prefetch_related(Prefetch("item", to_attr="billed"), "billed__club")
+async for line in lines:
+    print(type(line.billed).__name__, (await line.billed.club).slug)     # "Membership koper-sailing" …
+```
+
+A prefetch is no operation of its own but a sequence of `Select` operations, which run one after another on the query
+set's session: inside a transaction they use its slot and read its writes; outside one, each operation takes a slot
+and returns it, as separate queries do in Django. A relation with more keys than
+[`BATCH_SIZE`](/ref/queryset#adorm-models-prefetch-batch-size) is read with one operation per batch.
+[`prefetch_related_objects()`](/ref/queryset#adorm-prefetch-related-objects-instances-lookups-executor-none) prefetches
+for instances read earlier.
+
+## Rows by key
+
+`in_bulk()` returns the instances whose primary key (or another unique field) is in a list, as a dict by that value:
+
+```python
+clubs = await Club.objects.in_bulk([1, 2, 99])                       # {1: <Club>, 2: <Club>}
+by_slug = await Club.objects.in_bulk(["koper-sailing"], field_name="slug")
+every = await Club.objects.filter(city="Koper").in_bulk()            # every row, by primary key
 ```
 
 ## From queries to operations

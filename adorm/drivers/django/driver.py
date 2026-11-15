@@ -15,13 +15,20 @@ from adorm.drivers.base import Capabilities, ThreadedConnection, ThreadedDriver
 from adorm.drivers.django.translation import (
     AGGREGATES,
     aggregation,
+    check_in_bulk_field,
+    child_instance,
+    clean_exclude,
+    clean_instance,
+    clean_needs_row,
     django_model,
     field_kwargs,
     FUNCTIONS,
     instance_row,
     lookup_kwargs,
     model_queryset,
+    parent_link_field,
     translate,
+    validation_error,
 )
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.exceptions import (
@@ -72,7 +79,7 @@ _LOOKUP_NAMES = (
 )
 
 READ_CAPABILITIES = Capabilities(
-    operations={"select", "get", "first", "last", "count", "exists", "aggregate"},
+    operations={"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"},
     constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
     | {f"function.{name}" for name in FUNCTIONS}
     | {f"aggregate.{name}" for name in AGGREGATES}
@@ -102,7 +109,17 @@ READ_CAPABILITIES = Capabilities(
 
 CAPABILITIES = Capabilities(
     operations=READ_CAPABILITIES.operations
-    | {"create", "save", "update", "delete", "delete_instance", "get_or_create", "update_or_create"},
+    | {
+        "create",
+        "create_from_parent",
+        "save",
+        "update",
+        "delete",
+        "delete_instance",
+        "get_or_create",
+        "update_or_create",
+        "full_clean",
+    },
     constructs=READ_CAPABILITIES.constructs
     | {
         "clause.select_for_update",
@@ -325,6 +342,10 @@ class DjangoConnection(ThreadedConnection):
         if kind == "aggregate":
             queryset, expressions = aggregation(operation.query, operation.aggregations)
             return queryset.using(self.alias).aggregate(**expressions)
+        if kind == "in_bulk":
+            check_in_bulk_field(operation)
+            translated = translate(operation.select_query())
+            return translated.rows(translated.queryset.using(self.alias))
         translated = translate(operation.query)
         queryset = translated.queryset.using(self.alias)
         if kind == "select":
@@ -515,6 +536,36 @@ def _insert(alias: str, model: Any, kwargs: dict[str, Any], pk: Any, force: bool
     return instance_row(instance)
 
 
+def _create_from_parent(alias: str, operation: Any) -> dict[str, Any]:
+    model = django_model(operation.model)
+    parent = parent_link_field(model).related_model._base_manager.using(alias).get(pk=operation.parent_pk)
+    instance = child_instance(operation, parent)
+    for field in model._meta.local_concrete_fields:
+        setattr(instance, field.attname, field.pre_save(instance, add=True))
+    # A raw save inserts the child's own table only; the field values are prepared above.
+    instance.save_base(using=alias, raw=True, force_insert=True)
+    return instance_row(instance)
+
+
+def _full_clean(alias: str, operation: Any) -> dict[str, Any]:
+    from django.core.exceptions import ValidationError as DjangoValidationError
+
+    model = django_model(operation.model)
+    stored = None
+    if clean_needs_row(operation):
+        stored = model._base_manager.using(alias).filter(pk=operation.pk).first()
+    instance = clean_instance(operation, alias, stored)
+    try:
+        instance.full_clean(
+            exclude=clean_exclude(operation),
+            validate_unique=operation.validate_unique,
+            validate_constraints=operation.validate_constraints,
+        )
+    except DjangoValidationError as exc:
+        raise validation_error(operation.model, exc) from exc
+    return instance_row(instance)
+
+
 def _save(alias: str, operation: Any) -> dict[str, Any]:
     model = django_model(operation.model)
     names = [name for name, _ in operation.values]
@@ -619,6 +670,8 @@ def _update_or_create(alias: str, operation: Any) -> tuple[dict[str, Any], bool]
 
 _WRITES: dict[str, Callable[[str, Any], Any]] = {
     "create": _create,
+    "create_from_parent": _create_from_parent,
+    "full_clean": _full_clean,
     "save": _save,
     "update": _update,
     "delete": _delete,

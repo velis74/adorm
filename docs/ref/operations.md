@@ -6,7 +6,8 @@ connection: one read or write, described without I/O, models by their label and 
 ```python
 from adorm import F, Now, Q
 from adorm.models import registry
-from adorm.operations import Aggregate, Call, Count, Create, Delete, Get, GetOrCreate, ModelRow, Save, Select, Update, UpdateOrCreate
+from adorm.operations import Aggregate, Call, Count, Create, CreateFromParent, Delete, FullClean, Get, GetOrCreate
+from adorm.operations import InBulk, ModelRow, Save, Select, Update, UpdateOrCreate
 from adorm.query import Query
 ```
 
@@ -26,12 +27,16 @@ expressions.
 | `qs.first()`, `qs.last()` | `First(query)`, `Last(query)` |
 | `qs.count()`, `qs.exists()` | `Count(query)`, `Exists(query)` |
 | `qs.aggregate(*args, **kwargs)` | `Aggregate(query, aggregations)` |
+| `qs.in_bulk(id_list, field_name=...)` | `InBulk(query, field_name, ids)` |
+| `qs.prefetch_related(...)` | no operation of its own: a sequence of `Select` operations after the query's own, one per relation, level and batch of keys, each with a slot of its own outside a transaction |
 | `Model.objects.create(**values)` | `Create(label, values)`, `Create(label, values, manager)` on a manager with an ORM name |
 | `obj.save(update_fields=...)` | `Save(label, pk, values, update_fields)` |
 | `qs.update(**values)` | `Update(query, values)` |
 | `qs.delete()`, `obj.delete()` | `Delete(query)`, `DeleteInstance(label, pk)` |
 | `qs.get_or_create(defaults=..., **lookups)` | `GetOrCreate(query, lookups, defaults)` |
 | `qs.update_or_create(defaults=..., create_defaults=..., **lookups)` | `UpdateOrCreate(query, lookups, defaults, create_defaults)` |
+| `Child.objects.create_from_parent(parent, **values)` | `CreateFromParent(label, parent_pk, values)` |
+| `obj.full_clean(exclude=...)` | `FullClean(label, pk, values, exclude, validate_unique, validate_constraints, adding)` |
 | `qs.archive(...)`, `Model.objects.lend(...)` (driver methods) | `Call(query, "archive", "queryset", ...)`, `Call(Query(label, manager=...), "lend", "manager", ...)` |
 
 `filter()`, `exclude()`, `annotate()`, `alias()`, `order_by()`, `distinct()`, slicing, `values()`, `values_list()`,
@@ -143,6 +148,24 @@ The number of rows of `query`, an `int`.
 
 Whether `query` has a row, a `bool`.
 
+### `adorm.operations.InBulk(query, field_name="pk", ids=None)`
+
+The rows of `query` whose field `field_name` holds one of `ids`, every row when `ids` is `None`; a list of rows, which
+[`in_bulk()`](./queryset#async-in-bulk-id-list-none-field-name-pk) keys by the field's value. `select_query()` is
+`query.filter(<field_name>__in=ids)` (`query` itself for `ids=None`), so with ids the operation also reports
+`lookup.in`.
+
+`field_name` is `"pk"` or a field name without `__` (`ValueError`). The driver refuses a field that is neither the
+primary key, nor unique on its own (`unique=True` or a single-field unique constraint without a condition), nor the
+only field the query is distinct on with `ProgrammingError`. `ids` is an iterable of plain values, not a string
+(`TypeError`), kept in order without repeats. A sliced query, one after `values()` and one that defers the field
+raise `TypeError`. The encoded form has `"field_name"` and `"ids"` (`null` or the values, typed as the field).
+
+```python
+InBulk(Query("clubs.Club"), ids=[1, 2])
+InBulk(Query("clubs.Club"), "slug", ["koper-sailing"])
+```
+
 ### `adorm.operations.Aggregate(query, aggregations)`
 
 The values of `aggregations` over the rows of `query`, a dict by name. `aggregations` is a mapping or
@@ -205,6 +228,40 @@ does a value that refers to a field of the row when the save inserts (`pk` is `N
 Save("club.Member", 5, {"name": "Ann", "age": 31}, update_fields=["age"])
 Save("club.Member", None, {"name": "New"})                  # insert
 Save("club.Member", 5, {"age": F("age") + 1}, force_update=True)
+```
+
+### `adorm.operations.CreateFromParent(model, parent_pk, values=())`
+
+Inserts the row of the multi-table inheritance child `model` for the existing row of its parent whose primary key is
+`parent_pk`: only the child's own table gets a row, with `values` (the child's own fields); the parent's row is not
+written. Result: the child's row as stored, the parent's fields included.
+
+`parent_pk` as `None` raises `ValueError`, as an expression `TypeError`; a value that refers to a field raises
+`TypeError`. The driver raises `ProgrammingError` for a model that is not a multi-table inheritance child and for a
+value of an inherited field, `ObjectDoesNotExist` when the parent has no row with `parent_pk` and `IntegrityError` when
+the child already has one. The Django driver reads the parent and saves the child with `save_base(raw=True,
+force_insert=True)` after its fields' `pre_save()`; the native PostgreSQL driver inserts the child's table as Django's
+save does, without the model's methods and signals.
+
+```python
+CreateFromParent("activities.Competition", 3, {"discipline": "Climbing"})
+```
+
+### `adorm.operations.FullClean(model, pk, values=(), exclude=(), validate_unique=True, validate_constraints=True, adding=True)`
+
+Validates an instance of `model` as the target validates one before a save (Django: `Model.full_clean()`). The
+instance has the primary key `pk` and `values` (its loaded and assigned fields, plain values); the driver puts them
+over the stored row when `adding` is false and `pk` is not `None` (the row read first when `values` lacks fields),
+otherwise over the target's defaults. `exclude` names fields or relations that are not validated;
+`validate_unique` and `validate_constraints` switch the unique checks and the model's constraints. `adding` tells
+whether the instance is not stored yet: a unique check of a stored instance leaves its own row out.
+
+Result: the instance's fields after cleaning, as a row. Errors raise `adorm.ValidationError` with the messages by
+adorm name (a foreign key's under its relation's name, the model's under `"__all__"`). An expression as `pk` or value
+and a string `exclude` raise `TypeError`, an `exclude` name that is not an identifier `ValueError`.
+
+```python
+FullClean("billing.Invoice", 3, {"due": datetime.date(2025, 1, 1)}, exclude=["club"], adding=False)
 ```
 
 ### `adorm.operations.Update(query, values=())`

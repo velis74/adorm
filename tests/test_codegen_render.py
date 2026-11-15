@@ -133,6 +133,23 @@ def test_relation_forms():
         assert line in source.splitlines(), line
 
 
+def test_generic_foreign_keys_render_their_fields_unless_they_are_the_defaults():
+    relations = (
+        RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id",
+                     ct_field="content_type"),
+        RelationSpec("generic_foreign_key", "owner", "owner", "contenttypes.ContentType", column="owner_id",
+                     ct_field="owner_type"),
+    )  # fmt: skip
+    fields = tuple(FieldSpec(name, name, INT) for name in ("content_type_id", "object_id", "owner_type_id", "owner_id"))
+    source = render_module(AppSpec("shop", (model("shop.Tag", fields, relations),)), line_length=120)
+    lines = source.splitlines()
+    assert "    item = GenericForeignKey()" in lines
+    assert '    owner = GenericForeignKey("owner_type", "owner_id")' in lines
+    assert "from adorm import GenericForeignKey, Model, ModelMeta" in lines
+    with pytest.raises(ValueError, match="needs ct_field"):
+        RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id")
+
+
 def test_imported_names_that_clash_with_model_names_get_an_alias():
     models = (
         model("shop.Field", (FieldSpec("born", "born", TypeSpec("datetime.date")),)),

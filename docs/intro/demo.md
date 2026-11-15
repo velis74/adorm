@@ -108,10 +108,9 @@ model, regenerate them:
 uv run adorm generate --settings demo.backend.settings -o demo/models --line-length 120
 ```
 
-The generator writes one module per Django app and reports what it leaves out (the generic foreign key):
+The generator writes one module per Django app and reports what it leaves out (nothing for the demo):
 
 ```text
-warning: billing.InvoiceLine.item: GenericForeignKey is not generated
 wrote demo/models/__init__.py
 ...
 5 written, 0 removed, 0 unchanged.
@@ -124,8 +123,9 @@ fields with the Django field's constraints, choices as a `Literal`, its foreign 
 reverse foreign keys as `ReverseForeignKey`, reverse one-to-one relations as `ReverseOneToOne` and many-to-many
 relations as `ManyToMany` with their join columns. Query paths traverse all of them (`memberships__club__slug`). An
 MTI child is a subclass of the parent's adorm model with its own label and primary key. The generic foreign key
-`InvoiceLine.item` has no adorm counterpart; its columns `content_type_id` and `object_id` are fields. `schema_hash`
-is the hash of the Django model the module was generated from.
+`InvoiceLine.item` is a `GenericForeignKey` descriptor over the fields `content_type_id` and `object_id`
+(`await line.item` returns the `Membership` or `Activity`). `schema_hash` is the hash of the Django model the module
+was generated from.
 
 ```python
 class Membership(Model):
@@ -559,7 +559,7 @@ through Django, once; writes stay in memory and are gone when the API stops.
 
 | Supported | Not supported (raises `NotSupportedError`) |
 |---|---|
-| `select`, `get`, `first`, `last`, `count`, `exists`, `create`, `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create` | `aggregate` and `call` operations, connection options |
+| `select`, `get`, `first`, `last`, `count`, `exists`, `in_bulk` by primary key, `create`, `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create`; `prefetch_related()` and generic foreign keys, which run `select` and `get` | `aggregate`, `call`, `create_from_parent` and `full_clean` operations, `in_bulk` by another field, connection options |
 | conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`, `club=club`) or column | field paths across relations (`club__slug`, construct `path.nested`), conditions on a reverse or many-to-many relation name (`clubs=club`), subqueries |
 | `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()` | annotations, `alias()`, grouping with `values().annotate()`, functions, aggregates, `only()`, `defer()`, `select_related()` |
 | transactions, savepoints, cancellation, `select_for_update()` with `nowait` and `skip_locked` | `select_for_update()` with `of` or `no_key`, inserting or deleting a row of an MTI child, deleting a row a foreign key references |

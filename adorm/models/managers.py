@@ -221,6 +221,10 @@ class BoundModel:
         """``all().select_related(...)``."""
         return self.all().select_related(*fields)
 
+    def prefetch_related(self, *lookups: Any) -> QuerySet:
+        """``all().prefetch_related(...)``."""
+        return self.all().prefetch_related(*lookups)
+
     def distinct(self, *fields: str) -> QuerySet:
         """``all().distinct(...)``."""
         return self.all().distinct(*fields)
@@ -257,9 +261,17 @@ class BoundModel:
         """``await all().aggregate(...)``."""
         return await self.all().aggregate(*args, **kwargs)
 
+    async def in_bulk(self, id_list: Any = None, *, field_name: str = "pk") -> dict[Any, Any]:
+        """``await all().in_bulk(...)``."""
+        return await self.all().in_bulk(id_list, field_name=field_name)
+
     async def create(self, **values: Any) -> Any:
         """``await all().create(...)``."""
         return await self.all().create(**values)
+
+    async def create_from_parent(self, parent: Any, **values: Any) -> Any:
+        """``await all().create_from_parent(...)``."""
+        return await self.all().create_from_parent(parent, **values)
 
     async def get_or_create(self, defaults: Any = None, **lookups: Any) -> tuple[Any, bool]:
         """``await all().get_or_create(...)``."""

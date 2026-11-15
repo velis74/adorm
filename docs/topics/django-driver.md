@@ -184,7 +184,9 @@ with Django's messages. `first()` and `last()` order by the primary key when nei
 ordering; `first()` on a sliced query needs `order_by()` (the core raises `TypeError` without it), and so do
 `first()` and `last()` on a grouped query. `count()` and `exists()` run Django's `count()` and `exists()`; `count()`
 of a grouped query counts its groups. `aggregate()` runs Django's `aggregate()` on the query's model rows and
-returns its dict.
+returns its dict. `in_bulk()` checks the field as Django's `in_bulk()` does
+([`check_in_bulk_field()`](/ref/drivers#adorm-drivers-django-translation-check-in-bulk-field-operation)), then reads the
+query's rows filtered with `<field>__in`.
 
 Relations work as on any driver: `await member.club` runs a `get`, `club.memberships` and many-to-many relations
 are queries.
@@ -211,6 +213,8 @@ signals and the overrides of the query's manager run as in Django code, on the s
 | `qs.delete()` | `delete()` on the query's query set (its manager's overrides apply): Django's collector cascades, sets NULL and fires `pre_delete` / `post_delete`; no model's `delete()` runs |
 | `obj.delete()` | the instance read with `_base_manager`, then its `delete()`: the model's `delete()` override runs, and Django's own deletes it with the collector; a missing row deletes nothing |
 | `qs.get_or_create(...)`, `qs.update_or_create(...)` | `get_or_create(...)`, `update_or_create(...)` on the query's query set |
+| `Child.objects.create_from_parent(parent, **values)` | the parent read with `_base_manager`, the child built with its values and the parent link, the child's fields' `pre_save()`, then `save_base(raw=True, force_insert=True)`: only the child's table is inserted, `pre_save` / `post_save` receive `raw=True`, and a `save()` override does not run |
+| `obj.full_clean(exclude=[...])` | `full_clean(exclude=..., validate_unique=..., validate_constraints=...)` of the instance with the adorm instance's values over its stored row; the model's `clean()` and its own queries run on the slot's connection |
 
 A save of an instance with a primary key that the database has no row for inserts the row when the instance was not
 loaded with every field, as Django does for a complete instance; the driver checks the row with one `exists()` query

@@ -188,7 +188,7 @@ class Session:
         return f"Session({self.using!r}, {self.session_name!r})"
 
 
-_ROW_READS = frozenset({"select", "get", "first", "last"})
+_ROW_READS = frozenset({"select", "get", "first", "last", "in_bulk"})
 """Operation kinds that read rows and so lock them with ``select_for_update()``."""
 
 _sessions: weakref.WeakValueDictionary[tuple[str, str], Session] = weakref.WeakValueDictionary()

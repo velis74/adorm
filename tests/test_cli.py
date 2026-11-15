@@ -29,7 +29,7 @@ def test_generate_writes_then_check_passes(tmp_path, capsys):
     out, err = capsys.readouterr()
     assert f"wrote {output / 'library.py'}" in out
     assert "2 written, 0 removed, 0 unchanged." in out
-    assert "warning: library.Note.item: GenericForeignKey is not generated" in err
+    assert "warning: library.Book.reviews: GenericRelation is not generated" in err
     assert (output / "library.py").read_text(encoding="utf-8").startswith(HEADER)
     assert main(["generate", "--check", "-o", str(output), "library"]) == 0
     assert "2 generated files are up to date." in capsys.readouterr().out

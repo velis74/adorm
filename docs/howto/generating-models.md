@@ -180,6 +180,7 @@ it was not given to the target.
 | the reverse side of a `ForeignKey` | [`ReverseForeignKey`](/ref/models#adorm-reverseforeignkey-target-column) named after the accessor (`related_name`, `<model>_set`) |
 | the reverse side of a `OneToOneField` | [`ReverseOneToOne`](/ref/models#adorm-reverseonetoone-target-column) |
 | `ManyToManyField`, either side | [`ManyToMany`](/ref/models#adorm-manytomany-target-through-source-column-target-column) through the declared or the automatic through model |
+| `GenericForeignKey` | [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id) with the content type field and the object id field (no arguments for `content_type` and `object_id`) |
 
 Reverse relations come only from models that are generated in the same run. A forward relation to a model that is not
 generated (or through a declared through model that is not) keeps its column and its descriptor and is reported as a
@@ -188,7 +189,7 @@ warning: the descriptor fails when it is used unless that model is registered so
 
 These are reported as warnings and left out, while their columns stay ordinary fields:
 
-- generic foreign keys and generic relations (`content_type_id`, `object_id`);
+- generic relations (`GenericRelation`, the reverse side of a generic foreign key);
 - a foreign key with `to_field` naming a field other than the target's primary key, both its sides, and a
   many-to-many relation whose through model has such a foreign key (`shelf_id` stays, holding the `code` value).
 
@@ -365,6 +366,7 @@ class Note(Model):
     score: decimal.Decimal = Field(default=decimal.Decimal("2.5"), max_digits=4, decimal_places=1)
     content_type = ForeignKey("contenttypes.ContentType")
     copy_ = ForeignKey("library.Book", column="copy_id")
+    item = GenericForeignKey()
 ```
 
 Code and queries use the suffixed name; serialisation and the JSON schema use the original one (the model base sets

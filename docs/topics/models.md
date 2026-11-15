@@ -153,6 +153,49 @@ async for member in club.members.filter(active=True):
 In Python input a relation name stands for its column: `Member(name="Ana", club=club)` sets `club_id` and caches
 `club`. JSON input carries the column (`"club_id": 7`); a relation name in it is a validation error.
 
+After [`prefetch_related()`](/topics/queries#prefetching-related-objects) the relations hold the prefetched objects:
+an `await` of a foreign key runs no operation, and the query set of a reverse or many-to-many relation reads the
+prefetched rows for `async for`, `count()` and `exists()`.
+
+### Generic foreign keys
+
+A [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id) points at a
+row of any model: the content type field (a foreign key to Django's `ContentType`) names the model, the object id
+field holds the row's primary key. `adorm generate` writes one for every Django `GenericForeignKey`. Awaiting it
+reads the content type, finds the registered adorm model for it and loads the row; the object is cached while both
+fields keep their values. A missing row gives `None`, as in Django.
+
+```python
+class InvoiceLine(Model):
+    _meta = ModelMeta("billing.InvoiceLine")
+    id: int | None = None
+    content_type_id: int
+    object_id: int
+    content_type = ForeignKey("contenttypes.ContentType")
+    item = GenericForeignKey()
+
+
+line = await InvoiceLine.objects.first()
+item = await line.item                 # a Membership or an Activity
+line.item = None                       # clears content_type_id and object_id
+```
+
+Assigning an instance raises `TypeError`: the content type's primary key is a row of the database, so the
+application sets `content_type_id` and `object_id`. Query paths do not traverse a generic foreign key.
+
+### Multi-table inheritance
+
+A child model of multi-table inheritance derives from its parent's adorm model, with its own label and a primary key
+that is the parent link (`activity_ptr_id`). Reading and saving a child reads and writes the rows of both tables.
+[`create_from_parent()`](/ref/queryset#async-create-from-parent-parent-values) adds the child's row to a parent row
+that exists, leaving the parent's row as it is:
+
+```python
+crag = await Activity.objects.get(name="Crag day")
+competition = await Competition.objects.create_from_parent(crag, discipline="Climbing")
+competition.capacity             # 15, the parent's value
+```
+
 ## Equality
 
 Instances are equal when they are rows of the same model with the same primary key, whatever their other values,
@@ -178,6 +221,25 @@ await member.save(update_fields=["active"])  # updates one column
 
 `save()` builds a [`Save`](/ref/operations) operation and runs it on the instance's executor: the session of the query
 set that loaded the instance, or else the [current session](/topics/sessions#the-current-session). See the [Model API](/ref/models) for every option and error.
+
+## Validating
+
+Pydantic validates the values given to the constructor. `await instance.full_clean()` validates the instance as the
+target does before a save: on the Django driver Django's `Model.full_clean()` runs the field validators, the model's
+`clean()`, the unique checks and the constraints, against the database in the current transaction. Errors raise
+`adorm.ValidationError` with the messages by field name; `exclude` leaves fields out:
+
+```python
+invoice.due = datetime.date(2025, 1, 1)
+try:
+    await invoice.full_clean()
+except adorm.ValidationError as exc:
+    exc.message_dict              # {"due": ["The due date cannot be before the issue date."]}
+await invoice.full_clean(exclude=["due"])
+```
+
+See [`full_clean()`](/ref/models#full-clean-exclude-none-validate-unique-true-validate-constraints-true) in the Model
+API for the instance it validates and the error keys.
 
 ## Deleting
 

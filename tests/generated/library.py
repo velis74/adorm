@@ -6,7 +6,17 @@ import decimal
 import uuid
 from typing import Any, Literal
 
-from adorm import ForeignKey, Manager, ManyToMany, Model, ModelMeta, ReverseForeignKey, ReverseOneToOne, driver_method
+from adorm import (
+    ForeignKey,
+    GenericForeignKey,
+    Manager,
+    ManyToMany,
+    Model,
+    ModelMeta,
+    ReverseForeignKey,
+    ReverseOneToOne,
+    driver_method,
+)
 from pydantic import Field
 from tests.djangoproject.library.adorm_bases import LoanQuerySetBase
 
@@ -145,6 +155,7 @@ class Note(Model):
     score: decimal.Decimal = Field(default=decimal.Decimal("2.5"), max_digits=4, decimal_places=1)
     content_type = ForeignKey("contenttypes.ContentType")
     copy_ = ForeignKey("library.Book", column="copy_id")
+    item = GenericForeignKey()
 
 
 class Shelf(Model):

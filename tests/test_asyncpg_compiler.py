@@ -42,7 +42,13 @@ from psycopg.types.numeric import Float8, Int2, Int4, Int8
 from psycopg.types.range import Range
 
 from adorm.drivers.asyncpg import compiler as compiler_module
-from adorm.drivers.asyncpg.compiler import bind_param, DjangoCompiler, DjangoStatement, MAX_QUERY_PARAMS
+from adorm.drivers.asyncpg.compiler import (
+    bind_param,
+    DjangoCompiler,
+    DjangoStatement,
+    MAX_QUERY_PARAMS,
+    StatementNeeded,
+)
 from adorm.drivers.sql import Statement
 from adorm.exceptions import NotSupportedError, TransactionManagementError
 from tests.djangoproject.library.models import Author, Book, Edition, Note
@@ -874,3 +880,74 @@ def test_asyncpg_aggregation_matches_django(test_database_url, name):
     result = compiled.result(record)
     assert result == expected
     assert {k: type(v) for k, v in result.items()} == {k: type(v) for k, v in expected.items()}
+
+
+def test_replay_asks_for_each_statement_then_answers_it(compiler):
+    def check():
+        return Author.objects.filter(slug="ann").exists(), Author.objects.filter(slug="bob").exists()
+
+    with pytest.raises(StatementNeeded) as needed:
+        compiler.replay(check, [])
+    first = needed.value.statement
+    assert "library_author" in first.sql
+    assert "ann" in first.params
+    with pytest.raises(StatementNeeded) as needed:
+        compiler.replay(check, [(first.sql, [(1,)])])
+    second = needed.value.statement
+    assert compiler.replay(check, [(first.sql, [(1,)]), (second.sql, [])]) == (True, False)
+    with pytest.raises(NotSupportedError, match="other statements"):
+        compiler.replay(check, [("SELECT 2", [(1,)])])
+
+
+@pytest.mark.parametrize("caught", [Exception, BaseException])
+def test_replay_asks_for_a_statement_that_the_code_catches(compiler, caught):
+    def check():
+        try:
+            return Author.objects.filter(slug="ann").exists()
+        except caught:
+            return "swallowed"
+
+    def raising():
+        try:
+            Author.objects.filter(slug="ann").exists()
+        except caught:
+            pass
+        raise ValueError("another error")
+
+    for fn in (check, raising):
+        with pytest.raises(StatementNeeded) as needed:
+            compiler.replay(fn, [])
+        assert "library_author" in needed.value.statement.sql
+    statement = needed.value.statement
+    assert compiler.replay(check, [(statement.sql, [(1,)])]) is True
+    with pytest.raises(ValueError, match="another error"):
+        compiler.replay(raising, [(statement.sql, [(1,)])])
+
+
+def test_replay_restores_the_connections_of_the_thread(compiler):
+    from django.db import DEFAULT_DB_ALIAS
+
+    storage = connections._connections
+    before = getattr(storage, DEFAULT_DB_ALIAS, None)
+    seen = compiler.replay(lambda: connections[DEFAULT_DB_ALIAS], [])
+    assert seen is compiler.connection
+    assert getattr(storage, DEFAULT_DB_ALIAS, None) is before
+    with pytest.raises(RuntimeError):
+        compiler.replay(lambda: (_ for _ in ()).throw(RuntimeError), [])
+    assert getattr(storage, DEFAULT_DB_ALIAS, None) is before
+
+
+async def test_replay_in_concurrent_tasks_sees_only_its_own_answers(compiler):
+    def count(slug):
+        return lambda: Author.objects.filter(slug=slug).count()
+
+    async def run(slug, rows):
+        await asyncio.sleep(0)
+        with pytest.raises(StatementNeeded) as needed:
+            compiler.replay(count(slug), [])
+        statement = needed.value.statement
+        await asyncio.sleep(0)
+        return compiler.replay(count(slug), [(statement.sql, [(rows,)])])
+
+    results = await asyncio.gather(*(run(f"slug-{n}", n) for n in range(20)))
+    assert results == list(range(20))

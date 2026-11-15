@@ -26,12 +26,15 @@ __all__ = [
     "Call",
     "Count",
     "Create",
+    "CreateFromParent",
     "Delete",
     "DeleteInstance",
     "Exists",
     "First",
+    "FullClean",
     "Get",
     "GetOrCreate",
+    "InBulk",
     "Last",
     "ModelRow",
     "Operation",
@@ -281,6 +284,80 @@ class Exists(_QueryOperation):
     kind: ClassVar[str] = "exists"
 
 
+@dataclass(frozen=True, eq=False)
+class InBulk(_QueryOperation):
+    """The rows of ``query`` whose field ``field_name`` holds one of ``ids``; every row when ``ids`` is ``None``.
+    Result: a list of rows (dicts), which the caller keys by the field's value.
+
+    ``field_name`` is ``"pk"`` or a field name without ``__``; the driver refuses a field that is neither the primary
+    key nor unique on its own (nor the only field the query is distinct on) with `ProgrammingError`. ``ids`` is an
+    iterable of values (not a string), kept in order without repeats. The query selects model rows (no ``values()``),
+    is not sliced and loads the field (not deferred); otherwise ``TypeError``.
+    """
+
+    kind: ClassVar[str] = "in_bulk"
+    field_name: str = "pk"
+    ids: tuple[Any, ...] | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        query = self.query
+        if query.is_sliced:
+            raise TypeError("cannot use in_bulk() on a query once a slice has been taken")
+        if query.row_format != "model":
+            raise TypeError("in_bulk() cannot be used with values() or values_list()")
+        name = self.field_name
+        if not isinstance(name, str) or not name.isidentifier() or "__" in name:
+            raise ValueError(f"{name!r} is not a field name")
+        if name != "pk" and (
+            name in query.deferred_fields or (query.only_fields is not None and name not in query.only_fields)
+        ):
+            raise TypeError(f"in_bulk() needs the field {name!r}, which the query defers")
+        if self.ids is not None:
+            if isinstance(self.ids, str | bytes) or not isinstance(self.ids, Iterable):
+                raise TypeError("ids is an iterable of values, not a string")
+            values = []
+            for value in self.ids:
+                if isinstance(value, Node):
+                    raise TypeError("an id is a value, not an expression")
+                value = freeze_value(value)
+                if value not in values:
+                    values.append(value)
+            object.__setattr__(self, "ids", tuple(values))
+
+    def select_query(self) -> Query:
+        """``query`` filtered by ``<field_name>__in=ids`` (unchanged for ``ids=None``)."""
+        if self.ids is None:
+            return self.query
+        return self.query.filter(**{f"{self.field_name}__in": list(self.ids)})
+
+    def constructs(self) -> Iterator[str]:
+        yield from super().constructs()
+        if self.ids is not None:
+            yield "lookup.in"
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        data = super()._encode(encoder)
+        data["field_name"] = self.field_name
+        with encoder.scope(self.query.model):
+            hint = encoder.field_type(self.field_name)
+            data["ids"] = None if self.ids is None else [encoder.operand(value, hint) for value in self.ids]
+        return data
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        query = _decode_query(decoder, data)
+        name, raw = _get(data, "field_name"), _get(data, "ids")
+        if not isinstance(name, str):
+            raise ValueError("the field name is a string")
+        if raw is not None and not isinstance(raw, list):
+            raise ValueError("the ids are a list or null")
+        with decoder.scope(query.model):
+            hint = decoder.field_type(name)
+            ids = None if raw is None else tuple(decoder.operand(value, hint) for value in raw)
+        return cls(query, name, ids)
+
+
 _FORBIDDEN_NAME = re.compile(r"['`\"\]\[;\s\x00-\x1F\x7F-\x9F]|#|--|/\*|\*/")
 
 
@@ -483,6 +560,129 @@ class Create(Operation):
         with decoder.scope(model):
             values = _decode_values(decoder, _get(data, "values"), "values", extra=manager is not None)
             return cls(model, values, manager)
+
+
+@dataclass(frozen=True, eq=False)
+class CreateFromParent(Operation):
+    """Insert the row of the multi-table inheritance child ``model`` for the existing row of its parent whose primary
+    key is ``parent_pk``: only the child's own table gets a row, with ``values`` (field name → value of the child's
+    own fields); the parent's row is not written. Result: the child's row as stored, the parent's fields included.
+
+    ``parent_pk`` is a value, not ``None`` (``ValueError``) and not an expression; a value of ``values`` refers to no
+    field and contains no aggregate (``TypeError``). The driver raises `ProgrammingError` for a model that is not a
+    multi-table inheritance child and for a value of an inherited field, `ObjectDoesNotExist` when the parent has no
+    row with ``parent_pk`` and `IntegrityError` when the child already has one.
+    """
+
+    kind: ClassVar[str] = "create_from_parent"
+    model: str
+    parent_pk: Any
+    values: tuple[tuple[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        check_model_label(self.model)
+        if self.parent_pk is None:
+            raise ValueError("creating a child of an existing parent needs the parent's primary key")
+        if isinstance(self.parent_pk, Node):
+            raise TypeError("the primary key is a value, not an expression")
+        object.__setattr__(self, "parent_pk", freeze_value(self.parent_pk))
+        object.__setattr__(self, "values", _field_values(self.values, refs=False))
+
+    def nodes(self) -> Iterator[Node]:
+        return (value for _, value in self.values if isinstance(value, Node))
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        with encoder.scope(self.model):
+            return {
+                "model": self.model,
+                "parent_pk": encoder.operand(self.parent_pk, encoder.field_type("pk")),
+                "values": _encode_values(encoder, self.values),
+            }
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        model = check_model_label(_get(data, "model"))
+        with decoder.scope(model):
+            return cls(
+                model,
+                decoder.operand(_get(data, "parent_pk"), decoder.field_type("pk")),
+                _decode_values(decoder, _get(data, "values"), "values"),
+            )
+
+
+@dataclass(frozen=True, eq=False)
+class FullClean(Operation):
+    """Validate an instance of ``model`` as the target validates one before a save (Django: ``Model.full_clean()``).
+
+    The instance has the primary key ``pk`` and ``values`` (field name → value: its loaded and assigned fields); the
+    driver puts them over the stored row when ``adding`` is false and ``pk`` is not ``None`` (the row read first when
+    ``values`` lacks fields), otherwise over the target's defaults. ``exclude`` names fields or relations that are not
+    validated; ``validate_unique`` and ``validate_constraints`` switch the unique checks and the model's constraints.
+    ``adding`` tells whether the instance is not stored yet: a unique check of a stored instance leaves its own row
+    out. Result: the instance's fields after cleaning, as a row; errors raise `adorm.ValidationError` with the
+    messages by adorm field name (a foreign key's under its relation's name, the model's under ``"__all__"``).
+
+    ``pk`` and the values are plain values, not expressions (``TypeError``); ``exclude`` is an iterable of names, not
+    a string (``TypeError``).
+    """
+
+    kind: ClassVar[str] = "full_clean"
+    model: str
+    pk: Any
+    values: tuple[tuple[str, Any], ...] = ()
+    exclude: tuple[str, ...] = ()
+    validate_unique: bool = True
+    validate_constraints: bool = True
+    adding: bool = True
+
+    def __post_init__(self) -> None:
+        check_model_label(self.model)
+        if isinstance(self.pk, Node):
+            raise TypeError("the primary key is a value, not an expression")
+        object.__setattr__(self, "pk", freeze_value(self.pk))
+        pairs = _field_values(self.values, refs=False)
+        for name, value in pairs:
+            if isinstance(value, Node):
+                raise TypeError(f"the value of {name!r} is a plain value, not an expression")
+        object.__setattr__(self, "values", pairs)
+        if isinstance(self.exclude, str):
+            raise TypeError("exclude is an iterable of field names, not a string")
+        names = tuple(dict.fromkeys(self.exclude))
+        for name in names:
+            if not isinstance(name, str) or not name.isidentifier():
+                raise ValueError(f"{name!r} is not a field name")
+        object.__setattr__(self, "exclude", names)
+        for flag in ("validate_unique", "validate_constraints", "adding"):
+            object.__setattr__(self, flag, bool(getattr(self, flag)))
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        with encoder.scope(self.model):
+            return {
+                "model": self.model,
+                "pk": encoder.operand(self.pk, encoder.field_type("pk")),
+                "values": _encode_values(encoder, self.values),
+                "exclude": list(self.exclude),
+                "validate_unique": self.validate_unique,
+                "validate_constraints": self.validate_constraints,
+                "adding": self.adding,
+            }
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        model = check_model_label(_get(data, "model"))
+        exclude = _get(data, "exclude")
+        if not (isinstance(exclude, list) and all(isinstance(name, str) for name in exclude)):
+            raise ValueError("exclude is a list of field names")
+        with decoder.scope(model):
+            return cls(
+                model,
+                decoder.operand(_get(data, "pk"), decoder.field_type("pk")),
+                _decode_values(decoder, _get(data, "values"), "values"),
+                exclude=tuple(exclude),
+                validate_unique=_flag(data, "validate_unique"),
+                validate_constraints=_flag(data, "validate_constraints"),
+                adding=_flag(data, "adding"),
+            )
 
 
 @dataclass(frozen=True, eq=False)

@@ -15,6 +15,7 @@ import importlib
 import inspect
 import os
 import re
+import sys
 import types
 import typing
 import warnings
@@ -383,9 +384,33 @@ def _relations(model: type[models.Model], include_parents: bool, included: Colle
             relation = _reverse_relation(field, opts.label)
             if relation is not None:
                 relations.append(relation)
+        elif _is_generic_foreign_key(field):
+            if own and field.model is not model:
+                continue
+            relations.append(_generic_relation(field))
         elif field.is_relation and not field.concrete and not field.many_to_many:
             _warn(f"{opts.label}.{field.name}: {type(field).__name__} is not generated")
     return relations
+
+
+def _is_generic_foreign_key(field: Any) -> bool:
+    # A model with a generic foreign key has imported the module; importing it otherwise needs contenttypes installed.
+    module = sys.modules.get("django.contrib.contenttypes.fields")
+    return module is not None and isinstance(field, module.GenericForeignKey)
+
+
+def _generic_relation(field: Any) -> RelationSpec:
+    """The `RelationSpec` of the generic foreign key ``field``."""
+    opts = field.model._meta
+    content_type = opts.get_field(field.ct_field)
+    return RelationSpec(
+        "generic_foreign_key",
+        python_name(field.name),
+        field.name,
+        content_type.related_model._meta.label,
+        column=python_name(opts.get_field(field.fk_field).attname),
+        ct_field=python_name(content_type.name),
+    )
 
 
 _CORE_MODULES = frozenset({"django.db.models.manager", "django.db.models.query", "builtins"})

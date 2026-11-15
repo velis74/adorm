@@ -11,6 +11,7 @@ from adorm.drivers.asyncpg.driver import (
     CAPABILITIES,
     connect_arguments,
     DSN_PARAMETERS,
+    IN_BULK_BATCH_SIZE,
     ISOLATION_LEVELS,
     MAX_GET_RESULTS,
     server_version_num,
@@ -19,6 +20,7 @@ from adorm.drivers.asyncpg.driver import (
 __all__ = [
     "CAPABILITIES",
     "DSN_PARAMETERS",
+    "IN_BULK_BATCH_SIZE",
     "ISOLATION_LEVELS",
     "MAX_GET_RESULTS",
     "AsyncpgConnection",

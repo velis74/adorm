@@ -15,12 +15,20 @@ from adorm.exceptions import InterfaceError, ModelExceptionsMixin, ProtectedErro
 from adorm.models.managers import BoundModel, Manager
 from adorm.models.meta import ModelMeta
 from adorm.models.registry import registry
-from adorm.models.relations import ForeignKey, Relation
+from adorm.models.relations import ForeignKey, GenericForeignKey, Relation
 
 if TYPE_CHECKING:
     from adorm.operations import Operation
 
-__all__ = ["Executor", "Model", "ModelState", "get_managers", "get_relations", "set_executor_resolver"]
+__all__ = [
+    "Executor",
+    "Model",
+    "ModelState",
+    "get_generic_foreign_keys",
+    "get_managers",
+    "get_relations",
+    "set_executor_resolver",
+]
 
 
 @runtime_checkable
@@ -46,7 +54,9 @@ class ModelState:
     """Per-instance state outside the fields.
 
     ``adding`` is ``True`` until the instance is loaded or saved; ``executor`` runs the instance's operations
-    (the one that loaded or last saved it); ``related`` caches related instances by relation name.
+    (the one that loaded or last saved it); ``related`` caches related instances by relation name, the prefetched rows
+    of a reverse or many-to-many relation as a tuple; for a generic foreign key, the content type, the object id and
+    the instance loaded for them.
     """
 
     __slots__ = ("adding", "executor", "related")
@@ -82,6 +92,11 @@ def get_relations(model: type[Model]) -> Mapping[str, Relation]:
     return model.__adorm_relations__
 
 
+def get_generic_foreign_keys(model: type[Model]) -> Mapping[str, GenericForeignKey]:
+    """The `GenericForeignKey` descriptors of ``model`` (inherited ones included) by attribute name."""
+    return model.__adorm_generic_foreign_keys__
+
+
 def get_managers(model: type[Model]) -> Mapping[str, Manager]:
     """The manager declarations of ``model`` (inherited ones included) by attribute name."""
     return model.__adorm_managers__
@@ -98,15 +113,15 @@ def _collect_managers(cls: type) -> dict[str, Manager]:
     return managers
 
 
-def _collect_relations(cls: type) -> dict[str, Relation]:
-    relations: dict[str, Relation] = {}
+def _collect(cls: type, kind: type) -> dict[str, Any]:
+    found: dict[str, Any] = {}
     for klass in reversed(cls.__mro__):
         for name, value in vars(klass).items():
-            if isinstance(value, Relation):
-                relations[name] = value
-            elif name in relations:
-                del relations[name]
-    return relations
+            if isinstance(value, kind):
+                found[name] = value
+            elif name in found:
+                del found[name]
+    return found
 
 
 def _inherited_orm_names(cls: type, fields: Mapping[str, Any], relations: Mapping[str, Relation]) -> dict[str, str]:
@@ -135,7 +150,7 @@ class Model(ModelExceptionsMixin, BaseModel):
 
     model_config = ConfigDict(
         extra="allow",
-        ignored_types=(Relation, BoundModel),
+        ignored_types=(Relation, GenericForeignKey, BoundModel),
         serialize_by_alias=True,
         validate_by_name=True,
         validate_by_alias=True,
@@ -145,6 +160,7 @@ class Model(ModelExceptionsMixin, BaseModel):
     _meta: ClassVar[ModelMeta | None] = None
     objects = Manager()
     __adorm_relations__: ClassVar[Mapping[str, Relation]] = {}
+    __adorm_generic_foreign_keys__: ClassVar[Mapping[str, GenericForeignKey]] = {}
     __adorm_managers__: ClassVar[Mapping[str, Manager]] = {}
     _state: ModelState = PrivateAttr(default_factory=ModelState)
 
@@ -153,12 +169,18 @@ class Model(ModelExceptionsMixin, BaseModel):
         super().__pydantic_init_subclass__(**kwargs)
         if "_meta" in cls.__private_attributes__:
             raise TypeError(f"{cls.__name__}._meta is a ClassVar[ModelMeta], not a private attribute")
-        relations = _collect_relations(cls)
+        relations = _collect(cls, Relation)
         fields = cls.__pydantic_fields__
         for name, relation in relations.items():
             if isinstance(relation, ForeignKey) and relation.column not in fields:
                 raise TypeError(f"{cls.__name__}.{name} is stored in {relation.column!r}, which is not a field")
         cls.__adorm_relations__ = relations
+        generic = _collect(cls, GenericForeignKey)
+        for name, relation in generic.items():
+            for column in (relation.ct_column(cls), relation.fk_field):
+                if column not in fields:
+                    raise TypeError(f"{cls.__name__}.{name} is stored in {column!r}, which is not a field")
+        cls.__adorm_generic_foreign_keys__ = generic
         managers = _collect_managers(cls)
         clashes = sorted(name for name in managers if name in fields or name in relations)
         if clashes:
@@ -225,6 +247,11 @@ class Model(ModelExceptionsMixin, BaseModel):
             return handler(data)
         data = dict(data)
         cls._map_pk(data)
+        for name, generic in cls.__adorm_generic_foreign_keys__.items():
+            if name in data:
+                raise ValueError(
+                    f"{name} is a generic foreign key: give {generic.ct_column(cls)!r} and {generic.fk_field!r}"
+                )
         related: dict[str, Any] = {}
         for name, relation in cls.__adorm_relations__.items():
             if name not in data or not isinstance(relation, ForeignKey):
@@ -394,6 +421,45 @@ class Model(ModelExceptionsMixin, BaseModel):
         )
         executor = self._executor()
         self._stored(await executor.execute(operation), executor)
+
+    async def full_clean(
+        self, *, exclude: Iterable[str] | None = None, validate_unique: bool = True, validate_constraints: bool = True
+    ) -> None:
+        """Validate the instance `save()` would write as the target does (Django's ``Model.full_clean()``), with a
+        `FullClean` operation, skipping the fields (or relations) in ``exclude``, and set the cleaned values on its
+        loaded fields. Raises `adorm.ValidationError`; ``ValueError`` for an ``exclude`` name that names nothing."""
+        from adorm.operations import FullClean
+
+        meta = self._require_meta()
+        cls = type(self)
+        names: list[str] = []
+        if exclude is not None:
+            if isinstance(exclude, str):
+                raise TypeError("exclude is an iterable of field names, not a string")
+            for name in exclude:
+                if name == "pk":
+                    name = meta.pk
+                if name not in cls.__pydantic_fields__ and name not in cls.__adorm_relations__:
+                    raise ValueError(f"{name!r} is not a field of {meta.label}")
+                names.append(name)
+        values = {
+            name: self.__dict__[name]
+            for name in cls.__pydantic_fields__
+            if name != meta.pk and name in self.model_fields_set and name in self.__dict__
+        }
+        operation = FullClean(
+            meta.label,
+            self.__dict__.get(meta.pk),
+            values,
+            exclude=names,
+            validate_unique=validate_unique,
+            validate_constraints=validate_constraints,
+            adding=self._state.adding,
+        )
+        cleaned = await self._executor().execute(operation)
+        for name, value in (cleaned or {}).items():
+            if name in cls.__pydantic_fields__ and name in self.__dict__:
+                self.__dict__[name] = value
 
     async def delete(self) -> tuple[int, dict[str, int]]:
         """Delete the instance's row and the rows that cascade from it with a `DeleteInstance` operation, which runs

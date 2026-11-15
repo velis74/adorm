@@ -39,6 +39,7 @@ _RELATION_CLASSES = {
     "reverse_foreign_key": "ReverseForeignKey",
     "reverse_one_to_one": "ReverseOneToOne",
     "many_to_many": "ManyToMany",
+    "generic_foreign_key": "GenericForeignKey",
 }
 
 
@@ -393,6 +394,11 @@ class _ModuleRenderer:
 
     def relation(self, relation: RelationSpec) -> list[str]:
         w = self.writer
+        if relation.kind == "generic_foreign_key":
+            defaults = relation.ct_field == "content_type" and relation.column == "object_id"
+            args = [] if defaults else [w.value(relation.ct_field), w.value(relation.column)]
+            callee = self.imports.name("adorm", _RELATION_CLASSES[relation.kind])
+            return w.call(f"{relation.name} = ", callee, args, INDENT)
         args = [w.value(relation.target)]
         if relation.kind == "foreign_key":
             if relation.column != f"{relation.name}_id":
