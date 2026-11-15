@@ -35,8 +35,8 @@ dependencies = [
 adorm = "adorm.cli:main"
 
 [project.optional-dependencies]
-django = ["django>=4.2"]
-asyncpg = ["asyncpg>=0.30", "django>=4.2", "psycopg>=3.2"]
+django = ["asgiref>=3.6,<4", "django>=4.2"]
+asyncpg = ["asgiref>=3.6,<4", "asyncpg>=0.30", "django>=4.2", "psycopg>=3.2"]
 
 [dependency-groups]
 dev = [

@@ -263,7 +263,15 @@ def test_save_errors(kwargs, error, message):
 def test_last_refuses_a_sliced_query():
     with pytest.raises(TypeError, match="cannot reverse a query once a slice has been taken"):
         Last(MEMBERS[:3])
-    assert First(MEMBERS[:3]).query.is_sliced
+    assert First(MEMBERS.order_by("name")[:3]).query.is_sliced
+
+
+def test_first_refuses_a_sliced_query_without_an_ordering():
+    with pytest.raises(TypeError, match="sliced query without an ordering"):
+        First(MEMBERS[:3])
+    with pytest.raises(TypeError, match="sliced query without an ordering"):
+        First(MEMBERS[2:])
+    assert First(MEMBERS).query == MEMBERS
 
 
 def test_save_normalises_update_fields():
@@ -388,7 +396,7 @@ def test_update_values_are_typed_by_the_queried_model():
     data = Update(MEMBERS.filter(age__gt="1"), {"age": "2", "fee": F("fee") + 1}).to_dict(SCHEMA)
     assert data["values"]["age"] == {"value": 2}
     assert data["values"]["fee"]["node"] == "CombinedExpression"
-    assert data["query"]["where"]["children"][0]["rhs"] == {"value": 1}
+    assert data["query"]["filters"][0]["children"][0]["rhs"] == {"value": 1}
 
 
 def test_get_or_create_lookups_are_typed_by_their_lookup():

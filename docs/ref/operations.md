@@ -119,7 +119,8 @@ Get(Query("club.Member").filter(pk=5))
 ### `adorm.operations.First(query)`
 
 The first row of `query`, or `None`. Without an ordering on the query or the model, rows are ordered by the primary
-key.
+key. A sliced query without an ordering of its own raises `TypeError`; the model's ordering does not count, as an
+adorm model does not carry it.
 
 ### `adorm.operations.Last(query)`
 

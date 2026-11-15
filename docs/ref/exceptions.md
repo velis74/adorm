@@ -2,10 +2,10 @@
 
 ::: info Status
 The installed version provides the exception classes, `wrap_driver_error`, the [driver contract](/ref/drivers),
-whose connections raise these exceptions, the [pool and router](/ref/pool) and [`atomic()`](/ref/transactions). The
-other components that raise them (the bundled drivers, `timeout()`) are described on the
-[concepts](/topics/concepts) page and are not part of the installed version; the examples below show how application
-code handles the exceptions they raise.
+whose connections raise these exceptions, the [pool and router](/ref/pool), [`atomic()`](/ref/transactions) and the
+[Django driver](/topics/django-driver) for reads. The other components that raise them (the native PostgreSQL
+driver, `timeout()`) are described on the [concepts](/topics/concepts) page and are not part of the installed
+version; the examples below show how application code handles the exceptions they raise.
 :::
 
 adorm has its own exceptions, modelled on Django's. Applications catch adorm's classes, never the target ORM's or

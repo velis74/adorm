@@ -9,8 +9,9 @@ API has two groups of endpoints:
 - `/api/data/...` read and write through [sessions](/topics/sessions) and [transactions](/topics/transactions) on the
   executor with the active driver, and answer the calls the driver received.
 
-The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. Until an
-ORM driver is available, the active driver is the demo's [in-memory driver](#memory-driver).
+The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. The
+[Django driver](/topics/django-driver), the first available one, executes the reads; the demo's
+[in-memory driver](#memory-driver) (`--driver memory`) also executes the writes.
 
 ## Running it
 
@@ -34,7 +35,7 @@ uv run python demo.py
 
 ```text
 $ uv run python demo.py --list-drivers
-django     adorm.drivers.django:DjangoDriver        not available: adorm.drivers.django does not exist
+django     adorm.drivers.django:DjangoDriver        available
 asyncpg    adorm.drivers.asyncpg:AsyncpgDriver      not available: adorm.drivers.asyncpg does not define AsyncpgDriver
 memory     demo.api.memory:MemoryDriver             available
 ```
@@ -202,17 +203,19 @@ Abbreviated (`…` marks omitted keys):
     "query": {
       "node": "Query",
       "model": "clubs.Member",
-      "where": {
-        "node": "Q",
-        "children": [
-          {"node": "lookup.exact", "lhs": {"node": "F", "name": "memberships__active"}, "rhs": {"value": true}},
-          {"node": "lookup.exact", "lhs": {"node": "F", "name": "memberships__club__slug"},
-           "rhs": {"value": "ljubljana-rowing"}},
-          {"node": "Q", "children": ["…two lookup.icontains nodes…"], "connector": "OR", "negated": false}
-        ],
-        "connector": "AND",
-        "negated": false
-      },
+      "filters": [
+        {
+          "node": "Q",
+          "children": [
+            {"node": "lookup.exact", "lhs": {"node": "F", "name": "memberships__active"}, "rhs": {"value": true}},
+            {"node": "lookup.exact", "lhs": {"node": "F", "name": "memberships__club__slug"},
+             "rhs": {"value": "ljubljana-rowing"}}
+          ],
+          "connector": "AND",
+          "negated": false
+        },
+        {"node": "Q", "children": ["…two lookup.icontains nodes…"], "connector": "OR", "negated": false}
+      ],
       "…": "…"
     }
   },
@@ -341,8 +344,8 @@ first one's row lock and then finds the invoice paid.
 
 ## Memory driver
 
-`demo/api/memory.py` is the demo's in-memory driver (`MemoryDriver`, mode `async`). It runs the data endpoints on the
-executor until an ORM driver is available. Its setup reads the rows of every generated model from the demo database
+`demo/api/memory.py` is the demo's in-memory driver (`MemoryDriver`, mode `async`). It runs every data endpoint on
+the executor, the writing ones included. Its setup reads the rows of every generated model from the demo database
 through Django, once; writes stay in memory and are gone when the API stops.
 
 | Supported | Not supported (raises `NotSupportedError`) |
@@ -410,8 +413,8 @@ insert of a taken primary key and after a rollback to a savepoint), deadlock det
 trace; each concurrency test runs five times. `tests/demo/test_smoke.py` runs `demo.py` against the database
 `adorm_test_demo`: the setup, its repetition and `--reset`, the generated models check and a stale copy failing it,
 the club report's aggregates on the seeded data, the model check and the `check_adorm_models` exit status, then the
-server once per available driver (once without a driver when none is available), driven over HTTP, with the data
-endpoints on every driver. On the memory driver the database stays unchanged; on another driver the writes land in it
-and `--reset` restores the data afterwards.
+server once per available driver (once without a driver when none is available), driven over HTTP, with the reading
+data endpoints on every driver and the writing ones on every driver that supports `create`. On the memory driver the
+database stays unchanged; on another driver the writes land in it and `--reset` restores the data afterwards.
 `ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated driver names) makes the suite fail when one of those drivers is not
 available. Both run in `uv run pytest`, and so in CI.

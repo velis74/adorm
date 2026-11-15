@@ -237,3 +237,24 @@ def test_equal_queries_built_differently():
     assert MEMBERS.only("a", "b") == MEMBERS.only("a", "b", "a")
     assert MEMBERS.select_related("a").select_related("b") == MEMBERS.select_related("a", "b")
     assert MEMBERS.order_by(F("a").desc()) == MEMBERS.order_by("-a")
+
+
+def test_each_filter_and_exclude_call_is_a_filter_of_its_own():
+    q = MEMBERS.filter(tags__name="a").filter(tags__name="b").exclude(age__lt=3)
+    assert q.filters == (Q(tags__name="a"), Q(tags__name="b"), ~Q(age__lt=3))
+    assert q.where == Q(tags__name="a") & Q(tags__name="b") & ~Q(age__lt=3)
+    assert q != MEMBERS.filter(Q(tags__name="a") & Q(tags__name="b")).exclude(age__lt=3)
+    assert MEMBERS.filter() is MEMBERS
+    assert MEMBERS.filter(Q()).filters == ()
+
+
+def test_and_keeps_the_filters_of_both_queries_and_or_joins_them_into_one():
+    a = MEMBERS.filter(tags__name="a").filter(age__gt=1)
+    b = MEMBERS.filter(tags__name="b")
+    assert (a & b).filters == (*a.filters, *b.filters)
+    assert (a | b).filters == ((Q(tags__name="a") & Q(age__gt=1)) | Q(tags__name="b"),)
+
+
+def test_filters_survive_encoding():
+    q = MEMBERS.filter(name="a").filter(Q(age__gt=1) | Q(age__lt=0))
+    assert Query.from_dict(q.to_dict()).filters == q.filters

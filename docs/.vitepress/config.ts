@@ -58,6 +58,7 @@ export default defineConfig({
           { text: 'Pool and router', link: '/topics/pool' },
           { text: 'Events', link: '/topics/events' },
           { text: 'Drivers', link: '/topics/drivers' },
+          { text: 'The Django driver', link: '/topics/django-driver' },
           { text: 'SQL compilation for asyncpg', link: '/topics/sql-compilation' },
         ],
       },

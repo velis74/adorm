@@ -188,3 +188,20 @@
   with the cast psycopg's client-side or server-side binding implies; `DjangoStatement.rows()` returns asyncpg rows
   as Django returns them on psycopg. The `asyncpg` extra installs Django and psycopg 3 as well.
 - Documentation: "SQL compilation for asyncpg" topic.
+- Django ORM driver `adorm.drivers.django.DjangoDriver` (threaded, one Django connection per slot thread) for reads:
+  `select`, `get`, `first`, `last`, `count` and `exists` with every lookup, relation paths in adorm names (renamed
+  fields and reverse accessor names translated), `Q`, a query as subquery in `in`, `Subquery`, `Lower` / `Upper`,
+  ordering with NULL placement, `distinct()` and `DISTINCT ON`, slicing, `values()` / `values_list()`, `only()` /
+  `defer()`, `none()`, `select_related()` (nested rows in the same query) and the query's Django manager; transactions
+  for reads and cancellation of a running statement. Django's exceptions become adorm's (`map_django_error()`), and
+  every call sees the caller's active language and time zone (`adopt_context_locals()`). The driver supports
+  PostgreSQL aliases; profile `params` and the `connect` hook apply per connection, with Django configuring the
+  hook's connection. `adorm.drivers.django.translation` turns an adorm `Query` into a Django query set without a
+  connection: each filter is one Django `filter()` call, a model instance compared with a foreign key stands for its
+  `to_field`, and a typed `Value` gets the Django field for its type (`output_field()`). The `django` and `asyncpg`
+  extras require asgiref 3.x.
+- `Query.filters`: one condition per `filter()` / `exclude()` call, so a multi-valued relation is joined once per
+  call as in Django; `query & other` keeps both queries' filters. `Query.where` is the filters joined with AND.
+- `First` (`first()`) refuses a sliced query without an ordering of its own with `TypeError`.
+- `ThreadedConnection.prepare_call_sync()`: a hook that prepares each call's context on the connection's thread.
+- Documentation: "The Django driver" topic.

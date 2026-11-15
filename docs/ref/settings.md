@@ -43,7 +43,7 @@ close.
 ```python
 adorm.configure(
     profiles={
-        "default": {"driver": "myproject.drivers.DjangoDriver", "alias": "default"},
+        "default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"},
         "reports": ConnectionProfile("reports", AsyncpgDriver(), params={"dsn": REPORTS_DSN}),
     },
     pool={"max_connections": 20, "acquire_timeout": 10},
@@ -64,7 +64,7 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `driver` | a [`Driver`](/ref/drivers#adorm-drivers-driver) instance, a `Driver` subclass (instantiated without arguments) or the import path of either, `"package.module.Name"` or `"package.module:Name"` |
 | `alias` | the target's database alias, a non-empty string |
 | `params` | the driver parameters; stored as a read-only copy |
-| `connect` | `None`, or `connect(profile)` returning the target's connection in place of the driver's default |
+| `connect` | `None`, or `connect(profile)` returning a new connection in place of the one the driver opens; each driver documents what it returns (the [Django driver](/ref/drivers#adorm-drivers-django-djangoconnection): the DB-API connection Django's wrapper uses) |
 | `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request |
 | `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
@@ -83,7 +83,7 @@ def set_role(connection, profile, session):
         cursor.execute("SET ROLE " + connection.ops.quote_name(profile.params["role"]))
 
 
-profile = ConnectionProfile("user:alice", "myproject.drivers.DjangoDriver", params={"role": "alice"},
+profile = ConnectionProfile("user:alice", "adorm.drivers.django.DjangoDriver", params={"role": "alice"},
                             on_acquire=set_role, on_release=reset_role)
 ```
 

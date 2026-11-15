@@ -140,7 +140,7 @@ except Member.DoesNotExist:
 #### `async first()`, `async last()`
 
 The first or last row (`First` / `Last`), `None` when there is none. `last()` on a sliced query set raises
-`TypeError`.
+`TypeError`, and so does `first()` on a sliced query set without `order_by()`.
 
 #### `async count()`
 

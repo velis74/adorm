@@ -230,9 +230,14 @@ class Get(_QueryOperation):
 @dataclass(frozen=True, eq=False)
 class First(_QueryOperation):
     """The first row of ``query``, ordered by the primary key when the query and the model have no ordering.
-    Result: the row or ``None``."""
+    Result: the row or ``None``. A sliced query has an ordering of its own (``TypeError``)."""
 
     kind: ClassVar[str] = "first"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.query.is_sliced and not self.query.ordering:
+            raise TypeError("cannot take the first row of a sliced query without an ordering")
 
 
 @dataclass(frozen=True, eq=False)

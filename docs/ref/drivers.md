@@ -273,6 +273,7 @@ caller's context variables are visible; changes made inside the call do not flow
 | `close_sync()` | yes | closes the target's connection; also runs after a failed `connect_sync()` |
 | `savepoint_sync(name)`, `release_savepoint_sync(name)`, `rollback_to_savepoint_sync(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
 | `set_options_sync(options, local)` | no | connection options; raises `NotSupportedError` for any option unless overridden |
+| `prepare_call_sync()` | no | runs before every other `*_sync` method and every hook, in the same context copy, to prepare that context; an exception it raises is the call's; does nothing unless overridden |
 
 `cancel_sync()` is the one method that runs on another thread, while a call is running. It asks the target to
 cancel the running statement and returns once the request is delivered; it never waits for the call. The
@@ -328,6 +329,190 @@ class SQLiteConnection(ThreadedConnection):
 
     ...
 ```
+
+## Django driver
+
+`adorm.drivers.django` executes adorm operations with Django's ORM; `adorm.drivers.django.translation` turns adorm
+queries into Django query sets. Importing either imports Django; operations need Django set up (`django.setup()`).
+The [Django driver topic](/topics/django-driver) shows them in use.
+
+```python
+from adorm.drivers.django import DjangoDriver
+from adorm.drivers.django.translation import translate
+```
+
+### `adorm.drivers.django.DjangoDriver`
+
+A [`ThreadedDriver`](#adorm-drivers-threadeddriver): `name` `"django"`, `mode` `"threaded"`, `connection_class`
+[`DjangoConnection`](#adorm-drivers-django-djangoconnection), `capabilities`
+[`CAPABILITIES`](#adorm-drivers-django-capabilities). Created without arguments; a profile names it by class,
+instance or import path.
+
+```python
+adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})
+driver = DjangoDriver()
+pool = Pool(driver, ConnectionProfile("default", driver), max_connections=10)
+```
+
+### `adorm.drivers.django.DjangoConnection`
+
+The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
+
+| Method | Does |
+|---|---|
+| `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread (a backend other than PostgreSQL raises `NotSupportedError`); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged); `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; with Django's `OPTIONS["pool"]` it raises `NotSupportedError`; then `ensure_connection()` |
+| `execute_sync(operation)` | [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool` |
+| `begin_sync()` | `set_autocommit(False)` |
+| `commit_sync()`, `rollback_sync()` | `commit()` / `rollback()`, then `set_autocommit(True)` |
+| `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
+| `close_sync()` | the wrapper's `close()` |
+| `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals) |
+| `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc) |
+
+`target`, what profile hooks receive, is the wrapper (`self.db`).
+
+### `adorm.drivers.django.CAPABILITIES`
+
+The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
+
+| Field | Value |
+|---|---|
+| `operations` | `select`, `get`, `first`, `last`, `count`, `exists` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`; `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`; `function.Lower`, `function.Upper`; `expression.Subquery` |
+| `cancellation` | `True` |
+| `savepoints`, `connection_options`, `backend_events` | none |
+
+The constructs are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON
+fields); `DjangoConnection` refuses other database backends.
+
+### `adorm.drivers.django.map_django_error(exc)`
+
+Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` as `__cause__`:
+
+| `exc` | Result |
+|---|---|
+| `django.core.exceptions.ObjectDoesNotExist` (a model's `DoesNotExist`) | `ObjectDoesNotExist` with Django's message |
+| `django.core.exceptions.MultipleObjectsReturned` | `MultipleObjectsReturned` with Django's message |
+| `FieldError`, `FieldDoesNotExist` | `ProgrammingError` (`original` is `exc`) |
+| Django's `ValidationError` | `ValidationError` with the same messages (by field, a list, or one message with `code` and `params`) |
+| `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
+| `SynchronousOnlyOperation` | `InterfaceError` |
+| anything else | [`wrap_driver_error(exc)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name, else `DatabaseError` |
+
+```python
+map_django_error(Author.DoesNotExist("Author matching query does not exist."))
+# ObjectDoesNotExist('Author matching query does not exist.')
+```
+
+### `adorm.drivers.django.adopt_context_locals()`
+
+Re-binds the values of asgiref `Local` objects in the current context (Django's active language and time zone) to
+the current thread. asgiref 3.13 and later tag such a value with the thread that set it, so in a context copied
+from an event loop task and run on another thread it reads as unset; after the call it reads as in the task. A
+value without that tag (earlier asgiref versions, which need no re-binding) and other context variables are
+unchanged. The `django` and `asyncpg` extras require asgiref 3.x. `DjangoConnection.prepare_call_sync()` calls it before every call.
+
+```python
+with translation.override("sl"):
+    context = contextvars.copy_context()
+
+def read():
+    adopt_context_locals()
+    return translation.get_language()
+
+threading.Thread(target=context.run, args=(read,)).start()     # read() returns "sl"
+```
+
+### `adorm.drivers.django.translation.translate(query)`
+
+Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquery) of `query`, a
+[`Query`](/ref/query). Builds Django objects only; opens no database connection.
+
+- The query set starts from the Django manager named by `Query.manager`, or from the model's `_base_manager` without
+  one. A manager the model lacks raises `ProgrammingError`.
+- Annotations, conditions (a lookup on an expression through an `alias()`), ordering (the model's `Meta.ordering`
+  when the query has none), `distinct()` with or without fields, the slice and `none()` follow as in Django.
+- Each of `Query.filters` is one Django `filter()` call, so a multi-valued relation is joined once per filter, as
+  in Django.
+- Field paths go through [`orm_path()`](#adorm-drivers-django-translation-orm-path-model-path-annotations); a model
+  instance as a value stands for its primary key, or, compared with a foreign key whose `to_field` is another field,
+  for that field's value; a `Value` with `output_type` gets
+  [`output_field(output_type)`](#adorm-drivers-django-translation-output-field-output-type); a query in an `in`
+  lookup becomes a Django query set ([`subquery()`](#adorm-drivers-django-translation-subquery-query)).
+- A node without a translation (`OuterRef`, `Exists`, aggregates, functions not in
+  [`FUNCTIONS`](#adorm-drivers-django-translation-functions)) and `select_for_update()` raise `NotSupportedError`;
+  a `select_related()` path that is not a relation of the adorm model, or not a foreign key or one-to-one relation,
+  raises `ProgrammingError`. Unknown fields raise Django's `FieldError` when the query set is built.
+
+```python
+translated = translate(Query("library.Author").select_related("mentor").only("name", "mentor__name"))
+translated.columns          # ('id', 'name', 'mentor__id', 'mentor__name')
+translated.rows(translated.queryset)
+# [{'id': 1, 'name': 'Ann', 'mentor': None}, {'id': 2, 'name': 'Bob', 'mentor': {'id': 1, 'name': 'Ann'}}, ...]
+```
+
+### `adorm.drivers.django.translation.TranslatedQuery`
+
+A query in Django's terms.
+
+| Member | Meaning |
+|---|---|
+| `queryset` | the Django query set of the rows, ending in `values_list(*columns)`; its `get()`, `first()`, `last()`, `count()` and `exists()` evaluate the query |
+| `columns` | the Django query paths it selects, each once |
+| `row(values)` | the adorm row of one tuple of `queryset` |
+| `rows(records)` | the adorm rows of tuples of `queryset` |
+
+A model row has the adorm model's fields that `only()` and `defer()` leave loaded (the primary key always), keyed by
+adorm name, then the annotations; each relation `select_related()` follows adds the related row under the relation's
+name, or `None` when the related primary key is NULL. `select_related()` without paths follows the non-null foreign
+keys up to [`SELECT_RELATED_DEPTH`](#adorm-drivers-django-translation-select-related-depth) relations deep. A
+`values()` / `values_list()` row is keyed by the selected names, as written; without names by the model's fields
+and the annotations. A model without a registered adorm model has its Django fields by attname.
+
+### `adorm.drivers.django.translation.orm_path(model, path, annotations=())`
+
+Returns Django's query path for the adorm field path `path` on the Django model `model`. Each segment is renamed
+with the `orm_names` of the adorm model registered for the Django model that segment is on; a reverse relation's
+accessor name becomes its query name. A path whose first segment is in `annotations` is returned unchanged; a
+segment Django does not know is kept, so that Django reports it.
+
+```python
+orm_path(Note, "copy___title")          # "copy__title"
+orm_path(Book, "tagging_set__weight")   # "tagging__weight"
+orm_path(Placement, "order_")           # "_order"
+```
+
+### `adorm.drivers.django.translation.django_model(label)`
+
+Returns the installed Django model with the label `label` (`"app_label.ModelName"`), auto-created many-to-many
+through models included (`"library.Book_authors"`). Raises `ProgrammingError` when there is none.
+
+### `adorm.drivers.django.translation.subquery(query)`
+
+Returns the Django query set of `query` used inside another query: its model rows (Django compares their primary
+key), or, after `values()` or `values_list()` with fields, those columns.
+
+### `adorm.drivers.django.translation.output_field(output_type)`
+
+Returns a new Django field instance for an adorm `output_type`: `bool` → `BooleanField`, `int` → `IntegerField`,
+`float` → `FloatField`, `str` → `TextField`, `Decimal` → `DecimalField`, `datetime` → `DateTimeField`, `date` →
+`DateField`, `time` → `TimeField`, `timedelta` → `DurationField`, `UUID` → `UUIDField`, `bytes` → `BinaryField`,
+`dict` and `list` → `JSONField`. Another type (`tuple`, `set`, `frozenset`) raises `NotSupportedError`.
+
+```python
+Query("library.Author").annotate(rank=Value(None, output_type=int)).values("name", "rank")
+# Django: annotate(rank=Value(None, output_field=IntegerField()))
+```
+
+### `adorm.drivers.django.translation.FUNCTIONS`
+
+A read-only mapping from adorm function class names to Django function classes: `"Lower"` → `Lower`, `"Upper"` →
+`Upper`.
+
+### `adorm.drivers.django.translation.SELECT_RELATED_DEPTH`
+
+`5`: how many relations deep `select_related()` without paths follows non-null foreign keys, as Django's
+`Query.max_depth`.
 
 ## SQL statements
 

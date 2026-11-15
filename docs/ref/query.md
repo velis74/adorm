@@ -29,7 +29,8 @@ q = (
 | Attribute | Contents |
 |---|---|
 | `model` | the model label |
-| `where` | a [`Q`](./expressions#adorm-q-args-kwargs); empty for all rows |
+| `filters` | a tuple of non-empty [`Q`](./expressions#adorm-q-args-kwargs) objects, one per `filter()` or `exclude()` call; empty for all rows |
+| `where` | the `filters` joined with AND, a `Q`; empty for all rows |
 | `annotations` | `(name, expression)` pairs in the order added |
 | `ordering` | a tuple of [`OrderBy`](./expressions#adorm-query-orderby-expression-descending-false-nulls-first-none-nulls-last-none) |
 | `select` | the selected field paths and annotation names; empty for all fields |
@@ -48,12 +49,20 @@ q = (
 
 #### `filter(*args, **kwargs)`
 
-Rows that also match the conditions, arguments as for [`Q`](./expressions#adorm-q-args-kwargs). Calls chain with
-AND. On a sliced query raises `TypeError`.
+Rows that also match the conditions, arguments as for [`Q`](./expressions#adorm-q-args-kwargs): appends
+`Q(*args, **kwargs)` to `filters`, unless it is empty. Calls chain with AND; as in Django, a multi-valued relation
+(a reverse foreign key, a many-to-many relation) is joined once per call, so the conditions of separate calls may
+match different related rows. On a sliced query raises `TypeError`.
+
+```python
+Query("library.Book").filter(authors__name="Ann").filter(authors__name="Cid")   # an author Ann and an author Cid
+Query("library.Book").filter(authors__name="Ann", authors__mentor__name="Cid")  # an author Ann mentored by Cid
+```
 
 #### `exclude(*args, **kwargs)`
 
-Rows that also do not match the conditions: `where & ~Q(*args, **kwargs)`. On a sliced query raises `TypeError`.
+Rows that also do not match the conditions: appends `~Q(*args, **kwargs)` to `filters`, unless the condition is
+empty. On a sliced query raises `TypeError`.
 
 #### `annotate(**annotations)`
 
@@ -147,8 +156,9 @@ Query("club.Member")[10:20][5:]      # rows 15 to 19
 
 Rows matching either query (`|`) or both (`&`). Both queries are on the same model and manager, unsliced, and agree
 on distinctness, `select`, `row_format`, annotations, `only()`, `defer()` and `select_for_update()`; otherwise
-`TypeError`. The result has the ordering of `other`, or of `query` when `other` has none, and the
-`select_related()` paths of both. A query without conditions matches every row, so `|` with it has no conditions;
+`TypeError`. `&` keeps the filters of both queries; `|` has one filter, the `where` of both joined with OR. The result
+has the ordering of `other`, or of `query` when `other` has none, and the `select_related()` paths of both. A query
+without conditions matches every row, so `|` with it has no conditions;
 `|` with a `none()` query returns the other query, `&` returns the empty one.
 
 `Query` has no set operations: `union()`, `intersection()` and `difference()` are not supported.
@@ -162,7 +172,7 @@ active & guests            # where: active=True AND guest=True
 
 #### Construct names
 
-`constructs()` yields the construct names of the where condition, the annotations and the ordering, plus
+`constructs()` yields the construct names of the filters, the annotations and the ordering, plus
 `clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`
 and the names of `for_update` for the clauses in use. `values()`, `values_list()`, `none()` and slicing have none.
 

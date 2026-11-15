@@ -341,7 +341,7 @@ def test_node_shape():
 
 def test_lookups_are_typed_by_the_queried_model():
     data = MEMBERS.filter(age__gt="3", joined__date__gte=1).to_dict(SCHEMA)
-    lookups = {c["lhs"]["name"]: c["rhs"] for c in data["where"]["children"]}
+    lookups = {c["lhs"]["name"]: c["rhs"] for c in data["filters"][0]["children"]}
     assert lookups == {"age": {"value": 3}, "joined__date": {"type": "int", "value": 1}}
 
 
@@ -377,7 +377,7 @@ def test_lookups_are_typed_by_the_queried_model():
 )
 def test_lookup_values(condition, rhs):
     data = MEMBERS.filter(condition).to_dict(SCHEMA)
-    assert data["where"]["children"][0]["rhs"] == rhs
+    assert data["filters"][0]["children"][0]["rhs"] == rhs
     restored = Query.from_dict(roundtrip(data), SCHEMA)
     assert restored.to_dict(SCHEMA) == data
 
@@ -391,7 +391,7 @@ def test_invalid_lookup_value_for_its_field():
 def test_annotations_type_lookups_on_them():
     q = MEMBERS.annotate(n=Count("payment"), total=Sum("payment__amount")).filter(n__gt=1, total__gt=5)
     data = q.to_dict(SCHEMA)
-    rhs = {c["lhs"]["name"]: c["rhs"] for c in data["where"]["children"]}
+    rhs = {c["lhs"]["name"]: c["rhs"] for c in data["filters"][0]["children"]}
     assert rhs == {"n": {"value": 1}, "total": {"type": "int", "value": 5}}
     assert Query.from_dict(roundtrip(data), SCHEMA) == q
 
@@ -399,7 +399,7 @@ def test_annotations_type_lookups_on_them():
 def test_an_annotation_shadows_a_field():
     q = MEMBERS.annotate(age=Length("name") * 2).filter(age__gt=3)
     data = q.to_dict(SCHEMA)
-    assert data["where"]["children"][0]["rhs"] == {"type": "int", "value": 3}
+    assert data["filters"][0]["children"][0]["rhs"] == {"type": "int", "value": 3}
     assert Query.from_dict(roundtrip(data), SCHEMA) == q
 
 
@@ -407,7 +407,7 @@ def test_subqueries_resolve_against_their_own_model_and_outer_refs_against_the_o
     inner = Query("club.Payment").filter(Exact(OuterRef("joined"), "2026-01-01T00:00:00"), amount__gt=5)
     q = MEMBERS.filter(Exists(inner))
     data = q.to_dict(SCHEMA)
-    children = data["where"]["children"][0]["query"]["where"]["children"]
+    children = data["filters"][0]["children"][0]["query"]["filters"][0]["children"]
     assert [c["rhs"] for c in children] == [{"value": "2026-01-01T00:00:00"}, {"value": "5"}]
     assert Query.from_dict(roundtrip(data), SCHEMA) == MEMBERS.filter(
         Exists(
@@ -420,7 +420,7 @@ def test_subqueries_resolve_against_their_own_model_and_outer_refs_against_the_o
 
 def test_outer_ref_without_an_outer_query_is_untyped():
     data = MEMBERS.filter(Exact(OuterRef("age"), 3)).to_dict(SCHEMA)
-    assert data["where"]["children"][0]["rhs"] == {"type": "int", "value": 3}
+    assert data["filters"][0]["children"][0]["rhs"] == {"type": "int", "value": 3}
 
 
 def test_value_output_type_types_the_value():
@@ -518,7 +518,7 @@ def test_malformed_trunc_kind():
     ("change", "message"),
     [
         ({"model": "Member"}, "model label"),
-        ({"where": {"node": "F", "name": "a"}}, "where is a Q"),
+        ({"filters": [{"node": "F", "name": "a"}]}, "filters are non-empty Q nodes"),
         ({"ordering": [{"node": "F", "name": "a"}]}, "ordering"),
         ({"for_update": {"node": "F", "name": "a"}}, "for_update"),
         ({"row_format": "xml"}, "row format"),
@@ -628,7 +628,7 @@ def test_values_in_case_and_coalesce_take_the_type_of_their_position():
     case = Case(When(age__gt=5, then=Value("master")), default=Value(Level.BEGINNER))
     query = MEMBERS.filter(level=case, status=Coalesce("status", Value("left")))
     data = query.to_dict(SCHEMA)
-    rhs = {c["lhs"]["name"]: c["rhs"] for c in data["where"]["children"]}
+    rhs = {c["lhs"]["name"]: c["rhs"] for c in data["filters"][0]["children"]}
     assert rhs["level"]["cases"][0]["result"]["value"] == {"value": "master"}
     assert rhs["level"]["default"]["value"] == {"value": "beginner"}
     assert rhs["status"]["expressions"][1]["value"] == {"value": "left"}
@@ -640,12 +640,12 @@ def test_values_in_case_and_coalesce_take_the_type_of_their_position():
 
 def test_case_output_type_wins_over_the_position():
     data = MEMBERS.filter(name=Case(When(age=1, then=Value("5")), default=Value("6"), output_type=int)).to_dict(SCHEMA)
-    assert data["where"]["children"][0]["rhs"]["default"]["value"] == {"value": 6}
+    assert data["filters"][0]["children"][0]["rhs"]["default"]["value"] == {"value": 6}
 
 
 def test_arithmetic_operands_keep_their_inferred_types():
     data = MEMBERS.filter(joined__gt=F("joined") - datetime.timedelta(days=1)).to_dict(SCHEMA)
-    assert data["where"]["children"][0]["rhs"]["rhs"]["value"] == {"type": "timedelta", "value": "P1D"}
+    assert data["filters"][0]["children"][0]["rhs"]["rhs"]["value"] == {"type": "timedelta", "value": "P1D"}
 
 
 def test_output_types_are_checked_when_built():
@@ -665,14 +665,14 @@ def test_annotations_are_typed_by_their_expression():
         lv=Level.MASTER, club_ref="3"
     )
     data = query.to_dict(SCHEMA)
-    assert [c["rhs"] for c in data["where"]["children"]] == [{"value": 3}, {"value": "master"}]
+    assert [c["rhs"] for c in data["filters"][0]["children"]] == [{"value": 3}, {"value": "master"}]
     assert Query.from_dict(roundtrip(data), SCHEMA).to_dict(SCHEMA) == data
 
 
 def test_subquery_is_typed_by_the_field_it_selects():
     payments = Query("club.Payment").filter(member=OuterRef("pk")).values("paid_at")[:1]
     data = MEMBERS.filter(Exact(Subquery(payments), "2026-01-01T00:00:00")).to_dict(SCHEMA)
-    assert data["where"]["children"][0]["rhs"] == {"value": "2026-01-01T00:00:00"}
+    assert data["filters"][0]["children"][0]["rhs"] == {"value": "2026-01-01T00:00:00"}
 
 
 # structure of decoded nodes

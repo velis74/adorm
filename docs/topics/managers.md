@@ -1,5 +1,11 @@
 # Managers and driver methods
 
+::: info Status
+The installed [Django driver](/topics/django-driver) applies a manager's `get_queryset()` to reads
+(`clause.manager`). Driver methods (`call` operations) and the write overrides (`create()`, `delete()`,
+`update()` …) raise `NotSupportedError` on it.
+:::
+
 A Django model carries logic in its managers and query sets: a `get_queryset()` that hides soft-deleted rows, a
 `create()` that drops an argument, a `delete()` that refuses bulk deletion, a `create_user()` that hashes a
 password. adorm brings that logic into its API with the mechanism that brings the model definitions: the managers

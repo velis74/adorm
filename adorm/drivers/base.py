@@ -456,6 +456,10 @@ class ThreadedConnection(DriverConnection):
         if options:
             raise NotSupportedError(f"unsupported connection options: {', '.join(sorted(options))}")
 
+    def prepare_call_sync(self) -> None:  # noqa: B027 - optional hook
+        """Prepare the call's context; runs on the connection's thread, in the call's copy of the caller's context,
+        before every ``*_sync`` call and hook. An exception it raises is the call's. Does nothing unless overridden."""
+
     def cancel_sync(self) -> None:  # noqa: B027 - optional hook
         """Ask the target to cancel the running statement; runs on another thread. Does nothing unless overridden.
 
@@ -636,7 +640,7 @@ class ThreadedConnection(DriverConnection):
             # Hidden so that a sync-only check (Django's async_unsafe) accepts the call.
             asyncio._set_running_loop(None)
         try:
-            ok, value = True, call.context.run(call.fn, *call.args)
+            ok, value = True, call.context.run(self._run_prepared, call.fn, call.args)
         except Exception as exc:
             ok, value = False, self._map(exc) if map_errors else exc
         except BaseException as exc:
@@ -651,6 +655,10 @@ class ThreadedConnection(DriverConnection):
                 call.state = _State.DONE
                 self._current = None
         return ok, value
+
+    def _run_prepared(self, fn: Callable[..., Any], args: tuple[Any, ...]) -> Any:
+        self.prepare_call_sync()
+        return fn(*args)
 
     def _shut_down(self) -> None:
         """Run ``close_sync()`` and stop the thread after a failed ``connect_sync()``."""

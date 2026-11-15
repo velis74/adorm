@@ -3,8 +3,9 @@
 ::: info Status
 The installed version provides connection profiles, their hooks, run-time profiles and the default router built
 from them. Connection options in a profile and slot lifetimes (`purge_stale_connections_at`) are not part of it yet.
-Neither are the Django ORM and native PostgreSQL drivers used in the examples; any `Driver` implementation (see
-[Writing a driver](/howto/writing-a-driver)) works.
+The [Django driver](/topics/django-driver) runs profiles' hooks and executes reads; the native PostgreSQL driver used
+in the examples is not part of it yet. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
+works.
 :::
 
 A **connection profile** is a named entry in adorm's settings. A session's `using` is the name of a profile, as a
@@ -17,7 +18,7 @@ import adorm
 
 adorm.configure(
     profiles={
-        "default": {"driver": "myproject.drivers.DjangoDriver", "alias": "default"},
+        "default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"},
         "reports": {
             "driver": "myproject.drivers.AsyncpgDriver",
             "params": {"dsn": REPORTS_DSN},

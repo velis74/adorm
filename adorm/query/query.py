@@ -6,6 +6,8 @@ its label (``"app_label.ModelName"``); the driver resolves the label and the fie
 
 from __future__ import annotations
 
+import functools
+import operator
 import re
 
 from collections.abc import Iterable
@@ -108,13 +110,17 @@ def as_query(value: Any) -> Query | None:
 class Query(Node):
     """The rows of ``model`` (a label, ``"app_label.ModelName"``) that a read returns.
 
-    Attributes: ``where`` (a `Q`, empty for all rows), ``annotations`` (``(name, expression)`` pairs in the order
-    added), ``ordering`` (`OrderBy` tuple), ``select`` (selected field paths or annotation names, empty for all fields),
-    ``row_format`` (``"model"``, ``"dict"``, ``"tuple"``, ``"flat"`` or ``"named"``), ``is_distinct`` and
-    ``distinct_fields``, ``low_mark`` and ``high_mark`` (the slice; ``high_mark`` ``None`` for no limit),
-    ``only_fields`` (``None`` unless ``only()`` limits the loaded fields) and ``deferred_fields``,
-    ``select_related_fields`` (``False``, ``True`` for every non-null relation, or a tuple of relation paths),
-    ``is_none`` (``none()``), ``for_update`` (a `ForUpdate` or ``None``) and ``manager``.
+    Attributes: ``filters`` (one non-empty `Q` per ``filter()`` or ``exclude()`` call, empty for all rows),
+    ``annotations`` (``(name, expression)`` pairs in the order added), ``ordering`` (`OrderBy` tuple), ``select``
+    (selected field paths or annotation names, empty for all fields), ``row_format`` (``"model"``, ``"dict"``,
+    ``"tuple"``, ``"flat"`` or ``"named"``), ``is_distinct`` and ``distinct_fields``, ``low_mark`` and ``high_mark``
+    (the slice; ``high_mark`` ``None`` for no limit), ``only_fields`` (``None`` unless ``only()`` limits the loaded
+    fields) and ``deferred_fields``, ``select_related_fields`` (``False``, ``True`` for every non-null relation, or a
+    tuple of relation paths), ``is_none`` (``none()``), ``for_update`` (a `ForUpdate` or ``None``) and ``manager``.
+
+    The conditions of separate ``filter()`` calls are kept apart because, as in Django, a condition on a multi-valued
+    relation (reverse foreign key, many-to-many) joins that relation once per call: with two calls, each condition
+    may match a different related row. ``where`` is all of them joined with AND.
 
     ``manager`` names the target ORM's manager whose rows and method overrides the driver applies (Django: the
     manager attribute of the model, so its ``get_queryset()`` and its query set's ``create()``, ``delete()`` …);
@@ -124,7 +130,7 @@ class Query(Node):
 
     _fields = (
         "model",
-        "where",
+        "filters",
         "annotations",
         "ordering",
         "select",
@@ -142,7 +148,7 @@ class Query(Node):
     )
     ROW_FORMATS: ClassVar[tuple[str, ...]] = ROW_FORMATS
     model: str
-    where: Q
+    filters: tuple[Q, ...]
     annotations: tuple[tuple[str, Expression], ...]
     ordering: tuple[OrderBy, ...]
     select: tuple[str, ...]
@@ -161,7 +167,7 @@ class Query(Node):
     def __init__(self, model: str, *, manager: str | None = None) -> None:
         self._init(
             model=check_model_label(model),
-            where=Q(),
+            filters=(),
             annotations=(),
             ordering=(),
             select=(),
@@ -177,6 +183,11 @@ class Query(Node):
             for_update=None,
             manager=_check_manager(manager),
         )
+
+    @property
+    def where(self) -> Q:
+        """The conditions of every ``filter()`` and ``exclude()`` call joined with AND; empty for all rows."""
+        return functools.reduce(operator.and_, self.filters, Q())
 
     @property
     def is_sliced(self) -> bool:
@@ -195,13 +206,14 @@ class Query(Node):
     def filter(self, *args: Any, **kwargs: Any) -> Query:
         """Rows that also match the conditions; arguments as for `Q`."""
         self._check_not_sliced("filter")
-        return self._replace(where=self.where & Q(*args, **kwargs))
+        condition = Q(*args, **kwargs)
+        return self._replace(filters=self.filters + (condition,)) if condition else self
 
     def exclude(self, *args: Any, **kwargs: Any) -> Query:
         """Rows that also do not match the conditions; arguments as for `Q`."""
         self._check_not_sliced("filter")
         condition = Q(*args, **kwargs)
-        return self._replace(where=self.where & ~condition) if condition else self
+        return self._replace(filters=self.filters + (~condition,)) if condition else self
 
     def annotate(self, **annotations: Any) -> Query:
         """Add computed columns: name → expression."""
@@ -304,23 +316,25 @@ class Query(Node):
         if connector == Q.OR:
             if self.is_none or other.is_none:
                 return other if self.is_none else self
-            where = self.where | other.where if self.where and other.where else Q()
+            filters = (self.where | other.where,) if self.filters and other.filters else ()
         else:
             if self.is_none or other.is_none:
                 return other if other.is_none else self
-            where = self.where & other.where
+            filters = self.filters + other.filters
         if self.select_related_fields is True or other.select_related_fields is True:
             related: bool | tuple[str, ...] = True
         else:
             related = _unique((self.select_related_fields or ()) + (other.select_related_fields or ())) or False
-        return self._replace(where=where, ordering=other.ordering or self.ordering, select_related_fields=related)
+        return self._replace(filters=filters, ordering=other.ordering or self.ordering, select_related_fields=related)
 
     def __or__(self, other: Any) -> Query:
-        """Rows matching either query; both are on the same model and select the same way."""
+        """Rows matching either query; both are on the same model and select the same way. The result has one
+        filter: the two queries' conditions joined with OR."""
         return self._combine(other, Q.OR)
 
     def __and__(self, other: Any) -> Query:
-        """Rows matching both queries; both are on the same model and select the same way."""
+        """Rows matching both queries; both are on the same model and select the same way. The result keeps the
+        filters of both."""
         return self._combine(other, Q.AND)
 
     def distinct(self, *fields: str) -> Query:
@@ -347,7 +361,8 @@ class Query(Node):
         return self._replace(low_mark=low, high_mark=high)
 
     def get_source_expressions(self) -> tuple[Node, ...]:
-        children: tuple[Node, ...] = (self.where, *(expression for _, expression in self.annotations), *self.ordering)
+        annotations = (expression for _, expression in self.annotations)
+        children: tuple[Node, ...] = (*self.filters, *annotations, *self.ordering)
         return children if self.for_update is None else (*children, self.for_update)
 
     def _own_constructs(self) -> Iterable[str]:
@@ -367,8 +382,10 @@ class Query(Node):
     def _check_decoded(self) -> None:
         check_model_label(self.model)
         _check_manager(self.manager)
-        if not isinstance(self.where, Q) or not all(isinstance(o, OrderBy) for o in self.ordering):
-            raise ValueError("a query's where is a Q and its ordering OrderBy nodes")
+        if not isinstance(self.filters, tuple) or not all(isinstance(f, Q) and f for f in self.filters):
+            raise ValueError("a query's filters are non-empty Q nodes")
+        if not all(isinstance(o, OrderBy) for o in self.ordering):
+            raise ValueError("a query's ordering is OrderBy nodes")
         if self.for_update is not None and not isinstance(self.for_update, ForUpdate):
             raise ValueError("a query's for_update is a ForUpdate")
         if self.row_format not in ROW_FORMATS:
@@ -405,8 +422,8 @@ class Query(Node):
         parts = [repr(self.model)]
         if self.manager is not None:
             parts.append(f"manager={self.manager!r}")
-        if self.where:
-            parts.append(f"where={self.where!r}")
+        if self.filters:
+            parts.append(f"filters={self.filters!r}")
         for name in ("ordering", "select", "distinct_fields", "deferred_fields", "select_related_fields"):
             if getattr(self, name):
                 parts.append(f"{name}={getattr(self, name)!r}")

@@ -1,9 +1,9 @@
 # Drivers
 
 ::: info Status
-The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`) and the
-[slots and pool](/topics/pool) that call drivers. The Django ORM and native PostgreSQL drivers are not part of it
-yet.
+The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`), the
+[slots and pool](/topics/pool) that call drivers and the [Django driver](/topics/django-driver) for reads. The
+native PostgreSQL driver is not part of it yet.
 :::
 
 A driver executes adorm operations on one target: an ORM such as Django's or SQLAlchemy, or a database library
@@ -117,8 +117,10 @@ target's check against use from an event loop (Django's `async_unsafe`) accepts 
 to everything else. A running direct call cannot be interrupted by cancelling a task, since the loop is blocked;
 `cancel()` from another thread cancels it.
 
-Every `*_sync` call runs in a copy of the awaiting task's context: context variables set by the caller (Django's
-active translation, for example) are visible to the target; changes made inside the call do not flow back.
+Every `*_sync` call runs in a copy of the awaiting task's context: context variables set by the caller are visible to
+the target; changes made inside the call do not flow back. A value a library ties to the thread that set it (an
+asgiref `Local`, which holds Django's active language) needs re-binding to the connection's thread;
+`prepare_call_sync()` runs before each call in its context copy for that, and the Django driver re-binds there.
 
 A connection belongs to one slot, which awaits one call at a time.
 

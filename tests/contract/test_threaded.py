@@ -453,6 +453,44 @@ async def test_sync_methods_see_a_copy_of_the_callers_context(fake):
     assert request_id.get() == "r1"
 
 
+class PreparingConnection(FakeConnection):
+    def prepare_call_sync(self):
+        self.record(f"prepare {request_id.get()}")
+        request_id.set(f"prepared {request_id.get()}")
+        if request_id.get() == "prepared fail":
+            raise SqlError("23505")
+
+
+class PreparingDriver(FakeDriver):
+    connection_class = PreparingConnection
+
+
+async def test_prepare_call_sync_runs_before_every_call_in_its_context():
+    driver = PreparingDriver()
+    conn = await driver.open_connection(Profile("default"), Recorder())
+    try:
+        request_id.set("r1")
+        assert await conn.execute(Op(lambda _conn: request_id.get())) == "prepared r1"
+        await conn.begin()
+        assert request_id.get() == "r1"
+        assert [name for name, _ in driver.control.calls] == [
+            "prepare unset",
+            "connect",
+            "prepare r1",
+            "execute",
+            "prepare r1",
+            "begin",
+        ]
+        assert {ident for _, ident in driver.control.calls} == {conn.thread.ident}
+        request_id.set("fail")
+        with pytest.raises(IntegrityError):
+            await conn.execute(Op(lambda _conn: "never"))
+        assert driver.control.calls[-1][0] == "prepare fail"
+        assert conn.is_usable()
+    finally:
+        await conn.close()
+
+
 # Cancellation
 
 

@@ -224,7 +224,7 @@ def test_nested_subqueries():
 def test_repr():
     q = MEMBERS.filter(a=1).annotate(n=Count("*")).order_by("-n").values("n").distinct()[2:4]
     text = repr(q)
-    assert text.startswith("Query('club.Member', where=<Q: (AND: Exact(F('a'), 1))>")
+    assert text.startswith("Query('club.Member', filters=(<Q: (AND: Exact(F('a'), 1))>,)")
     assert "ordering=" in text
     assert "select=('n',)" in text
     assert "annotations=" in text

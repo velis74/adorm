@@ -1,9 +1,9 @@
 # Multiple database users
 
 ::: info Status
-The Django ORM and native PostgreSQL drivers used in the examples are not part of the installed version. Any
-`Driver` whose connection `target` is Django's connection wrapper or an `asyncpg.Connection` works (see
-[Writing a driver](/howto/writing-a-driver)).
+The [Django driver](/topics/django-driver) runs the hooks of this recipe and executes reads; the native PostgreSQL
+driver used in the examples is not part of the installed version. Any `Driver` whose connection `target` is Django's
+connection wrapper or an `asyncpg.Connection` works (see [Writing a driver](/howto/writing-a-driver)).
 :::
 
 This recipe runs each application user's queries as that user's own PostgreSQL role, with database privileges and
@@ -102,7 +102,7 @@ import adorm
 adorm.configure(
     profiles={
         "default": {
-            "driver": "myproject.drivers.DjangoDriver",
+            "driver": "adorm.drivers.django.DjangoDriver",
             "alias": "default",                   # DATABASES["default"] logs in as app_login
             "on_acquire": set_role,
             "on_release": reset_role,

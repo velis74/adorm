@@ -249,8 +249,9 @@ def test_api_serves_operations(server):
 
 
 def test_api_executes_the_data_endpoints(server, demo_env, database):
-    """The data endpoints on every driver. The memory driver loads the seeded database and keeps its writes in
-    memory; on another driver the writes land in the database, which is reset afterwards."""
+    """The data endpoints on every driver; those that write only on a driver that supports ``create``. The memory
+    driver loads the seeded database and keeps its writes in memory; on another driver the writes land in the
+    database, which is reset afterwards."""
     driver, base = server
     if driver is None:
         pytest.skip("no driver is available")
@@ -268,10 +269,14 @@ def _check_data_endpoints(driver, base, database):
     payments_before = count(database, "billing_payment")
     invoice = database.execute("SELECT min(id) FROM billing_invoice WHERE status = 'open'").fetchone()[0]
     with httpx.Client(base_url=base, timeout=10) as http:
+        operations = {d["name"]: d["operations"] for d in http.get("/api/drivers").json()}[driver]
         members = http.get("/api/data/members", params={"limit": 100}).json()
         assert len(members["result"]) == members_before
         if driver == "memory":
             assert [call["call"] for call in members["calls"]] == ["acquire", "select clubs.Member", "release"]
+        first = members["result"][0]
+        assert http.get(f"/api/data/members/{first['id']}").json()["result"] == first
+        assert http.get("/api/data/members/999999").status_code == 404
 
         summary = http.get("/api/data/clubs/ljubljana-rowing/summary", params={"atomic": True}).json()["result"]
         expected = database.execute(
@@ -281,27 +286,33 @@ def _check_data_endpoints(driver, base, database):
             " FROM clubs_club c WHERE c.slug = 'ljubljana-rowing'"
         ).fetchone()
         assert (summary["active_memberships"], summary["activities"], summary["open_invoices"]) == expected
+        detail = http.get(f"/api/data/invoices/{invoice}").json()["result"]
+        assert detail["invoice"]["status"] == "open"
+        payments = database.execute("SELECT count(*) FROM billing_payment WHERE invoice_id = %s", (invoice,)).fetchone()
+        assert len(detail["payments"]) == payments[0]
 
-        enrolment = {"first_name": "Mia", "last_name": "Kos", "email": "mia@example.com", "fee": "50.00"}
-        enrolled = http.post("/api/data/clubs/koper-sailing/members", json=enrolment)
-        assert enrolled.status_code == 201, enrolled.text
-        member_id = enrolled.json()["result"]["member"]["id"]
-        assert http.get(f"/api/data/members/{member_id}").json()["result"]["first_name"] == "Mia"
-        assert [message["text"] for message in http.get("/api/data/outbox").json()] == [
-            "Welcome to Koper Sailing Club, Mia!"
-        ]
+        writes = "create" in operations
+        if writes:
+            enrolment = {"first_name": "Mia", "last_name": "Kos", "email": "mia@example.com", "fee": "50.00"}
+            enrolled = http.post("/api/data/clubs/koper-sailing/members", json=enrolment)
+            assert enrolled.status_code == 201, enrolled.text
+            member_id = enrolled.json()["result"]["member"]["id"]
+            assert http.get(f"/api/data/members/{member_id}").json()["result"]["first_name"] == "Mia"
+            assert [message["text"] for message in http.get("/api/data/outbox").json()] == [
+                "Welcome to Koper Sailing Club, Mia!"
+            ]
 
-        payment = {"amount": "120.00", "paid_at": "2026-02-01T12:00:00Z"}
-        assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 201
-        assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 409
-        assert http.get(f"/api/data/invoices/{invoice}").json()["result"]["invoice"]["status"] == "paid"
+            payment = {"amount": "120.00", "paid_at": "2026-02-01T12:00:00Z"}
+            assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 201
+            assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 409
+            assert http.get(f"/api/data/invoices/{invoice}").json()["result"]["invoice"]["status"] == "paid"
 
         state = http.get("/api/executor").json()
         assert state["driver"] == driver
         assert state["pools"][0]["in_use"] == 0
     database.rollback()
     status = database.execute("SELECT status FROM billing_invoice WHERE id = %s", (invoice,)).fetchone()
-    if driver == "memory":
+    if driver == "memory" or not writes:
         assert count(database, "clubs_member") == members_before
         assert count(database, "billing_payment") == payments_before
         assert status == ("open",)

@@ -108,7 +108,8 @@ class ConnectionProfile:
     either (``"package.module.Name"`` or ``"package.module:Name"``), imported on first use. ``alias`` is the
     target's database alias and ``params`` the driver parameters. The hooks:
 
-    - ``connect(profile)`` opens the target's connection in place of the driver's default;
+    - ``connect(profile)`` opens a connection in place of the one the driver opens; each driver documents what it
+      returns (the Django driver: the DB-API connection Django's wrapper uses);
     - ``on_acquire(connection, profile, session)`` runs when a slot is assigned to a session, before its first
       request;
     - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.

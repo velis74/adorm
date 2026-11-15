@@ -3,8 +3,8 @@
 ::: info Status
 The installed version provides the query building blocks on this page: `Q`, `F`, lookups, functions, aggregates,
 other expressions, the immutable [`Query`](/ref/query), the [operations](/ref/operations) that read and write
-with it and the [`QuerySet`](/ref/queryset) that runs them on a session. Executing an operation needs a runner or a
-transaction that reaches a driver, which the installed version does not provide.
+with it and the [`QuerySet`](/ref/queryset) that runs them on a session. The [Django driver](/topics/django-driver)
+executes the reads (`select`, `get`, `first`, `last`, `count`, `exists`).
 :::
 
 A query is built from adorm's own building blocks, never from the target ORM's. Building one is plain Python: it
@@ -82,6 +82,14 @@ Query("club.Club").filter(member__age__lt=18)                  # reverse relatio
 ```
 
 A field whose name equals a lookup name takes an explicit lookup: `filter(range__exact=5)`.
+
+As in Django, conditions on a multi-valued relation (a reverse foreign key, a many-to-many relation) in one
+`filter()` call apply to the same related row; conditions in separate calls may each match a different one:
+
+```python
+Query("club.Club").filter(member__age__lt=18, member__guest=True)    # a member who is a minor guest
+Query("club.Club").filter(member__age__lt=18).filter(member__guest=True)  # a minor member and a guest member
+```
 
 ### Queries as subqueries
 
@@ -205,7 +213,8 @@ Query("club.Member").select_related("club", "club__owner")
 
 ## Combining queries
 
-`|` and `&` combine two queries on the same model into one whose condition is the OR or the AND of theirs:
+`|` and `&` combine two queries on the same model into one whose condition is the OR or the AND of theirs. `&`
+keeps the filters of both, as chained `filter()` calls do; `|` joins both conditions into one filter:
 
 ```python
 adults = Query("club.Member").filter(age__gte=18)

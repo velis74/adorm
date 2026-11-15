@@ -55,9 +55,9 @@ Node attributes that are not values are strings, integers, booleans, `null`, nes
 `output_type` is encoded as its type name.
 
 ```python
-Query("club.Member").filter(fee__gt=10).to_dict(schema)["where"]
-# {"node": "Q", "connector": "AND", "negated": False,
-#  "children": [{"node": "lookup.gt", "lhs": {"node": "F", "name": "fee"}, "rhs": {"value": "10"}}]}
+Query("club.Member").filter(fee__gt=10).to_dict(schema)["filters"]
+# [{"node": "Q", "connector": "AND", "negated": False,
+#   "children": [{"node": "lookup.gt", "lhs": {"node": "F", "name": "fee"}, "rhs": {"value": "10"}}]}]
 ```
 
 ### Typed and untyped positions

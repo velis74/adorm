@@ -34,7 +34,7 @@ Pool settings are `max_connections`, `acquire_timeout`, `commit_timeout` and `re
 and [Slots](#slots)).
 
 ```python
-adorm.configure(profiles={"default": {"driver": "myproject.drivers.DjangoDriver", "alias": "default"}})
+adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})
 ```
 
 A call never carries connection parameters; different database accounts are different profiles. Profiles can
