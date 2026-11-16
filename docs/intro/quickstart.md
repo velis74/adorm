@@ -1,15 +1,12 @@
 # Quick start
 
-A Django project with PostgreSQL, a FastAPI application that reads and writes its data with adorm on asyncpg.
+An existing Django project gets async views in a FastAPI application.
 
 ## Install
 
 ```bash
-pip install "adorm[asyncpg]" fastapi uvicorn
+pip install "adorm[django]" fastapi uvicorn
 ```
-
-The `asyncpg` extra installs asyncpg, Django and psycopg 3. For a database other than PostgreSQL install the `django`
-extra and use the Django driver (see [Configure adorm](#configure-adorm)).
 
 ## Django models
 
@@ -75,36 +72,32 @@ class Book(Model):
 The models are pydantic models: `Book.model_json_schema()` and FastAPI response models work on them. `author` and
 `books` are relations: `await book.author` loads the author, `author.books` is a query.
 
-## Configure adorm
+## Set up
 
-Once per process: set Django up, then register a connection profile. The profile `default` uses Django's database
-alias `default` from `DATABASES`.
+Add adorm's Django app. It configures adorm from `DATABASES` when Django is set up:
+
+```python
+# mysite/settings.py
+INSTALLED_APPS = [
+    ...,
+    "mysite.library",
+    "adorm.contrib.django",
+]
+```
+
+The FastAPI application sets Django up before it imports the models:
 
 ```python
 # mysite/main.py
-import os
-from contextlib import asynccontextmanager
-
 import django
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "mysite.settings")
 django.setup()
 
-import adorm
 from fastapi import FastAPI, HTTPException
 
 from mysite.library_service import author_overview, lend
 
-adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDriver", "alias": "default"}})
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-    await adorm.settings.close_pools()
-
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 
 @app.get("/authors/{name}")
@@ -120,14 +113,6 @@ async def post_loan(book_id: int) -> dict:
         raise HTTPException(409, str(exc)) from exc
     return {"title": book.title, "copies_left": book.copies}
 ```
-
-| Driver | Profile | Runs |
-|---|---|---|
-| native PostgreSQL | `"driver": "adorm.drivers.asyncpg.AsyncpgDriver"` | on the event loop through asyncpg, no threads |
-| Django ORM | `"driver": "adorm.drivers.django.DjangoDriver"` | the synchronous Django ORM on one thread per slot, on any database Django supports |
-
-The application code is the same on both drivers. [Connection profiles](/topics/profiles) covers pools, several
-database users and the Django setting `ADORM`.
 
 ## Write queries
 
@@ -147,7 +132,7 @@ async def author_overview(name: str) -> dict:
     author = await Author.objects.get(name__iexact=name)
     books = author.books.order_by("-published")                  # a query; nothing runs yet
 
-    total, shelf = await asyncio.gather(                         # two queries at once, two slots
+    total, shelf = await asyncio.gather(                         # two queries at once
         books.count(),
         Book.objects.aggregate(titles=Count("id"), on_loan=Count("id", filter=Q(copies=0)), copies=Sum("copies")),
     )
@@ -163,7 +148,7 @@ async def author_overview(name: str) -> dict:
 
 
 async def lend(book_id: int) -> Book:
-    async with adorm.atomic():                                   # one slot, one transaction
+    async with adorm.atomic():                                   # one transaction
         book = await Book.objects.select_for_update().get(pk=book_id)
         if book.copies == 0:
             raise LookupError(f"no copy of {book.title!r} left")
@@ -173,8 +158,7 @@ async def lend(book_id: int) -> Book:
 
 - Building a query (`filter()`, `order_by()`, `select_related()`) does no I/O. `await` runs it: `get()`, `first()`,
   `count()`, `aggregate()`, `update()`; `async for` iterates the rows.
-- A call outside a transaction takes a slot from the pool for that call only. `async with adorm.atomic()` holds one
-  slot until the block ends and commits, or rolls back on an exception.
+- `async with adorm.atomic()` is a transaction: it commits when the block ends and rolls back on an exception.
 - `select_for_update()` locks the row until the transaction ends: two concurrent `lend()` calls for the last copy
   run one after the other, and the second raises `LookupError`.
 
@@ -182,7 +166,7 @@ With two books of Ursula K. Le Guin in the database (*The Dispossessed*, 1974, t
 one copy):
 
 ```bash
-uvicorn mysite.main:app
+DJANGO_SETTINGS_MODULE=mysite.settings uvicorn mysite.main:app
 ```
 
 ```console
@@ -200,3 +184,4 @@ $ curl -X POST localhost:8000/books/2/loans
 - [Transactions](/topics/transactions): savepoints, `on_commit()`, timeouts.
 - [Sessions](/topics/sessions) and [the pool](/topics/pool): slots, acquisition timeouts, deadlock detection.
 - [Testing](/topics/testing): adorm under Django's `TestCase`.
+- [Drivers](/topics/drivers): the native PostgreSQL driver, which runs without threads.
