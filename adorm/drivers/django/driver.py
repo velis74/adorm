@@ -101,6 +101,9 @@ READ_CAPABILITIES = Capabilities(
         "clause.defer",
         "clause.select_related",
         "clause.manager",
+        "clause.union",
+        "clause.intersection",
+        "clause.difference",
         "function.Trunc",
         "aggregate.distinct",
         "aggregate.filter",
@@ -385,6 +388,9 @@ class DjangoConnection(ThreadedConnection):
         if kind == "count":
             return queryset.count()
         if kind == "exists":
+            if operation.query.is_combined:
+                # Django's exists() selects a constant in the queries of a union only, not in a nested combination.
+                return bool(queryset[:1])
             return queryset.exists()
         raise NotSupportedError(f"the Django driver does not execute {kind!r} operations")
 

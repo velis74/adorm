@@ -546,6 +546,156 @@ async def distinct_on():
     return [fee async for fee in query]
 
 
+# Set operations
+
+
+def _django_union_of_values_lists():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    advanced = DjangoMember.objects.filter(level="advanced").values_list("level", flat=True)
+    beginners = DjangoMember.objects.filter(level="beginner").values_list("level", flat=True)
+    return list(advanced.union(beginners).order_by("level")), advanced.union(beginners, all=True).count()
+
+
+@case(
+    "select",
+    "count",
+    "lookup.exact",
+    "clause.union",
+    expected=(["advanced", "beginner"], 8),
+    django=_django_union_of_values_lists,
+)
+async def union_of_values_lists():
+    advanced = Member.objects.filter(level="advanced").values_list("level", flat=True)
+    beginners = Member.objects.filter(level="beginner").values_list("level", flat=True)
+    return await rows(advanced.union(beginners).order_by("level")), await advanced.union(beginners, all=True).count()
+
+
+def _django_union_of_model_rows():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    juniors = DjangoMember.objects.filter(tags__contains=["junior"])
+    query = DjangoMember.objects.filter(level="advanced").union(juniors).order_by("-first_name")[:3]
+    return [member.first_name for member in query]
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "lookup.contains",
+    "clause.union",
+    expected=["Lara", "Jana", "Igor"],
+    django=_django_union_of_model_rows,
+)
+async def union_of_model_rows():
+    juniors = Member.objects.filter(tags__contains=["junior"])
+    return await ordered(Member.objects.filter(level="advanced").union(juniors).order_by("-first_name")[:3])
+
+
+def _django_intersection():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    query = DjangoMember.objects.filter(level="advanced").intersection(
+        DjangoMember.objects.filter(tags__contains=["coach"])
+    )
+    return sorted(member.first_name for member in query), query.exists()
+
+
+@case(
+    "select",
+    "exists",
+    "lookup.exact",
+    "lookup.contains",
+    "clause.intersection",
+    expected=(["Bojan", "Eva"], True),
+    django=_django_intersection,
+)
+async def intersection():
+    query = Member.objects.filter(level="advanced").intersection(Member.objects.filter(tags__contains=["coach"]))
+    return await first_names(query), await query.exists()
+
+
+def _django_difference_then_values_list():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    board = DjangoMember.objects.filter(tags__contains=["board"])
+    query = DjangoMember.objects.filter(level="advanced").difference(board)
+    return list(query.values_list("first_name", flat=True).order_by("first_name"))
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "lookup.contains",
+    "clause.difference",
+    expected=["Bojan", "Igor"],
+    django=_django_difference_then_values_list,
+)
+async def difference_then_values_list():
+    query = Member.objects.filter(level="advanced").difference(Member.objects.filter(tags__contains=["board"]))
+    return await rows(query.values_list("first_name", flat=True).order_by("first_name"))
+
+
+def _django_union_reduced_to_one_query():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    levels = DjangoMember.objects.order_by("level").values_list("level", flat=True)
+    union = levels[:6].union(DjangoMember.objects.none()).order_by("-level")
+    union_all = levels[:6].union(DjangoMember.objects.none(), all=True).order_by("-level")
+    unsliced = levels.union(DjangoMember.objects.none()).order_by("-level")
+    return list(union[:5]), list(union_all[:5]), list(unsliced)
+
+
+@case(
+    "select",
+    "clause.union",
+    expected=(
+        ["beginner", "advanced"],
+        ["beginner", "beginner", "advanced", "advanced", "advanced"],
+        ["intermediate"] * 4 + ["beginner"] * 4 + ["advanced"] * 4,
+    ),
+    django=_django_union_reduced_to_one_query,
+)
+async def union_reduced_to_one_query():
+    levels = Member.objects.order_by("level").values_list("level", flat=True)
+    union = levels[:6].union(Member.objects.none()).order_by("-level")
+    union_all = levels[:6].union(Member.objects.none(), all=True).order_by("-level")
+    unsliced = levels.union(Member.objects.none()).order_by("-level")
+    return await rows(union[:5]), await rows(union_all[:5]), await rows(unsliced)
+
+
+def _django_set_operations_of_one_query():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    levels = DjangoMember.objects.values_list("level", flat=True)
+    return (
+        sorted(levels.difference(DjangoMember.objects.none())),
+        sorted(levels.intersection()),
+        sorted(levels.union(levels[2:2])[:20]),
+    )
+
+
+@case(
+    "select",
+    "clause.intersection",
+    "clause.difference",
+    "clause.union",
+    expected=(
+        ["advanced"] * 4 + ["beginner"] * 4 + ["intermediate"] * 4,
+        ["advanced"] * 4 + ["beginner"] * 4 + ["intermediate"] * 4,
+        ["advanced", "beginner", "intermediate"],
+    ),
+    django=_django_set_operations_of_one_query,
+)
+async def set_operations_of_one_query():
+    levels = Member.objects.values_list("level", flat=True)
+    return (
+        sorted(await rows(levels.difference(Member.objects.none()))),
+        sorted(await rows(levels.intersection())),
+        sorted(await rows(levels.union(levels[2:2])[:20])),
+    )
+
+
 # Row formats and loaded fields
 
 

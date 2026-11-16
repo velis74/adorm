@@ -237,6 +237,18 @@ class BoundModel:
         """``all().select_for_update(...)``."""
         return self.all().select_for_update(**options)
 
+    def union(self, *others: QuerySet, all: bool = False) -> QuerySet:
+        """``all().union(...)``."""
+        return self.all().union(*others, all=all)
+
+    def intersection(self, *others: QuerySet) -> QuerySet:
+        """``all().intersection(...)``."""
+        return self.all().intersection(*others)
+
+    def difference(self, *others: QuerySet) -> QuerySet:
+        """``all().difference(...)``."""
+        return self.all().difference(*others)
+
     async def get(self, *args: Any, **kwargs: Any) -> Any:
         """``await all().get(...)``."""
         return await self.all().get(*args, **kwargs)

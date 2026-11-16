@@ -71,11 +71,12 @@ from adorm.query.lookups import (
     split_lookup,
     StartsWith,
 )
-from adorm.query.query import as_query, CLAUSES, construct_names, ForUpdate, NESTED_PATH, Query
+from adorm.query.query import as_query, CLAUSES, COMBINATORS, construct_names, ForUpdate, NESTED_PATH, Query
 from adorm.query.queryset import QuerySet
 
 __all__ = [
     "CLAUSES",
+    "COMBINATORS",
     "LOOKUPS",
     "NESTED_PATH",
     "Aggregate",

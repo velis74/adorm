@@ -886,3 +886,17 @@ async def test_calls_outside_tracing_are_not_recorded(db):  # noqa: ARG001
         pass
     await Member.objects.count()
     assert calls == []
+
+
+async def test_set_operations_compare_rows_by_value():
+    data = tables()
+    data["clubs.Membership"][0]["fee"] = Decimal("120.0")
+    data["clubs.Club"][1]["disciplines"] = ["Sculling", "Fitness"]
+    async with executor(memory.MemoryDatabase(data)):
+        fees = Membership.objects.values_list("fee", flat=True)
+        totals = Invoice.objects.values_list("total", flat=True)
+        assert sorted([value async for value in fees.union(totals)]) == [Decimal("0.00"), Decimal("80.00"), 120]
+        assert [value async for value in fees.intersection(totals)] == [Decimal("120.0")]
+        assert [value async for value in fees.difference(totals)] == [Decimal("0.00")]
+        disciplines = Club.objects.values_list("disciplines", flat=True)
+        assert [value async for value in disciplines.union(disciplines.filter(pk=1))] == [["Sculling", "Fitness"]]

@@ -204,11 +204,13 @@ class QuerySet:
     def prefetch_related(self, *lookups: Any) -> Self:
         """A copy that loads the related objects of ``lookups`` (relation paths or `adorm.Prefetch` objects, added to
         the earlier ones; ``None`` clears them) for every instance it returns. Raises ``ValueError`` for a path given
-        again with another query set, ``TypeError`` after ``values()`` or ``values_list()``."""
+        again with another query set, ``TypeError`` after ``values()`` or ``values_list()`` and
+        `adorm.NotSupportedError` after a set operation."""
         from adorm.models.prefetch import normalize_lookups
 
         if lookups == (None,):
             return self._clone(self.query, ())
+        self.query.check_not_combined("prefetch_related")
         if self.query.row_format != "model":
             raise TypeError("cannot call prefetch_related() after values() or values_list()")
         return self._clone(self.query, normalize_lookups(self.prefetch_lookups, lookups))
@@ -248,6 +250,39 @@ class QuerySet:
         if other.executor is not self.executor:
             raise TypeError("cannot combine query sets of different sessions")
         return self._clone(combine(self.query, other.query))
+
+    def _others(self, others: tuple[Any, ...]) -> list[QuerySet]:
+        for other in others:
+            if not isinstance(other, QuerySet):
+                raise TypeError(f"a set operation combines query sets, not {type(other).__name__}")
+            if other.executor is not self.executor:
+                raise TypeError("cannot combine query sets of different sessions")
+        return list(others)
+
+    def union(self, *others: QuerySet, all: bool = False) -> QuerySet:
+        """`Query.union()` of the query sets' queries; ``others`` are query sets of the same session. When this
+        query set is empty, the other query sets that are not empty are combined instead, and a single one is
+        returned as it is."""
+        querysets = self._others(others)
+        if self.query.is_empty:
+            rest = [queryset for queryset in querysets if not queryset.query.is_empty]
+            if rest:
+                return rest[0] if len(rest) == 1 else rest[0].union(*rest[1:], all=all)
+        return self._clone(self.query.union(*(queryset.query for queryset in querysets), all=all))
+
+    def intersection(self, *others: QuerySet) -> QuerySet:
+        """`Query.intersection()` of the query sets' queries; ``others`` are query sets of the same session. When
+        one of the others is empty and this query set is not, that query set."""
+        querysets = self._others(others)
+        empty = next((queryset for queryset in querysets if queryset.query.is_empty), None)
+        if empty is not None and not self.query.is_empty:
+            return empty
+        return self._clone(self.query.intersection(*(queryset.query for queryset in querysets)))
+
+    def difference(self, *others: QuerySet) -> QuerySet:
+        """`Query.difference()` of the query sets' queries; ``others`` are query sets of the same session."""
+        querysets = self._others(others)
+        return self._clone(self.query.difference(*(queryset.query for queryset in querysets)))
 
     def __or__(self, other: Any) -> Self:
         return self._combine(other, Query.__or__)

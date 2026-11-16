@@ -69,6 +69,9 @@ def _refers_to_fields(node: Node, depth: int = 0) -> bool:
         return depth <= node.levels
     if isinstance(node, F):
         return depth == 0
+    if isinstance(node, Query) and node.is_combined:
+        # The combined queries are at the query's own level; its ordering names the combined rows' columns.
+        return any(_refers_to_fields(part, depth) for part in node.combined_queries)
     inner = depth + 1 if isinstance(node, Query) else depth
     return any(_refers_to_fields(child, inner) for child in node.get_source_expressions())
 
@@ -293,7 +296,8 @@ class InBulk(_QueryOperation):
     ``field_name`` is ``"pk"`` or a field name without ``__``; the driver refuses a field that is neither the primary
     key nor unique on its own (nor the only field the query is distinct on) with `ProgrammingError`. ``ids`` is an
     iterable of values (not a string), kept in order without repeats. The query selects model rows (no ``values()``),
-    is not sliced and loads the field (not deferred); otherwise ``TypeError``.
+    is not sliced and loads the field (not deferred); otherwise ``TypeError``. A combined query (`Query.is_combined`)
+    raises `adorm.NotSupportedError`.
     """
 
     kind: ClassVar[str] = "in_bulk"
@@ -303,6 +307,7 @@ class InBulk(_QueryOperation):
     def __post_init__(self) -> None:
         super().__post_init__()
         query = self.query
+        query.check_not_combined("in_bulk")
         if query.is_sliced:
             raise TypeError("cannot use in_bulk() on a query once a slice has been taken")
         if query.row_format != "model":
@@ -370,7 +375,8 @@ class Aggregate(_QueryOperation):
     ``aggregations`` is a mapping or ``(name, expression)`` pairs, at least one. A name is a non-empty string without
     whitespace, control characters, quotes, backticks, brackets, ``;``, ``#``, ``--``, ``/*`` or ``*/``
     (``ValueError``); it may contain ``__`` (``"fee__sum"``) and may not repeat. An expression without an aggregate
-    outside a subquery raises ``TypeError``, and so does a query distinct on fields. The expressions refer to the
+    outside a subquery raises ``TypeError``, and so does a query distinct on fields; a combined query
+    (`Query.is_combined`) raises `adorm.NotSupportedError`. The expressions refer to the
     query's fields and annotations; over a sliced, distinct or grouped query, or one with aggregate annotations, they
     aggregate the query's rows as a subquery.
     """
@@ -380,6 +386,7 @@ class Aggregate(_QueryOperation):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.query.check_not_combined("aggregate")
         if self.query.distinct_fields:
             raise TypeError("cannot aggregate a query distinct on fields")
         items = self.aggregations.items() if isinstance(self.aggregations, Mapping) else self.aggregations
@@ -426,13 +433,15 @@ class Delete(_QueryOperation):
     """Delete the rows of ``query`` and the rows that cascade from them. Result: ``(total, {label: count})``.
 
     The query is not sliced, not distinct on fields and selects model rows (no ``values()``); otherwise
-    ``TypeError``. `DeleteInstance` deletes a model instance.
+    ``TypeError``. A combined query (`Query.is_combined`) raises `adorm.NotSupportedError`. `DeleteInstance` deletes a
+    model instance.
     """
 
     kind: ClassVar[str] = "delete"
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.query.check_not_combined("delete")
         if self.query.is_sliced:
             raise TypeError("cannot delete from a query once a slice has been taken")
         if self.query.distinct_fields:
@@ -478,7 +487,8 @@ class Update(_QueryOperation):
     """Set ``values`` (field name → value or expression) on the rows of ``query``. Result: the number of rows.
 
     ``values`` is a mapping or ``(name, value)`` pairs; field names have no ``__``. The query is not sliced, not
-    distinct on fields and not grouped, and an expression value contains no aggregate; otherwise ``TypeError``.
+    distinct on fields and not grouped, and an expression value contains no aggregate; otherwise ``TypeError``. A
+    combined query (`Query.is_combined`) raises `adorm.NotSupportedError`.
     """
 
     kind: ClassVar[str] = "update"
@@ -486,6 +496,7 @@ class Update(_QueryOperation):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        self.query.check_not_combined("update")
         if self.query.is_sliced:
             raise TypeError("cannot update a query once a slice has been taken")
         if self.query.distinct_fields:
@@ -906,6 +917,7 @@ class _LookupWrite(Operation):
 
     def __post_init__(self) -> None:
         _check_query(self.query)
+        self.query.check_not_combined(self.kind)
         if self.query.is_sliced:
             raise TypeError("cannot filter a query once a slice has been taken")
         object.__setattr__(self, "lookups", _lookups(self.lookups))
@@ -965,7 +977,8 @@ class GetOrCreate(_LookupWrite):
     ``(row, created)``.
 
     ``lookups`` and ``defaults`` are mappings or pairs; lookup values are prepared as for ``filter()``. The query is
-    not sliced and a default refers to no field and contains no aggregate; otherwise ``TypeError``.
+    not sliced and a default refers to no field and contains no aggregate; otherwise ``TypeError``. A combined query
+    (`Query.is_combined`) raises `adorm.NotSupportedError`.
     """
 
     kind: ClassVar[str] = "get_or_create"

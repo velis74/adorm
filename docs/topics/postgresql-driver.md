@@ -142,7 +142,7 @@ of the connection, which never connects, and runs one statement (`in_bulk` with 
 | `get` | the query without its ordering (unless it is sliced or `distinct()` on fields), `LIMIT 21` | the row; none raises `ObjectDoesNotExist`, more than one `MultipleObjectsReturned`, with Django's messages (`it returned more than 20!` for [`MAX_GET_RESULTS`](/ref/drivers#adorm-drivers-asyncpg-max-get-results) rows) |
 | `first` / `last` | the query ordered as written (reversed for `last`), by the primary key without an ordering, `LIMIT 1` | the row or `None` |
 | `count` | `SELECT COUNT(*) FROM (<query>) subquery` | `int` |
-| `exists` | `SELECT 1 AS "a" … LIMIT 1`, Django's `exists()` query | `bool` |
+| `exists` | `SELECT 1 AS "a" … LIMIT 1`, Django's `exists()` query; for a set operation, the combined query with `LIMIT 1` | `bool` |
 | `aggregate` | the statement of Django's `aggregate()`: `SELECT <aggregates> FROM …`, or `FROM (<query>) subquery` over a sliced, distinct or grouped query or one with aggregate annotations; none for a query that matches no rows | a dict by name, converted as Django converts it |
 | `in_bulk` | the field checked as Django's `in_bulk()` checks it (`ProgrammingError` otherwise), then the query's `SELECT` filtered with `<field> IN (...)`, one statement per [`IN_BULK_BATCH_SIZE`](/ref/drivers#adorm-drivers-asyncpg-in-bulk-batch-size) ids | the rows |
 

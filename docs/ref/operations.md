@@ -108,7 +108,10 @@ instances, tuples and named tuples from it.
 ### `adorm.operations.Select(query)`
 
 The rows of `query`: iterating, listing or awaiting a query. A query that is not a [`Query`](./query) raises
-`TypeError`, as for every operation that takes one.
+`TypeError`, as for every operation that takes one. `Select`, `Get`, `First`, `Last`, `Count` and `Exists` take a
+query combined by a [set operation](./query#union-others-all-false); `InBulk`, `Aggregate`, `Update`, `Delete`,
+`GetOrCreate` and `UpdateOrCreate` raise [`NotSupportedError`](./exceptions) for one
+(`cannot call update() after union()`).
 
 ```python
 Select(
@@ -119,6 +122,12 @@ Select(
 )
 Select(Query("club.Member").values_list("pk", flat=True))
 Select(Query("club.Member").filter(active=True) | Query("club.Member").filter(guest=True))
+```
+
+```python
+advanced = Query("clubs.Member").filter(level="advanced").values_list("first_name", flat=True)
+Select(advanced.union(Query("clubs.Club").values_list("city", flat=True)).order_by("first_name"))
+Count(advanced.difference(Query("clubs.Member").filter(tags__contains=["board"]).values_list("first_name", flat=True)))
 ```
 
 ### `adorm.operations.Get(query)`

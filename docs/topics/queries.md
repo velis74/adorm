@@ -5,8 +5,8 @@ The installed version provides the query building blocks on this page: `Q`, `F`,
 other expressions, the immutable [`Query`](/ref/query), the [operations](/ref/operations) that read and write
 with it and the [`QuerySet`](/ref/queryset) that runs them on a session. The [Django driver](/topics/django-driver) and
 the [native PostgreSQL driver](/topics/postgresql-driver) execute all of them: the reads (`select`, `get`, `first`,
-`last`, `count`, `exists`, `aggregate`), annotations, aliases, grouping, functions, aggregates, subqueries, the writes
-and `select_for_update()`.
+`last`, `count`, `exists`, `aggregate`), annotations, aliases, grouping, functions, aggregates, subqueries, set
+operations (`union()`, `intersection()`, `difference()`), the writes and `select_for_update()`.
 :::
 
 A query is built from adorm's own building blocks, never from the target ORM's. Building one is plain Python: it
@@ -281,6 +281,49 @@ for club in clubs:
     combined |= Query("club.Member").filter(club__name=club)
 ```
 
+## Set operations
+
+`union()`, `intersection()` and `difference()` combine the rows of several queries, as SQL's `UNION`, `INTERSECT`
+and `EXCEPT` do. The rows are compared column by column, so the queries select the same number of columns of
+matching types; they may be on different models. `union()` removes duplicate rows unless `all=True`;
+`intersection()` and `difference()` always remove them:
+
+```python
+advanced = Member.objects.filter(level="advanced").values_list("first_name", flat=True)
+coaches = Member.objects.filter(tags__contains=["coach"]).values_list("first_name", flat=True)
+
+await advanced.union(coaches).count()
+[name async for name in advanced.intersection(coaches)]
+[name async for name in advanced.difference(coaches).order_by("first_name")]
+
+cities = Club.objects.values_list("city", flat=True)
+[value async for value in cities.union(advanced, all=True)]
+```
+
+The combined rows have the row format of the first query: model instances of its model when it selects model rows.
+After a set operation only `order_by()`, slicing, `values()` / `values_list()` and the reads (`async for`, `get()`
+without conditions, `first()`, `last()`, `count()`, `exists()`) apply to the combined rows; another set operation
+nests the combination. `filter()`, `annotate()`, `distinct()`, `only()`, `select_related()`, `prefetch_related()`,
+`aggregate()`, `update()`, `delete()` and the other methods raise `NotSupportedError`, as in Django:
+
+```python
+members = Member.objects.filter(level="advanced").union(Member.objects.filter(tags__contains=["junior"]))
+[member.first_name async for member in members.order_by("-first_name")[:3]]
+[name async for name in members.values_list("first_name", flat=True)]
+members.filter(club_id=1)         # NotSupportedError: cannot call filter() after union()
+```
+
+`values()` or `values_list()` after a set operation selects those fields in every combined query that selects model
+rows. After `values()` or `values_list()` the ordering names columns of the combined rows, by the names the last
+`values()` gives; combined model rows are ordered by fields of the first query's model. Empty queries
+(`none()`, `qs[0:0]`) are combined as Django combines them ([Empty queries](/ref/query#empty-queries)). A
+combination inside a filter is a subquery; there each combined query of model rows selects its primary key:
+
+```python
+juniors = Member.objects.filter(tags__contains=["junior"]).values("pk")
+Member.objects.filter(pk__in=Member.objects.filter(level="advanced").values("pk").union(juniors))
+```
+
 ## Locking rows
 
 `select_for_update()` locks the selected rows until the end of the transaction that reads them:
@@ -395,3 +438,6 @@ query = Query("club.Member").filter(name__icontains="a").order_by(Lower("name"))
 sorted(set(query.constructs()))
 # ['clause.distinct', 'function.Lower', 'lookup.icontains']
 ```
+
+A set operation adds `clause.union`, `clause.intersection` or `clause.difference` to the construct names of its
+queries.

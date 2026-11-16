@@ -29,7 +29,7 @@ from django.db.models import functions as djf
 from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
-from adorm.exceptions import FieldError, NotSupportedError, ProgrammingError
+from adorm.exceptions import DatabaseError, FieldError, NotSupportedError, ProgrammingError
 from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
 from adorm.query import expressions as ax
@@ -400,12 +400,87 @@ class _Translator:
 
     def subquery(self, query: Query) -> Any:
         """The Django query set of ``query`` inside this one; its `OuterRef` refers to this query."""
-        translator = _Translator(query, self)
-        queryset = translator.base()
+        return _Translator(query, self).selected()
+
+    def selected(self) -> Any:
+        """The Django query set of the query used inside another query: its model rows, or the selected columns after
+        ``values()`` / ``values_list()`` with fields. The combined queries of a set operation select the primary key
+        for model rows."""
+        query = self.query
+        if query.is_combined:
+            parts = []
+            for part in self.parts():
+                queryset = part.selected()
+                parts.append(queryset.values_list("pk") if part.query.row_format == "model" else queryset)
+            return self.combined(parts)
+        queryset = self.base()
         if query.row_format != "model" and query.select:
-            names = translator.annotation_names
-            queryset = queryset.values_list(*(n if n in names else translator.path(n) for n in query.select))
+            names = self.annotation_names
+            queryset = queryset.values_list(*(n if n in names else self.path(n) for n in query.select))
         return queryset
+
+    # Set operations
+
+    def parts(self) -> list[_Translator]:
+        """The translators of the combined queries, at this query's level. A combined query that selects model rows
+        selects the names of this query's ``values()`` or ``values_list()``."""
+        query = self.query
+        parts = query.combined_queries
+        if query.row_format != "model":
+            parts = tuple(part.values(*query.select) if part.row_format == "model" else part for part in parts)
+        return [_Translator(part, self.parent) for part in parts]
+
+    def combined(self, parts: Sequence[Any]) -> Any:
+        """The Django query set of the set operation over the query sets ``parts``, ordered and sliced."""
+        query = self.query
+        first, *rest = parts
+        if query.is_none:
+            return first.none()
+        if query.combinator == "union":
+            queryset = first.union(*rest, all=query.combinator_all)
+        else:
+            queryset = getattr(first, query.combinator)(*rest)
+        if query.ordering:
+            queryset = queryset.order_by(*(self.combined_order(order) for order in query.ordering))
+        if query.is_sliced:
+            queryset = queryset[query.low_mark : query.high_mark]
+        return queryset
+
+    def combined_order(self, order: ax.OrderBy) -> Any:
+        """The Django ordering of the combined rows by ``order``: a column of the combined rows is named as the first
+        query that is not combined selects it."""
+        query = self.query
+        names = query.select if query.row_format != "model" else ()
+        expression = order.expression
+        if names and isinstance(expression, ax.F) and expression.name not in names:
+            raise DatabaseError("ORDER BY term does not match any column in the result set.")
+        first = query
+        while first.is_combined:
+            inner = first.combined_queries[0]
+            outer_names = first.select if first.row_format != "model" else ()
+            inner_names = inner.select if inner.row_format != "model" else ()
+            if isinstance(expression, ax.F) and expression.name in outer_names and len(inner_names) == len(outer_names):
+                expression = ax.F(inner_names[outer_names.index(expression.name)])
+            first = inner
+        if expression is not order.expression:
+            order = order._replace(expression=expression)
+        return _Translator(first, self.parent).order(order)
+
+    def translate_combined(self) -> TranslatedQuery:
+        """The `TranslatedQuery` of a set operation: the combined queries' rows are built as the first one's, keyed
+        by this query's selected names."""
+        query = self.query
+        parts = [part.translate() for part in self.parts()]
+        first = parts[0]
+        queryset = self.combined([part.queryset for part in parts])
+        plan = first._plan
+        if query.row_format != "model" and query.select:
+            if len(query.select) != len(plan.fields):
+                raise ProgrammingError(
+                    f"values() names {len(query.select)} columns, the combined queries select {len(plan.fields)}"
+                )
+            plan = _RowPlan(zip(query.select, (index for _, index in plan.fields), strict=True), None)
+        return TranslatedQuery(queryset, first.columns, plan)
 
     # Expressions and conditions
 
@@ -727,6 +802,8 @@ class _Translator:
 
     def translate(self) -> TranslatedQuery:
         query = self.query
+        if query.is_combined:
+            return self.translate_combined()
         queryset = self.base()
         columns = _Columns()
         if query.row_format == "model":
@@ -785,12 +862,7 @@ def subquery(query: Query) -> Any:
     """The Django query set of ``query`` used inside another query: its model rows (Django compares their primary
     key), or the selected column after ``values()`` / ``values_list()`` with fields. An `OuterRef` in ``query`` raises
     `ProgrammingError`: the query has no outer query here; inside a translated query it refers to that query."""
-    translator = _Translator(query)
-    queryset = translator.base()
-    if query.row_format != "model" and query.select:
-        names = translator.annotation_names
-        queryset = queryset.values_list(*(n if n in names else translator.path(n) for n in query.select))
-    return queryset
+    return _Translator(query).selected()
 
 
 def aggregation(query: Query, aggregations: Iterable[tuple[str, Any]]) -> tuple[Any, dict[str, Any]]:

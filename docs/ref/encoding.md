@@ -8,7 +8,8 @@ same concept as the argument transport of [`celery_viewset`](:fastapi_viewsets:/
 ```python
 from adorm.codec import decode_value, encode_value
 from adorm.operations import Create, Operation
-from adorm.query import Query
+from adorm.query import Exists, OuterRef, Query
+from adorm.query.lookups import Exact
 from adorm.schema import ModelSchema, Schema, resolve_field_type
 ```
 
@@ -81,7 +82,16 @@ A value is typed by:
 
 The type of an expression is its field's type for `F` (against the queried model) and `OuterRef` (against the
 enclosing query's model), the annotation's type for an annotation name, else its `output_type`, else the first known
-type of a `Coalesce` argument or a `Case` result, or the type of the field a one-column `Subquery` selects.
+type of a `Coalesce` argument or a `Case` result, or the type of the field a one-column `Subquery` selects. The
+combined queries of a [set operation](./query#union-others-all-false) are typed by their own models at the level of
+the combined query: an `OuterRef` in them refers to the query that encloses the combination.
+
+```python
+inner = Query("club.Club").filter(Exact(OuterRef("joined"), "2026-01-01T00:00:00"))
+combined = inner.union(Query("club.Club").filter(name="Chess"))
+Query("club.Member").filter(Exists(combined)).to_dict(schema)
+# the OuterRef value is typed by club.Member's joined, the name by club.Club's name
+```
 
 ```python
 Update(Query("club.Member"), {"level": Case(When(age__gt=5, then=Value(Level.MASTER)), default=F("level"))})

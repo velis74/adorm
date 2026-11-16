@@ -459,3 +459,15 @@
   (`adorm.drivers.django.translation.check_bulk_create()`, `bulk_create_options()`). The demo's memory driver inserts
   every row or none and refuses the conflict options. Without `update_conflicts`, `update_fields` and `unique_fields`
   are ignored, and with no instances only `batch_size` is checked, as in Django.
+- Set operations `Query.union(*others, all=False)`, `intersection()` and `difference()`, also on query sets, bound
+  models and managers (constructs `clause.union`, `clause.intersection`, `clause.difference`; `Query.combinator`,
+  `combinator_all`, `combined_queries`, `is_combined`, `adorm.query.COMBINATORS`), with Django's handling of empty
+  queries (`none()` and empty slices). After a set operation only ordering, slicing, `values()` / `values_list()`, `none()`, further set
+  operations and the reads `Select`, `Get` (without conditions), `First`, `Last`, `Count` and `Exists` apply; other
+  query methods, `prefetch_related()` and the operations `InBulk`, `Aggregate`, `Update`, `Delete`, `GetOrCreate`
+  and `UpdateOrCreate` raise `NotSupportedError`. The codec encodes the combined queries at the level of the combined
+  query, each typed by its own model. The Django and the native PostgreSQL drivers translate them into Django's
+  `union()`, `intersection()` and `difference()`, also as subqueries, and an ordering by a column that `values()`
+  names after the set operation orders by the first query's column at the same position; the native PostgreSQL
+  driver leaves out empty combined queries as Django does. The demo's memory driver compares the rows column by
+  column by value and combines empty queries as Django compiles them.

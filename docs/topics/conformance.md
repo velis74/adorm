@@ -55,7 +55,8 @@ The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`,
 combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
 placement, slicing, `distinct()` and `DISTINCT ON`, the row formats, `only()` and `defer()`, foreign keys, reverse and
 many-to-many relations, multi-table inheritance, generic relations, JSON keys, subqueries, annotations, every function
-and aggregate, `select_for_update()` with its options, `prefetch_related()` (reverse, forward and many-to-many
+and aggregate, `select_for_update()` with its options, set operations (`union()` with and without `all`, `intersection()`,
+`difference()`, combinations left with a single query after empty ones), `prefetch_related()` (reverse, forward and many-to-many
 relations, a `Prefetch` query set into `to_attr`, across a generic foreign key), generic foreign key objects,
 `in_bulk()`, `full_clean()`, and the writes (`create`, `bulk_create` with generated primary keys, defaults, batches
 that insert every row or none, `ignore_conflicts` and `update_conflicts`, `update_fields` and `unique_fields` ignored

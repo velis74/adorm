@@ -82,6 +82,7 @@ executor:
 | `select_for_update(nowait=, skip_locked=, of=, no_key=)` | row locks; reading the rows outside a transaction raises `TransactionManagementError` |
 | `qs[start:stop]` | slice; an integer index raises `TypeError` |
 | `qs1 \| qs2`, `qs1 & qs2` | OR / AND of the conditions |
+| `union(*others, all=False)`, `intersection(*others)`, `difference(*others)` | [set operations](#set-operations) |
 
 ```python
 recent = (
@@ -93,6 +94,36 @@ recent = (
 ```
 
 Combining query sets of different executors raises `TypeError`.
+
+### Set operations
+
+`union(*others, all=False)`, `intersection(*others)` and `difference(*others)` apply the
+[`Query` set operations](./query#union-others-all-false) to the queries of the query set and of the query sets
+`others`, which run on the same executor (otherwise, and for an argument that is not a query set, `TypeError`). The
+result is a query set of the first query set's class, whose rows are those of the combined query, in the row format
+of the first query. Where the `Query` method returns another query, the method returns that query's query set, which
+may be of another class: `union()` on an empty query set (`none()`, or a slice that leaves no rows) with a single
+other query set that is not empty returns that query set, and `intersection()` with an empty query set among
+`others` returns it. Empty query sets are combined by the [rules for empty queries](./query#empty-queries).
+
+```python
+advanced = Member.objects.filter(level="advanced")
+coaches = Member.objects.filter(tags__contains=["coach"])
+
+[m.first_name async for m in advanced.intersection(coaches)]
+await advanced.union(coaches, all=True).count()
+[n async for n in advanced.difference(coaches).values_list("first_name", flat=True).order_by("first_name")]
+await advanced.union(coaches).order_by("first_name").first()
+```
+
+After a set operation the building methods `order_by()`, slicing, `values()`, `values_list()`, `none()` and the set
+operations apply, and so do the terminal methods `async for`, `get()` without conditions, `first()`, `last()`,
+`count()` and `exists()`. The other building methods, `prefetch_related()`, `get()` with conditions, `aggregate()`,
+`in_bulk()`, `update()`, `delete()`, `get_or_create()` and `update_or_create()` raise `NotSupportedError` without
+running an operation, as in Django. `first()` and `last()` without `order_by()` order the combined rows by the
+primary key, as in Django; when the combined rows do not include the primary key column (`values()` /
+`values_list()` without it), the driver raises `DatabaseError` (`ORDER BY term does not match any column in the
+result set.`).
 
 ### `prefetch_related(*lookups)`
 
@@ -113,7 +144,7 @@ async for club in clubs:            # 4 Select operations: clubs, memberships, m
 
 A `Prefetch` with a query set or `to_attr` whose path (with `to_attr`) is already given raises `ValueError`;
 `prefetch_related()` after `values()` or `values_list()`, and `values()` or `values_list()` after it, raise
-`TypeError`.
+`TypeError`; after a set operation it raises `NotSupportedError`.
 
 ### `adorm.Prefetch(lookup, queryset=None, to_attr=None)`
 

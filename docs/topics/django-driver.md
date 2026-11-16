@@ -153,6 +153,7 @@ The driver turns an adorm [`Query`](/ref/query) into a Django query set
 | slicing | slicing (`LIMIT` / `OFFSET`) |
 | `none()` | `none()`: no statement runs |
 | `select_related()` | the related fields joined into the same `values_list()` |
+| `union(*others, all=)`, `intersection()`, `difference()` | Django's `union(all=)`, `intersection()`, `difference()` of the translated combined queries, then `order_by()` and the slice; `values()` after the set operation is applied to each combined query of model rows, and an ordering key that only that `values()` names orders by the first query's column at the same position; Django leaves out empty combined queries; as a subquery, a combination of model rows selects the primary key |
 
 Each adorm filter is one Django `filter()` call, so a condition on a multi-valued relation (a reverse foreign key, a
 many-to-many relation) joins that relation once per call, as in Django:
@@ -201,8 +202,8 @@ Every read returns rows keyed by adorm names; the core builds the instances.
 `get()` runs Django's `get()`: no row raises the model's `DoesNotExist`, several rows its `MultipleObjectsReturned`,
 with Django's messages. `first()` and `last()` order by the primary key when neither the query nor the model has an
 ordering; `first()` on a sliced query needs `order_by()` (the core raises `TypeError` without it), and so do
-`first()` and `last()` on a grouped query. `count()` and `exists()` run Django's `count()` and `exists()`; `count()`
-of a grouped query counts its groups. `aggregate()` runs Django's `aggregate()` on the query's model rows and
+`first()` and `last()` on a grouped query. `count()` runs Django's `count()`, which of a grouped query counts its
+groups; `exists()` runs Django's `exists()`, and for a combined query reads its first row (`queryset[:1]`). `aggregate()` runs Django's `aggregate()` on the query's model rows and
 returns its dict. `in_bulk()` checks the field as Django's `in_bulk()` does
 ([`check_in_bulk_field()`](/ref/drivers#adorm-drivers-django-translation-check-in-bulk-field-operation)), then reads the
 query's rows filtered with `<field>__in`.

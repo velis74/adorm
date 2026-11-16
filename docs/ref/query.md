@@ -5,7 +5,7 @@ queries](/topics/queries) shows it in context.
 
 ```python
 from adorm import F, Lower, Q, Sum
-from adorm.query import ForUpdate, Query, as_query
+from adorm.query import COMBINATORS, ForUpdate, Query, as_query
 ```
 
 ### `adorm.query.Query(model, *, manager=None)`
@@ -49,6 +49,10 @@ q = (
 | `is_none` | whether `none()` was called |
 | `for_update` | a [`ForUpdate`](#adorm-query-forupdate-nowait-false-skip-locked-false-of-no-key-false), or `None` |
 | `manager` | the target ORM's manager whose rows and query set methods the driver uses (Django: the manager attribute, so its `get_queryset()` and its query set's `delete()` …), `None` for the model's rows without manager logic |
+| `combinator` | `None`, or `"union"`, `"intersection"` or `"difference"`: the set operation that combines `combined_queries` |
+| `combinator_all` | whether a union keeps duplicate rows (`union(all=True)`) |
+| `combined_queries` | the combined queries, a tuple; empty without a set operation |
+| `is_combined` | whether `combinator` is set |
 | `is_sliced` | whether a slice limits the rows |
 | `is_empty` | whether the query returns no rows: `is_none`, or the slice leaves none (`high_mark <= low_mark`) |
 
@@ -225,7 +229,7 @@ has the ordering of `other`, or of `query` when `other` has none, and the `selec
 without conditions matches every row, so `|` with it has no conditions;
 `|` with a `none()` query returns the other query, `&` returns the empty one.
 
-`Query` has no set operations: `union()`, `intersection()` and `difference()` are not supported.
+Either query combined by a set operation raises `TypeError`.
 
 ```python
 active = Query("club.Member").filter(active=True)
@@ -234,12 +238,93 @@ active | guests            # where: active=True OR guest=True
 active & guests            # where: active=True AND guest=True
 ```
 
+#### `union(*others, all=False)`
+
+The rows of the query and of the queries `others` (SQL `UNION`); `all=True` keeps duplicate rows, otherwise they are
+removed. Returns a combined query: `combinator` `"union"`, `combined_queries` the query followed by `others`, and
+`select` and `row_format` of the query, so the combined rows have its row format. The queries are compared column by
+column: they select the same number of columns of matching types and may be on different models (the database
+refuses other columns). The query keeps its ordering and slice; each of `others` keeps them when it is sliced or
+distinct on fields, and loses its ordering otherwise. An argument that is not a `Query` raises `TypeError`.
+
+Without `others` returns the query itself. An empty query (`is_empty`: `none()`, or a slice that leaves no rows)
+among `others` stays among the combined queries, and the database leaves it out (see [Empty queries](#empty-queries)).
+On an empty query, the queries of `others` that are not empty are combined instead: a single one is returned as it
+is, none at all returns the query.
+
+```python
+adults = Query("club.Member").filter(age__gte=18).values_list("name", flat=True)
+coaches = Query("club.Member").filter(tags__contains=["coach"]).values_list("name", flat=True)
+adults.union(coaches)
+adults.union(coaches, all=True).order_by("name")[:10]
+adults.union(Query("club.Club").values_list("name", flat=True))   # names of members and clubs
+```
+
+#### `intersection(*others)`
+
+The rows the query and every one of `others` return (SQL `INTERSECT`), without duplicates; a combined query with
+`combinator` `"intersection"`, built as `union()` builds it. Without `others` the query alone is combined. When the
+query or one of `others` is empty (`is_empty`), returns that query.
+
+#### `difference(*others)`
+
+The rows of the query that none of `others` returns (SQL `EXCEPT`), without duplicates; a combined query with
+`combinator` `"difference"`, built as `union()` builds it. Without `others` the query alone is combined. An empty
+query among `others` stays among the combined queries; on an empty query returns the query itself.
+
+```python
+adults.intersection(coaches)
+adults.difference(coaches).order_by("-name")
+adults.union(coaches).difference(Query("club.Member").filter(guest=True).values_list("name", flat=True))
+```
+
+#### After a set operation
+
+A combined query has no filters, annotations or other clauses of its own; these methods apply to the combined rows:
+`order_by()`, slicing, `values()` and `values_list()`, `none()` and another set operation, which nests the
+combination. `values()` and `values_list()` select their fields in every combined query that selects model rows; a
+combined query with its own `values()` keeps its columns, and the combined rows are keyed by the names given, column
+by column. After `values()` or `values_list()` the keys of `order_by()` name columns of the combined rows, including
+names that only the later `values()` gives; a key that names no column raises
+[`DatabaseError`](./exceptions) (`ORDER BY term does not match any column in the result set.`). Combined model
+rows are ordered by the fields of the first combined query's model. `filter()`, `exclude()`, `annotate()`,
+`alias()`, `distinct()`, `only()`, `defer()`, `select_related()` and `select_for_update()` raise
+[`NotSupportedError`](./exceptions) (`cannot call filter() after union()`), as in Django.
+
+```python
+combined = adults.union(coaches)
+combined.order_by("-name")[:5].values_list("name", flat=True)
+combined.filter(age=30)       # NotSupportedError: cannot call filter() after union()
+combined.values_list("label", flat=True).order_by("label")   # the one column, named label
+```
+
+#### Empty queries
+
+The drivers combine empty queries as Django compiles them. An empty query is left out of a union, and of a difference
+after its first query; an empty query in an intersection makes the result empty. A combination left with a single
+query reads that query's rows as they are (with duplicates, also for `intersection()` and `difference()`), except a
+sliced union, which still removes duplicate rows unless `all=True`. That single query is placed in parentheses
+before the combination's own ordering and slice, so PostgreSQL refuses an ordering, offset or limit given to both
+with `ProgrammingError` (`multiple ORDER BY clauses not allowed`; an ordering of the single query counts only when it
+is sliced).
+
+```python
+first_two = adults.order_by("name")[:2]
+first_two.union(Query("club.Member").none()).order_by("-name")[:5]   # a union: distinct names
+first_two.union(Query("club.Member").none()).order_by("-name")       # ProgrammingError when read
+```
+
+#### `check_not_combined(action)`
+
+Raises `NotSupportedError` (`cannot call <action>() after <combinator>()`) when the query is combined.
+
 #### Construct names
 
 `constructs()` yields the construct names of the filters, the annotations and the ordering, plus
 `clause.annotate` (an annotation that is not an alias), `clause.alias`, `clause.group_by`, `clause.distinct` or
 `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager` and the names of
-`for_update` for the clauses in use, and [`path.nested`](#adorm-query-nested-path) when a field of `values()`,
+`for_update` for the clauses in use, `clause.union`, `clause.intersection` or `clause.difference` for a set
+operation, followed by the construct names of the combined queries, and [`path.nested`](#adorm-query-nested-path) when a field of `values()`,
 `values_list()`, `group_by`, `only()`, `defer()` or `distinct()` has several segments. `values()` and `values_list()` of plain fields, `none()` and slicing have none.
 
 ```python
@@ -252,7 +337,8 @@ set(Query("clubs.Member").filter(memberships__club__slug="koper-sailing").constr
 #### Encoding
 
 `to_dict(schema=None)` and `Query.from_dict(data, schema=None)` convert a query to JSON-safe data and back; lookup
-values are typed by the queried model's fields (see [Operation encoding](./encoding)).
+values are typed by the queried model's fields (see [Operation encoding](./encoding)). The combined queries of a
+set operation are encoded under `combined_queries`, each typed by its own model.
 
 ### `adorm.query.ForUpdate(*, nowait=False, skip_locked=False, of=(), no_key=False)`
 
@@ -266,12 +352,16 @@ Its construct names are `clause.select_for_update`, plus `clause.select_for_upda
 
 ### `adorm.query.CLAUSES`
 
-The construct names of `Query` clauses, `ForUpdate` options and the conflict handling of
+The construct names of `Query` clauses and set operations, `ForUpdate` options and the conflict handling of
 [`BulkCreate`](./operations#adorm-operations-bulkcreate-model-rows-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none-manager-none),
 a tuple: `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`,
 `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` and
-`clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`, `clause.on_conflict.ignore` and
-`clause.on_conflict.update`.
+`clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`, `clause.on_conflict.ignore`,
+`clause.on_conflict.update`, `clause.union`, `clause.intersection` and `clause.difference`.
+
+### `adorm.query.COMBINATORS`
+
+`("union", "intersection", "difference")`: the values of `Query.combinator` for a set operation.
 
 ### `adorm.query.NESTED_PATH`
 

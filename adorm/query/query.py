@@ -13,13 +13,16 @@ import re
 from collections.abc import Iterable, Iterator
 from typing import Any, ClassVar
 
+from adorm.exceptions import NotSupportedError
 from adorm.query.expressions import check_field_path, Expression, F, Node, OrderBy, Q
 
-__all__ = ["CLAUSES", "NESTED_PATH", "ForUpdate", "Query", "as_query", "construct_names"]
+__all__ = ["CLAUSES", "COMBINATORS", "NESTED_PATH", "ForUpdate", "Query", "as_query", "construct_names"]
 
 _LABEL = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
 
 ROW_FORMATS = ("model", "dict", "tuple", "flat", "named")
+COMBINATORS: tuple[str, ...] = ("union", "intersection", "difference")
+"""The set operations of `Query.union()`, `Query.intersection()` and `Query.difference()`."""
 _SAME_WHEN_COMBINED = (
     "is_distinct",
     "distinct_fields",
@@ -33,6 +36,21 @@ _SAME_WHEN_COMBINED = (
     "deferred_fields",
     "for_update",
     "manager",
+)
+
+_OWN_WHEN_COMBINED = frozenset(
+    {
+        "model",
+        "ordering",
+        "select",
+        "row_format",
+        "low_mark",
+        "high_mark",
+        "is_none",
+        "combinator",
+        "combinator_all",
+        "combined_queries",
+    }
 )
 
 
@@ -53,8 +71,11 @@ CLAUSES: tuple[str, ...] = (
     "clause.select_for_update.no_key",
     "clause.on_conflict.ignore",
     "clause.on_conflict.update",
+    "clause.union",
+    "clause.intersection",
+    "clause.difference",
 )
-"""The construct names of `Query` clauses, `ForUpdate` options and the conflict handling of
+"""The construct names of `Query` clauses and set operations, `ForUpdate` options and the conflict handling of
 `adorm.operations.BulkCreate`."""
 
 NESTED_PATH = "path.nested"
@@ -152,6 +173,14 @@ def _outer_nodes(node: Node) -> Iterator[Node]:
             yield from _outer_nodes(child)
 
 
+def _queries(others: Iterable[Any]) -> list[Query]:
+    queries = list(others)
+    for query in queries:
+        if not isinstance(query, Query):
+            raise TypeError(f"a set operation combines queries, not {type(query).__name__}")
+    return queries
+
+
 def as_query(value: Any) -> Query | None:
     """``value`` when it is a `Query`, its ``query`` attribute when that is one, else ``None``."""
     if isinstance(value, Query):
@@ -186,6 +215,11 @@ class Query(Node):
     manager attribute of the model, so its ``get_queryset()`` and its query set's ``create()``, ``delete()`` …);
     ``None`` reads the model's rows without manager logic. A query with a manager uses the construct
     ``clause.manager``.
+
+    ``combinator`` is ``None``, or ``"union"``, ``"intersection"`` or ``"difference"`` for the set operation that
+    combines the rows of ``combined_queries``; ``combinator_all`` keeps duplicate rows of a union. A combined query
+    has no filters, annotations or other clauses of its own: its ``select`` and ``row_format`` describe the combined
+    rows, and its ordering and slice apply to them.
     """
 
     _fields = (
@@ -209,6 +243,9 @@ class Query(Node):
         "is_none",
         "for_update",
         "manager",
+        "combinator",
+        "combinator_all",
+        "combined_queries",
     )
     ROW_FORMATS: ClassVar[tuple[str, ...]] = ROW_FORMATS
     model: str
@@ -231,6 +268,9 @@ class Query(Node):
     is_none: bool
     for_update: ForUpdate | None
     manager: str | None
+    combinator: str | None
+    combinator_all: bool
+    combined_queries: tuple[Query, ...]
 
     def __init__(self, model: str, *, manager: str | None = None) -> None:
         self._init(
@@ -254,6 +294,9 @@ class Query(Node):
             is_none=False,
             for_update=None,
             manager=_check_manager(manager),
+            combinator=None,
+            combinator_all=False,
+            combined_queries=(),
         )
 
     @property
@@ -271,18 +314,31 @@ class Query(Node):
         """Whether the query returns no rows: ``none()`` was called or the slice leaves none."""
         return self.is_none or (self.high_mark is not None and self.high_mark <= self.low_mark)
 
+    @property
+    def is_combined(self) -> bool:
+        """Whether the query combines other queries with ``union()``, ``intersection()`` or ``difference()``."""
+        return self.combinator is not None
+
+    def check_not_combined(self, action: str) -> None:
+        """Raise `adorm.NotSupportedError` when the query is combined: ``action`` is not allowed after a set
+        operation."""
+        if self.combinator is not None:
+            raise NotSupportedError(f"cannot call {action}() after {self.combinator}()")
+
     def _check_not_sliced(self, action: str) -> None:
         if self.is_sliced:
             raise TypeError(f"cannot {action} a query once a slice has been taken")
 
     def filter(self, *args: Any, **kwargs: Any) -> Query:
         """Rows that also match the conditions; arguments as for `Q`."""
+        self.check_not_combined("filter")
         self._check_not_sliced("filter")
         condition = Q(*args, **kwargs)
         return self._add_filter(condition) if condition else self
 
     def exclude(self, *args: Any, **kwargs: Any) -> Query:
         """Rows that also do not match the conditions; arguments as for `Q`."""
+        self.check_not_combined("exclude")
         self._check_not_sliced("filter")
         condition = Q(*args, **kwargs)
         return self._add_filter(~condition) if condition else self
@@ -308,6 +364,7 @@ class Query(Node):
         return self._annotate(annotations, selected=False)
 
     def _annotate(self, annotations: dict[str, Any], *, selected: bool) -> Query:
+        self.check_not_combined("annotate" if selected else "alias")
         existing = {name for name, _ in self.annotations}
         for name, expression in annotations.items():
             if name in existing:
@@ -389,6 +446,7 @@ class Query(Node):
 
     def only(self, *fields: str) -> Query:
         """Load only ``fields`` (and the primary key); replaces an earlier ``only()``, minus deferred fields."""
+        self.check_not_combined("only")
         self._check_no_values("only")
         names = _unique(check_field_path(f) for f in fields)
         if self.deferred_fields:
@@ -397,6 +455,7 @@ class Query(Node):
 
     def defer(self, *fields: str | None) -> Query:
         """Do not load ``fields`` until accessed; ``defer(None)`` loads every field again."""
+        self.check_not_combined("defer")
         self._check_no_values("defer")
         if fields == (None,):
             return self._replace(only_fields=None, deferred_fields=())
@@ -411,6 +470,7 @@ class Query(Node):
         No fields follows every non-null relation; ``select_related(None)`` clears the list. Paths add up over
         calls.
         """
+        self.check_not_combined("select_related")
         self._check_no_values("select_related")
         if fields == (None,):
             return self._replace(select_related_fields=False)
@@ -428,11 +488,14 @@ class Query(Node):
         self, *, nowait: bool = False, skip_locked: bool = False, of: Iterable[str] = (), no_key: bool = False
     ) -> Query:
         """Lock the selected rows until the end of the transaction; options as for `ForUpdate`."""
+        self.check_not_combined("select_for_update")
         return self._replace(for_update=ForUpdate(nowait=nowait, skip_locked=skip_locked, of=of, no_key=no_key))
 
     def _combine(self, other: Any, connector: str) -> Query:
         if not isinstance(other, Query):
             return NotImplemented
+        if self.is_combined or other.is_combined:
+            raise TypeError(f"cannot use the {'|' if connector == Q.OR else '&'} operator with a combined query")
         if other.model != self.model:
             raise TypeError(f"cannot combine a query on {self.model} with one on {other.model}")
         if self.is_sliced or other.is_sliced:
@@ -473,8 +536,54 @@ class Query(Node):
         filters of both."""
         return self._combine(other, Q.AND)
 
+    def union(self, *others: Query, all: bool = False) -> Query:
+        """The rows of this query and of ``others`` (SQL ``UNION``); ``all`` keeps duplicate rows.
+
+        Without ``others`` the query itself. When this query is empty (`is_empty`), the other queries that are not
+        empty are combined instead, and a single one is returned as it is.
+        """
+        queries = _queries(others)
+        if self.is_empty:
+            rest = [query for query in queries if not query.is_empty]
+            if not rest:
+                return self
+            return rest[0] if len(rest) == 1 else rest[0]._combinator("union", rest[1:], all=all)
+        if not queries:
+            return self
+        return self._combinator("union", queries, all=all)
+
+    def intersection(self, *others: Query) -> Query:
+        """The rows this query and every one of ``others`` return (SQL ``INTERSECT``), without duplicates. When this
+        query or one of ``others`` is empty (`is_empty`), that query. Without ``others`` the query alone is
+        combined."""
+        queries = _queries(others)
+        if self.is_empty:
+            return self
+        empty = next((query for query in queries if query.is_empty), None)
+        return empty if empty is not None else self._combinator("intersection", queries)
+
+    def difference(self, *others: Query) -> Query:
+        """The rows of this query that none of ``others`` returns (SQL ``EXCEPT``), without duplicates. On an empty
+        query (`is_empty`) the query itself. Without ``others`` the query alone is combined."""
+        queries = _queries(others)
+        if self.is_empty:
+            return self
+        return self._combinator("difference", queries)
+
+    def _combinator(self, combinator: str, others: Iterable[Query], *, all: bool = False) -> Query:
+        # An unordered set operation ignores the ordering of an unsliced query.
+        parts = tuple(q if q.is_sliced or q.distinct_fields else q._replace(ordering=()) for q in others)
+        return Query(self.model)._replace(
+            select=self.select,
+            row_format=self.row_format,
+            combinator=combinator,
+            combinator_all=bool(all),
+            combined_queries=(self, *parts),
+        )
+
     def distinct(self, *fields: str) -> Query:
         """Remove duplicate rows; with ``fields``, keep one row per distinct value of those fields."""
+        self.check_not_combined("distinct")
         self._check_not_sliced("make distinct")
         return self._replace(is_distinct=True, distinct_fields=tuple(check_field_path(f) for f in fields))
 
@@ -504,9 +613,13 @@ class Query(Node):
     def get_source_expressions(self) -> tuple[Node, ...]:
         annotations = (expression for _, expression in self.annotations)
         children: tuple[Node, ...] = (*self.filters, *annotations, *self.ordering)
-        return children if self.for_update is None else (*children, self.for_update)
+        if self.for_update is not None:
+            children = (*children, self.for_update)
+        return (*children, *self.combined_queries)
 
     def _own_constructs(self) -> Iterable[str]:
+        if self.combinator is not None:
+            yield f"clause.{self.combinator}"
         if len(self.annotations) > len(self.aliases):
             yield "clause.annotate"
         if self.aliases:
@@ -595,9 +708,36 @@ class Query(Node):
             raise ValueError("group_mark is set exactly when group_by is")
         if self.group_mark is not None and not (_is_int(self.group_mark) and 0 <= self.group_mark < count):
             raise ValueError("group_mark is the index of an annotation")
+        self._check_decoded_combination()
+
+    def _check_decoded_combination(self) -> None:
+        if not isinstance(self.combinator_all, bool):
+            raise ValueError("combinator_all is a bool")
+        parts = self.combined_queries
+        if not isinstance(parts, tuple) or not all(isinstance(part, Query) for part in parts):
+            raise ValueError("combined_queries is a list of queries")
+        if self.combinator is None:
+            if parts or self.combinator_all:
+                raise ValueError("combined_queries and combinator_all need a combinator")
+            return
+        if self.combinator not in COMBINATORS:
+            raise ValueError(f"unknown combinator {self.combinator!r}")
+        if not parts:
+            raise ValueError("a combined query has combined_queries")
+        if self.combinator_all and self.combinator != "union":
+            raise ValueError("combinator_all applies to a union")
+        if parts[0].model != self.model:
+            raise ValueError("a combined query is on the model of its first query")
+        clean = Query(self.model)
+        for name in self._fields:
+            if name not in _OWN_WHEN_COMBINED and getattr(self, name) != getattr(clean, name):
+                raise ValueError(f"a combined query has no {name} of its own")
 
     def __repr__(self) -> str:
         parts = [repr(self.model)]
+        if self.combinator is not None:
+            all_rows = ", all=True" if self.combinator_all else ""
+            parts.append(f"{self.combinator}={self.combined_queries!r}{all_rows}")
         if self.manager is not None:
             parts.append(f"manager={self.manager!r}")
         if self.filters:

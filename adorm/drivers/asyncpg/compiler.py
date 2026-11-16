@@ -386,13 +386,14 @@ class DjangoCompiler:
         """Compile ``query``, a Django ``QuerySet`` or ``Query`` (select, update, delete or aggregate), into a
         statement with numbered placeholders and asyncpg parameters.
 
-        A select that matches no rows compiles with ``WHERE 0 = 1``; an update or delete that matches no rows and an
-        update without values compile into an empty statement. ``in_transaction`` tells whether the statement runs
-        inside a transaction: ``select_for_update()`` outside one raises ``TransactionManagementError``, as Django
-        does. ``returning`` names the Django fields an update returns (``RETURNING``). Raises ``NotSupportedError`` for
-        an insert (`compile_insert()` compiles one), for an update of fields of a multi-table inheritance parent,
-        which Django runs as several statements after selecting the keys, and for a statement with more than
-        `MAX_QUERY_PARAMS` parameters, and for ``returning`` on Django before 6, which does not compile it."""
+        A select that matches no rows compiles with ``WHERE 0 = 1``; a set operation leaves out its empty combined
+        queries as Django does (all of them empty compile with ``WHERE 0 = 1``); an update or delete that matches no
+        rows and an update without values compile into an empty statement. ``in_transaction`` tells whether the
+        statement runs inside a transaction: ``select_for_update()`` outside one raises ``TransactionManagementError``,
+        as Django does. ``returning`` names the Django fields an update returns (``RETURNING``). Raises
+        ``NotSupportedError`` for an insert (`compile_insert()` compiles one), for an update of fields of a multi-table
+        inheritance parent, which Django runs as several statements after selecting the keys, and for a statement with
+        more than `MAX_QUERY_PARAMS` parameters, and for ``returning`` on Django before 6, which does not compile it."""
         query = getattr(query, "query", query)
         if returning and not _UPDATE_RETURNING:
             raise NotSupportedError("this Django version does not compile RETURNING for an update")
@@ -400,6 +401,9 @@ class DjangoCompiler:
             raise NotSupportedError("an update of parent model fields runs as several statements")
         if isinstance(query, sql.InsertQuery):
             raise NotSupportedError("an insert compiles with compile_insert()")
+        if getattr(query, "combinator", None):
+            compiler, sql_text, params = self._combined_sql(query, in_transaction)
+            return self._statement(sql_text, params, compiler)
         compiler = self._compiler(query, in_transaction)
         if returning:
             compiler.returning_fields = list(returning)
@@ -433,8 +437,11 @@ class DjangoCompiler:
         inner = getattr(query, "query", query).clone()
         inner.subquery = True
         inner.clear_ordering(force=False)
-        compiler = self._compiler(inner, in_transaction)
-        inner_sql, params = compiler.as_sql(with_col_aliases=True)
+        if inner.combinator:
+            compiler, inner_sql, params = self._combined_sql(inner, in_transaction, with_col_aliases=True)
+        else:
+            compiler = self._compiler(inner, in_transaction)
+            inner_sql, params = compiler.as_sql(with_col_aliases=True)
         return self._statement(f"SELECT COUNT(*) FROM ({inner_sql}) subquery", params, compiler)  # noqa: S608 - compiled
 
     def compile_aggregate(self, query: Any, aggregates: Mapping[str, Any]) -> DjangoAggregation:
@@ -506,10 +513,21 @@ class DjangoCompiler:
                 else:
                     connections[name] = connection
 
-    def _compiler(self, query: Any, in_transaction: bool) -> Any:
+    def _compiler(self, query: Any, in_transaction: bool, *, elide_empty: bool = False) -> Any:
         if getattr(query, "select_for_update", False) and not in_transaction:
             raise TransactionManagementError("select_for_update cannot be used outside of a transaction.")
-        return query.get_compiler(connection=self.connection, elide_empty=False)
+        return query.get_compiler(connection=self.connection, elide_empty=elide_empty)
+
+    def _combined_sql(self, query: Any, in_transaction: bool, **options: Any) -> tuple[Any, str, Sequence[Any]]:
+        """The compiler, SQL and parameters of a set operation. Empty combined queries are left out as Django leaves
+        them out; when every one is empty, they compile with ``WHERE 0 = 1``."""
+        compiler = self._compiler(query, in_transaction, elide_empty=True)
+        try:
+            sql_text, params = compiler.as_sql(**options)
+        except EmptyResultSet:
+            compiler = self._compiler(query, in_transaction)
+            sql_text, params = compiler.as_sql(**options)
+        return compiler, sql_text, params
 
     def _statement(
         self, sql_text: str, params: Sequence[Any], compiler: Any, returning: Sequence[Any] = ()

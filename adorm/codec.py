@@ -389,6 +389,8 @@ class Encoder(_Codec):
 
     def _query(self, query: Query) -> dict[str, Any]:
         data: dict[str, Any] = {"node": node_name(type(query))}
+        # The combined queries are at the level of the query itself: an OuterRef in them refers to the enclosing query.
+        combined = [self.node(part) for part in query.combined_queries]
         with self.scope(query.model):
             scope = self._scopes[-1]
             annotations = []
@@ -396,7 +398,12 @@ class Encoder(_Codec):
                 annotations.append([name, self.node(expression)])
                 scope.annotations[name] = expression
             for name in query._fields:
-                data[name] = annotations if name == "annotations" else self._field(query, name, getattr(query, name))
+                if name == "annotations":
+                    data[name] = annotations
+                elif name == "combined_queries":
+                    data[name] = combined
+                else:
+                    data[name] = self._field(query, name, getattr(query, name))
         return data
 
     def _field(self, node: Node, name: str, value: Any, hint: Any = None) -> Any:
@@ -473,7 +480,10 @@ class Decoder(_Codec):
 
     def _query(self, cls: type[Query], data: Mapping[str, Any]) -> Query:
         model = check_model_label(self._get(data, "model"))
-        values: dict[str, Any] = {"model": model}
+        combined = self._get(data, "combined_queries")
+        if not isinstance(combined, list):
+            raise ValueError("the combined queries of a query are a list")
+        values: dict[str, Any] = {"model": model, "combined_queries": tuple(self.node(part) for part in combined)}
         with self.scope(model):
             scope = self._scopes[-1]
             raw = self._get(data, "annotations")

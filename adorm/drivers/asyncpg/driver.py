@@ -337,7 +337,8 @@ class AsyncpgConnection(DriverConnection):
             statement = self._compile(queryset, count=True)
             return await self._run(self.conn.fetchval(statement.sql, *statement.params))
         if kind == "exists":
-            statement = self._compile(queryset.query.exists())
+            # Django's exists() selects a constant in the queries of a union only, not in a nested combination.
+            statement = self._compile(queryset[:1] if operation.query.is_combined else queryset.query.exists())
             return await self._run(self.conn.fetchrow(statement.sql, *statement.params)) is not None
         raise NotSupportedError(f"the asyncpg driver does not execute {kind!r} operations")
 

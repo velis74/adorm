@@ -6,7 +6,8 @@ the demo's PostgreSQL database through Django; writes stay in memory.
 
 Supported: the operations in `CAPABILITIES` on a query of one model: conditions (`Q`, negation, the lookups listed)
 on the model's own fields and foreign key columns, with a model instance standing for its primary key, arithmetic
-with `F`, ordering by fields, ``distinct()``, slicing and ``values()`` / ``values_list()`` of fields. Constructs
+with `F`, ordering by fields, ``distinct()``, slicing, ``values()`` / ``values_list()`` of fields and the set
+operations ``union()``, ``intersection()`` and ``difference()``, which compare the rows column by column. Constructs
 outside `CAPABILITIES` (``path.nested`` for field paths across relations, ``clause.annotate`` …) are refused before
 execution; a reverse relation named in a condition raises `NotSupportedError`, and so does ``in_bulk()`` on a field
 other than the primary key. A negated condition keeps a row whose field in a lookup is NULL, as Django's ``exclude()``
@@ -34,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import itertools
 import operator
 import re
@@ -161,6 +163,9 @@ CAPABILITIES = Capabilities(
     constructs={f"lookup.{name}" for name in (*LOOKUPS, "isnull")}
     | {
         "clause.distinct",
+        "clause.union",
+        "clause.intersection",
+        "clause.difference",
         "clause.select_for_update",
         "clause.select_for_update.nowait",
         "clause.select_for_update.skip_locked",
@@ -367,28 +372,13 @@ class _Rows:
 
     def order(self, rows: list[dict[str, Any]], ordering: tuple[OrderBy, ...]) -> list[dict[str, Any]]:
         """``rows`` sorted by ``ordering`` (by primary key without one); NULLs sort as in PostgreSQL."""
-        if not ordering:
-            ordering = (OrderBy(F("pk")),)
-        for order in reversed(ordering):
-            if not isinstance(order.expression, F):
-                raise NotSupportedError("the memory driver orders by fields only")
-            name = self.field(order.expression.name)
-            if order.nulls_first is None and order.nulls_last is None:
-                nulls_first = order.descending
-            else:
-                nulls_first = bool(order.nulls_first)
-            # sorted(reverse=True) also reverses the rank of NULLs.
-            null_rank = 0 if nulls_first != order.descending else 1
+        return _ordered(rows, ordering or (OrderBy(F("pk")),), self.field)
 
-            def key(row: Mapping[str, Any], name: str = name, null_rank: int = null_rank) -> tuple[int, Any]:
-                value = row.get(name)
-                return (null_rank, 0) if value is None else (1 - null_rank, value)
-
-            try:
-                rows = sorted(rows, key=key, reverse=order.descending)
-            except TypeError as exc:
-                raise _incomparable(exc) from exc
-        return rows
+    def names(self, query: Query) -> tuple[str, ...]:
+        """The keys of the rows `project()` returns for ``query``, in column order."""
+        if query.row_format == "model" or not query.select:
+            return tuple(self.fields)
+        return query.select
 
     def project(self, query: Query, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """The rows as the query's row format selects them, distinct when the query is."""
@@ -407,6 +397,96 @@ class _Rows:
                     unique.append(row)
             rows = unique
         return rows
+
+
+def _ordered(
+    rows: list[dict[str, Any]], ordering: tuple[OrderBy, ...], key_of: Callable[[str], str]
+) -> list[dict[str, Any]]:
+    """``rows`` sorted by ``ordering``, field references whose row keys ``key_of`` gives; NULLs sort as in
+    PostgreSQL."""
+    for order in reversed(ordering):
+        if not isinstance(order.expression, F):
+            raise NotSupportedError("the memory driver orders by fields only")
+        name = key_of(order.expression.name)
+        if order.nulls_first is None and order.nulls_last is None:
+            nulls_first = order.descending
+        else:
+            nulls_first = bool(order.nulls_first)
+        # sorted(reverse=True) also reverses the rank of NULLs.
+        null_rank = 0 if nulls_first != order.descending else 1
+
+        def key(row: Mapping[str, Any], name: str = name, null_rank: int = null_rank) -> tuple[int, Any]:
+            value = row.get(name)
+            return (null_rank, 0) if value is None else (1 - null_rank, value)
+
+        try:
+            rows = sorted(rows, key=key, reverse=order.descending)
+        except TypeError as exc:
+            raise _incomparable(exc) from exc
+    return rows
+
+
+def _combined_parts(query: Query) -> tuple[Query, ...]:
+    """The combined queries of ``query``; those that select model rows select its ``values()`` names when it has
+    them."""
+    if query.row_format == "model":
+        return query.combined_queries
+    return tuple(part.values(*query.select) if part.row_format == "model" else part for part in query.combined_queries)
+
+
+def _row_names(query: Query) -> tuple[str, ...]:
+    """The keys of ``query``'s rows, in column order."""
+    if not query.is_combined:
+        return _Rows(query.model).names(query)
+    if query.row_format != "model" and query.select:
+        return query.select
+    return _row_names(_combined_parts(query)[0])
+
+
+def _result_column(query: Query, names: tuple[str, ...], path: str) -> str:
+    """The key of the combined rows of ``query`` that the ordering path ``path`` names."""
+    if query.row_format == "model":
+        return _Rows(query.model).field(path)
+    if path not in names:
+        raise DatabaseError("ORDER BY term does not match any column in the result set.")
+    return path
+
+
+def _check_single_part(query: Query, part: Query) -> None:
+    """Raise the error of PostgreSQL for the clauses of ``query``, a set operation compiled into its one query
+    ``part`` in parentheses, that ``part`` has already."""
+    if part.is_combined or not part.is_sliced:
+        return
+    for clause, outer, inner in (
+        ("ORDER BY", query.ordering, part.ordering),
+        ("OFFSET", query.low_mark, part.low_mark),
+        ("LIMIT", query.high_mark is not None, part.high_mark is not None),
+    ):
+        if outer and inner:
+            raise ProgrammingError(f"multiple {clause} clauses not allowed", sqlstate="42601")
+
+
+def _row_key(value: Any) -> Any:
+    """``value`` as a hashable key that is equal for equal values (lists and mappings compared by their items)."""
+    if isinstance(value, (list, tuple)):
+        return tuple(_row_key(item) for item in value)
+    if isinstance(value, Mapping):
+        return tuple(sorted((key, _row_key(item)) for key, item in value.items()))
+    if isinstance(value, set):
+        return frozenset(value)
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _distinct(values: Iterable[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    """``values`` without repeats, in order of first appearance."""
+    unique: dict[Any, tuple[Any, ...]] = {}
+    for value in values:
+        unique.setdefault(_row_key(value), value)
+    return list(unique.values())
 
 
 def _violation(
@@ -596,7 +676,55 @@ class MemoryConnection(DriverConnection):
         selected = [row for row in self._table(query.model).values() if rows.matches(query, row)]
         return rows.order(selected, query.ordering)
 
+    def _combine(self, query: Query) -> list[dict[str, Any]]:
+        """The rows of a set operation, compared column by column, ordered and sliced. As Django compiles it, an
+        empty query is left out of a union and of a difference after its first query and empties an intersection;
+        a single remaining query is read on its own, except in a sliced union, which removes duplicates."""
+        if query.is_none:
+            return []
+        results = []
+        widths = set()
+        for part in _combined_parts(query):
+            if part.is_empty:
+                if query.combinator == "union" or (query.combinator == "difference" and results):
+                    continue
+                return []
+            names = _row_names(part)
+            widths.add(len(names))
+            results.append([tuple(row.get(name) for name in names) for row in self._read(part)])
+        if len(widths) > 1:
+            raise ProgrammingError(
+                f"each {query.combinator.upper()} query must have the same number of columns", sqlstate="42601"
+            )
+        if not results:
+            return []
+        first, *others = results
+        if not others:
+            if query.combinator == "union" and query.is_sliced:
+                combined = first if query.combinator_all else _distinct(first)
+            else:
+                _check_single_part(query, next(part for part in _combined_parts(query) if not part.is_empty))
+                combined = first
+        elif query.combinator == "union":
+            combined = [value for result in results for value in result]
+            if not query.combinator_all:
+                combined = _distinct(combined)
+        else:
+            excluded = [{_row_key(value) for value in other} for other in others]
+            unique = _distinct(first)
+            if query.combinator == "intersection":
+                combined = [value for value in unique if all(_row_key(value) in other for other in excluded)]
+            else:
+                combined = [value for value in unique if not any(_row_key(value) in other for other in excluded)]
+        names = _row_names(query)
+        rows = [dict(zip(names, value, strict=True)) for value in combined]
+        if query.ordering:
+            rows = _ordered(rows, query.ordering, functools.partial(_result_column, query, names))
+        return rows[query.low_mark : query.high_mark]
+
     def _read(self, query: Query) -> list[dict[str, Any]]:
+        if query.is_combined:
+            return copy.deepcopy(self._combine(query))
         rows = _Rows(query.model).project(query, self._select(query))
         rows = rows[query.low_mark : query.high_mark]
         return copy.deepcopy(rows)
@@ -815,7 +943,10 @@ class MemoryConnection(DriverConnection):
             case Get():
                 return await self._one(operation.query)
             case First():
-                rows = await self._fetch(operation.query[:1])
+                query = operation.query
+                if query.is_combined and not query.ordering:
+                    query = query.order_by("pk")  # as an unordered query of model rows
+                rows = await self._fetch(query[:1])
                 return rows[0] if rows else None
             case Last():
                 ordering = operation.query.ordering or (OrderBy(F("pk")),)
