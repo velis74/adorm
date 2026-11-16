@@ -867,39 +867,67 @@ def _model_spec(model: type[models.Model], hashed: str, included: Collection[str
     )
 
 
-def _selected_models(app_labels: Sequence[str] | None, exclude: Iterable[str]) -> list[tuple[str, list[Any]]]:
+def _app_config(label: str) -> Any:
+    try:
+        return apps.get_app_config(label)
+    except LookupError:
+        raise CodegenError(f"no installed Django app has the label {label!r}") from None
+
+
+def _selected_model(config: Any, name: str) -> type[models.Model]:
+    """The model ``name`` of the app ``config``; `CodegenError` for a model that is unknown or not generated."""
+    try:
+        model = config.get_model(name)
+    except LookupError:
+        raise CodegenError(f"the Django app {config.label!r} has no model {name!r}") from None
+    opts = model._meta
+    if opts.auto_created:
+        raise CodegenError(f"{opts.label} is an automatic many-to-many through model, which is not generated")
+    if opts.swapped:
+        raise CodegenError(f"{opts.label} is swapped for {opts.swapped}: select that model instead")
+    return model
+
+
+def _selected_models(labels: Sequence[str] | None, exclude: Iterable[str]) -> list[tuple[str, list[Any]]]:
+    """The models to generate by app label: a model label selects that model, an app label every model of the app."""
+    if labels is None:
+        labels = [config.label for config in apps.get_app_configs()]
     excluded = set(exclude)
-    if app_labels is None:
-        configs = list(apps.get_app_configs())
-    else:
-        configs = []
-        for label in dict.fromkeys(app_labels):
-            try:
-                configs.append(apps.get_app_config(label))
-            except LookupError:
-                raise CodegenError(f"no installed Django app has the label {label!r}") from None
-    selected = []
-    for config in configs:
-        if config.label in excluded:
+    configs: dict[str, Any] = {}
+    chosen_by_app: dict[str, set[Any] | None] = {}
+    for label in dict.fromkeys(labels):
+        parts = label.split(".") if isinstance(label, str) else []
+        if not 1 <= len(parts) <= 2 or not all(part.isidentifier() for part in parts):
+            raise CodegenError(f"{label!r} is neither an app label nor a model label ('app_label.Model')")
+        if parts[0] not in configs:
+            configs[parts[0]] = _app_config(parts[0])
+        if len(parts) == 1:
+            chosen_by_app[parts[0]] = None
             continue
-        chosen = [model for model in config.get_models() if model._meta.label not in excluded]
-        if chosen:
-            selected.append((config.label, chosen))
+        model = _selected_model(configs[parts[0]], parts[1])
+        chosen = chosen_by_app.setdefault(parts[0], set())
+        if chosen is not None:
+            chosen.add(model)
+    selected = []
+    for app_label, chosen in chosen_by_app.items():
+        if app_label in excluded:
+            continue
+        found = [
+            model
+            for model in configs[app_label].get_models()
+            if model._meta.label not in excluded and (chosen is None or model in chosen)
+        ]
+        if found:
+            selected.append((app_label, found))
     return selected
 
 
-def introspect(app_labels: Sequence[str] | None = None, *, exclude: Iterable[str] = ()) -> tuple[AppSpec, ...]:
-    """The `AppSpec` of each selected Django app, in ``INSTALLED_APPS`` order for ``app_labels=None``, else in the
-    given order.
-
-    ``app_labels=None`` selects every app with models. ``exclude`` holds app labels and model labels to leave out; an
-    app left without models is skipped. Raises `CodegenError` for an unknown app label, an app label that cannot name
-    a module and an unsupported model. Constructs that are not generated (generic relations, relations that reference
-    a field other than the target's primary key, unknown field types, patterns pydantic cannot compile), types
-    generated as ``typing.Any`` and forward relations to models that are not generated are reported as
-    `CodegenWarning`.
+def introspect(labels: Sequence[str] | None = None, *, exclude: Iterable[str] = ()) -> tuple[AppSpec, ...]:
+    """The `AppSpec` of each selected Django app: an app label selects every model of the app, a model label that
+    model, and ``exclude`` wins. Raises `CodegenError` for a label it cannot select or a model it cannot describe;
+    constructs that are not generated are reported as `CodegenWarning`.
     """
-    selected = _selected_models(app_labels, exclude)
+    selected = _selected_models(labels, exclude)
     included = {model._meta.label for _, chosen in selected for model in chosen}
     result = []
     for label, chosen in selected:

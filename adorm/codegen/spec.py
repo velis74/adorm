@@ -44,7 +44,7 @@ CONSTRAINTS = ("gt", "ge", "lt", "le", "min_length", "max_length", "pattern", "m
 
 
 class CodegenError(Exception):
-    """Generation cannot proceed: an unknown app, an unsupported model, a file the generator does not own."""
+    """Generation cannot proceed: an unknown app or model, an unsupported model, a file the generator does not own."""
 
 
 class CodegenWarning(UserWarning):

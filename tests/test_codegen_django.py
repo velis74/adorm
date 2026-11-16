@@ -2,6 +2,7 @@
 
 import datetime
 import decimal
+import re
 import warnings
 
 import pytest
@@ -9,9 +10,10 @@ import pytest
 from django.contrib.postgres.fields import ArrayField, HStoreField
 from django.core.validators import MaxLengthValidator, MinValueValidator, RegexValidator
 from django.db import models
+from django.test import override_settings
 from django.test.utils import isolate_apps
 
-from adorm.codegen import CodegenError, CodegenWarning, NO_DEFAULT, RelationSpec, TypeSpec
+from adorm.codegen import CodegenError, CodegenWarning, NO_DEFAULT, plan, RelationSpec, TypeSpec
 from adorm.codegen.django import field_spec, introspect, model_spec, schema_hash
 from tests.djangoproject.library import models as library
 
@@ -401,6 +403,101 @@ def test_introspect_excludes_apps_and_models():
 def test_introspect_refuses_an_unknown_app():
     with pytest.raises(CodegenError, match="no installed Django app has the label 'shop'"):
         introspect(["shop"])
+
+
+def labels_of(apps):
+    return {app.label: [model.label for model in app.models] for app in apps}
+
+
+def test_introspect_selects_single_models_in_django_order():
+    apps = introspect(["library.Loan", "auth.User", "library.Reader"])
+    assert labels_of(apps) == {"library": ["library.Reader", "library.Loan"], "auth": ["auth.User"]}
+    assert [app.label for app in apps] == ["library", "auth"], "apps keep the order they are first named in"
+
+
+def test_selection_does_not_depend_on_the_order_of_the_labels():
+    one = plan(introspect(["library.Loan", "library.Reader", "auth.User"]), line_length=120)
+    other = plan(introspect(["library.Reader", "library.Loan", "auth.User", "library.Loan"]), line_length=120)
+    assert one == other
+
+
+def test_a_model_label_is_matched_like_django_matches_it():
+    assert labels_of(introspect(["library.reader", "library.LOAN"])) == {"library": ["library.Reader", "library.Loan"]}
+
+
+@pytest.mark.parametrize(
+    "labels", [["library.Loan", "library"], ["library", "library.Loan"], ["library.Loan", "library", "library.Fine"]]
+)
+def test_an_app_label_selects_the_whole_app_next_to_its_model_labels(labels):
+    assert labels_of(introspect(labels)) == labels_of(introspect(["library"]))
+
+
+def test_exclude_applies_to_selected_models():
+    assert labels_of(introspect(["library.Loan", "library.Reader"], exclude=["library.Loan"])) == {
+        "library": ["library.Reader"]
+    }
+    assert introspect(["library.Loan"], exclude=["library"]) == ()
+
+
+def test_selected_models_keep_reverse_relations_only_from_selected_models():
+    (app,) = introspect(["library.Reader", "library.Loan"])
+    reader, loan = app.models
+    assert {relation.name for relation in reader.relations} == {"loans"}, "reservations is not generated"
+    assert {relation.name for relation in loan.relations} >= {"reader", "book"}
+    assert "fines" not in {relation.name for relation in loan.relations}
+
+
+def test_a_relation_to_a_model_not_selected_keeps_its_column_and_is_reported():
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", CodegenWarning)
+        (app,) = introspect(["library.Loan", "library.Reader"])
+    messages = [str(warning.message) for warning in caught if issubclass(warning.category, CodegenWarning)]
+    assert "library.Loan.book: library.Book not generated, so the relation fails when used" in messages
+    assert not [message for message in messages if message.startswith("library.Loan.reader:")]
+    loan = app.models[1]
+    assert {field.name: field.type for field in loan.fields}["book_id"] == TypeSpec("str")
+    assert loan.schema_hash == schema_hash(library.Loan), "the selection does not change the schema hash"
+
+
+def test_a_selected_multi_table_child_without_its_parent_declares_every_field():
+    (app,) = introspect(["library.Edition"])
+    (edition,) = app.models
+    assert edition.base is None
+    assert {"isbn", "title", "book_ptr_id", "released"} <= {field.name for field in edition.fields}
+
+
+def test_a_selected_proxy_without_its_model_declares_every_field():
+    (app,) = introspect(["library.BookProxy"])
+    (proxy,) = app.models
+    assert proxy.base is None
+    assert {"isbn", "title"} <= {field.name for field in proxy.fields}
+    assert proxy.concrete_model == "library.Book"
+    (app,) = introspect(["library.Book", "library.BookProxy"])
+    proxy = next(model for model in app.models if model.label == "library.BookProxy")
+    assert (proxy.base, proxy.fields) == ("library.Book", ())
+
+
+@pytest.mark.parametrize(
+    ("label", "message"),
+    [
+        ("library.Bok", "the Django app 'library' has no model 'Bok'"),
+        ("shop.Thing", "no installed Django app has the label 'shop'"),
+        ("library.Book.isbn", "'library.Book.isbn' is neither an app label nor a model label"),
+        ("library.", "'library.' is neither an app label nor a model label"),
+        ("", "'' is neither an app label nor a model label"),
+        ("library.Book_authors", "library.Book_authors is an automatic many-to-many through model"),
+    ],
+)
+def test_introspect_refuses_a_label_it_cannot_select(label, message):
+    with pytest.raises(CodegenError, match=re.escape(message)):
+        introspect(["library.Loan", label])
+
+
+def test_introspect_refuses_a_swapped_model():
+    with override_settings(AUTH_USER_MODEL="library.Reader"):
+        with pytest.raises(CodegenError, match=r"auth\.User is swapped for library\.Reader: select that model"):
+            introspect(["auth.User"])
+        assert "auth.User" not in labels_of(introspect(["auth"]))["auth"], "a swapped model is not part of its app"
 
 
 def test_relations_to_a_field_other_than_the_primary_key_are_reported_and_left_out():

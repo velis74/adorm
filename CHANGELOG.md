@@ -145,7 +145,9 @@
   with leading underscores (`_order` of `order_with_respect_to` is `order_`); field paths split so that a segment may
   end in `_` (`copy___title`). Modules and names the module imports are aliased when a field or relation has their
   name. Relations that reference a field other than the target's primary key (`to_field`), generic relations and
-  forward relations to models that are not generated are reported as warnings. Each model carries a schema hash
+  forward relations to models that are not generated are reported as warnings. Labels select whole apps (`clubs`)
+  or single models (`clubs.Member`); the module of an app holds only its selected models, and relations to models
+  outside the selection keep their column fields and descriptors and are reported. Each model carries a schema hash
   (`adorm.codegen.django.schema_hash()`). `--check` exits with status 1 when a file is missing, stale, obsolete or
   not written by the generator; such files are never replaced. Errors, including a cycle of base classes between
   modules and a model the generator cannot describe, exit with status 2. The current directory and the

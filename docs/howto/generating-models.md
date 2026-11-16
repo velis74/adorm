@@ -42,7 +42,7 @@ schemas = {model._meta.label: model.model_json_schema() for model in MODELS}
 
 | Option | Effect |
 |---|---|
-| `app_label …` | the apps to generate; default: every app with models |
+| `label …` | an app label (`clubs`) for every model of the app, or a model label (`clubs.Member`) for that model; default: every app with models |
 | `-o`, `--output DIR` | the package directory; created when missing |
 | `--settings MODULE` | the Django settings module; default: `DJANGO_SETTINGS_MODULE` |
 | `--pythonpath DIR` | a directory put on the import path after the current directory (repeatable) |
@@ -50,6 +50,49 @@ schemas = {model._meta.label: model.model_json_schema() for model in MODELS}
 | `--check` | write nothing; exit with status 1 when a file is missing, stale, obsolete or not generated |
 | `--ignore-third-party` | do not warn about manager and query set methods of installed packages |
 | `--line-length N` | the longest line before a statement is split (default 88) |
+
+## Generate selected models
+
+A model label (`app_label.Model`) selects one model; an app label selects every model of its app. The two mix in one
+command, and the module of each app holds only the selected models, in the Django order:
+
+```sh
+adorm generate --settings myproject.settings --output myproject/adorm_models clubs.Club clubs.Member billing
+```
+
+```text
+warning: clubs.Club.country: geo.Country not generated, so the relation fails when used
+wrote myproject/adorm_models/__init__.py
+wrote myproject/adorm_models/clubs.py
+wrote myproject/adorm_models/billing.py
+3 written, 0 removed, 0 unchanged.
+```
+
+An app named by its label too is generated whole, whatever model labels name it; `--exclude` still leaves models out.
+The model name matches case-insensitively (`clubs.member`). An unknown app or model, a label that is neither an app
+label nor a model label (`clubs.Member.email`, `clubs.`), an automatic many-to-many through model and a swapped model
+(`auth.User` with a custom `AUTH_USER_MODEL`) stop the command with an error.
+
+A selection keeps the relations to models outside it apart from the generated code:
+
+| Relation | Generated |
+|---|---|
+| a foreign key to a model that is not selected | the column field (`country_id`) and the `ForeignKey`, reported as a warning; reading the relation raises `LookupError` (no model is registered under the label) unless that model is registered some other way |
+| a many-to-many relation to a model, or through a declared through model, that is not selected | the `ManyToMany`, reported the same way |
+| the reverse side of a relation declared on a model that is not selected | nothing |
+| a multi-table inheritance parent or a proxy's model that is not selected | the class derives from `Model` and declares every field |
+
+The column field keeps the code working with the key alone, without the related model:
+
+```python
+from myproject.adorm_models import clubs
+
+club = await clubs.Club.objects.get(slug="chess")
+country_id = club.country_id  # the key; await club.country raises LookupError
+members = [member async for member in clubs.Member.objects.filter(club_id=club.id)]
+```
+
+The selection is part of the output: run `--check` with the same labels.
 
 ## Check the modules in CI
 
@@ -193,7 +236,8 @@ it was not given to the target.
 
 Reverse relations come only from models that are generated in the same run. A forward relation to a model that is not
 generated (or through a declared through model that is not) keeps its column and its descriptor and is reported as a
-warning: the descriptor fails when it is used unless that model is registered some other way. A relation hidden with
+warning: the descriptor raises `LookupError` when it is used unless that model is registered some other way
+([selected models](#generate-selected-models)). A relation hidden with
 `related_name="+"` is left out.
 
 These are reported as warnings and left out, while their columns stay ordinary fields:

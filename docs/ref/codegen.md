@@ -16,21 +16,23 @@ from adorm.porting import client_base, expose
 
 ```text
 adorm generate [-h] -o OUTPUT [--settings SETTINGS] [--pythonpath PYTHONPATH] [-e LABEL] [--check]
-               [--ignore-third-party] [--line-length LINE_LENGTH] [app_label ...]
+               [--ignore-third-party] [--line-length LINE_LENGTH] [label ...]
 ```
 
-Writes one module per Django app and a package `__init__.py` into `OUTPUT`; with `--check`, writes nothing and
-reports the differences. `python -m adorm generate` is the same command. Before Django is set up, the current
-directory and then each `--pythonpath` directory, as absolute paths, are put at the front of `sys.path`; entries that
-name the same directories further back are moved there. Warnings (constructs that are not generated, forward
-relations to models that are not generated) go to standard error as `warning: <message>`; `--ignore-third-party`
-leaves out the `ThirdPartyMethodsWarning` lines.
+Writes one module per Django app and a package `__init__.py` into `OUTPUT`; with `--check`, writes nothing and reports
+the differences. Each `label` is an app label, which selects every model of the app, or a model label
+(`app_label.Model`), which selects that model; without labels every app with models is generated.
+`python -m adorm generate` is the same command. Before Django is set up, the current directory and then each
+`--pythonpath` directory, as absolute paths, are put at the front of `sys.path`; entries that name the same directories
+further back are moved there. Warnings (constructs that are not generated, forward relations to models that are not
+generated) go to standard error as `warning: <message>`; `--ignore-third-party` leaves out the
+`ThirdPartyMethodsWarning` lines.
 
 | Exit status | Meaning |
 |---|---|
 | 0 | the files were written, or `--check` found them up to date |
 | 1 | `--check` found a missing, stale, obsolete or foreign file |
-| 2 | an error: a usage error, no settings module, Django missing or not set up, an unknown app, an unsupported model, a foreign file to overwrite, any other exception (printed as `adorm generate: <type>: <message>`) |
+| 2 | an error: a usage error, no settings module, Django missing or not set up, an unknown app or model, a label that is neither, a model that is not generated (an automatic through model, a swapped model), an unsupported model, a foreign file to overwrite, any other exception (printed as `adorm generate: <type>: <message>`) |
 
 ### `adorm.cli.main(argv=None)`
 
@@ -186,7 +188,8 @@ without an ORM name and methods.
 
 ### `adorm.codegen.CodegenError`
 
-Generation cannot proceed: an unknown app label, a model with a composite primary key or a name no Python name maps
+Generation cannot proceed: an unknown app or model label, a label that is neither, an automatic many-to-many through
+model or a swapped model named by a model label, a model with a composite primary key or a name no Python name maps
 to, two fields of a model with the same Python name, a cycle of base classes between modules, a file to overwrite
 that the generator did not write, no settings module.
 
@@ -274,17 +277,24 @@ What `write()` did: the paths in `written`, `removed` and `unchanged`.
 Sets Django up with the settings module `settings`, default `DJANGO_SETTINGS_MODULE`. No settings module, or one
 Django cannot import or use, raises `CodegenError`.
 
-### `adorm.codegen.django.introspect(app_labels=None, *, exclude=())`
+### `adorm.codegen.django.introspect(labels=None, *, exclude=())`
 
-A tuple of `AppSpec`, one per selected app with models: every app in `INSTALLED_APPS` order for `None`, else the given
-apps in the given order. `exclude` holds app labels and model labels. Swapped models and automatic through models are
-not included. An unknown app label, an app label that cannot name a module and an unsupported model raise
+A tuple of `AppSpec`, one per selected app with models: every app in `INSTALLED_APPS` order for `None`, else the apps
+of `labels` in the order they are first named. An app label in `labels` selects every model of the app; a model label
+(`"clubs.Member"`, the model name matched case-insensitively, as Django's `apps.get_model()` does) selects that model,
+and an app named both ways is selected whole. The models of an app keep Django's order, so the order of the labels
+does not change a module. `exclude` holds app labels and model labels and wins over `labels`; an app left without
+models is skipped. Swapped models and automatic through models are not included.
+
+An unknown app or model label, a label that is neither (`"clubs.Member.email"`), an automatic many-to-many through
+model or a swapped model in `labels`, an app label that cannot name a module and an unsupported model raise
 `CodegenError`; constructs that are not generated and forward relations to models outside the selection are reported
 as `CodegenWarning`.
 
 ```python
 setup("myproject.settings")
 apps = introspect(["clubs", "billing"], exclude=["billing.Payment"])
+apps = introspect(["clubs.Club", "clubs.Member", "billing"])  # two models of clubs, every model of billing
 ```
 
 ### `adorm.codegen.django.model_spec(model, *, included=None)`

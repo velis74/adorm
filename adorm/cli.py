@@ -30,11 +30,17 @@ def _parser() -> argparse.ArgumentParser:
         help="generate adorm model modules from Django models",
         description=(
             "Write one module of adorm models per Django app, and an __init__.py importing them, into the package "
-            "directory OUTPUT. With --check, write nothing and exit with status 1 when a file is missing, stale, "
+            "directory OUTPUT. An app label selects every model of the app, a model label (app_label.Model) that "
+            "model. With --check, write nothing and exit with status 1 when a file is missing, stale, "
             "obsolete or not written by the generator."
         ),
     )
-    generate.add_argument("app_labels", nargs="*", metavar="app_label", help="apps to generate (default: every app)")
+    generate.add_argument(
+        "labels",
+        nargs="*",
+        metavar="label",
+        help="app label or model label (app_label.Model) to generate (default: every app)",
+    )
     generate.add_argument("-o", "--output", required=True, type=Path, help="package directory of the modules")
     generate.add_argument("--settings", help="Django settings module (default: DJANGO_SETTINGS_MODULE)")
     generate.add_argument(
@@ -83,7 +89,7 @@ def _generate(args: argparse.Namespace) -> int:
         warnings.simplefilter("always", CodegenWarning)
         if args.ignore_third_party:
             warnings.simplefilter("ignore", ThirdPartyMethodsWarning)
-        apps = source.introspect(args.app_labels or None, exclude=args.exclude)
+        apps = source.introspect(args.labels or None, exclude=args.exclude)
     for warning in caught:
         if issubclass(warning.category, CodegenWarning):
             print(f"warning: {warning.message}", file=sys.stderr)

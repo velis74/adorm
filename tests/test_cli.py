@@ -104,6 +104,67 @@ def test_a_forward_relation_to_an_app_not_generated_is_a_warning(tmp_path, capsy
     assert "warning: library.Author.account: auth.User not generated, so the relation fails when used" in err
 
 
+def test_generate_selected_models(tmp_path, capsys):
+    output = tmp_path / "models"
+    assert main(["generate", "-o", str(output), "library.Loan", "library.Reader"]) == 0
+    out, err = capsys.readouterr()
+    assert "2 written, 0 removed, 0 unchanged." in out
+    assert "warning: library.Loan.book: library.Book not generated, so the relation fails when used" in err
+    module = (output / "library.py").read_text(encoding="utf-8")
+    assert '__all__ = ["Reader", "Loan"]' in module
+    assert "class Book(" not in module
+    assert main(["generate", "--check", "-o", str(output), "library.Reader", "library.Loan"]) == 0
+    capsys.readouterr()
+    assert main(["generate", "--check", "-o", str(output), "library"]) == 1, "the selection is part of the output"
+    assert f"{output / 'library.py'}: stale" in capsys.readouterr().err
+
+
+def test_an_unknown_model_is_an_error(tmp_path, capsys):
+    assert main(["generate", "-o", str(tmp_path), "library.Loan", "library.Lone"]) == 2
+    assert "adorm generate: the Django app 'library' has no model 'Lone'" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_selected_models_import_on_their_own(tmp_path):
+    result = run(
+        "generate", "--settings", "tests.djangoproject.settings", "-o", str(tmp_path / "picked"), "library.Loan",
+        "library.Reader", "auth.User",
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    script = textwrap.dedent(
+        """
+        import asyncio
+
+        from picked import auth, library, MODELS
+
+        print(*[model._meta.label for model in MODELS])
+        loan = library.Loan.model_construct(id=1, reader_id=2, book_id="9780000000001")
+        print(loan.book_id)
+
+
+        async def main():
+            try:
+                await loan.book
+            except LookupError as exc:
+                print(exc)
+
+
+        asyncio.run(main())
+        """
+    )
+    environ = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), str(ROOT)])}
+    environ.pop("DJANGO_SETTINGS_MODULE", None)
+    imported = subprocess.run(  # noqa: S603 - the interpreter running the suite
+        [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path, env=environ, check=False
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert imported.stdout.splitlines() == [
+        "library.Reader library.Loan auth.User",
+        "9780000000001",
+        "no model is registered under 'library.Book'",
+    ]
+
+
 def test_missing_django_is_an_error(tmp_path, monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "django", None)
     monkeypatch.delitem(sys.modules, "adorm.codegen.django", raising=False)
