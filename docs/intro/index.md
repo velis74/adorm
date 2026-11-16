@@ -4,6 +4,8 @@ adorm (asynchronous database ORM, pronounced "adore") is an asynchronous ORM for
 queries and model operations with adorm's API, and a **driver** executes them: natively on PostgreSQL (asyncpg) or
 through an existing ORM (Django).
 
+[Quick start](/intro/quickstart) sets up a project and shows the API in one page.
+
 ::: info Status
 adorm is pre-release. The [API reference](/ref/) lists what the installed version provides.
 :::

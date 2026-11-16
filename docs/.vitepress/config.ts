@@ -41,6 +41,7 @@ export default defineConfig({
         text: 'Introduction',
         items: [
           { text: 'What is adorm', link: '/intro/' },
+          { text: 'Quick start', link: '/intro/quickstart' },
           { text: 'Changelog', link: '/intro/changelog' },
           { text: 'Demo application', link: '/intro/demo' },
         ],
