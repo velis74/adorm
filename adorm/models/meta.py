@@ -18,14 +18,16 @@ class ModelMeta:
     ``schema_hash`` is the hash `adorm generate` computed from the ORM model, ``None`` for a model written by hand.
     ``orm_names`` maps a field or relation name to the target ORM's name where the two differ (a generated model
     renames names that clash with pydantic); a model class's ``_meta`` also holds the entries of its model bases for
-    the fields and relations it inherits. A model class declares it as ``_meta``; a class without one is abstract (it
-    cannot load or save rows).
+    the fields and relations it inherits. ``concrete_model`` is the label of the concrete model a proxy model stands
+    for (Django's ``concrete_model``), ``None`` for a concrete model. A model class declares it as ``_meta``; a class
+    without one is abstract (it cannot load or save rows).
     """
 
     label: str
     pk: str = "id"
     schema_hash: str | None = field(default=None, kw_only=True)
     orm_names: Mapping[str, str] | None = field(default=None, kw_only=True, hash=False)
+    concrete_model: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         check_model_label(self.label)
@@ -33,6 +35,10 @@ class ModelMeta:
             raise ValueError(f"{self.pk!r} is not a field name")
         if self.schema_hash is not None and (not isinstance(self.schema_hash, str) or not self.schema_hash):
             raise ValueError(f"{self.schema_hash!r} is not a schema hash")
+        if self.concrete_model is not None:
+            check_model_label(self.concrete_model)
+            if self.concrete_model == self.label:
+                raise ValueError(f"{self.label} cannot be a proxy of itself")
         if self.orm_names is None:
             object.__setattr__(self, "orm_names", MappingProxyType({}))
         if not isinstance(self.orm_names, Mapping):

@@ -175,7 +175,7 @@ async for activity in activities:
 
 ### `adorm.GenericPrefetch(lookup, querysets, to_attr=None)`
 
-A prefetch lookup whose last relation is a [`GenericForeignKey`](./models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id),
+A prefetch lookup whose last relation is a [`GenericForeignKey`](./models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true),
 with a query set per related model: the related rows of a content type are read from the query set on its model, the
 plain rows of models without one. Two query sets on the same model raise `ValueError`. A plain `Prefetch` with a query
 set on a generic foreign key raises `ValueError`, and so does a `GenericPrefetch` on another relation.
@@ -197,7 +197,7 @@ instances of one or more models, and cache them on the instances.
 | `ReverseOneToOne` | `Select` of the targets by `<column>__in` | the relation's cache; `None` for no row |
 | `ReverseForeignKey` | `Select` from the target's `objects` manager by `<column>__in` | the rows, which the relation's query set reads; each row gets the owner in its foreign key's cache |
 | `ManyToMany` | `Select` of the links (`values(source_column, target_column)`), then of the targets from the `objects` manager by `pk__in` | the rows |
-| `GenericForeignKey` | `Select` of the content types, then one `Select` per model by `pk__in` | the relation's cache; `None` for a missing row |
+| `GenericForeignKey` | the content types [`content_types`](./models#adorm-contenttypes) has not cached (a `Get` for one, a `Select` for several), then one `Select` per model by `pk__in` | the relation's cache; `None` for a missing row |
 
 Each relation on a path is read once for all the instances of its level, and the rows of a generic foreign key, of
 several models, continue on each model's relation of the next segment. An instance whose relation is already cached
@@ -359,7 +359,8 @@ otherwise the operation runs.
 A new instance validated from `values` by the model constructor (a relation name takes an instance and sets its
 column), inserted with a `Create` operation of the fields given (the primary key only when it is not `None`). The
 instance gets the values the target returns (primary key, defaults) and is bound to `executor`. Invalid values raise
-pydantic's `ValidationError` before any operation runs.
+pydantic's `ValidationError` before any operation runs. A [generic foreign key](./models#generic-assignment) keyword
+whose content type is not cached has it read on `executor` first.
 
 When the query carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), the
 operation carries it too and the values that are not fields go along, so the target manager's `create()` receives
@@ -370,6 +371,7 @@ values of the instance.
 ```python
 member = await Member.objects.create(name="Ana", club=club)
 member.pk          # set by the database
+line = await InvoiceLine.objects.create(invoice_id=1, item=membership, description="Fee", unit_price=120)
 reader = await Reader.objects.create(name="Ann", username="ann")   # Create(..., manager="objects")
 ```
 
@@ -381,7 +383,8 @@ operation and returns them as a list, in order. Each instance writes its loaded 
 (`model_fields_set`; a primary key of `None` is left to the target), so the instances may set different fields and
 take the target's defaults for the rest. After the operation each instance has the values the target set, such as a
 generated primary key, and is bound to `executor`; a failing operation leaves the instances unchanged. As Django's
-`bulk_create()`, it calls no `save()` and sends no signals.
+`bulk_create()`, it calls no `save()` and sends no signals. The content types that
+[generic foreign key assignments](./models#generic-assignment) left unset are read on `executor` first.
 
 - `batch_size`: the most rows one statement inserts. The statements of one call run in one transaction, or in the
   open transaction without a savepoint of their own: a failing row inserts none of the rows.
@@ -441,7 +444,8 @@ has one.
 #### `async get_or_create(defaults=None, **lookups)`
 
 The instance matching `lookups`, or a new one from the lookups without `__` and `defaults`, with a `GetOrCreate`
-operation. Returns `(instance, created)`.
+operation. Returns `(instance, created)`. A [generic foreign key](./models#generic-assignment) in `defaults` takes a
+stored instance and stands for both of its fields; its content type id is taken on the query set's executor first.
 
 ```python
 member, created = await Member.objects.get_or_create(name="Ana", defaults={"fee": 5})
@@ -451,7 +455,8 @@ member, created = await Member.objects.get_or_create(name="Ana", defaults={"fee"
 
 Set `defaults` on the instance matching `lookups`, or create one from the lookups without `__` and
 `create_defaults` (`defaults` when `create_defaults` is `None`), with an `UpdateOrCreate` operation. Returns
-`(instance, created)`; the instance has the row as stored.
+`(instance, created)`; the instance has the row as stored. A [generic foreign key](./models#generic-assignment) in
+`defaults` or `create_defaults` takes a stored instance, as for `get_or_create()`.
 
 ```python
 member, created = await Member.objects.update_or_create(

@@ -9,13 +9,13 @@ from adorm.models.base import (
     ModelState,
     set_executor_resolver,
 )
+from adorm.models.contenttypes import CONTENT_TYPE_MODEL, content_types, ContentTypes, natural_key
 from adorm.models.inheritance import parent_link
 from adorm.models.managers import driver_method, driver_methods, DriverMethod, find_driver_method, Manager
 from adorm.models.meta import ModelMeta
 from adorm.models.prefetch import GenericPrefetch, Prefetch, prefetch_related_objects
 from adorm.models.registry import model_schema, ModelRegistry, registry
 from adorm.models.relations import (
-    CONTENT_TYPE_MODEL,
     ForeignKey,
     GenericForeignKey,
     ManyToMany,
@@ -27,6 +27,7 @@ from adorm.models.relations import (
 
 __all__ = [
     "CONTENT_TYPE_MODEL",
+    "ContentTypes",
     "DriverMethod",
     "Executor",
     "ForeignKey",
@@ -43,6 +44,7 @@ __all__ = [
     "Relation",
     "ReverseForeignKey",
     "ReverseOneToOne",
+    "content_types",
     "driver_method",
     "driver_methods",
     "find_driver_method",
@@ -50,6 +52,7 @@ __all__ = [
     "get_managers",
     "get_relations",
     "model_schema",
+    "natural_key",
     "parent_link",
     "prefetch_related_objects",
     "registry",

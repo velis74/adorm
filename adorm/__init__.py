@@ -39,6 +39,8 @@ from adorm.executor import (
     TransactionOutcome,
 )
 from adorm.models import (
+    content_types,
+    ContentTypes,
     driver_method,
     ForeignKey,
     GenericForeignKey,
@@ -104,6 +106,7 @@ __all__ = [
     "Coalesce",
     "Concat",
     "ConnectionProfile",
+    "ContentTypes",
     "Count",
     "DatabaseError",
     "DataError",
@@ -172,6 +175,7 @@ __all__ = [
     "client_base",
     "configure",
     "connection_options",
+    "content_types",
     "create_session",
     "current_session",
     "driver_method",

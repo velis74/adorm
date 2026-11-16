@@ -116,7 +116,7 @@ operation equals the original when its values already had their fields' types.
 The schema of the model `label`: `fields` maps every concrete field name (a foreign key's column field such as
 `club_id` included) to its type hint, `relations` maps every relation name (forward, reverse and many-to-many) to the
 target model's label, and `pk` names the primary key field. `orm_names` maps a field or relation name to the target
-ORM's name where the two differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none)
+ORM's name where the two differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)
 does. `methods` maps the [`MethodKey`](#adorm-schema-methodkey) of every driver method of the model's managers to
 its [`MethodSchema`](#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none); a
 [`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) encodes its arguments with

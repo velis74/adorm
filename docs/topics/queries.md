@@ -381,8 +381,8 @@ async for activity in activities:
     names = [(await attendance.member).first_name for attendance in activity.attended]
 ```
 
-A generic foreign key is prefetched with one operation per related model, after one for the content types; the
-objects of several models then continue on each model's relation of the next segment.
+A generic foreign key is prefetched with one operation per related model, after one for the content types that
+[`adorm.content_types`](/ref/models#adorm-contenttypes) has not cached; the objects of several models then continue on each model's relation of the next segment.
 [`GenericPrefetch`](/ref/queryset#adorm-genericprefetch-lookup-querysets-to-attr-none) gives a query set per model:
 
 ```python

@@ -378,6 +378,12 @@ class Driver(ABC):
         """
         return is_refusal(exc)
 
+    def database_key(self, profile: Profile) -> Any:  # noqa: ARG002 - subclasses use it
+        """A hashable value naming the database ``profile`` connects to, or ``None`` (the default) when the driver
+        cannot tell. Profiles with equal keys share what adorm caches per database (`adorm.content_types`); a profile
+        whose key is ``None`` has a cache of its own. Does no I/O."""
+        return None
+
     @abstractmethod
     async def open_connection(self, profile: Profile, emit: Emit) -> DriverConnection:
         """Open a connection for ``profile``; the connection reports events through ``emit``.

@@ -2,8 +2,9 @@
 
 A prefetch runs after the rows of a query are read, with one `adorm.operations.Select` per relation and level (two for
 a many-to-many relation: the links, then the targets; one per content type for a generic foreign key, after one for the
-content types), and one more for each further `BATCH_SIZE` keys. The operations run one after another on one executor,
-so inside a transaction they share its slot; outside one each takes a slot of its own.
+content types `adorm.content_types` has not cached), and one more for each further `BATCH_SIZE` keys. The operations
+run one after another on one executor, so inside a transaction they share its slot; outside one each takes a slot of
+its own.
 """
 
 from __future__ import annotations
@@ -473,19 +474,15 @@ def _owner_groups(pks: list[Any], targets: dict[Any, set[Any]]) -> list[list[Any
 async def _fetch_generic(
     relation: GenericForeignKey, cls: type[Model], instances: list[Model], sources: Any, executor: Executor
 ) -> list[Any]:
+    from adorm.models.contenttypes import content_types
     from adorm.models.registry import registry
-    from adorm.operations import Select
 
     pairs = [relation.values(instance) for instance in instances]
-    content_types = _unique(content_type for content_type, object_id in pairs if object_id is not None)
-    models: dict[Any, type[Model]] = {}
-    if content_types:
-        label = relation.content_type_model(cls)
-        pk = registry.get(label)._require_meta().pk if label in registry else "id"
-        for batch in _batches(content_types):
-            query = Query(label).filter(pk__in=batch).values(pk, "app_label", "model")
-            for row in await executor.execute(Select(query)):
-                models[row[pk]] = registry.get_for_content_type(row["app_label"], row["model"])
+    wanted_types = _unique(content_type for content_type, object_id in pairs if object_id is not None)
+    natural = await content_types.natural_keys(
+        wanted_types, session=executor, content_type_model=relation.content_type_model(cls)
+    )
+    models = {content_type: registry.get_for_content_type(*key) for content_type, key in natural.items()}
     wanted: dict[type[Model], list[Any]] = {}
     keys: list[Any] = []
     for content_type, object_id in pairs:

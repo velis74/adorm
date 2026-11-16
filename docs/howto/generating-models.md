@@ -188,7 +188,7 @@ it was not given to the target.
 | the reverse side of a `ForeignKey` | [`ReverseForeignKey`](/ref/models#adorm-reverseforeignkey-target-column) named after the accessor (`related_name`, `<model>_set`) |
 | the reverse side of a `OneToOneField` | [`ReverseOneToOne`](/ref/models#adorm-reverseonetoone-target-column) |
 | `ManyToManyField`, either side | [`ManyToMany`](/ref/models#adorm-manytomany-target-through-source-column-target-column) through the declared or the automatic through model |
-| `GenericForeignKey` | [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id) with the content type field and the object id field (no arguments for `content_type` and `object_id`) |
+| `GenericForeignKey` | [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true) with the content type field and the object id field (no arguments for `content_type` and `object_id`), and `for_concrete_model=False` when Django's is false |
 
 Reverse relations come only from models that are generated in the same run. A forward relation to a model that is not
 generated (or through a declared through model that is not) keeps its column and its descriptor and is reported as a
@@ -209,7 +209,8 @@ warning: auth.Permission.content_type: contenttypes.ContentType not generated, s
 ### Inheritance and proxies
 
 A multi-table inheritance child derives from its parent's generated class and declares only its own fields (the
-parent link is its primary key); a proxy model derives from the class of the model it stands for and adds no fields.
+parent link is its primary key); a proxy model derives from the class of the model it stands for, adds no fields and
+names its concrete model in `ModelMeta(..., concrete_model=...)`, which gives it its concrete model's content type.
 When the parent is not generated, the class derives from `Model` and declares every field. A parent in another app
 is imported from that app's module.
 

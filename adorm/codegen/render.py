@@ -346,6 +346,8 @@ class _ModuleRenderer:
         args.append(f"schema_hash={self.writer.value(model.schema_hash)}")
         if model.orm_names:
             args.append(f"orm_names={self.writer.value(model.orm_names)}")
+        if model.concrete_model is not None:
+            args.append(f"concrete_model={self.writer.value(model.concrete_model)}")
         return self.writer.call("_meta = ", self.imports.name("adorm", "ModelMeta"), args, INDENT)
 
     def literal_alias(self, model: ModelSpec, field: FieldSpec) -> None:
@@ -397,6 +399,8 @@ class _ModuleRenderer:
         if relation.kind == "generic_foreign_key":
             defaults = relation.ct_field == "content_type" and relation.column == "object_id"
             args = [] if defaults else [w.value(relation.ct_field), w.value(relation.column)]
+            if not relation.for_concrete_model:
+                args.append("for_concrete_model=False")
             callee = self.imports.name("adorm", _RELATION_CLASSES[relation.kind])
             return w.call(f"{relation.name} = ", callee, args, INDENT)
         args = [w.value(relation.target)]

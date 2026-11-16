@@ -410,6 +410,7 @@ def _generic_relation(field: Any) -> RelationSpec:
         content_type.related_model._meta.label,
         column=python_name(opts.get_field(field.fk_field).attname),
         ct_field=python_name(content_type.name),
+        for_concrete_model=field.for_concrete_model,
     )
 
 
@@ -815,6 +816,7 @@ def _model_spec(model: type[models.Model], hashed: str, included: Collection[str
         base=base,
         doc=_doc(model),
         managers=managers,
+        concrete_model=opts.concrete_model._meta.label if opts.proxy else None,
     )
 
 

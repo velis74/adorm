@@ -1,8 +1,9 @@
 # Model API
 
 The model base class, model identity, relation descriptors, managers and the model registry, importable from
-`adorm.models`. `Model`, `ModelMeta`, `Manager`, `driver_method` and the relation descriptors `ForeignKey`,
-`ReverseForeignKey`, `ReverseOneToOne` and `ManyToMany` are also importable from `adorm`.
+`adorm.models`. `Model`, `ModelMeta`, `Manager`, `driver_method`, the relation descriptors `ForeignKey`,
+`ReverseForeignKey`, `ReverseOneToOne`, `ManyToMany` and `GenericForeignKey`, and the content type cache
+`content_types` (`ContentTypes`) are also importable from `adorm`.
 
 ```python
 from adorm import driver_method, ForeignKey, Manager, Model, ModelMeta, ReverseOneToOne
@@ -43,7 +44,7 @@ class Member(Model):
 ### `adorm.Model`
 
 Base class of adorm models, a subclass of pydantic `BaseModel`. A model declares `_meta` (a
-[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none)), its fields as pydantic fields and its relations as [`Relation`](#adorm-models-relation-target)
+[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)), its fields as pydantic fields and its relations as [`Relation`](#adorm-models-relation-target)
 descriptors. A subclass without its own `_meta` inherits its parent's; a model without any `_meta` is abstract: it
 cannot load or save rows and its instances compare by identity.
 
@@ -163,9 +164,11 @@ executor.
 - The values written are the fields in `model_fields_set` (the loaded and the assigned ones), the primary key
   excepted. Fields the instance never set are left to the target, so its defaults apply on insert.
 - Without a primary key value the row is inserted; with one it is updated, or inserted when no row has that key.
-- `update_fields` limits the update to those fields and never inserts. A relation name stands for its column, the
-  primary key (`"pk"` or its field name) is ignored, and an empty `update_fields` saves nothing. A named field the
-  instance has but never set (a default) is written too.
+- `update_fields` limits the update to those fields and never inserts. A relation name stands for its column, a
+  generic foreign key's name for both of its fields, the primary key (`"pk"` or its field name) is ignored, and an
+  empty `update_fields` saves nothing. A named field the instance has but never set (a default) is written too.
+- A content type field of a pending [`GenericForeignKey`](#generic-assignment) assignment is resolved first, on the
+  instance's executor.
 - `force_insert` always inserts; `force_update` never inserts.
 - The values the target returns (the primary key, database defaults) are set on the instance and added to
   `model_fields_set`; the instance keeps the executor for later operations.
@@ -183,8 +186,11 @@ await member.save(update_fields=["active"])
 
 Raises `TypeError` for a string `update_fields` and a result that is not a mapping, `ValueError` for an
 `update_fields` name that is not a field, one that is deferred, and `update_fields` or `force_update` without a
-primary key value, and [`InterfaceError`](./exceptions) when no executor is available. A failed or cancelled save
-leaves the instance unchanged.
+primary key value, and [`InterfaceError`](./exceptions) when no executor is available. A pending generic foreign key
+assignment whose model has no content type row raises the content type model's `DoesNotExist`
+([`ObjectDoesNotExist`](./exceptions) when that model is not registered) before the `Save` operation. A failed or
+cancelled save leaves the instance unchanged, except for a content type field it resolved before the `Save`
+operation.
 
 #### `full_clean(*, exclude=None, validate_unique=True, validate_constraints=True)`
 
@@ -252,7 +258,7 @@ Raises `ValueError` without a primary key value and [`InterfaceError`](./excepti
 reference that forbids the delete raises `ProtectedError` or `RestrictedError` with instances of the registered
 models as its objects, as [`QuerySet.delete()`](./queryset#async-delete) does; the instance keeps its primary key.
 
-### `adorm.ModelMeta(label, pk="id", *, schema_hash=None, orm_names=None)`
+### `adorm.ModelMeta(label, pk="id", *, schema_hash=None, orm_names=None, concrete_model=None)`
 
 The identity of a model: its `label` (`"app_label.ModelName"`) and the name of its primary key field. A frozen
 dataclass; an invalid label or pk name raises `ValueError`.
@@ -265,6 +271,10 @@ dataclass; an invalid label or pk name raises `ValueError`.
   of its model bases for the fields and relations it inherits, so a multi-table inheritance child or a proxy maps an
   inherited name like its parent. It is stored read-only; a name that is not an identifier raises `ValueError`, a
   model class whose `orm_names` names no field or relation of it raises `TypeError`.
+- `concrete_model`: the label of the concrete model a proxy model stands for (Django's `concrete_model`), `None` for a
+  concrete model. [`adorm generate`](/howto/generating-models) sets it on every proxy. The content type of a proxy is
+  its concrete model's ([`natural_key()`](#adorm-models-natural-key-model-for-concrete-model-true)). An invalid label,
+  or the model's own label, raises `ValueError`.
 - `orm_name(name)`: the ORM name of the field or relation `name`, `name` itself when `orm_names` does not list it.
 
 ```python
@@ -290,6 +300,10 @@ class SignedNote(Note):
 
 
 SignedNote._meta.orm_name("json_")    # "json", inherited from Note
+
+
+class PinnedNote(Note):
+    _meta = ModelMeta("club.PinnedNote", concrete_model="club.Note")    # a proxy of Note
 ```
 
 ### `adorm.models.ModelState`
@@ -301,9 +315,10 @@ Per-instance state outside the fields, the instance's private attribute `_state`
 | `adding` | `True` until the instance is loaded or saved |
 | `executor` | the executor that loaded or last saved the instance, `None` otherwise |
 | `related` | cached related instances by relation name; the prefetched rows of a reverse or many-to-many relation; for a generic foreign key the content type, the object id and the instance they were loaded for |
+| `generic` | by generic foreign key name, the assigned instance whose content type the next write resolves, with the object id and the content type id set at assignment (`None` when it was not cached) |
 
-A copy (`copy.copy()`, `model_copy()`) gets its own state with the same executor and a copy of the cache; a deep copy
-deep-copies the cache. A pickled instance comes back without its executor.
+A copy (`copy.copy()`, `model_copy()`) gets its own state with the same executor and a copy of the cache and the
+pending assignments; a deep copy deep-copies them. A pickled instance comes back without its executor.
 
 ## Relations
 
@@ -445,25 +460,23 @@ await club.memberships.count()                    # 3, no operation
 await club.memberships.filter(active=True).count()   # a Count operation
 ```
 
-### `adorm.GenericForeignKey(ct_field="content_type", fk_field="object_id")`
+### `adorm.GenericForeignKey(ct_field="content_type", fk_field="object_id", *, for_concrete_model=True)`
 
 A relation to a row of any model (Django's `GenericForeignKey`): the content type's primary key in the content type
 field and the row's primary key in the field `fk_field`. The content type field is the `ForeignKey` named `ct_field`,
 whose column and target are used, or a field `<ct_field>_id` holding a primary key of
-[`CONTENT_TYPE_MODEL`](#adorm-models-content-type-model).
+[`CONTENT_TYPE_MODEL`](#adorm-models-content-type-model). `for_concrete_model` (a `bool`, else `TypeError`) makes an
+assigned proxy instance store its concrete model's content type, as in Django.
 
-- `await instance.rel` returns the related instance. The content type row's `app_label` and `model` name the
-  registered model ([`registry.get_for_content_type()`](#adorm-models-modelregistry)); its row with the primary key
-  in `fk_field` (converted to the primary key's type, `"7"` to `7`) is loaded with a `Get` operation on the owner's
-  executor. The content type is read with a `Get` operation (`values("app_label", "model")`), or taken from the
-  content type relation's cache (`select_related("content_type")`).
+- `await instance.rel` returns the related instance. The content type id names the registered model through
+  [`content_types.get_model()`](#adorm-contenttypes) (cached; a miss is a `Get` operation), or through the content
+  type relation's cache (`select_related("content_type")`); its row with the primary key in `fk_field` (converted to
+  the primary key's type, `"7"` to `7`) is loaded with a `Get` operation on the owner's executor.
 - The instance is cached on the owner for the values of both fields it was loaded for, and serves while they keep
   them; a field changed while a load or prefetch runs leaves the cache for the old values. A prefetch fills the
   cache.
 - Either field `None`, or no row with that primary key, gives `None`. A content type of a model that is not
   registered raises `LookupError`; reading the relation while either field is deferred raises `AttributeError`.
-- Assigning `None` sets both fields to `None`; assigning an instance raises `TypeError` (set the two fields); the
-  relation's name as a constructor argument fails validation (pydantic `ValidationError`).
 - It is not a `Relation`: query paths do not traverse it, it is not part of the
   [schema](#adorm-models-model-schema-model), and [`get_relations()`](#adorm-models-get-relations-model) leaves it out.
   A model class checks that both fields exist (`TypeError`).
@@ -484,10 +497,138 @@ line.object_id = 7                        # the next await loads again
 lines = InvoiceLine.objects.prefetch_related("item")    # one query per content type
 ```
 
+#### Assignment {#generic-assignment}
+
+Assigning an instance, as an attribute or as a constructor keyword, points the relation at it:
+
+- `fk_field` gets the instance's primary key, validated as the field's type, or `str(pk)` when the key itself does
+  not validate (an integer key in a text field).
+- The content type is pending until the owner's next write:
+  [`save()`](#save-update-fields-none-force-insert-false-force-update-false),
+  [`full_clean()`](#full-clean-exclude-none-validate-unique-true-validate-constraints-true),
+  [`create()`](./queryset#async-create-values) or [`bulk_create()`](./queryset#async-bulk-create-objs-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none).
+  The write sets the content type field to the content type id of the instance's model (its concrete model's with
+  `for_concrete_model`), taken with [`content_types.get_id()`](#adorm-contenttypes) on the executor that writes (the
+  instance's for `save()`, the query set's for `create()`; from the cache when it is there). A row written through
+  another session therefore gets that database's id.
+- Until that write the content type field holds the id [`content_types`](#adorm-contenttypes) has cached for the
+  owner's executor. When none is cached, the field is unset: reading it raises `AttributeError`, and `model_dump()`
+  and `repr()` leave it out, as they do a deferred field. `await instance.rel` gives the assigned instance without
+  an operation.
+- No content type row for the assigned model makes the write raise the content type model's `DoesNotExist`
+  ([`ObjectDoesNotExist`](./exceptions) when that model is not registered); nothing is written. A write that fails
+  or is cancelled while it resolves leaves the assignment pending and writes nothing.
+- An assignment that changes while a write resolves it (another instance or `None` assigned, a field set, a
+  concurrent write resolving it first) is resolved anew or left as it is; the write stores the pair that is current.
+- Assigning either field afterwards drops the pending content type.
+- As an attribute: an instance without a primary key value or whose key fits `fk_field` neither way raises
+  `ValueError`, a value that is not an instance of a model with `_meta` `TypeError`; `None` sets both fields to
+  `None`.
+- As a constructor or `create()` keyword, every refusal raises pydantic's `ValidationError`: a value that is not a
+  stored model instance, the relation given together with either field, and `None` for a content type or object id
+  field that is not nullable. JSON input (`model_validate_json()`) gives the two fields instead.
+- [`get_or_create()`](./queryset#async-get-or-create-defaults-none-lookups) and
+  [`update_or_create()`](./queryset#async-update-or-create-defaults-none-create-defaults-none-lookups) take the
+  relation in `defaults` and `create_defaults` and write both fields; the content type id is taken on the query
+  set's executor before the operation. The relation in their lookups raises `FieldError`, as a query path.
+
+```python
+line = await InvoiceLine.objects.create(invoice_id=1, item=membership, description="Fee", unit_price=120)
+line.content_type_id                      # the id of clubs.Membership, read once and cached
+
+line.item = activity                      # content_type_id readable at once when Activity's id is cached
+await line.save()                         # a Get of the content type when it is not cached, then the Save
+await line.save(update_fields=["item"])   # writes content_type_id and object_id
+```
+
+Methods of the descriptor:
+
+- `object_id(model, value)`: the value `fk_field` of `model` holds for the instance `value`; raises `TypeError` and
+  `ValueError` as attribute assignment does.
+- `cached_content_type(model, executor, value)`: the content type id of `value`'s model as
+  [`content_types`](#adorm-contenttypes) has it cached for `executor`, `None` when it is not cached.
+- `assigned(instance)`: the instance whose content type the next write resolves, `None` when no assignment is pending.
+- `await resolve(instance, executor)`: sets the content type field of a pending assignment with
+  [`content_types.get_id()`](#adorm-contenttypes) on `executor`; nothing when no assignment is pending.
+
 ### `adorm.models.CONTENT_TYPE_MODEL`
 
 `"contenttypes.ContentType"`: the content type model a `GenericForeignKey` reads when its content type field is not a
-`ForeignKey` of the model.
+`ForeignKey` of the model, and the default `content_type_model` of [`content_types`](#adorm-contenttypes).
+
+## Content types
+
+A content type row (Django's `ContentType`) names a model by `app_label` and `model`, the lowercased class name; a
+generic foreign key stores its primary key. The rows are created by the target (Django's `migrate`); adorm only reads
+them.
+
+### `adorm.ContentTypes`
+
+Content type ids by model and models by content type id, cached per database: Django's
+`ContentType.objects.get_for_model()` and `get_for_id()`. Every method but `clear()` takes:
+
+- `session`: the [`Session`](./sessions) (or another [executor](#adorm-models-executor)) whose database it reads, by
+  default the current session. Inside a transaction of that session it reads on the transaction's slot, also from a
+  task that inherits the context, so a lookup never waits for a second slot.
+- `content_type_model`: the label of the content type model, by default
+  [`CONTENT_TYPE_MODEL`](#adorm-models-content-type-model).
+- `for_concrete_model` (where a model is given): a proxy model uses its concrete model's content type
+  ([`natural_key()`](#adorm-models-natural-key-model-for-concrete-model-true)).
+
+The cache belongs to the database a session's profile connects to, as its driver names it
+([`Driver.database_key()`](./drivers#database-key-profile)): profiles whose drivers name the same database share it, such as per-user
+profiles that differ only in hooks or options. The Django and asyncpg drivers name the host, port and database name of
+the profile's `DATABASES` entry with its `params` applied, and none for a profile with a `connect` hook. For a profile
+whose driver names no database the cache belongs to the profile: sessions of that profile share it, and a profile that
+is replaced or unregistered starts with an empty one. A session whose profile is not registered uses the profile's
+name, any other executor the executor object. Each lookup that misses runs its own operation; concurrent lookups do not
+wait for one another, and a cancelled one leaves the others running. The Django and asyncpg drivers connect Django's
+`post_migrate` signal to `clear()` (`migrate` and `flush`, which a `TransactionTestCase` runs after each test,
+create the rows again with other ids). Thread-safe.
+
+| Method | Result |
+|---|---|
+| `await get_id(model, *, for_concrete_model=True, session=None, content_type_model=...)` | the content type id of a model class or instance: cached, or read with a `Get` operation (`app_label`, `model`) and cached |
+| `await get_for_model(model, *, for_concrete_model=True, session=None, content_type_model=...)` | the row as a new instance of the registered content type model, with the primary key, `app_label` and `model` loaded |
+| `await get_model(content_type, *, session=None, content_type_model=...)` | the registered model of a content type id |
+| `await natural_keys(content_types, *, session=None, content_type_model=...)` | `{id: (app_label, model)}` for the ids that have a row; one missing id is read with a `Get`, several with `Select` operations of up to 500 ids; `None` ids are skipped |
+| `cached_id(model, *, for_concrete_model=True, session=None, content_type_model=...)` | the cached id, `None` when it is not cached; runs nothing |
+| `clear()` | forgets every cached content type; a lookup running meanwhile does not store what it read |
+
+No content type row raises the content type model's `DoesNotExist` when that model is registered,
+[`ObjectDoesNotExist`](./exceptions) otherwise, and nothing is cached. `get_model()` of a content type whose model
+is not registered raises `LookupError`, and so does `get_for_model()` when the content type model is not registered.
+A model class or instance that is not one raises `TypeError`.
+
+```python
+from adorm import content_types
+
+type_id = await content_types.get_id(Membership)            # one Get, then cached
+await content_types.get_id(membership)                      # an instance works too, no operation
+content_types.cached_id(Membership)                         # the id, or None before the first lookup
+await content_types.get_model(type_id)                      # Membership
+row = await content_types.get_for_model(Membership)         # ContentType(id=..., app_label="clubs", model="membership")
+await content_types.get_id(Membership, session=reporting)   # the id in the database of another profile
+
+links = TaggedItem.objects.filter(content_type_id=await content_types.get_id(Location), object_id__in=ids)
+```
+
+### `adorm.content_types`
+
+The process's `ContentTypes` instance, used by generic foreign keys and prefetches.
+
+### `adorm.models.natural_key(model, *, for_concrete_model=True)`
+
+`(app_label, model)` of the content type of the model class or instance `model`: the parts of its label, the model
+name lowercased. With `for_concrete_model` a proxy gives its concrete model's key
+([`ModelMeta.concrete_model`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)).
+Raises `TypeError` for anything but a model class or instance.
+
+```python
+natural_key(Membership)                               # ("clubs", "membership")
+natural_key(PinnedNote)                               # ("club", "note")
+natural_key(PinnedNote, for_concrete_model=False)     # ("club", "pinnednote")
+```
 
 ### `adorm.models.get_generic_foreign_keys(model)`
 

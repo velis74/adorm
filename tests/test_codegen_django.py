@@ -158,9 +158,13 @@ def test_multi_table_child_of_a_parent_left_out_is_flattened():
 def test_proxy_derives_from_the_model_it_stands_for():
     model = model_spec(library.BookProxy)
     assert (model.base, model.pk, model.fields, model.relations) == ("library.Book", "isbn", (), ())
+    assert model.concrete_model == "library.Book"
     flat = model_spec(library.BookProxy, included={"library.BookProxy"})
     assert flat.base is None
+    assert flat.concrete_model == "library.Book"
     assert "title" in {field.name for field in flat.fields}
+    assert model_spec(library.Book).concrete_model is None
+    assert model_spec(library.Edition).concrete_model is None
 
 
 def test_reverse_relations_from_models_left_out_are_skipped():
@@ -183,6 +187,12 @@ def test_docstrings():
     assert model_spec(library.Tag).doc is None, "Django's generated docstring is left out"
 
 
+def test_generic_foreign_keys_keep_for_concrete_model(monkeypatch):
+    monkeypatch.setattr(library.Note._meta.get_field("item"), "for_concrete_model", False)
+    (item,) = [relation for relation in model_spec(library.Note).relations if relation.name == "item"]
+    assert not item.for_concrete_model
+
+
 def test_generic_foreign_keys_are_generated_and_generic_relations_reported():
     model = model_spec(library.Note)
     (item,) = [relation for relation in model.relations if relation.name == "item"]
@@ -190,6 +200,7 @@ def test_generic_foreign_keys_are_generated_and_generic_relations_reported():
         "generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id", ct_field="content_type"
     )
     assert not item.is_forward
+    assert item.for_concrete_model
     assert "item" not in model.orm_names
     with pytest.warns(CodegenWarning, match=r"library\.Book\.reviews: GenericRelation is not generated"):
         model_spec(library.Book)

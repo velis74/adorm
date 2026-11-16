@@ -471,3 +471,11 @@
   names after the set operation orders by the first query's column at the same position; the native PostgreSQL
   driver leaves out empty combined queries as Django does. The demo's memory driver compares the rows column by
   column by value and combines empty queries as Django compiles them.
+- Content types: `adorm.content_types` (`ContentTypes`) gives the content type id of a model (`get_id()`,
+  `get_for_model()`, `cached_id()`) and the model of an id (`get_model()`, `natural_keys()`), cached per database
+  (`Driver.database_key()`, `adorm.drivers.django.database_key()`; per profile when the driver names none) and
+  cleared on Django's `post_migrate`; `adorm.models.natural_key()`. `ModelMeta.concrete_model` names a proxy's
+  concrete model, which `adorm generate` sets. Assigning an instance to a `GenericForeignKey` (attribute,
+  constructor or `create()` keyword, `get_or_create()` and `update_or_create()` defaults) sets the object id, and the
+  next write sets the content type id read on the executor that writes; `update_fields` takes the relation's name;
+  `GenericForeignKey(for_concrete_model=...)`.

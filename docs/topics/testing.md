@@ -159,6 +159,10 @@ class RaceTests(TransactionTestCase):
 The [native PostgreSQL driver](/topics/postgresql-driver) works here as anywhere; inside a `TestCase` it raises
 `NotSupportedError`, since its own connection could neither see nor roll back the test's transaction.
 
+The test case's `flush` deletes the content type rows and Django's `post_migrate` creates them again with other ids;
+both drivers clear [`adorm.content_types`](/ref/models#adorm-contenttypes) on that signal, so a content type id read
+in one test is not used in the next.
+
 ## pytest
 
 pytest-django sets Django's test environment up, so the same holds there:

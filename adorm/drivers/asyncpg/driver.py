@@ -18,7 +18,12 @@ from django.core.exceptions import SynchronousOnlyOperation, ValidationError as 
 from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
 from adorm.drivers.asyncpg.writes import Writer, WRITES
 from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
-from adorm.drivers.django.driver import CAPABILITIES as DJANGO_CAPABILITIES, map_django_error
+from adorm.drivers.django.driver import (
+    CAPABILITIES as DJANGO_CAPABILITIES,
+    clear_content_types_on_migrate,
+    database_key,
+    map_django_error,
+)
 from adorm.drivers.django.translation import (
     aggregation,
     check_in_bulk_field,
@@ -515,6 +520,10 @@ class AsyncpgDriver(Driver):
     capabilities = CAPABILITIES
     close_timeout: float = 5.0
 
+    def database_key(self, profile: Profile) -> Any:
+        """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""
+        return database_key(profile)
+
     async def open_connection(self, profile: Profile, emit: Emit) -> AsyncpgConnection:
         """Open ``profile``'s connection: ``profile.connect(profile)`` when the profile has a ``connect`` hook (its
         result is awaited when awaitable and must be an ``asyncpg.Connection``, else `InterfaceError`), otherwise
@@ -522,9 +531,11 @@ class AsyncpgDriver(Driver):
         entry and ``OPTIONS["assume_role"]`` is assumed. An alias without a ``DATABASES`` entry raises
         `ProgrammingError` and a backend that is not PostgreSQL `NotSupportedError`, both before anything
         connects. Inside Django's ``TestCase`` (`adorm.testing.django.find_test_database()`) it raises
-        `NotSupportedError`: its connection could not see or roll back the test's transaction."""
+        `NotSupportedError`: its connection could not see or roll back the test's transaction. Connects Django's
+        ``post_migrate`` to `adorm.content_types.clear()`."""
         from adorm.testing.django import find_test_database
 
+        clear_content_types_on_migrate()
         test = await find_test_database(profile.alias)
         if test is not None and test.in_test_case:
             raise NotSupportedError(

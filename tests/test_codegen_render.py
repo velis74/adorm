@@ -146,6 +146,10 @@ def test_generic_foreign_keys_render_their_fields_unless_they_are_the_defaults()
     assert "    item = GenericForeignKey()" in lines
     assert '    owner = GenericForeignKey("owner_type", "owner_id")' in lines
     assert "from adorm import GenericForeignKey, Model, ModelMeta" in lines
+    proxied = RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id",
+                           ct_field="content_type", for_concrete_model=False)  # fmt: skip
+    source = render_module(AppSpec("shop", (model("shop.Tag", fields, (proxied,)),)), line_length=120)
+    assert "    item = GenericForeignKey(for_concrete_model=False)" in source.splitlines()
     with pytest.raises(ValueError, match="needs ct_field"):
         RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id")
 
@@ -166,6 +170,15 @@ def test_imported_names_that_clash_with_model_names_get_an_alias():
     assert "class datetime(_Model):" in lines
     assert "    born: _datetime.date" in lines
     assert '    kind: _Literal["x"]' in lines
+
+
+def test_a_proxy_names_its_concrete_model_in_its_meta():
+    proxy = model("shop.Special", base="shop.Item", concrete_model="shop.Item")
+    source = render_module(AppSpec("shop", (model("shop.Item"), proxy)), line_length=120)
+    assert (
+        '    _meta = ModelMeta("shop.Special", schema_hash="abcd", concrete_model="shop.Item")' in source.splitlines()
+    )
+    assert "concrete_model" not in source.split("class Special")[0]
 
 
 def test_bases_in_the_module_and_in_other_modules():

@@ -159,11 +159,11 @@ prefetched rows for `async for`, `count()` and `exists()`.
 
 ### Generic foreign keys
 
-A [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id) points at a
+A [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true) points at a
 row of any model: the content type field (a foreign key to Django's `ContentType`) names the model, the object id
 field holds the row's primary key. `adorm generate` writes one for every Django `GenericForeignKey`. Awaiting it
-reads the content type, finds the registered adorm model for it and loads the row; the object is cached while both
-fields keep their values. A missing row gives `None`, as in Django.
+finds the registered adorm model for the content type and loads the row; the object is cached while both fields keep
+their values. A missing row gives `None`, as in Django.
 
 ```python
 class InvoiceLine(Model):
@@ -178,10 +178,39 @@ class InvoiceLine(Model):
 line = await InvoiceLine.objects.first()
 item = await line.item                 # a Membership or an Activity
 line.item = None                       # clears content_type_id and object_id
+
+line.item = activity                   # object_id = activity.pk; content_type_id when it is cached
+await line.save()                      # reads Activity's content type id first when it is not
+line = await InvoiceLine.objects.create(invoice_id=1, item=membership, description="Fee", unit_price=120)
 ```
 
-Assigning an instance raises `TypeError`: the content type's primary key is a row of the database, so the
-application sets `content_type_id` and `object_id`. Query paths do not traverse a generic foreign key.
+Assigning an instance sets the object id at once. The content type id is a row of the database: the next `save()`,
+`full_clean()`, `create()` or `bulk_create()` takes it through [`adorm.content_types`](/ref/models#adorm-contenttypes)
+on the session that writes (from the cache when it is there). Until then `content_type_id` holds the id cached for the
+instance's session, or, when none is cached, is unset: reading it raises `AttributeError` and `model_dump()` leaves it
+out. `get_or_create()` and `update_or_create()` take an instance in `defaults` too. Details are in the
+[reference](/ref/models#generic-assignment). Query paths do not traverse a generic foreign key.
+
+### Content types
+
+[`adorm.content_types`](/ref/models#adorm-contenttypes) is adorm's `ContentType.objects.get_for_model()`: the content
+type id of a model, read once per database and cached, and the model of a content type id. A filter on the
+fields of a generic foreign key takes the id from it, without a query on every call:
+
+```python
+from adorm import content_types
+
+location_type = await content_types.get_id(Location)          # a Get the first time, then from the cache
+links = TaggedItem.objects.filter(content_type_id=location_type, object_id__in=ids)
+await content_types.get_model(location_type)                  # Location
+row = await content_types.get_for_model(Location)             # an instance of the generated ContentType model
+await content_types.get_id(LocationProxy)                     # Location's id: a proxy uses its concrete model's
+```
+
+A lookup inside a transaction reads on the transaction's slot. The rows are created by Django's `migrate`; adorm
+does not create them, and a model without a row raises `ContentType.DoesNotExist`. `migrate` and `flush` (after each
+`TransactionTestCase` test) create the rows again, and the Django and asyncpg drivers clear the cache on Django's
+`post_migrate` signal; `content_types.clear()` clears it otherwise.
 
 ### Multi-table inheritance
 

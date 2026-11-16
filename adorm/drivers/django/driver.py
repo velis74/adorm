@@ -58,6 +58,8 @@ __all__ = [
     "DjangoConnection",
     "DjangoDriver",
     "adopt_context_locals",
+    "clear_content_types_on_migrate",
+    "database_key",
     "map_django_error",
     "model_row",
 ]
@@ -720,6 +722,43 @@ _WRITES: dict[str, Callable[[str, Any], Any]] = {
 }
 
 
+def _clear_content_types(**kwargs: Any) -> None:  # noqa: ARG001 - a signal receiver takes keyword arguments
+    from adorm.models.contenttypes import content_types
+
+    content_types.clear()
+
+
+def clear_content_types_on_migrate() -> None:
+    """Connect Django's ``post_migrate`` signal to `adorm.content_types.clear()`, once per process: ``migrate`` and
+    ``flush`` (after a ``TransactionTestCase`` test) create content type rows again, with other ids."""
+    from django.db.models.signals import post_migrate
+
+    post_migrate.connect(_clear_content_types, weak=False, dispatch_uid="adorm.content_types")
+
+
+def database_key(profile: Any) -> Any:
+    """``("postgresql", host, port, name)`` of ``profile``'s ``DATABASES`` entry with its ``params`` applied; ``None``
+    for a profile with a ``connect`` hook, an alias without an entry or an entry that is not PostgreSQL."""
+    from django.core.exceptions import ImproperlyConfigured
+    from django.db import connections
+    from django.db.utils import load_backend
+
+    if profile.connect is not None:
+        return None
+    try:
+        entry = {**connections.settings[profile.alias], **profile.params}
+        if load_backend(entry["ENGINE"]).DatabaseWrapper.vendor != "postgresql":
+            return None
+    except (KeyError, ImportError, ImproperlyConfigured):
+        return None
+    key = ("postgresql", str(entry.get("HOST") or ""), str(entry.get("PORT") or ""), entry.get("NAME"))
+    try:
+        hash(key)
+    except TypeError:
+        return None
+    return key
+
+
 class DjangoDriver(ThreadedDriver):
     """Executes adorm reads and writes with Django's ORM.
 
@@ -732,11 +771,17 @@ class DjangoDriver(ThreadedDriver):
     connection_class = DjangoConnection
     capabilities = CAPABILITIES
 
+    def database_key(self, profile: Any) -> Any:
+        """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""
+        return database_key(profile)
+
     async def open_connection(self, profile: Any, emit: Any) -> ThreadedConnection:
         """Open a ``connection_class`` connection; inside a Django test, `adorm.testing.django.django_connection()`
-        chooses the connection (the shared test connection of a ``TestCase``)."""
+        chooses the connection (the shared test connection of a ``TestCase``). Connects Django's ``post_migrate`` to
+        `adorm.content_types.clear()` (`clear_content_types_on_migrate()`)."""
         from adorm.testing.django import django_connection
 
+        clear_content_types_on_migrate()
         connection = await django_connection(self, profile, emit)
         await connection.start()
         return connection

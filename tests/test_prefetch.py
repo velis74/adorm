@@ -139,13 +139,13 @@ def test_generic_foreign_key_values_and_assignment():
     assert get_generic_foreign_keys(InvoiceLine)["item"].values(line) == (4, 7)
     line.item = None
     assert (line.content_type_id, line.object_id) == (None, None)
-    with pytest.raises(TypeError, match="assign 'content_type_id' and 'object_id'"):
-        line.item = line
+    with pytest.raises(TypeError, match="item takes a model instance, not str"):
+        line.item = "line"
     deferred = InvoiceLine.from_row({"id": 1, "content_type_id": 4})
     with pytest.raises(AttributeError, match="needs 'object_id', which is deferred"):
         deferred.item  # noqa: B018 - the access raises
     with pytest.raises(ValueError, match="generic foreign key: give 'content_type_id' and 'object_id'"):
-        InvoiceLine(invoice_id=1, item=line, description="x", unit_price=1)
+        InvoiceLine.model_validate_json('{"invoice_id": 1, "item": 1, "description": "x", "unit_price": 1}')
 
 
 def test_generic_foreign_key_columns_are_fields():
@@ -379,14 +379,14 @@ async def test_generic_foreign_keys_on_the_memory_driver(db, recorded):  # noqa:
     assert (type(membership), membership.pk, membership.fee) == (Membership, 1, Decimal("120.00"))
     assert (type(await lines[1].item), (await lines[1].item).name) == (Activity, "Regatta")
     assert await lines[2].item is None
-    # a content type and an object for each line; the second await of a line reads the cache
-    assert [operation.kind for operation in recorded] == ["get"] * 6
+    # an object for each line, a content type the first time it is seen; the second await of a line reads the cache
+    assert [operation.kind for operation in recorded] == ["get"] * 5
     recorded.clear()
     prefetched = [
         line async for line in InvoiceLine.objects.order_by("id").prefetch_related(Prefetch("item", to_attr="billed"))
     ]
-    # lines, content types, memberships, activities
-    assert [operation.kind for operation in recorded] == ["select"] * 4
+    # lines, memberships, activities: the content types are cached
+    assert [operation.kind for operation in recorded] == ["select"] * 3
     assert [type(line.billed).__name__ for line in prefetched] == ["Membership", "Activity", "NoneType", "Membership"]
     generic = [
         line

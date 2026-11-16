@@ -2434,6 +2434,98 @@ async def generic_foreign_key_object():
     return type(item).__name__, item.fee, (await item.member).first_name, (await again.member).first_name
 
 
+@case("get", "lookup.exact", expected=("Membership", True, "membership", "Membership"))
+async def content_type_of_a_model_cached():
+    import demo.models.contenttypes  # noqa: F401 - registers the content type model
+
+    content_type = await adorm.content_types.get_id(Membership)
+    row = await adorm.content_types.get_for_model(Membership)
+    model = await adorm.content_types.get_model(content_type)
+    return model.__name__, row.pk == content_type, row.model, (await adorm.content_types.get_model(row.pk)).__name__
+
+
+def _django_generic_foreign_key_assignment():
+    from demo.backend.activities.models import Activity as DjangoActivity
+    from demo.backend.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    invoice = DjangoInvoice.objects.get(number="2026-0003")
+    membership = DjangoMembership.objects.order_by("id").first()
+    created = DjangoInvoiceLine.objects.create(
+        invoice=invoice, item=membership, description="Fee", unit_price=Decimal("10.00")
+    )
+    activity = DjangoActivity.objects.order_by("id").first()
+    saved = DjangoInvoiceLine(invoice=invoice, item=membership, description="Activity", unit_price=Decimal("4.00"))
+    saved.item = activity
+    saved.save()
+    first = DjangoInvoiceLine.objects.get(pk=created.pk).item
+    second = DjangoInvoiceLine.objects.get(pk=saved.pk).item
+    return type(first).__name__, first.pk == membership.pk, type(second).__name__, second.pk == activity.pk
+
+
+@case(
+    "first",
+    "get",
+    "create",
+    "save",
+    "lookup.exact",
+    expected=("Membership", True, "Activity", True),
+    django=_django_generic_foreign_key_assignment,
+)
+async def generic_foreign_key_assignment():
+    invoice = await Invoice.objects.get(number="2026-0003")
+    membership = await Membership.objects.order_by("id").first()
+    created = await InvoiceLine.objects.create(
+        invoice_id=invoice.pk, item=membership, description="Fee", unit_price=Decimal("10.00")
+    )
+    activity = await Activity.objects.order_by("id").first()
+    saved = InvoiceLine(invoice_id=invoice.pk, item=membership, description="Activity", unit_price=Decimal("4.00"))
+    saved.item = activity
+    await saved.save()
+    first = await (await InvoiceLine.objects.get(pk=created.pk)).item
+    second = await (await InvoiceLine.objects.get(pk=saved.pk)).item
+    return type(first).__name__, first.pk == membership.pk, type(second).__name__, second.pk == activity.pk
+
+
+def _django_generic_foreign_key_in_defaults():
+    from demo.backend.activities.models import Activity as DjangoActivity
+    from demo.backend.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
+    from demo.backend.clubs.models import Membership as DjangoMembership
+
+    invoice = DjangoInvoice.objects.get(number="2026-0003")
+    membership = DjangoMembership.objects.order_by("id").first()
+    activity = DjangoActivity.objects.order_by("id").first()
+    line, created = DjangoInvoiceLine.objects.get_or_create(
+        description="Defaults", defaults={"invoice": invoice, "item": membership, "unit_price": Decimal("3.00")}
+    )
+    first = DjangoInvoiceLine.objects.get(pk=line.pk).item
+    _, created_again = DjangoInvoiceLine.objects.update_or_create(description="Defaults", defaults={"item": activity})
+    second = DjangoInvoiceLine.objects.get(pk=line.pk).item
+    return created, type(first).__name__, created_again, type(second).__name__, second.pk == activity.pk
+
+
+@case(
+    "first",
+    "get",
+    "get_or_create",
+    "update_or_create",
+    "lookup.exact",
+    expected=(True, "Membership", False, "Activity", True),
+    django=_django_generic_foreign_key_in_defaults,
+)
+async def generic_foreign_key_in_defaults():
+    invoice = await Invoice.objects.get(number="2026-0003")
+    membership = await Membership.objects.order_by("id").first()
+    activity = await Activity.objects.order_by("id").first()
+    line, created = await InvoiceLine.objects.get_or_create(
+        description="Defaults", defaults={"invoice_id": invoice.pk, "item": membership, "unit_price": Decimal("3.00")}
+    )
+    first = await (await InvoiceLine.objects.get(pk=line.pk)).item
+    _, created_again = await InvoiceLine.objects.update_or_create(description="Defaults", defaults={"item": activity})
+    second = await (await InvoiceLine.objects.get(pk=line.pk)).item
+    return created, type(first).__name__, created_again, type(second).__name__, second.pk == activity.pk
+
+
 @case(
     "select",
     "lookup.in",

@@ -49,12 +49,20 @@ status = main(["generate", "--check", "--settings", "myproject.settings", "-o", 
 The models of one app, rendered as the module `<label>.py`. A label that is not an identifier, or is a keyword,
 raises `ValueError`.
 
-### `adorm.codegen.ModelSpec(label, class_name, pk, fields, relations, schema_hash, base=None, doc=None, managers=())`
+### `adorm.codegen.ModelSpec(label, class_name, pk, fields, relations, schema_hash, base=None, doc=None, managers=(), concrete_model=None)`
 
 A generated class: its label, class name, primary key field, own `fields` and `relations`, `schema_hash`, the label of
 the generated model it derives from (`base`, `None` for `Model`), its docstring and the `ManagerSpec` of every manager
-it declares (a plain `objects` is inherited from `Model` and not listed). `orm_names` gives the ORM names of its
-renamed fields and relations. Two fields, relations or managers with one name raise `ValueError`.
+it declares (a plain `objects` is inherited from `Model` and not listed). `concrete_model` is the label of a proxy's
+concrete model, rendered into its [`ModelMeta`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none).
+`orm_names` gives the ORM names of its renamed fields and relations. Two fields, relations or managers with one name
+raise `ValueError`.
+
+```python
+ModelSpec("library.BookProxy", "BookProxy", "isbn", (), (), "d4e7cbdc2a0fc320", base="library.Book",
+          concrete_model="library.Book")
+# _meta = ModelMeta("library.BookProxy", pk="isbn", schema_hash="d4e7cbdc2a0fc320", concrete_model="library.Book")
+```
 
 ### `adorm.codegen.FieldSpec(name, orm_name, type, nullable=False, default=NO_DEFAULT, default_factory=None, db_filled=False, constraints={}, description=None, primary_key=False)`
 
@@ -69,12 +77,13 @@ FieldSpec("json_", "json", TypeSpec("str"), default="", constraints={"max_length
 # json_: str = Field(default="", alias="json", max_length=20)
 ```
 
-### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False, ct_field=None)`
+### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False, ct_field=None, for_concrete_model=True)`
 
 A relation, rendered as `ForeignKey` (`kind="foreign_key"`), `ReverseForeignKey` (`"reverse_foreign_key"`),
 `ReverseOneToOne` (`"reverse_one_to_one"`), `ManyToMany` (`"many_to_many"`, with `through`, `source_column` and
 `target_column`; `reverse` for the side that did not declare it) or `GenericForeignKey` (`"generic_foreign_key"`:
-the content type foreign key `ct_field` to `target`, the object id field `column`). `is_forward` is true for a foreign
+the content type foreign key `ct_field` to `target`, the object id field `column`, and `for_concrete_model=False`
+rendered when it is false). `is_forward` is true for a foreign
 key and a declared many-to-many relation; the schema hash covers only those. A missing column, and a generic foreign
 key without `ct_field`, raise `ValueError`.
 

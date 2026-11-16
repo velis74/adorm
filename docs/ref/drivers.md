@@ -81,6 +81,21 @@ class DjangoDriver(ThreadedDriver):
         return super().is_refusal(exc) or "too many connections" in str(exc.original)
 ```
 
+#### `database_key(profile)`
+
+Returns a hashable value naming the database `profile` connects to, or `None` (the default) when the driver cannot
+tell. Profiles with equal keys share what adorm caches per database
+([`adorm.content_types`](./models#adorm-contenttypes)); a profile whose key is `None` has a cache of its own. Does no
+I/O. [`DjangoDriver`](#adorm-drivers-django-djangodriver) and
+[`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver) return
+[`adorm.drivers.django.database_key(profile)`](#adorm-drivers-django-database-key-profile).
+
+```python
+class TenantDriver(DjangoDriver):
+    def database_key(self, profile):
+        return ("tenant", profile.params["tenant"])    # every profile of a tenant shares its content type ids
+```
+
 ### `adorm.drivers.ExecutionMode`
 
 `Literal["threaded", "async"]`. `"threaded"`: each connection runs a synchronous target on its own thread.
@@ -564,6 +579,30 @@ def read():
     return translation.get_language()
 
 threading.Thread(target=context.run, args=(read,)).start()     # read() returns "sl"
+```
+
+### `adorm.drivers.django.clear_content_types_on_migrate()`
+
+Connects Django's `post_migrate` signal to [`adorm.content_types.clear()`](./models#adorm-contenttypes), once per
+process (`dispatch_uid="adorm.content_types"`): `migrate` and `flush`, which a `TransactionTestCase` runs after each
+test, create the content type rows again with other ids. `DjangoDriver.open_connection()` and
+`AsyncpgDriver.open_connection()` call it.
+
+```python
+clear_content_types_on_migrate()
+call_command("migrate")          # post_migrate: adorm.content_types forgets every cached id
+```
+
+### `adorm.drivers.django.database_key(profile)`
+
+`("postgresql", host, port, name)` of the `DATABASES` entry `profile.alias` with `profile.params` replacing its keys
+(`HOST` and `PORT` as strings, `""` when not set). `None` for a profile with a `connect` hook, an alias without an
+entry, a backend other than PostgreSQL and a `NAME` that is not hashable. The database key of `DjangoDriver` and
+`AsyncpgDriver` ([`Driver.database_key()`](#database-key-profile)).
+
+```python
+database_key(ConnectionProfile("reports", DjangoDriver(), alias="default", on_acquire=set_role))
+# ("postgresql", "localhost", "5432", "club"), the same as for the profile "default"
 ```
 
 ### `adorm.drivers.django.translation.translate(query)`

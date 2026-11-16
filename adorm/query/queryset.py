@@ -476,11 +476,14 @@ class QuerySet:
         When the query carries an ORM manager (`Query.manager`), the operation carries it too and the values that are
         not fields go along to the target manager's ``create()``: an override of it may take arguments that are not
         fields (on the Django driver; the native PostgreSQL driver refuses an override). Without one, such values stay
-        extra values of the instance.
+        extra values of the instance. A content type a generic foreign key keyword left unset is resolved on the query
+        set's executor first (`adorm.GenericForeignKey`).
         """
         from adorm.operations import Create
 
         instance = self.model(**values)
+        if instance._state.generic:
+            await instance._resolve_generic_foreign_keys(self.executor)
         stored = _stored_values(instance, self.model._require_meta().pk)
         manager = self.query.manager
         if manager is not None and instance.__pydantic_extra__:
@@ -505,7 +508,8 @@ class QuerySet:
         object that is not an instance of the model raises ``TypeError`` and an invalid ``batch_size`` ``ValueError``,
         also for no instances; no instances return ``[]`` without an operation, so the other arguments and the driver's
         checks (a multi-table inheritance child) are not applied to them. The query's ORM manager (`Query.manager`)
-        inserts the rows when it has one.
+        inserts the rows when it has one. A content type a generic foreign key assignment left unset is resolved on the
+        query set's executor first (`adorm.GenericForeignKey`).
         """
         from adorm.models.base import Model
         from adorm.operations import BulkCreate
@@ -527,6 +531,9 @@ class QuerySet:
                 raise TypeError(f"bulk_create() takes {meta.label} instances, not {instance!r}")
         if not instances:
             return instances
+        for instance in instances:
+            if instance._state.generic:
+                await instance._resolve_generic_foreign_keys(self.executor)
         operation = BulkCreate(
             meta.label,
             [_stored_values(instance, meta.pk) for instance in instances],
@@ -567,12 +574,43 @@ class QuerySet:
             raise parent_model.DoesNotExist(*exc.args) from exc
         return self._instance(row)
 
+    async def _generic_values(self, values: Mapping[str, Any]) -> dict[str, Any]:
+        """``values`` with each generic foreign key of the model (`adorm.GenericForeignKey`) replaced by its two
+        fields: for an instance, its object id and its content type id, read through `adorm.content_types` on the
+        query set's executor; for ``None``, ``None`` in both. A relation given together with either of its fields
+        raises ``ValueError``, a value that is not a stored model instance ``TypeError`` or ``ValueError`` as for
+        assignment; a missing content type row raises as `adorm.content_types.get_id()`."""
+        from adorm.models.contenttypes import content_types
+
+        model = self.model
+        values = dict(values)
+        for name, generic in model.__adorm_generic_foreign_keys__.items():
+            if name not in values:
+                continue
+            column = generic.ct_column(model)
+            for field in dict.fromkeys((column, generic.ct_field, generic.fk_field)):
+                if field in values:
+                    raise ValueError(f"give either {name} or {field}, not both")
+            value = values.pop(name)
+            if value is None:
+                values[column] = values[generic.fk_field] = None
+                continue
+            values[generic.fk_field] = generic.object_id(model, value)
+            values[column] = await content_types.get_id(
+                value,
+                for_concrete_model=generic.for_concrete_model,
+                session=self.executor,
+                content_type_model=generic.content_type_model(model),
+            )
+        return values
+
     async def get_or_create(self, defaults: Mapping[str, Any] | None = None, **lookups: Any) -> tuple[Model, bool]:
         """The instance matching ``lookups``, or a new one from the plain lookups and ``defaults`` (a
-        `GetOrCreate` operation); returns ``(instance, created)``."""
+        `GetOrCreate` operation); returns ``(instance, created)``. A generic foreign key in ``defaults`` takes an
+        instance, as for `create()`."""
         from adorm.operations import GetOrCreate
 
-        operation = GetOrCreate(self.query, lookups, defaults or {})
+        operation = GetOrCreate(self.query, lookups, await self._generic_values(defaults or {}))
         row, created = await self._run(operation)
         return self._instance(row), bool(created)
 
@@ -584,11 +622,15 @@ class QuerySet:
     ) -> tuple[Model, bool]:
         """Set ``defaults`` on the instance matching ``lookups``, or create one from the plain lookups and
         ``create_defaults`` (``defaults`` when it is ``None``), with an `UpdateOrCreate` operation; returns
-        ``(instance, created)``."""
+        ``(instance, created)``. A generic foreign key in ``defaults`` or ``create_defaults`` takes an instance, as
+        for `create()`."""
         from adorm.operations import UpdateOrCreate
 
         operation = UpdateOrCreate(
-            self.query, lookups, defaults or {}, None if create_defaults is None else create_defaults
+            self.query,
+            lookups,
+            await self._generic_values(defaults or {}),
+            None if create_defaults is None else await self._generic_values(create_defaults),
         )
         row, created = await self._run(operation)
         return self._instance(row), bool(created)

@@ -56,35 +56,53 @@ class ModelState:
     ``adding`` is ``True`` until the instance is loaded or saved; ``executor`` runs the instance's operations
     (the one that loaded or last saved it); ``related`` caches related instances by relation name, the prefetched rows
     of a reverse or many-to-many relation as a tuple; for a generic foreign key, the content type, the object id and
-    the instance loaded for them.
+    the instance loaded for them. ``generic`` holds, by relation name, the instance assigned to a generic foreign key
+    whose content type the next write resolves, with the object id and the content type id set at assignment.
     """
 
-    __slots__ = ("adding", "executor", "related")
+    __slots__ = ("adding", "executor", "generic", "related")
 
     def __init__(self) -> None:
         self.adding = True
         self.executor: Executor | None = None
         self.related: dict[str, Any] = {}
+        self.generic: dict[str, tuple[Any, Any, Any]] = {}
 
     def __copy__(self) -> ModelState:
         state = ModelState()
         state.adding, state.executor, state.related = self.adding, self.executor, dict(self.related)
+        state.generic = dict(self.generic)
         return state
 
     def __deepcopy__(self, memo: dict[int, Any]) -> ModelState:
         state = ModelState()
         state.adding, state.executor = self.adding, self.executor
         state.related = copy.deepcopy(self.related, memo)
+        state.generic = copy.deepcopy(self.generic, memo)
         return state
 
     def __getstate__(self) -> dict[str, Any]:
-        return {"adding": self.adding, "related": self.related}
+        return {"adding": self.adding, "related": self.related, "generic": self.generic}
 
     def __setstate__(self, data: dict[str, Any]) -> None:
         self.adding, self.executor, self.related = data["adding"], None, data["related"]
+        self.generic = data.get("generic", {})
 
     def __repr__(self) -> str:
         return f"ModelState(adding={self.adding!r}, related={sorted(self.related)!r})"
+
+
+def _placeholder(model: type[Model], name: str) -> Any:
+    """A value the field ``name`` of ``model`` validates: ``None``, ``0`` or ``""``."""
+    from adorm.models.inheritance import _adapter
+
+    adapter = _adapter(model, name)
+    for candidate in (None, 0, ""):
+        try:
+            return adapter.validate_python(candidate)
+        except ValueError:
+            continue
+    raise ValueError(f"{model.__name__}.{name} takes no placeholder while the content type id is not cached")
 
 
 def get_relations(model: type[Model]) -> Mapping[str, Relation]:
@@ -247,11 +265,7 @@ class Model(ModelExceptionsMixin, BaseModel):
             return handler(data)
         data = dict(data)
         cls._map_pk(data)
-        for name, generic in cls.__adorm_generic_foreign_keys__.items():
-            if name in data:
-                raise ValueError(
-                    f"{name} is a generic foreign key: give {generic.ct_column(cls)!r} and {generic.fk_field!r}"
-                )
+        generic_values = cls._generic_keywords(data, info.mode == "python")
         related: dict[str, Any] = {}
         for name, relation in cls.__adorm_relations__.items():
             if name not in data or not isinstance(relation, ForeignKey):
@@ -275,7 +289,41 @@ class Model(ModelExceptionsMixin, BaseModel):
         instance = handler(data)
         if related:
             instance._state.related.update(related)
+        for name, value in generic_values.items():
+            setattr(instance, name, value)
         return instance
+
+    @classmethod
+    def _generic_keywords(cls, data: dict[str, Any], python: bool) -> dict[str, Any]:
+        """Take the generic foreign key keywords out of ``data`` and put the values of their fields in their place; the
+        values taken, by relation name, are assigned to the validated instance. A content type field that has no
+        cached value gets a placeholder its type accepts, unset again by the assignment."""
+        taken: dict[str, Any] = {}
+        for name, generic in cls.__adorm_generic_foreign_keys__.items():
+            if name not in data:
+                continue
+            column = generic.ct_column(cls)
+            if not python:
+                raise ValueError(f"{name} is a generic foreign key: give {column!r} and {generic.fk_field!r}")
+            for field in (column, generic.fk_field):
+                if cls._field_given(data, field):
+                    raise ValueError(f"give either {name} or {field}, not both")
+            value = data.pop(name)
+            taken[name] = value
+            if value is None:
+                data[column] = data[generic.fk_field] = None
+                continue
+            try:
+                data[generic.fk_field] = generic.object_id(cls, value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(str(exc)) from None
+            executor = _resolver(cls) if _resolver is not None else None
+            content_type = generic.cached_content_type(cls, executor, value)
+            if content_type is not None:
+                data[column] = content_type
+            elif cls.__pydantic_fields__[column].is_required():
+                data[column] = _placeholder(cls, column)
+        return taken
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any], *, executor: Executor | None = None) -> Any:
@@ -315,8 +363,15 @@ class Model(ModelExceptionsMixin, BaseModel):
     if not TYPE_CHECKING:
 
         def __getattr__(self, name: str) -> Any:
-            if name in type(self).__pydantic_fields__:
-                raise AttributeError(f"{type(self).__name__}.{name} is deferred: the row was loaded without it")
+            cls = type(self)
+            if name in cls.__pydantic_fields__:
+                for relation, generic in cls.__adorm_generic_foreign_keys__.items():
+                    if generic.ct_column(cls) == name and generic.assigned(self) is not None:
+                        raise AttributeError(
+                            f"{cls.__name__}.{name} is unset until the next write: {relation} was assigned an instance "
+                            "whose content type id is not cached"
+                        )
+                raise AttributeError(f"{cls.__name__}.{name} is deferred: the row was loaded without it")
             return super().__getattr__(name)
 
     @property
@@ -373,9 +428,11 @@ class Model(ModelExceptionsMixin, BaseModel):
         The values written are the fields in ``model_fields_set`` (loaded and assigned), the primary key excepted;
         fields the instance never set are left to the target (its defaults on insert). Without a primary key value
         the row is inserted; with one it is updated, or inserted when no row has that key. ``update_fields`` limits
-        the update to those fields (a relation name stands for its column; the primary key is ignored) and never
-        inserts; an empty one saves nothing. ``force_insert`` always inserts, ``force_update`` never does. The
-        values the target returns (the primary key, defaults) are set on the instance.
+        the update to those fields (a relation name stands for its column, a generic foreign key's for both of its
+        fields; the primary key is ignored) and never inserts; an empty one saves nothing. ``force_insert`` always
+        inserts, ``force_update`` never does. The values the target returns (the primary key, defaults) are set on the
+        instance. A content type a generic foreign key assignment left unset is resolved first, on the instance's
+        executor (`GenericForeignKey`).
 
         Raises ``ValueError`` for an ``update_fields`` name that is not a field, one that is deferred, and
         ``update_fields`` or ``force_update`` without a primary key value.
@@ -385,23 +442,31 @@ class Model(ModelExceptionsMixin, BaseModel):
         meta = self._require_meta()
         cls = type(self)
         fields = cls.__pydantic_fields__
+        if self._state.generic:
+            await self._resolve_generic_foreign_keys(self._executor())
         names: tuple[str, ...] | None = None
         if update_fields is not None:
             if isinstance(update_fields, str):
                 raise TypeError("update_fields is an iterable of field names, not a string")
             resolved = []
-            for name in update_fields:
-                relation = cls.__adorm_relations__.get(name)
+            for given in update_fields:
+                relation = cls.__adorm_relations__.get(given)
+                generic = cls.__adorm_generic_foreign_keys__.get(given)
                 if isinstance(relation, ForeignKey):
-                    name = relation.column
-                elif name == "pk":
-                    name = meta.pk
-                if name not in fields:
-                    raise ValueError(f"{name!r} is not a field of {meta.label}")
-                if name not in self.__dict__:
-                    raise ValueError(f"update_fields names {name!r}, which is deferred")
-                if name != meta.pk:
-                    resolved.append(name)
+                    candidates = [relation.column]
+                elif generic is not None:
+                    candidates = [generic.ct_column(cls), generic.fk_field]
+                elif given == "pk":
+                    candidates = [meta.pk]
+                else:
+                    candidates = [given]
+                for name in candidates:
+                    if name not in fields:
+                        raise ValueError(f"{name!r} is not a field of {meta.label}")
+                    if name not in self.__dict__:
+                        raise ValueError(f"update_fields names {name!r}, which is deferred")
+                    if name != meta.pk:
+                        resolved.append(name)
             if not resolved:
                 return
             names = tuple(resolved)
@@ -432,6 +497,8 @@ class Model(ModelExceptionsMixin, BaseModel):
 
         meta = self._require_meta()
         cls = type(self)
+        if self._state.generic:
+            await self._resolve_generic_foreign_keys(self._executor())
         names: list[str] = []
         if exclude is not None:
             if isinstance(exclude, str):
@@ -485,6 +552,11 @@ class Model(ModelExceptionsMixin, BaseModel):
         if total:
             self.__dict__[meta.pk] = None
         return total, dict(counts)
+
+    async def _resolve_generic_foreign_keys(self, executor: Executor) -> None:
+        """Set the content type fields that generic foreign key assignments left unset, read on ``executor``."""
+        for name in list(self._state.generic):
+            await type(self).__adorm_generic_foreign_keys__[name].resolve(self, executor)
 
     def _stored(self, result: Any, executor: Executor) -> None:
         """Set the field values a write returned and mark the instance as stored by ``executor``."""

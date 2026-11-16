@@ -125,7 +125,7 @@ class Edition(Book):
 
 
 class BookProxy(Book):
-    _meta = ModelMeta("library.BookProxy", pk="isbn", schema_hash="d4e7cbdc2a0fc320")
+    _meta = ModelMeta("library.BookProxy", pk="isbn", schema_hash="d4e7cbdc2a0fc320", concrete_model="library.Book")
 
 
 class Tagging(Model):

@@ -197,8 +197,8 @@ class RelationSpec:
     ``target``; ``many_to_many``: `adorm.ManyToMany` through the model ``through``, linking ``source_column`` to
     ``target_column``; ``reverse`` marks the reverse side of a many-to-many relation declared on ``target``;
     ``generic_foreign_key``: `adorm.GenericForeignKey` with the content type in the foreign key ``ct_field`` (to
-    ``target``, the content type model) and the object id in the field ``column``. ``name`` is the Python name,
-    ``orm_name`` the ORM's.
+    ``target``, the content type model) and the object id in the field ``column``; ``for_concrete_model`` is its
+    ``for_concrete_model``. ``name`` is the Python name, ``orm_name`` the ORM's.
     """
 
     kind: RelationKind
@@ -211,6 +211,7 @@ class RelationSpec:
     target_column: str | None = None
     reverse: bool = False
     ct_field: str | None = None
+    for_concrete_model: bool = True
 
     def __post_init__(self) -> None:
         if self.kind == "generic_foreign_key" and not self.ct_field:
@@ -391,7 +392,8 @@ class ModelSpec:
     stands for), ``None`` to derive from `adorm.Model`. ``fields`` and ``relations`` are the class's own; inherited
     ones are on the base. ``managers`` are the managers the class declares; a plain ``objects`` is inherited from
     `adorm.Model` and not listed. ``schema_hash`` is `compute_schema_hash()` of the whole model, inherited fields
-    included. ``doc`` is the class docstring.
+    included. ``doc`` is the class docstring. ``concrete_model`` is the label of the concrete model of a proxy model,
+    ``None`` for a concrete model.
     """
 
     label: str
@@ -403,6 +405,7 @@ class ModelSpec:
     base: str | None = None
     doc: str | None = None
     managers: tuple[ManagerSpec, ...] = ()
+    concrete_model: str | None = None
 
     def __post_init__(self) -> None:
         names = [f.name for f in self.fields] + [r.name for r in self.relations] + [m.name for m in self.managers]

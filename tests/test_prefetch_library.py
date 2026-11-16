@@ -198,12 +198,15 @@ async def test_generic_foreign_key_loads_and_caches_the_object(library, pool, re
     assert len(recorded) == 2
     note.object_id = POEMS
     assert (await note.item).title == "Poems"
-    assert len(recorded) == 4
+    assert len(recorded) == 3, "the content type is cached"
+    book_type = note.content_type_id
     note.item = None
     assert (note.content_type_id, note.object_id) == (None, None)
     assert await note.item is None
-    with pytest.raises(TypeError, match="generic foreign key"):
-        note.item = book
+    note.item = book
+    assert (note.content_type_id, note.object_id) == (book_type, DUNE)
+    assert await note.item is book
+    assert len(recorded) == 3
 
 
 async def test_generic_foreign_key_to_a_missing_row_is_none(library, pool):  # noqa: ARG001
@@ -242,7 +245,7 @@ async def test_generic_prefetch_with_querysets_and_to_attr(library, pool, record
     recorded.clear()
     plain = [note async for note in Note.objects.order_by("object_id").prefetch_related("item")]
     assert {type(await note.item).__name__ for note in plain} == {"Book", "Reader"}
-    assert len(recorded) == 4
+    assert len(recorded) == 3, "notes, books, readers: the content types are cached"
 
 
 # in_bulk()

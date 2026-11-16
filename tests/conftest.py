@@ -9,6 +9,17 @@ import asyncpg
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _forget_content_types():
+    """Start every test with an empty content type cache, so the operations a test records do not depend on the
+    tests before it."""
+    from adorm.models.contenttypes import content_types
+
+    content_types.clear()
+    yield
+    content_types.clear()
+
+
 @pytest.fixture(scope="session")
 def database_url() -> str:
     """URL of the PostgreSQL server the suite runs against."""
