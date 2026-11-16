@@ -35,12 +35,12 @@ default pool settings, and the executor's debug switch.
 | `profiles` | a mapping of profile names to a [`ConnectionProfile`](#adorm-connectionprofile) of that name or a mapping of its keyword arguments without `name` |
 | `providers` | [profile providers](#adorm-settings-profileprovider), asked in this order |
 | `pool` | the [`PoolSettings`](#adorm-poolsettings), or a mapping of its arguments, of profiles that set none; `None` for the defaults |
-| `debug` | the executor's debug switch ([`set_debug()`](/ref/transactions)); `None` follows the running event loop's debug mode |
+| `debug` | the executor's [debug switch](/ref/transactions#debug-mode), as [`set_debug()`](/ref/transactions#adorm-executor-set-debug-value) sets it; `None` follows the running event loop's debug mode |
 
 - Every value is checked first; a `TypeError` or `ValueError` leaves the previous settings unchanged.
 - Profiles, providers and pool settings change in one step
   ([`ProfileRegistry.reset()`](#adorm-settings-profileregistry-pool-none)).
-- Without arguments it removes every profile and provider.
+- Without arguments it removes every profile and provider; without `debug` it sets the debug switch to `None`.
 - A profile with the same values as the registered one of its name keeps the registered one and its pools.
 - Routers close the pools of replaced or removed profiles, and, when `pool` changes, those of profiles without own
   pool settings.
@@ -272,7 +272,7 @@ a missing setting or `None` is an empty mapping.
 | `profiles` | as in `configure()`; a profile mapping's `connect`, `on_acquire` and `on_release` may also be import paths. Missing or `None`: [`default_profiles()`](#adorm-contrib-django-default-profiles); `{}`: no profile |
 | `providers` | a list of profile providers or their import paths |
 | `pool` | the default `PoolSettings` or a mapping of its arguments |
-| `debug` | the executor's debug switch, a bool or `None` |
+| `debug` | the executor's [debug switch](/ref/transactions#debug-mode), a bool or `None`; missing: `None` |
 
 Import paths have the form `"package.module.name"` or `"package.module:name"` and are imported in `ready()`, after the
 models are loaded. A profile's driver given by import path stays a path in the profile; `ready()` imports it to check

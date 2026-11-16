@@ -252,6 +252,19 @@ naming the tasks that ran operations in it, or in its savepoints, and are still 
 
 ## Debug mode
 
+The executor's debug checks run when its debug switch is on. The switch is set by:
+
+- [`adorm.configure(debug=...)`](/ref/settings#adorm-configure-profiles-none-providers-pool-none-debug-none);
+- the `debug` key of the [`ADORM`](/ref/settings#adorm) Django setting, which the
+  [Django app](/ref/settings#django-app) passes to `adorm.configure()` on `django.setup()` and when a test overrides
+  `ADORM`;
+- [`set_debug()`](#adorm-executor-set-debug-value).
+
+`True` turns the checks on and `False` off. `None` makes them follow the running event loop's debug mode
+(`asyncio.run(..., debug=True)`, `loop.set_debug(True)` or `PYTHONASYNCIODEBUG=1`); it is the value before the
+switch is set. Every `adorm.configure()` call sets the switch, to `None` when `debug` is not given; the value set last
+applies.
+
 ### `adorm.executor.set_debug(value)`
 
 Turns the executor's debug checks on (`True`) or off (`False`); `None` makes them follow the running event loop's
@@ -265,5 +278,5 @@ set_debug(True)
 
 ### `adorm.executor.debug_enabled()`
 
-Whether the executor's debug checks run: the value set with `set_debug()`, or else `loop.get_debug()` of the running
-event loop (`False` outside one).
+Whether the executor's debug checks run: the debug switch when it is `True` or `False`, or else `loop.get_debug()` of
+the running event loop (`False` outside one).
