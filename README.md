@@ -49,7 +49,6 @@ uv run python demo.py
 The documentation site is in `docs/` (VitePress, published on docs.velis.si):
 
 ```bash
-cd docs
 npm install
 npm run docs:dev
 ```
