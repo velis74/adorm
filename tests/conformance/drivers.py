@@ -55,6 +55,10 @@ class Blocker:
     async def terminate(self, waiter: Any) -> None:
         raise NotImplementedError
 
+    def holder_pid(self) -> int:
+        """The database session that holds what ``blocked()`` waits for, as `BackendActivity.blocking_pids` names it."""
+        raise NotImplementedError
+
     async def open_transactions(self) -> int:
         """How many connections other than the blocker's are in an open transaction, with or without a statement."""
         return 0
@@ -120,6 +124,9 @@ class TableLock(Blocker):
         _, monitor = await self._connections()
         await monitor.execute("SELECT pg_terminate_backend($1)", waiter)
 
+    def holder_pid(self) -> int:
+        return self.holder.get_server_pid()  # type: ignore[union-attr]
+
     async def open_transactions(self) -> int:
         holder, monitor = await self._connections()
         return await monitor.fetchval(
@@ -174,6 +181,9 @@ class RowLock(Blocker):
 
     def blocked(self, slug: str) -> Awaitable[Any]:
         return Club.objects.filter(slug=slug).update(city="Blocked")
+
+    def holder_pid(self) -> int:
+        return self.connection.number  # type: ignore[union-attr]
 
     async def open_transactions(self) -> int:
         connections = [connection for connection in self.driver.connections if connection is not self.connection]

@@ -41,6 +41,7 @@ import operator
 import re
 import types
 import typing
+import weakref
 
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -48,7 +49,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
-from adorm.drivers import Capabilities, Driver, DriverConnection
+from adorm.drivers import BackendActivity, Capabilities, DatabaseMonitor, Driver, DriverConnection
 from adorm.events import Emit
 from adorm.exceptions import (
     DatabaseError,
@@ -91,6 +92,7 @@ __all__ = [
     "MemoryConnection",
     "MemoryDatabase",
     "MemoryDriver",
+    "MemoryMonitor",
     "TraceEntry",
     "django_tables",
     "on_acquire",
@@ -518,6 +520,11 @@ class MemoryConnection(DriverConnection):
 
     def __repr__(self) -> str:
         return f"<MemoryConnection {self.number}>"
+
+    @property
+    def backend_pid(self) -> int:
+        """``number``."""
+        return self.number
 
     @property
     def in_transaction(self) -> bool:
@@ -1016,11 +1023,41 @@ class MemoryDriver(Driver):
     def __init__(self, database: MemoryDatabase | None = None) -> None:
         self.database = DATABASE if database is None else database
         self._numbers = itertools.count(1)
+        self._open: weakref.WeakValueDictionary[int, MemoryConnection] = weakref.WeakValueDictionary()
 
     async def open_connection(self, profile: Any, emit: Emit) -> MemoryConnection:
         if getattr(profile, "connect", None) is not None:
             raise InterfaceError("the memory driver opens no target connection; the profile's connect is refused")
-        return MemoryConnection(self, emit, next(self._numbers))
+        connection = MemoryConnection(self, emit, next(self._numbers))
+        self._open[connection.number] = connection
+        return connection
+
+    async def open_monitor(self, profile: Any) -> MemoryMonitor:  # noqa: ARG002 - one database for every profile
+        return MemoryMonitor(self)
+
+
+class MemoryMonitor(DatabaseMonitor):
+    """Reports the connections of a `MemoryDriver` by number; one waiting for a row lock has ``wait_event_type``
+    ``"Lock"`` and the lock's holder in ``blocking_pids``."""
+
+    def __init__(self, driver: MemoryDriver) -> None:
+        self.driver = driver
+
+    async def activity(self, pids: Iterable[int]) -> dict[int, BackendActivity]:
+        found: dict[int, BackendActivity] = {}
+        for pid in pids:
+            connection = self.driver._open.get(pid)
+            if connection is None or connection.closed:
+                continue
+            waiting = self.driver.database.waiters.get(connection)
+            if waiting is None:
+                found[pid] = BackendActivity(pid)
+            else:
+                found[pid] = BackendActivity(pid, "active", "Lock", "tuple", (waiting[0].number,))
+        return found
+
+    async def close(self) -> None:
+        pass
 
 
 def on_acquire(connection: MemoryConnection, profile: Any, session: Any) -> None:  # noqa: ARG001 - hook signature

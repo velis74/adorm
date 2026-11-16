@@ -40,8 +40,9 @@ from adorm import (
     TransactionOverlapError,
 )
 from adorm.drivers.asyncpg import AsyncpgDriver
-from adorm.drivers.django import DjangoConnection, DjangoDriver
+from adorm.drivers.django import backend_pid, DjangoConnection, DjangoDriver
 from adorm.executor import CloseReason, Pool, Router, set_runner
+from adorm.testing import running_operations, wait_for_lock, wait_for_operation
 from adorm.testing.django import (
     find_test_database,
     in_test_environment,
@@ -416,6 +417,60 @@ class SharedConnectionTests(TestCase):
             assert await create_session("default", "after").bind(Reader).count() == 0
             assert await tag_names() == ["after-0", "after-1", "after-2", "seed"]
 
+    async def test_a_statement_waiting_for_a_lock_on_the_shared_connection_is_reported(self):
+        test_pid = await sync_to_async(lambda: backend_pid(wrapper_of_test()))()
+        async with executor() as pool, outside() as holder:
+            for _ in REPEAT:
+                lock = holder.transaction()
+                await lock.start()
+                await holder.execute("LOCK TABLE library_reader IN ACCESS EXCLUSIVE MODE")
+                try:
+                    blocked = asyncio.create_task(create_session("default", "blocked").bind(Reader).count())
+                    assert (await wait_for_operation(blocked)).sender is blocked
+                    wait = await wait_for_lock(blocked)
+                    assert wait.running.sender is blocked
+                    assert wait.running.backend_pid == wait.activity.pid == test_pid
+                    assert wait.blocking_pids == (holder.get_server_pid(),)
+                    blocked.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await blocked
+                finally:
+                    await lock.rollback()
+            assert pool.in_use == 0
+            await tags().create(name="after")
+            assert await tag_names() == ["after", "seed"]
+
+    async def test_a_statement_waiting_for_the_shared_connection_is_not_reported_as_in_the_database(self):
+        async with executor() as pool, outside() as holder:
+            for _ in REPEAT:
+                lock = holder.transaction()
+                await lock.start()
+                await holder.execute("LOCK TABLE library_reader IN ACCESS EXCLUSIVE MODE")
+                try:
+                    blocked = asyncio.create_task(create_session("default", "blocked").bind(Reader).count())
+                    await wait_for_lock(blocked)
+                    queued = asyncio.create_task(tags(create_session("default", "queued")).count())
+                    while not running_operations(queued):
+                        await asyncio.sleep(0.001)
+                    [running] = running_operations(queued)
+                    assert not running.in_session
+                    assert not running.reached_session
+                    # The blocked statement holds the test connection; the queued one only waits for it.
+                    with pytest.raises(TimeoutError):
+                        await wait_for_operation(queued, timeout=0.2)
+                    with pytest.raises(TimeoutError):
+                        await wait_for_lock(queued, timeout=0.2)
+                    # Cancelled, the blocked statement's savepoint and its table lock are rolled back.
+                    blocked.cancel()
+                    with pytest.raises(asyncio.CancelledError):
+                        await blocked
+                    assert await queued == 1
+                    assert running.reached_session
+                    assert not running.running
+                finally:
+                    await lock.rollback()
+            assert pool.in_use == 0
+
     async def test_connection_options_do_not_leak_between_slots(self):
         seen = ShowingConnection.seen = {}
 
@@ -689,6 +744,51 @@ class OwnConnectionsTests(TransactionTestCase):
                 assert slot.connection.db.settings_dict["NAME"] == wrapper.settings_dict["NAME"]
         expected = sorted(f"{n}-{i}" for n in ("first", "second") for i in REPEAT)
         assert await committed_names() == expected
+
+    async def test_a_flow_waiting_for_a_row_lock_is_reported_on_both_drivers(self):
+        first, second = create_session("default", "holder"), create_session("default", "renamer")
+        for driver in (DjangoDriver(), AsyncpgDriver()):
+            async with executor(driver=driver) as pool:
+                tag = await tags().create(name=f"tag-{driver.name}")
+                for i in REPEAT:
+                    holding, release = asyncio.Event(), asyncio.Event()
+                    holder_pids = []
+
+                    async def hold(holding=holding, release=release, holder_pids=holder_pids, pk=tag.pk, pool=pool):
+                        async with first.atomic():
+                            await tags(first).select_for_update().get(pk=pk)
+                            lease = next(lease for lease in pool.leases() if lease.session is first)
+                            holder_pids.append(lease.slot.connection.backend_pid)
+                            holding.set()
+                            await release.wait()
+
+                    async def rename(i=i, pk=tag.pk, name=driver.name):
+                        async with second.atomic():
+                            row = await tags(second).select_for_update().get(pk=pk)
+                            row.name = f"{name}-{i}"
+                            await row.save()
+
+                    holder = asyncio.create_task(hold())
+                    await holding.wait()
+                    renamer = asyncio.create_task(rename())
+                    wait = await wait_for_lock(renamer)
+                    assert wait.running.sender is renamer
+                    assert wait.running.session is second
+                    assert wait.blocking_pids == tuple(holder_pids)
+                    if i % 2:
+                        renamer.cancel()
+                        with pytest.raises(asyncio.CancelledError):
+                            await renamer
+                        assert pool.in_use == 1  # the holder's slot only
+                        release.set()
+                        await holder
+                    else:
+                        release.set()
+                        await holder
+                        await renamer
+                    expected = f"{driver.name}-{i - i % 2}"
+                    assert (await tags().get(pk=tag.pk)).name == expected
+                assert pool.in_use == 0
 
     async def test_the_native_postgresql_driver_runs(self):
         async with executor(driver=AsyncpgDriver()):

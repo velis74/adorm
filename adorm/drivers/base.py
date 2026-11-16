@@ -27,7 +27,9 @@ from adorm.events import Emit, Event
 from adorm.exceptions import InterfaceError, NotSupportedError, OperationalError, wrap_driver_error
 
 __all__ = [
+    "BackendActivity",
     "Capabilities",
+    "DatabaseMonitor",
     "Driver",
     "DriverConnection",
     "ExecutionMode",
@@ -331,6 +333,24 @@ class DriverConnection(ABC):
         """Return the adorm exception for ``exc``, raised by the target. Defaults to `wrap_driver_error`."""
         return wrap_driver_error(exc)
 
+    @property
+    def backend_pid(self) -> int | None:
+        """The process id of the connection's session on the database server (PostgreSQL's ``pg_backend_pid()``), as
+        `DatabaseMonitor.activity()` takes it; ``None`` (the default) when the driver does not know it. Does no I/O."""
+        return None
+
+    @property
+    def holds_session(self) -> bool:
+        """Whether the running call has the connection's database session now: false while it waits for a session it
+        shares with other connections. ``True`` by default. Does no I/O; callable from any thread."""
+        return True
+
+    @property
+    def session_holds(self) -> int:
+        """How many times the connection has taken a database session it shares with other connections; ``0`` (the
+        default) for a connection with a session of its own. Callable from any thread."""
+        return 0
+
     def is_connection_lost(self, exc: BaseException) -> bool:
         """Whether ``exc``, a mapped adorm exception, leaves this connection unusable.
 
@@ -390,6 +410,54 @@ class Driver(ABC):
 
         When ``profile.connect`` is set, the driver opens the target's connection with it instead of its default.
         """
+
+    async def open_monitor(self, profile: Profile) -> DatabaseMonitor:  # noqa: ARG002 - subclasses use it
+        """Open a `DatabaseMonitor` on a connection of its own to ``profile``'s database, outside every pool. Raises
+        `NotSupportedError` unless overridden."""
+        raise NotSupportedError(f"the {self.name} driver cannot monitor database sessions")
+
+
+@dataclass(frozen=True, slots=True)
+class BackendActivity:
+    """What the database reports about one session (PostgreSQL's ``pg_stat_activity``).
+
+    ``state`` is the session's state (``"active"``, ``"idle"``, ``"idle in transaction"`` …), ``wait_event_type`` and
+    ``wait_event`` what it waits for (``"Lock"`` and ``"transactionid"`` for a row lock), ``None`` when it waits for
+    nothing; ``blocking_pids`` are the sessions holding the locks it waits for (``pg_blocking_pids()``).
+    """
+
+    pid: int
+    state: str | None = None
+    wait_event_type: str | None = None
+    wait_event: str | None = None
+    blocking_pids: tuple[int, ...] = ()
+
+    @property
+    def waiting_for_lock(self) -> bool:
+        """Whether the session waits for a heavyweight lock: a row, a table, a transaction id, an advisory lock."""
+        return self.wait_event_type == "Lock"
+
+
+class DatabaseMonitor(ABC):
+    """A connection of its own that reads what the database reports about other sessions (`Driver.open_monitor()`).
+
+    Used from one event loop; an ``async with`` block closes it.
+    """
+
+    @abstractmethod
+    async def activity(self, pids: Iterable[int]) -> dict[int, BackendActivity]:
+        """The `BackendActivity` of each session in ``pids`` (`DriverConnection.backend_pid` values), read now; a pid
+        without a session is left out."""
+
+    @abstractmethod
+    async def close(self) -> None:
+        """Close the monitor's connection. Logs errors instead of raising them; a second call does nothing."""
+
+    async def __aenter__(self) -> DatabaseMonitor:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.close()
 
 
 class _State(enum.Enum):

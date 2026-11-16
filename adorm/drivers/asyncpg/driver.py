@@ -7,7 +7,7 @@ import inspect
 import logging
 import shlex
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any
 from urllib.parse import urlencode
 
@@ -17,7 +17,7 @@ from django.core.exceptions import SynchronousOnlyOperation, ValidationError as 
 
 from adorm.drivers.asyncpg.compiler import DjangoCompiler, DjangoStatement
 from adorm.drivers.asyncpg.writes import Writer, WRITES
-from adorm.drivers.base import Capabilities, Driver, DriverConnection, Profile
+from adorm.drivers.base import BackendActivity, Capabilities, DatabaseMonitor, Driver, DriverConnection, Profile
 from adorm.drivers.django.driver import (
     CAPABILITIES as DJANGO_CAPABILITIES,
     clear_content_types_on_migrate,
@@ -31,6 +31,7 @@ from adorm.drivers.django.translation import (
     translate,
     validation_error,
 )
+from adorm.drivers.postgresql import activity_sql, backend_activity
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.events import Emit
 from adorm.exceptions import (
@@ -51,6 +52,7 @@ __all__ = [
     "MAX_GET_RESULTS",
     "AsyncpgConnection",
     "AsyncpgDriver",
+    "AsyncpgMonitor",
     "connect_arguments",
     "server_version_num",
 ]
@@ -227,6 +229,11 @@ class AsyncpgConnection(DriverConnection):
     @property
     def target(self) -> Any:
         return self.conn
+
+    @property
+    def backend_pid(self) -> int | None:
+        """``conn.get_server_pid()``."""
+        return self.conn.get_server_pid()
 
     # Statements
 
@@ -542,6 +549,18 @@ class AsyncpgDriver(Driver):
                 f"profile {profile.name!r}: the asyncpg driver cannot run inside the transaction of Django's TestCase; "
                 "use TransactionTestCase"
             )
+        conn, compiler = await self._connect(profile)
+        connection = AsyncpgConnection(self, profile, emit, conn, compiler)
+        connection._test = test
+        return connection
+
+    async def open_monitor(self, profile: Profile) -> AsyncpgMonitor:
+        """Open an `AsyncpgMonitor` on a connection opened as `open_connection()` opens one, also inside Django's
+        ``TestCase``: it reads only ``pg_stat_activity``."""
+        conn, _compiler = await self._connect(profile)
+        return AsyncpgMonitor(conn, self.close_timeout)
+
+    async def _connect(self, profile: Profile) -> tuple[asyncpg.Connection, DjangoCompiler]:
         conn = None
         try:
             settings_dict = _settings_dict(profile)
@@ -565,9 +584,33 @@ class AsyncpgDriver(Driver):
             if mapped is exc:
                 raise
             raise mapped from exc
-        connection = AsyncpgConnection(self, profile, emit, conn, compiler)
-        connection._test = test
-        return connection
+        return conn, compiler
+
+
+class AsyncpgMonitor(DatabaseMonitor):
+    """A `DatabaseMonitor` on an ``asyncpg.Connection`` of its own (``conn``)."""
+
+    def __init__(self, conn: asyncpg.Connection, close_timeout: float = 5.0) -> None:
+        self.conn = conn
+        self.close_timeout = close_timeout
+
+    async def activity(self, pids: Iterable[int]) -> dict[int, BackendActivity]:
+        try:
+            rows = await self.conn.fetch(activity_sql("$1"), [int(pid) for pid in pids])
+        except Exception as exc:
+            mapped = map_django_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        return {activity.pid: activity for activity in (backend_activity(*row) for row in rows)}
+
+    async def close(self) -> None:
+        if self.conn.is_closed():
+            return
+        try:
+            await self.conn.close(timeout=self.close_timeout)
+        except Exception:
+            logger.exception("closing the asyncpg monitor failed")
 
 
 def server_version_num(version: Any) -> int:

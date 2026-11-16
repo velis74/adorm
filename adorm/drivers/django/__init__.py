@@ -6,11 +6,13 @@
 
 from adorm.drivers.django.driver import (
     adopt_context_locals,
+    backend_pid,
     CAPABILITIES,
     clear_content_types_on_migrate,
     database_key,
     DjangoConnection,
     DjangoDriver,
+    DjangoMonitor,
     map_django_error,
     model_row,
     READ_CAPABILITIES,
@@ -21,7 +23,9 @@ __all__ = [
     "READ_CAPABILITIES",
     "DjangoConnection",
     "DjangoDriver",
+    "DjangoMonitor",
     "adopt_context_locals",
+    "backend_pid",
     "clear_content_types_on_migrate",
     "database_key",
     "map_django_error",

@@ -577,7 +577,9 @@ does a read with `select_for_update()`; a conflicting write or locking read of a
 and checks the row again, and a wait that would close a cycle raises `OperationalError` with SQLSTATE `40P01`. With
 `nowait` a locked row raises `OperationalError` with SQLSTATE `55P03`; with `skip_locked` locked rows are left out
 before the slice applies. A locking read outside a transaction raises `TransactionManagementError`. Rolling back to a savepoint releases the locks taken after
-it. A NULL value makes a condition unknown, as in SQL, except under a negation: there a lookup on a NULL field is
+it. A connection's `backend_pid` is its number; `open_monitor()` returns a `MemoryMonitor`, which reports a connection
+waiting for a row lock with `wait_event_type` `"Lock"` and the holder's number in `blocking_pids`, so
+[`wait_for_lock()`](/ref/testing#waiting-for-the-database) works on the driver. A NULL value makes a condition unknown, as in SQL, except under a negation: there a lookup on a NULL field is
 false, so `exclude()` and `~Q()` keep the row, as in Django. A lookup, arithmetic or ordering on values that do not
 compare (a date with a datetime, text with a number, `overlap` with an expression that is not a list) raises
 `ProgrammingError` with SQLSTATE `42883`.

@@ -93,8 +93,9 @@ unsubscribe = pool.events.subscribe(
 
 ## Cancellation outcomes
 
-A cancelled request ends with a `CancelledEvent`. `started=False` means the request was still queued and never
-reached the database; `started=True` means it was cancelled in the driver connection while it ran, so part of its
+A cancelled request ends with a `CancelledEvent`. `started=False` means the request was still queued, or was
+cancelled before the slot handed it to the connection (as while its connection options were set), and never reached
+the database; `started=True` means it was cancelled in the driver connection while it ran, so part of its
 work may have reached the database and an open transaction is unusable. Whether it took effect is unknown.
 
 ```python

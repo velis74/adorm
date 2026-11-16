@@ -11,11 +11,14 @@ from adorm.executor import (
     CloseReason,
     held_leases,
     holding,
+    on_request_started,
     Pool,
     Request,
     REQUEST_METHODS,
     RequestQueue,
     Router,
+    running_requests,
+    RunningRequest,
     Slot,
     SlotLease,
 )
@@ -388,7 +391,8 @@ of the current lease; for a threaded driver each connection also has its own thr
 queued requests and those sent later fail with `InterfaceError` and the slot is no longer usable.
 
 The slot delivers to its lease's channel exactly one outcome per request: `ResultEvent`, `ErrorEvent`, or
-`CancelledEvent` for a request cancelled before it finished (`started=False` when it was still queued).
+`CancelledEvent` for a request cancelled before it finished (`started=False` when it was still queued or was cancelled
+before the slot handed it to the connection, as while its connection options were set).
 Before the outcome of a successful `commit` it delivers `CallbackEvent("on_commit")`, before that of a successful
 `rollback` `CallbackEvent("on_rollback")`. Events the connection emits go to the lease's channel, or to the pool's
 `events` bus while no lease holds the slot. The slot accepts only `CallbackEvent` and `BackendEvent` from the
@@ -456,6 +460,7 @@ await lease.call("execute", count, options={})                         # set_opt
 | `idle_since` | the event loop time (`loop.time()`) the slot became idle, `None` while it is not idle |
 | `close_reason` | the [`CloseReason`](#adorm-executor-closereason) the slot left the pool for, `None` while it is open |
 | `options` | the database options in effect by what the slot set: those set for the connection, replaced inside a transaction by those set for it; `None` stands for the database's default, unknown ones are left out |
+| `running` | the [`RunningRequest`](#adorm-executor-runningrequest) whose driver connection call runs now, `None` when none does |
 
 #### `async open()`
 
@@ -479,6 +484,58 @@ Whether the slot can serve another lease: not closed, its connection usable and 
 Stops serving and closes the connection; `close_reason` becomes `reason`. The running request, the queued ones and
 those sent later fail with `InterfaceError`; a lease holding the slot frees the pool's capacity when it is released.
 Logs errors instead of raising them; a second call does nothing.
+
+## Running requests
+
+A request runs from the moment the slot hands it to the driver connection, after setting its connection options, until
+the connection call ends, whatever ends it: a result, an error, a cancellation, the slot closing. A request cancelled
+while queued or while its options are set never runs. [`adorm.testing`](/ref/testing#waiting-for-the-database) builds
+on these to wait in tests until an operation is in the database.
+
+### `adorm.executor.RunningRequest`
+
+A frozen dataclass, compared by identity: a request whose driver connection call has started.
+
+| Member | Value |
+|---|---|
+| `request` | the [`Request`](#adorm-executor-request-method-args-request-id-options-none) |
+| `session` | the session of the lease the request was sent on |
+| `sender` | the task that sent the request (for an operation, the task that awaits it, also inside a transaction), `None` when none did |
+| `slot` | the [`Slot`](#adorm-executor-slot) it runs on |
+| `operation` | the operation of an `execute` request, `None` for `begin`, `commit` and the other methods |
+| `backend_pid` | the slot connection's [`backend_pid`](/ref/drivers#backend-pid) |
+| `running` | whether the call has not ended yet |
+| `in_session` | whether the call runs and has its database session now ([`holds_session`](/ref/drivers#holds-session-session-holds)); on a connection with a session of its own, `running` |
+| `reached_session` | whether the call has had its database session, while it runs or before it ended; always for a connection with a session of its own, and for one that shares its session only after the call took it ([`session_holds`](/ref/drivers#holds-session-session-holds)) |
+
+### `adorm.executor.running_requests()`
+
+The `RunningRequest` of every request whose driver connection call runs now on a slot of the running event loop, in
+the order they started; those of other event loops are left out. Raises `RuntimeError` outside a running event loop.
+
+```python
+task = asyncio.create_task(Member.objects.count())
+...
+[r.operation for r in running_requests() if r.sender is task]     # [Count(...)] while the count runs
+```
+
+### `adorm.executor.on_request_started(callback)`
+
+Calls `callback(running)` with the `RunningRequest` whenever the driver connection call of a request starts on a slot
+of the running event loop, and returns a function that stops it; calling that function again does nothing. The
+callback runs on the loop, in the slot's task, before the connection method runs; an exception it raises is logged on
+`adorm.executor` and the request still runs. Callbacks registered on another event loop are not called. Raises
+`RuntimeError` outside a running event loop and `TypeError` for a `callback` that is not callable.
+
+```python
+sent = []
+stop = on_request_started(lambda running: sent.append(running.operation))
+try:
+    await Member.objects.filter(active=True).update(active=False)
+finally:
+    stop()
+sent      # [Update(...)]
+```
 
 ### `adorm.executor.CloseReason`
 

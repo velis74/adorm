@@ -305,6 +305,40 @@ class RawSQLDriver(Driver):
 Cancelling the task that awaits `execute()` needs no code: the cancellation reaches asyncpg, which sends a cancel
 request to the server and waits for the statement to end.
 
+### Report database sessions
+
+[`wait_for_lock()`](/ref/testing#adorm-testing-wait-for-lock-task-none-session-none-timeout-10-0-interval-0-01) needs two
+things of a driver: the database session of each connection ([`backend_pid`](/ref/drivers#backend-pid)) and a monitor
+that reads what the database reports about sessions on a connection of its own
+([`open_monitor()`](/ref/drivers#async-open-monitor-profile)). A driver over PostgreSQL runs
+[`activity_sql()`](/ref/drivers#adorm-drivers-postgresql-activity-sql-parameter):
+
+```python
+class RawSQLConnection(DriverConnection):
+    @property
+    def backend_pid(self):
+        return self.conn.get_server_pid()
+
+
+class RawSQLMonitor(DatabaseMonitor):
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def activity(self, pids):
+        rows = await self.conn.fetch(activity_sql("$1"), list(pids))
+        return {row[0]: backend_activity(*row) for row in rows}
+
+    async def close(self):
+        await self.conn.close()
+
+
+class RawSQLDriver(Driver):
+    async def open_monitor(self, profile):
+        return RawSQLMonitor(await asyncpg.connect(profile.params["dsn"]))
+```
+
+Without them `wait_for_lock()` raises `NotSupportedError`; `wait_for_operation()` works on every driver.
+
 ## 7. Run the conformance suite
 
 The repository's [driver conformance suite](/topics/conformance) runs every bundled driver over the demo's schema and
@@ -356,6 +390,10 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
   `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).
 - `connect_sync()` or `open_connection()` uses `profile.connect` when it is set.
 - `target` returns the target's connection object, which the profile's `on_acquire` and `on_release` hooks receive.
+- `backend_pid` names the connection's database session and `open_monitor()` reads sessions on a connection of its
+  own, when the database reports lock waits.
+- A connection that shares its database session with other connections and takes it per call reports
+  `holds_session` and `session_holds` ([driver contract](/ref/drivers#holds-session-session-holds)).
 - A cancelled statement reports SQLSTATE `57014`, not a connection error. When the cancellation can leave the
   server connection with an open transaction or locks, `is_usable()` returns `False` so that the slot closes it.
 - A request method cancelled after its statement finished returns that result or raises that error, which the

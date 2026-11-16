@@ -162,6 +162,7 @@ SUBMODULES = (
     "adorm.query.query",
     "adorm.query.queryset",
     "adorm.testing.django",
+    "adorm.testing.waits",
 )
 
 

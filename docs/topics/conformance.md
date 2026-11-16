@@ -196,10 +196,24 @@ lock or a unique constraint other than the primary key run on the SQL drivers on
 
 Each driver's `Blocker` (`tests/conformance/drivers.py`) makes an operation wait without sleeping: the SQL drivers
 read clubs while another connection holds an exclusive lock on their table, the memory driver updates a club while
-another transaction holds its row lock. `open_transactions()` counts the connections other than the blocker's in
-an open transaction: on PostgreSQL every backend of the test database with a transaction start time, on the memory
-driver every open connection the driver created with a transaction. Lost connections apply to drivers with a server
+another transaction holds its row lock. `holder_pid()` names the session holding the lock: the holder connection's
+server pid on the SQL drivers, the holder connection's number on the memory driver. `open_transactions()` counts the
+connections other than the blocker's in an open transaction: on PostgreSQL every backend of the test database with a
+transaction start time, on the memory driver every open connection the driver created with a transaction. Lost connections apply to drivers with a server
 connection.
+
+## Lock waits
+
+`tests/conformance/test_lock_waits.py` runs every driver through the [test helpers](/topics/testing#waiting-until-an-operation-is-in-the-database)
+that wait until an operation is in the database:
+
+| Test | What holds |
+|---|---|
+| an operation waiting for the blocker's lock, repeated | `wait_for_lock()` reports it with the holder's session in `blocking_pids` and its own slot connection's `backend_pid`; once released it finishes, no slot stays in use and nothing runs |
+| cancelling an operation once it waits, repeated | the slot returns and the next operation runs once the lock is released |
+| an operation sent by a task inside `atomic()`, cancelled once it waits, repeated | it is reported with that task as its sender; the transaction is `ROLLED_BACK` and no slot stays in use |
+| an operation reaching the driver | `wait_for_operation()` returns it with its sender and an integer `backend_pid` |
+| a monitor reading the holder's session and an unknown pid | only the holder's session comes back, not waiting for a lock; a second `close()` does nothing |
 
 ## Running it
 

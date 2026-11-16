@@ -163,6 +163,65 @@ The test case's `flush` deletes the content type rows and Django's `post_migrate
 both drivers clear [`adorm.content_types`](/ref/models#adorm-contenttypes) on that signal, so a content type id read
 in one test is not used in the next.
 
+## Waiting until an operation is in the database
+
+A race or cancellation test needs to know that a flow's operation has reached the database, or that it waits there for
+a lock another flow holds, before it releases the lock, cancels the flow or starts a competitor.
+[`adorm.testing`](/ref/testing#waiting-for-the-database) answers both without polling the database by hand:
+
+| Helper | Returns once |
+|---|---|
+| `wait_for_operation(task)` | an operation of `task` has been sent to the database: its slot handed it to the driver connection and it has its database session |
+| `wait_for_lock(task)` | an operation of `task` waits for a lock in the database; the result names the sessions that hold it |
+| `running_operations(task)` | at once: the operations of `task` running now |
+
+`task` is the task that awaits the operation, also when it runs inside a transaction; `session=` selects by session
+instead, and without either any operation counts. An operation the flow awaits through `asyncio.gather()`, a
+`TaskGroup` or, on Python 3.11, `asyncio.wait_for()` runs in a child task and does not match the flow's task: select it
+with `session=`. Both waits raise `RuntimeError` when the task finishes first, so a
+flow that did not block at all fails the test at once, and `TimeoutError` after `timeout` seconds (default 10).
+
+```python
+from adorm.testing import wait_for_lock
+
+
+class RaceTests(TransactionTestCase):
+    async def test_a_rename_waits_for_the_row_lock_and_wins_afterwards(self):
+        holding, release = asyncio.Event(), asyncio.Event()
+
+        async def hold():
+            async with adorm.atomic():
+                await Tag.objects.select_for_update().get(pk=tag.pk)
+                holding.set()
+                await release.wait()
+
+        holder = asyncio.create_task(hold())
+        await holding.wait()
+        rename = asyncio.create_task(update_tag(tag.pk, name="renamed"))
+        wait = await wait_for_lock(rename)         # the rename's select_for_update() waits for the holder
+        assert wait.blocking_pids                  # the holder's database session
+        release.set()
+        await holder
+        assert (await rename).name == "renamed"
+
+    async def test_cancelling_a_flow_that_waits_for_a_lock_rolls_it_back(self):
+        ...
+        rename = asyncio.create_task(update_tag(tag.pk, name="renamed"))
+        await wait_for_lock(rename)
+        rename.cancel()                             # cancels the waiting statement; the transaction rolls back
+        with self.assertRaises(asyncio.CancelledError):
+            await rename
+```
+
+`wait_for_lock()` reads the database sessions of the selected operations through a monitor connection of the driver's
+own ([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)), opened for the wait and closed afterwards; the
+Django and native PostgreSQL drivers read `pg_stat_activity`. It works in a `TestCase` too, where the slots' statements
+share the test's connection: a statement waits there for a lock held by a connection of the test's own. A statement
+that waits for the shared connection while another slot's statement holds it has not reached the database: neither
+helper reports it until it holds the connection.
+Both helpers work on the demo's memory driver too; `wait_for_operation()` needs no database access and works on every
+driver.
+
 ## pytest
 
 pytest-django sets Django's test environment up, so the same holds there:

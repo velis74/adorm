@@ -5,7 +5,9 @@ connection profile names it, so importing ``adorm`` imports no ORM.
 """
 
 from adorm.drivers.base import (
+    BackendActivity,
     Capabilities,
+    DatabaseMonitor,
     Driver,
     DriverConnection,
     ExecutionMode,
@@ -18,7 +20,9 @@ from adorm.drivers.base import (
 )
 
 __all__ = [
+    "BackendActivity",
     "Capabilities",
+    "DatabaseMonitor",
     "Driver",
     "DriverConnection",
     "ExecutionMode",

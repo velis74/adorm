@@ -1,4 +1,5 @@
-"""What PostgreSQL reports about a violated constraint, read from the errors of psycopg (2 and 3) and asyncpg."""
+"""What PostgreSQL reports about a violated constraint, read from the errors of psycopg (2 and 3) and asyncpg, and about
+the sessions of a database."""
 
 from __future__ import annotations
 
@@ -6,9 +7,10 @@ import re
 
 from typing import Any
 
+from adorm.drivers.base import BackendActivity
 from adorm.exceptions import _sqlstate
 
-__all__ = ["integrity_details", "parse_key_detail", "references_key"]
+__all__ = ["activity_sql", "backend_activity", "integrity_details", "parse_key_detail", "references_key"]
 
 # The key part of PostgreSQL's detail message of a unique, foreign key or exclusion violation.
 _KEY_DETAIL = re.compile(
@@ -103,3 +105,17 @@ def integrity_details(exc: BaseException) -> dict[str, Any]:
         "values": values,
         "detail": detail,
     }
+
+
+def activity_sql(parameter: str) -> str:
+    """The query of the sessions whose pids are in the array bound to ``parameter`` (``"%s"`` for psycopg,
+    ``"$1"`` for asyncpg): one row of `backend_activity()`'s arguments per session."""
+    columns = "pid, state, wait_event_type, wait_event, pg_blocking_pids(pid)"
+    return f"SELECT {columns} FROM pg_stat_activity WHERE pid = ANY({parameter}::integer[])"  # noqa: S608
+
+
+def backend_activity(
+    pid: int, state: str | None, wait_event_type: str | None, wait_event: str | None, blocking_pids: Any
+) -> BackendActivity:
+    """The `BackendActivity` of a row of `activity_sql()`."""
+    return BackendActivity(int(pid), state, wait_event_type, wait_event, tuple(int(p) for p in blocking_pids or ()))

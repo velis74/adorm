@@ -167,6 +167,8 @@ class SharedTestConnection:
                     )
                 if self.owner is None:
                     self.owner = connection
+                    if isinstance(connection, SharedConnectionMixin):
+                        connection._holds += 1
                     return
                 self._condition.wait()
 
@@ -359,6 +361,7 @@ class SharedConnectionMixin:
         self._shared = shared
         self._test = shared.test
         self._cancel_waiting: Any = None
+        self._holds = 0
         self._overlap: TransactionOverlapError | None = None
         self._needs_rollback = False
         self._session_options: dict[str, Any] = {}
@@ -367,6 +370,16 @@ class SharedConnectionMixin:
         self._sharing = False
         self._attached = False
         self._previous: Any = None
+
+    @property
+    def holds_session(self) -> bool:
+        """Whether the running call holds the shared connection now."""
+        return self._shared.owner is self
+
+    @property
+    def session_holds(self) -> int:
+        """How many times the connection has taken the shared connection."""
+        return self._holds
 
     # The bridge
 

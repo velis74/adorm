@@ -8,6 +8,7 @@ Importing this package imports asyncpg, Django and psycopg 3.
 from adorm.drivers.asyncpg.driver import (
     AsyncpgConnection,
     AsyncpgDriver,
+    AsyncpgMonitor,
     CAPABILITIES,
     connect_arguments,
     DSN_PARAMETERS,
@@ -25,6 +26,7 @@ __all__ = [
     "MAX_GET_RESULTS",
     "AsyncpgConnection",
     "AsyncpgDriver",
+    "AsyncpgMonitor",
     "connect_arguments",
     "server_version_num",
 ]

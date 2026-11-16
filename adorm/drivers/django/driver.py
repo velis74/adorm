@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import contextlib
 import contextvars
 import logging
 import sys
 import threading
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
-from adorm.drivers.base import Capabilities, ThreadedConnection, ThreadedDriver
+from adorm.drivers.base import BackendActivity, Capabilities, DatabaseMonitor, ThreadedConnection, ThreadedDriver
 from adorm.drivers.django.translation import (
     AGGREGATES,
     aggregation,
@@ -36,7 +38,7 @@ from adorm.drivers.django.translation import (
     translate,
     validation_error,
 )
-from adorm.drivers.postgresql import integrity_details, references_key
+from adorm.drivers.postgresql import activity_sql, backend_activity, integrity_details, references_key
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.exceptions import (
     FieldError,
@@ -57,7 +59,9 @@ __all__ = [
     "READ_CAPABILITIES",
     "DjangoConnection",
     "DjangoDriver",
+    "DjangoMonitor",
     "adopt_context_locals",
+    "backend_pid",
     "clear_content_types_on_migrate",
     "database_key",
     "map_django_error",
@@ -269,6 +273,25 @@ def _transaction_failed(db: Any) -> bool:
     return status is not None and int(status) == _INERROR
 
 
+def backend_pid(db: Any) -> int | None:
+    """The server process id of the DB-API connection of Django's wrapper ``db`` (psycopg 3 or 2); ``None`` while it
+    has none."""
+    connection = db.connection
+    if connection is None:
+        return None
+    info = getattr(connection, "info", None)
+    pid = getattr(info, "backend_pid", None) if info is not None else connection.get_backend_pid()
+    return int(pid) if pid else None
+
+
+def _slot_settings(settings_dict: Any, profile: Any) -> dict[str, Any]:
+    """``settings_dict`` with ``profile.params`` applied, opened directly and kept open: no health checks, no maximum
+    age, no ``OPTIONS["pool"]``."""
+    settings = {**settings_dict, **profile.params, "CONN_HEALTH_CHECKS": False, "CONN_MAX_AGE": None}
+    settings["OPTIONS"] = {key: value for key, value in settings.get("OPTIONS", {}).items() if key != "pool"}
+    return settings
+
+
 class DjangoConnection(ThreadedConnection):
     """A Django database connection, the thread's own ``connections[profile.alias]``.
 
@@ -300,10 +323,17 @@ class DjangoConnection(ThreadedConnection):
     _savepoints: list[tuple[str, str]]
     _base_ids: tuple[Any, ...] = ()
     _test: Any = None
+    _backend_pid: int | None = None
 
     @property
     def target(self) -> Any:
         return self.db
+
+    @property
+    def backend_pid(self) -> int | None:
+        """The server process id of the wrapper's connection, read on the connection's thread when it connects and
+        before each call."""
+        return self._backend_pid
 
     @property
     def alias(self) -> str:
@@ -312,6 +342,9 @@ class DjangoConnection(ThreadedConnection):
 
     def prepare_call_sync(self) -> None:
         adopt_context_locals()
+        db = getattr(self, "db", None)
+        if db is not None:
+            self._backend_pid = backend_pid(db)
 
     def connect_sync(self) -> None:
         from django.db import connections
@@ -324,9 +357,7 @@ class DjangoConnection(ThreadedConnection):
             db.close()
         self._restore = (db.settings_dict, db.Database, db.health_check_enabled, db.close_at)
         # The slot's connection is opened directly, never taken from Django's pool, and lives until the slot closes.
-        settings = {**db.settings_dict, **self.profile.params, "CONN_HEALTH_CHECKS": False, "CONN_MAX_AGE": None}
-        settings["OPTIONS"] = {key: value for key, value in settings.get("OPTIONS", {}).items() if key != "pool"}
-        db.settings_dict = settings
+        db.settings_dict = _slot_settings(db.settings_dict, self.profile)
         connect = self.profile.connect
         if connect is not None:
             db.Database = _HookDatabase(db.Database, lambda: connect(self.profile))
@@ -335,10 +366,12 @@ class DjangoConnection(ThreadedConnection):
         # Also for a connection the thread's wrapper already had open.
         db.health_check_enabled = False
         db.close_at = None
+        self._backend_pid = backend_pid(db)
 
     def _adopt(self, db: Any) -> None:
         """Use Django's connection wrapper ``db``."""
         self.db = db
+        self._backend_pid = backend_pid(db)
         self._savepoints = []
         package = type(db).__module__.rpartition(".")[0]
         self._trusted = (*_ORM_SQL_MODULES, f"{package}.") if package else _ORM_SQL_MODULES
@@ -759,6 +792,84 @@ def database_key(profile: Any) -> Any:
     return key
 
 
+class DjangoMonitor(DatabaseMonitor):
+    """A `DatabaseMonitor` on a Django connection wrapper of its own, on a thread of its own, for ``profile``'s alias
+    with its ``params`` and ``connect`` hook applied, as `DjangoConnection` opens it. Inside a Django test it connects
+    to the test database, also inside a ``TestCase``."""
+
+    def __init__(self, profile: Any) -> None:
+        self.profile = profile
+        self._executor = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="adorm-django-monitor")
+        self._db: Any = None
+        self._closed = False
+
+    async def start(self) -> None:
+        """Open the connection on the monitor's thread; on failure close the monitor."""
+        try:
+            await self._run(self._connect_sync)
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _run(self, fn: Callable[..., Any], *args: Any) -> Any:
+        if self._closed:
+            raise InterfaceError("the Django monitor is closed")
+        future = asyncio.get_running_loop().run_in_executor(self._executor, fn, *args)
+        try:
+            return await future
+        except Exception as exc:
+            mapped = map_django_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    def _connect_sync(self) -> None:
+        from django.db import connections
+        from django.db.utils import load_backend
+
+        profile = self.profile
+        try:
+            settings = _slot_settings(connections.settings[profile.alias], profile)
+        except KeyError:
+            raise ProgrammingError(f"DATABASES has no entry {profile.alias!r} for profile {profile.name!r}") from None
+        db = load_backend(settings["ENGINE"]).DatabaseWrapper(settings, profile.alias)
+        if db.vendor != "postgresql":
+            raise NotSupportedError(f"the Django driver supports PostgreSQL databases, not {db.vendor!r}")
+        connect = profile.connect
+        if connect is not None:
+            db.Database = _HookDatabase(db.Database, lambda: connect(profile))
+        self._db = db
+        db.ensure_connection()
+
+    def _activity_sync(self, pids: list[int]) -> dict[int, BackendActivity]:
+        with self._db.cursor() as cursor:
+            cursor.execute(activity_sql("%s"), [pids])
+            rows = cursor.fetchall()
+        return {activity.pid: activity for activity in (backend_activity(*row) for row in rows)}
+
+    async def activity(self, pids: Iterable[int]) -> dict[int, BackendActivity]:
+        return await self._run(self._activity_sync, [int(pid) for pid in pids])
+
+    def _close_sync(self) -> None:
+        db, self._db = self._db, None
+        if db is not None:
+            db.close()
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        future = asyncio.get_running_loop().run_in_executor(self._executor, self._close_sync)
+        self._closed = True
+        self._executor.shutdown(wait=False)
+        try:
+            await asyncio.shield(future)
+        except asyncio.CancelledError:
+            future.add_done_callback(lambda f: f.cancelled() or f.exception())
+            raise
+        except Exception:
+            logger.exception("closing the Django monitor failed")
+
+
 class DjangoDriver(ThreadedDriver):
     """Executes adorm reads and writes with Django's ORM.
 
@@ -785,3 +896,9 @@ class DjangoDriver(ThreadedDriver):
         connection = await django_connection(self, profile, emit)
         await connection.start()
         return connection
+
+    async def open_monitor(self, profile: Any) -> DjangoMonitor:
+        """Open a `DjangoMonitor` for ``profile``."""
+        monitor = DjangoMonitor(profile)
+        await monitor.start()
+        return monitor

@@ -150,8 +150,9 @@ class ErrorEvent(Event):
 class CancelledEvent(Event):
     """The request ``request_id`` was cancelled at the client's request.
 
-    ``started`` is ``False`` when the request's call never started: it was still queued, or it was cancelled while
-    the slot set its connection options. It is ``True`` when it was cancelled in the connection while running.
+    ``started`` is ``False`` when the request's call never started: it was still queued, or it was cancelled before the
+    slot handed it to the connection, as while the slot set its connection options. It is ``True`` when it was
+    cancelled in the connection while running.
     """
 
     kind: ClassVar[str] = "cancelled"

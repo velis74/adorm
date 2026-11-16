@@ -184,6 +184,20 @@ cancels without the caller cancelling it fails with `InterfaceError`.
 `release()` waits until every queued request has run, then returns the slot. It completes even when the releasing
 task is cancelled meanwhile, so a cancelled flow does not leak its slot.
 
+A request runs from the moment the slot hands it to the driver connection, after its connection options are set,
+until the connection call ends. `slot.running` is that [`RunningRequest`](/ref/pool#adorm-executor-runningrequest):
+the request, the session, the task that sent it and the slot. [`running_requests()`](/ref/pool#adorm-executor-running-requests)
+lists those of the event loop's slots, and [`on_request_started()`](/ref/pool#adorm-executor-on-request-started-callback)
+calls a function as each one starts. On a connection that shares its database session with others, as in Django's
+`TestCase`, a running call may still wait for that session; `in_session` tells whether it has it now. The
+[test helpers](/topics/testing#waiting-until-an-operation-is-in-the-database) build on them.
+
+```python
+stop = on_request_started(lambda running: print(running.session, running.operation))
+await Member.objects.count()          # Session('default', 'default') Count(...)
+stop()
+```
+
 ## Timeouts
 
 Every acquisition has a timeout: the `timeout` argument, else the `acquire_timeout` [connection option](/topics/options)
@@ -252,7 +266,8 @@ connections are still settling (within `release_timeout`) are closed.
 
 ## Events
 
-The pool and router emit no events of their own. A slot delivers events to the
+The pool and router emit no events of their own; the start of a request's connection call reaches the functions
+registered with `on_request_started()`, not an event channel. A slot delivers events to the
 [event channel](/topics/events) of its lease:
 
 | Event | Delivered by | Where it goes |

@@ -1,12 +1,92 @@
 # Testing
 
-`adorm.testing.django` is the test mode of the [Django driver](/topics/django-driver): what lets adorm run inside
-Django's `TestCase` and `TransactionTestCase` without changes to the test classes. The [testing topic](/topics/testing)
-shows it in use. The package `adorm.testing` imports no ORM; importing `adorm.testing.django` imports Django.
+`adorm.testing` holds helpers that wait until an operation has reached the database or waits there for a lock, defined
+in `adorm.testing.waits`. `adorm.testing.django` is the test mode of the [Django driver](/topics/django-driver): what
+lets adorm run inside Django's `TestCase` and `TransactionTestCase` without changes to the test classes. The
+[testing topic](/topics/testing) shows both in use. The package `adorm.testing` imports no ORM; importing
+`adorm.testing.django` imports Django.
 
 ```python
+from adorm.testing import LockWait, running_operations, wait_for_lock, wait_for_operation
 from adorm.testing.django import find_test_database, in_test_environment
 ```
+
+## Waiting for the database
+
+The helpers select operations by the task that sent them (`task`, the task that awaits the operation, also inside a
+transaction) and by their session (`session`); without either, any operation of the running event loop counts. An
+operation awaited through `asyncio.gather()`, a `TaskGroup` or, on Python 3.11, `asyncio.wait_for()` is sent by a
+child task and matches only that task, not its parent; `session` selects it. An operation runs from the moment its
+slot hands it to the driver connection ([running requests](/ref/pool#running-requests)); `begin`, `commit` and
+savepoint calls do not count. On a connection that shares its database session with others (the shared test connection
+of Django's `TestCase`), it has reached the database only once its call holds that session
+([`RunningRequest.in_session`](/ref/pool#adorm-executor-runningrequest)).
+
+### `adorm.testing.running_operations(task=None, *, session=None)`
+
+The [`RunningRequest`](/ref/pool#adorm-executor-runningrequest) of every selected operation whose driver connection call
+runs now on a slot of the running event loop, in the order they started.
+
+```python
+assert running_operations(session=reports) == ()      # no report runs now
+```
+
+### `adorm.testing.wait_for_operation(task=None, *, session=None, timeout=10.0, interval=0.01)`
+
+A coroutine: waits until a selected operation has been sent to the database (its driver connection call has started
+and has its database session, `RunningRequest.reached_session`) and returns its `RunningRequest`, the first such of
+`running_operations()` when one runs already. A started operation that still waits for a shared session is checked
+again every `interval` seconds; one that ends without it is not returned. An operation that starts and ends while the
+helper waits is still returned; `running` tells whether it still runs. Raises `RuntimeError` when `task` finishes first (chained to
+the task's exception when it raised one) and `TimeoutError` after `timeout` seconds. Works on every driver.
+
+```python
+task = asyncio.create_task(Member.objects.filter(pk=ann.pk).update(active=False))
+running = await wait_for_operation(task)
+running.operation          # Update(...)
+task.cancel()              # cancelled once the update is in the database, not while it waits for a slot
+```
+
+### `adorm.testing.wait_for_lock(task=None, *, session=None, timeout=10.0, interval=0.01)`
+
+A coroutine: waits until a selected operation waits for a lock in the database
+([`BackendActivity.waiting_for_lock`](/ref/drivers#adorm-drivers-backendactivity)) and returns the
+[`LockWait`](#adorm-testing-lockwait). Each check reads the database sessions
+([`backend_pid`](/ref/drivers#backend-pid)) of the selected operations that run then with their database session
+(`RunningRequest.in_session`) through a
+[`DatabaseMonitor`](/ref/drivers#adorm-drivers-databasemonitor) of their pool's driver, one per pool, opened on first
+use and closed when the helper returns, raises or is cancelled. Checks repeat every `interval` seconds and whenever a
+selected operation starts. A wait read for an operation that ended, or whose connection released or took its shared
+session again, during the read is not reported: the session may already run another call.
+
+| Raises | When |
+|---|---|
+| `NotSupportedError` | the driver of a selected operation does not report its connections' sessions (`backend_pid` is `None`) or cannot open a monitor ([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)) |
+| `RuntimeError` | `task` finishes first, for example because it did not wait at all; chained to the task's exception when it raised one |
+| `TimeoutError` | no selected operation waited for a lock within `timeout` seconds |
+
+The Django and native PostgreSQL drivers report sessions and monitor them on a connection of their own (`pg_stat_activity`),
+also inside Django's `TestCase`, where the monitor's connection is not the test's.
+
+```python
+async with adorm.atomic():
+    await Account.objects.select_for_update().get(pk=1)              # holds the row lock
+    task = asyncio.create_task(transfer(1, 2, 100), context=contextvars.Context())
+    wait = await wait_for_lock(task)
+    wait.operation        # the transfer's select_for_update() read of account 1
+    wait.blocking_pids    # (pid of this transaction's session,)
+```
+
+### `adorm.testing.LockWait`
+
+A frozen dataclass: an operation waiting for a lock.
+
+| Member | Value |
+|---|---|
+| `running` | the operation's [`RunningRequest`](/ref/pool#adorm-executor-runningrequest) |
+| `activity` | its session's [`BackendActivity`](/ref/drivers#adorm-drivers-backendactivity) as the monitor read it |
+| `operation` | `running.operation` |
+| `blocking_pids` | `activity.blocking_pids`: the sessions holding the locks it waits for |
 
 ## Finding the test's connection
 
@@ -69,7 +149,7 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `test`, `wrapper` | the [`TestDatabase`](#adorm-testing-django-testdatabase) and its wrapper |
 | `owner` | the connection whose call holds the shared connection, `None` when free |
 | `transactions` | the connections with an open transaction, innermost last |
-| `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it; give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the threaded bridge reports as a cancellation |
+| `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it (counted in the connection's `session_holds`); give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the threaded bridge reports as a cancellation |
 | `hold(connection)` | a `with` block between `acquire()` and `release()` |
 | `cancel(connection, cancel)` | cancels `connection`'s running call: `cancel()` (the driver's statement cancel) while it holds the shared connection, else it ends its wait. The owner cannot change meanwhile, so a cancel never reaches another connection's statement |
 | `apply_options(desired)` | sets the connection options `desired` with `SET LOCAL` and resets the others set before (`SET LOCAL … TO DEFAULT`); only differences from what is known to be set are sent |
@@ -100,6 +180,8 @@ Makes a [`DjangoConnection`](/ref/drivers#adorm-drivers-django-djangoconnection)
 | `set_options_sync(options, local)` | records the options: the connection's own and, with `local`, the transaction's (restored by a rollback to a savepoint, dropped at the end of the transaction) |
 | `cancel_sync()` | [`SharedTestConnection.cancel()`](#adorm-testing-django-sharedtestconnection-test) |
 | `close_sync()` | rolls back an open transaction while the test runs, together with the transactions begun inside it, which raise `TransactionOverlapError` on their next call; restores the thread's previous wrapper, calls `dec_thread_sharing()` and [`detach()`](#adorm-testing-django-sharedtestconnection-test)es; the test's connection stays open |
+| `holds_session` | whether the running call holds the shared connection now (`SharedTestConnection.owner` is this connection) |
+| `session_holds` | how many times the connection has taken the shared connection |
 
 ### `adorm.testing.django.shared_connection_class(cls)`
 

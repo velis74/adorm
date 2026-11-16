@@ -96,6 +96,59 @@ class TenantDriver(DjangoDriver):
         return ("tenant", profile.params["tenant"])    # every profile of a tenant shares its content type ids
 ```
 
+#### `async open_monitor(profile)`
+
+Opens a [`DatabaseMonitor`](#adorm-drivers-databasemonitor) on a connection of its own to `profile`'s database,
+outside every pool. Raises `NotSupportedError` unless overridden. [`DjangoDriver`](#adorm-drivers-django-djangodriver)
+returns a [`DjangoMonitor`](#adorm-drivers-django-djangomonitor-profile), [`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver)
+an [`AsyncpgMonitor`](#adorm-drivers-asyncpg-asyncpgmonitor-conn-close-timeout-5-0).
+[`wait_for_lock()`](/ref/testing#adorm-testing-wait-for-lock-task-none-session-none-timeout-10-0-interval-0-01) reads
+the sessions of running operations through it.
+
+```python
+async with await driver.open_monitor(profile) as monitor:
+    activity = await monitor.activity([connection.backend_pid])
+```
+
+### `adorm.drivers.DatabaseMonitor`
+
+Abstract base class of what `Driver.open_monitor()` returns: a connection of its own that reads what the database
+reports about other sessions. Used from one event loop; an `async with` block closes it.
+
+| Method | Does |
+|---|---|
+| `async activity(pids)` | the [`BackendActivity`](#adorm-drivers-backendactivity) of each session in `pids` ([`backend_pid`](#backend-pid) values) as a dict by pid, read now; a pid without a session is left out |
+| `async close()` | closes the monitor's connection; logs errors instead of raising them; a second call does nothing |
+
+```python
+class RawSQLMonitor(DatabaseMonitor):
+    def __init__(self, conn):
+        self.conn = conn
+
+    async def activity(self, pids):
+        rows = await self.conn.fetch(activity_sql("$1"), list(pids))
+        return {row[0]: backend_activity(*row) for row in rows}
+
+    async def close(self):
+        await self.conn.close()
+```
+
+### `adorm.drivers.BackendActivity`
+
+A frozen dataclass: what the database reports about one session (PostgreSQL's `pg_stat_activity`).
+
+| Attribute | Value |
+|---|---|
+| `pid` | the session's server process id |
+| `state` | `"active"`, `"idle"`, `"idle in transaction"` …; `None` when not reported |
+| `wait_event_type`, `wait_event` | what the session waits for, such as `"Lock"` and `"transactionid"` for a row lock; `None` when it waits for nothing |
+| `blocking_pids` | a tuple of the sessions holding the locks it waits for (`pg_blocking_pids()`); empty when it waits for none |
+| `waiting_for_lock` | a property: whether `wait_event_type` is `"Lock"`, a wait for a row, a table, a transaction id or an advisory lock |
+
+```python
+BackendActivity(4711, "active", "Lock", "transactionid", (4702,)).waiting_for_lock    # True
+```
+
 ### `adorm.drivers.ExecutionMode`
 
 `Literal["threaded", "async"]`. `"threaded"`: each connection runs a synchronous target on its own thread.
@@ -225,6 +278,8 @@ The contract the slot calls:
 | `map_error(exc)` | returns the adorm exception for an exception the target raised; defaults to `wrap_driver_error(exc)` |
 | `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it. The slot closes a connection whose request failed with such an error when the lease ends, whatever `is_usable()` says |
 | `ran_custom_sql` | whether the connection ran SQL adorm did not generate ([below](#ran-custom-sql)) |
+| `backend_pid` | the process id of the connection's session on the database server ([below](#backend-pid)) |
+| `holds_session`, `session_holds` | whether the running call has a database session the connection shares with others, and how many times it has taken it ([below](#holds-session-session-holds)) |
 | `settled`, `async settle()` | whether, and until when, the connection still works for its last call after the call's outcome ([below](#settled)) |
 
 A failed check raises `NotSupportedError` before the subclass is called: `execute()` runs
@@ -260,6 +315,29 @@ class ReportsConnection(ThreadedConnection):
             return run_report(self.db, operation.name)
         ...
 ```
+
+#### `backend_pid`
+
+The process id of the connection's session on the database server (PostgreSQL's `pg_backend_pid()`), the key of
+[`DatabaseMonitor.activity()`](#adorm-drivers-databasemonitor); `None` (the default) when the driver does not know it.
+Does no I/O. The Django driver reads it on the connection's thread when it connects and before each call, the native
+PostgreSQL driver returns asyncpg's `get_server_pid()`.
+
+```python
+class RawSQLConnection(DriverConnection):
+    @property
+    def backend_pid(self):
+        return self.conn.get_server_pid()
+```
+
+#### `holds_session`, `session_holds`
+
+For a connection that shares its database session with other connections and takes it for each call, as the
+[shared test connection](/ref/testing#adorm-testing-django-sharedconnectionmixin) of Django's `TestCase` does:
+`holds_session` is whether the running call has the session now, `session_holds` how many times the connection has
+taken it. Defaults: `True` and `0`, for a connection with a session of its own. Both do no I/O and are callable from any
+thread. A call that waits for the session has not reached the database: [`adorm.testing`](/ref/testing#waiting-for-the-database)
+reports neither it nor a lock wait of its `backend_pid`, which another call's statement holds then.
 
 #### `settled`
 
@@ -474,7 +552,8 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | `set_options_sync(options, local)` | [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the wrapper, one `execute()` without parameters; nothing for no options |
 | `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
 | `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's); then the wrapper gets back the settings, DB-API module, health check flag and closing time it had before `connect_sync()` |
-| `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals) |
+| `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals), then reads `backend_pid` |
+| `backend_pid` | [`backend_pid(wrapper)`](#adorm-drivers-django-backend-pid-db), read on the connection's thread when it connects and before each call |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc) |
 
 | Write | Django call | Result |
@@ -506,6 +585,28 @@ the operation that registers it.
 false once the `TestCase` atomic blocks on the test's connection differ from those open when the connection was opened
 ([`TestDatabase.current()`](/ref/testing#adorm-testing-django-testdatabase)): a connection opened in a `TestCase` test
 after that test, one opened in another Django test while a `TestCase` transaction is open.
+
+### `adorm.drivers.django.DjangoMonitor(profile)`
+
+The [`DatabaseMonitor`](#adorm-drivers-databasemonitor) of `DjangoDriver`, opened by `open_monitor(profile)`: a Django
+connection wrapper of its own, on a thread of its own, for the `DATABASES` entry `profile.alias` with `profile.params`
+and the `connect` hook applied as `DjangoConnection.connect_sync()` applies them. Inside a Django test the entry names
+the test database, so the monitor connects there, also inside a `TestCase`, whose connection it does not share.
+The constructor opens nothing; `async start()` opens the wrapper's connection on the monitor's thread and closes the
+monitor when that fails. `open_monitor()` calls both.
+`activity(pids)` runs [`activity_sql("%s")`](#adorm-drivers-postgresql-activity-sql-parameter) on the wrapper's cursor;
+errors go through `map_django_error()`. An alias without an entry raises `ProgrammingError`, a backend other than
+PostgreSQL `NotSupportedError`.
+
+```python
+async with await DjangoDriver().open_monitor(ConnectionProfile("default", driver)) as monitor:
+    await monitor.activity([pid])
+```
+
+### `adorm.drivers.django.backend_pid(db)`
+
+The server process id of the DB-API connection under Django's wrapper `db` (psycopg 3's `info.backend_pid`, psycopg
+2's `get_backend_pid()`); `None` while the wrapper has no connection.
 
 ### `adorm.drivers.django.CAPABILITIES`
 
@@ -985,6 +1086,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 | `cancel()` | cancels the statement running when it is called, from any thread; that call raises `OperationalError` with SQLSTATE `57014`, a statement that starts later is not affected. Nothing without a running statement |
 | `is_usable()` | `False` once a connection error was raised, once a statement was cancelled before it finished, once a write was cancelled inside a transaction of its own (also right after its `BEGIN` or during its `COMMIT`) or that transaction's `ROLLBACK` failed or was cancelled, after `close()` and when asyncpg reports the connection closed |
 | `close()` | asyncpg's `close()` within the driver's `close_timeout` (asyncpg aborts the connection when it fails); logs errors, a second call does nothing |
+| `backend_pid` | asyncpg's `get_server_pid()` |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc): Django's exceptions as on the Django driver, asyncpg's by their SQLSTATE; asyncpg's `InternalClientError` (its protocol in an unexpected state, as after the server ended an idle connection) is `InterfaceError` |
 
 Each statement runs in a task of its own, so `cancel()` stops it without cancelling the caller. Cancelling the
@@ -1001,6 +1103,19 @@ await connection.savepoint("adorm_sp_1")
 await connection.execute(Create("library.Tag", {"name": "night"}))
 await connection.rollback_to_savepoint("adorm_sp_1")
 await connection.commit()
+```
+
+### `adorm.drivers.asyncpg.AsyncpgMonitor(conn, close_timeout=5.0)`
+
+The [`DatabaseMonitor`](#adorm-drivers-databasemonitor) of `AsyncpgDriver` on the `asyncpg.Connection` `conn`.
+`AsyncpgDriver.open_monitor(profile)` opens `conn` as `open_connection()` opens a connection (steps 1 to 3), also inside
+a Django `TestCase`, where it connects to the test database: it reads only `pg_stat_activity`. `activity(pids)` runs
+[`activity_sql("$1")`](#adorm-drivers-postgresql-activity-sql-parameter); errors go through `map_django_error()`.
+`close()` is asyncpg's `close()` within `close_timeout`.
+
+```python
+async with await AsyncpgDriver().open_monitor(profile) as monitor:
+    (await monitor.activity([pid]))[pid].state      # "idle in transaction"
 ```
 
 ### `adorm.drivers.asyncpg.CAPABILITIES`
@@ -1203,16 +1318,40 @@ set_options_sql({"statement_timeout": 5, "lock_timeout": None}, local=True)
 # 'SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout TO DEFAULT'
 ```
 
-## PostgreSQL errors
+## PostgreSQL errors and sessions
 
 `adorm.drivers.postgresql` reads what PostgreSQL reports about a violated constraint from the errors of psycopg 3,
-psycopg 2 and asyncpg. It imports no ORM or database library. The Django and the native PostgreSQL drivers pass
+psycopg 2 and asyncpg, and holds the query of the database's sessions that the drivers' monitors run. It imports no
+ORM or database library. The Django and the native PostgreSQL drivers pass
 [`integrity_details`](#adorm-drivers-postgresql-integrity-details-exc) to
 [`wrap_driver_error()`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none) through
 [`map_django_error()`](#adorm-drivers-django-map-django-error-exc).
 
 ```python
 from adorm.drivers.postgresql import integrity_details, parse_key_detail, references_key
+```
+
+### `adorm.drivers.postgresql.activity_sql(parameter)`
+
+The query of the sessions whose pids are in the integer array bound to `parameter` (`"%s"` for psycopg, `"$1"` for
+asyncpg): `pid`, `state`, `wait_event_type`, `wait_event` and `pg_blocking_pids(pid)` from `pg_stat_activity`, one
+row per session found, in [`backend_activity()`](#adorm-drivers-postgresql-backend-activity-pid-state-wait-event-type-wait-event-blocking-pids)'s
+argument order.
+
+```python
+activity_sql("$1")
+# 'SELECT pid, state, wait_event_type, wait_event, pg_blocking_pids(pid) FROM pg_stat_activity
+#  WHERE pid = ANY($1::integer[])'
+```
+
+### `adorm.drivers.postgresql.backend_activity(pid, state, wait_event_type, wait_event, blocking_pids)`
+
+The [`BackendActivity`](#adorm-drivers-backendactivity) of a row of `activity_sql()`; `blocking_pids` becomes a tuple
+of `int`, `None` an empty one.
+
+```python
+backend_activity(4711, "active", "Lock", "tuple", [4702])
+# BackendActivity(pid=4711, state='active', wait_event_type='Lock', wait_event='tuple', blocking_pids=(4702,))
 ```
 
 ### `adorm.drivers.postgresql.integrity_details(exc)`

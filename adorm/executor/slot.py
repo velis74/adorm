@@ -8,9 +8,10 @@ import contextvars
 import enum
 import itertools
 import logging
+import threading
 
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, cast, TYPE_CHECKING
@@ -41,10 +42,13 @@ __all__ = [
     "CloseReason",
     "Request",
     "RequestQueue",
+    "RunningRequest",
     "Slot",
     "SlotLease",
     "cancellation_outcome",
     "cancelled_before_start",
+    "on_request_started",
+    "running_requests",
 ]
 
 logger = logging.getLogger("adorm.executor")
@@ -218,6 +222,114 @@ class Request:
             object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
 
 
+@dataclass(frozen=True, slots=True, eq=False)
+class RunningRequest:
+    """A request whose call of the driver connection has started: the slot has set its connection options and handed
+    it to the connection (`running_requests()`, `on_request_started()`).
+
+    ``sender`` is the task that sent the request (``None`` when none did), ``session`` the session of its lease. On a
+    connection that shares its database session with others, the call may still wait for that session
+    (`in_session`, `reached_session`).
+    """
+
+    request: Request
+    session: Session
+    sender: asyncio.Task | None
+    slot: Slot
+    _holds: int = field(default=0, init=False, repr=False)
+    _reached: bool = field(default=False, init=False, repr=False)
+
+    @property
+    def operation(self) -> Any:
+        """The operation of an ``execute`` request, ``None`` for the other methods."""
+        if self.request.method == "execute" and self.request.args:
+            return self.request.args[0]
+        return None
+
+    @property
+    def backend_pid(self) -> int | None:
+        """The slot's `DriverConnection.backend_pid`."""
+        connection = self.slot.connection
+        return None if connection is None else connection.backend_pid
+
+    @property
+    def running(self) -> bool:
+        """Whether the call has not ended yet."""
+        return self.slot.running is self
+
+    @property
+    def in_session(self) -> bool:
+        """Whether the call runs and has its database session now (`DriverConnection.holds_session`)."""
+        connection = self.slot.connection
+        return self.running and connection is not None and connection.holds_session
+
+    @property
+    def reached_session(self) -> bool:
+        """Whether the call has had its database session, now or before it ended: always for a connection with a
+        session of its own (`DriverConnection.session_holds`)."""
+        if not self.running:
+            return self._reached
+        connection = self.slot.connection
+        return connection is not None and self._has_held(connection)
+
+    def _has_held(self, connection: DriverConnection) -> bool:
+        return connection.holds_session or connection.session_holds > self._holds
+
+    def __repr__(self) -> str:
+        what = self.request.method if self.operation is None else f"{self.request.method} {self.operation!r}"
+        return f"<RunningRequest {what} of {self.session!r} on slot {self.slot.slot_id}>"
+
+
+_running_lock = threading.Lock()
+_running: dict[RunningRequest, asyncio.AbstractEventLoop] = {}
+_watchers: dict[object, tuple[asyncio.AbstractEventLoop, Callable[[RunningRequest], None]]] = {}
+
+
+def running_requests() -> tuple[RunningRequest, ...]:
+    """The requests whose driver connection call runs now on a slot of the running event loop, in the order they
+    started."""
+    loop = asyncio.get_running_loop()
+    with _running_lock:
+        return tuple(running for running, owner in _running.items() if owner is loop)
+
+
+def on_request_started(callback: Callable[[RunningRequest], None]) -> Callable[[], None]:
+    """Call ``callback(running)`` whenever the driver connection call of a request starts on a slot of the running
+    event loop; return a function that stops it.
+
+    The callback runs on the loop, in the slot's task, before the connection method runs; an exception it raises is
+    logged."""
+    if not callable(callback):
+        raise TypeError(f"a request callback is callable, not {callback!r}")
+    loop = asyncio.get_running_loop()
+    key = object()
+    with _running_lock:
+        _watchers[key] = (loop, callback)
+
+    def stop() -> None:
+        with _running_lock:
+            _watchers.pop(key, None)
+
+    return stop
+
+
+def _report_started(running: RunningRequest) -> None:
+    loop = asyncio.get_running_loop()
+    with _running_lock:
+        _running[running] = loop
+        callbacks = [callback for owner, callback in _watchers.values() if owner is loop]
+    for callback in callbacks:
+        try:
+            callback(running)
+        except Exception:
+            logger.exception("request callback %r failed for %r", callback, running)
+
+
+def _report_ended(running: RunningRequest) -> None:
+    with _running_lock:
+        _running.pop(running, None)
+
+
 class RequestQueue:
     """The writing end of a lease: requests put here run on the slot one at a time, in order."""
 
@@ -382,6 +494,8 @@ class SlotLease:
 
 _IDLE, _LEASED, _FINISHING, _CLOSED = "idle", "leased", "finishing", "closed"
 
+_Queued = tuple[SlotLease, Request, contextvars.Context, asyncio.Task | None]
+
 _UNKNOWN = object()  # an option value a failed or cancelled set_options() may or may not have set
 
 
@@ -424,10 +538,11 @@ class Slot:
         self.connection: DriverConnection | None = None
         self.lease: SlotLease | None = None
         self.state = _IDLE
-        self._queue: deque[tuple[SlotLease, Request, contextvars.Context]] = deque()
+        self._queue: deque[_Queued] = deque()
         self._wakeup = asyncio.Event()
         self._running: tuple[Request, asyncio.Task] | None = None
-        self._current: tuple[SlotLease, Request, contextvars.Context] | None = None
+        self._current: _Queued | None = None
+        self._started: RunningRequest | None = None
         self._cancelled: Request | None = None
         self._in_transaction = False
         self._options: dict[str, Any] = {}  # set for the connection
@@ -443,6 +558,11 @@ class Slot:
 
     def __repr__(self) -> str:
         return f"<Slot {self.slot_id} of {self.pool.name!r}, {self.state}>"
+
+    @property
+    def running(self) -> RunningRequest | None:
+        """The request whose driver connection call runs now, ``None`` when none does."""
+        return self._started
 
     async def open(self) -> None:
         """Open the driver connection and start serving requests."""
@@ -490,14 +610,14 @@ class Slot:
         if self.state == _CLOSED or self._server is None or self._server.done():
             self._deliver(lease, ErrorEvent(request.request_id, InterfaceError(f"{self!r} serves no requests")))
             return
-        self._queue.append((lease, request, contextvars.copy_context()))
+        self._queue.append((lease, request, contextvars.copy_context(), asyncio.current_task()))
         self._idle.clear()
         self._wakeup.set()
 
     def _cancel(self, request: Request) -> bool:
         """Cancel ``request``; return whether it was still queued. A queued request never runs and gets
         ``CancelledEvent(started=False)`` at once; a running one is cancelled in the driver connection."""
-        for index, (lease, queued, _context) in enumerate(self._queue):
+        for index, (lease, queued, _context, _sender) in enumerate(self._queue):
             if queued is request:
                 del self._queue[index]
                 if not self._queue and self._running is None:
@@ -542,7 +662,7 @@ class Slot:
         failed = ([self._current] if self._current is not None else []) + list(self._queue)
         self._current = None
         self._queue.clear()
-        for lease, request, _context in failed:
+        for lease, request, _context, _sender in failed:
             self._deliver(lease, ErrorEvent(request.request_id, error))
         self._idle.set()
 
@@ -593,11 +713,19 @@ class Slot:
             else:
                 remembered[name] = value
 
-    async def _with_options(self, desired: Mapping[str, Any], coroutine: Any, started: list[bool]) -> Any:
-        """Set ``desired`` (`_set_options()`), then await ``coroutine``, the request's call; ``started[0]`` becomes
-        true once the call starts."""
-        await self._set_options(desired)
+    async def _call(
+        self, desired: Mapping[str, Any] | None, coroutine: Any, started: list[bool], running: RunningRequest
+    ) -> Any:
+        """Set ``desired`` (`_set_options()`) unless it is ``None``, then await ``coroutine``, the request's call;
+        ``started[0]`` becomes true and ``running`` is reported once the call starts."""
+        if desired is not None:
+            await self._set_options(desired)
         started[0] = True
+        connection = self.connection
+        if connection is not None:
+            object.__setattr__(running, "_holds", connection.session_holds)
+        self._started = running
+        _report_started(running)
         return await coroutine
 
     def forget_options(self) -> None:
@@ -655,7 +783,9 @@ class Slot:
         self.state = _FINISHING
         self._finisher = asyncio.get_running_loop().create_task(self._return(lease, CloseReason.ABORTED))
 
-    async def _run(self, lease: SlotLease, request: Request, context: contextvars.Context) -> None:
+    async def _run(
+        self, lease: SlotLease, request: Request, context: contextvars.Context, sender: asyncio.Task | None
+    ) -> None:
         connection = cast("DriverConnection", self.connection)
         request_id = request.request_id
         try:
@@ -668,15 +798,13 @@ class Slot:
             self._deliver(lease, ErrorEvent(request_id, error))
             return
         inner = coroutine
-        started = [True]
-        if request.options is not None:
-            started[0] = False
-            coroutine = self._with_options(request.options, inner, started)
+        started = [False]
+        running = RunningRequest(request, lease.session, sender, self)
+        coroutine = self._call(request.options, inner, started, running)
         # The connection method runs in the context of the flow that sent the request.
         call = asyncio.get_running_loop().create_task(coroutine, context=context)
-        if inner is not coroutine:
-            # A call cancelled before it started never ran the connection method.
-            call.add_done_callback(lambda _call: inner.close())
+        # A call cancelled before it started never ran the connection method.
+        call.add_done_callback(lambda _call: inner.close())
         self._running = (request, call)
         event: Event
         try:
@@ -697,6 +825,10 @@ class Slot:
         finally:
             self._running = None
             self._cancelled = None
+            if self._started is running and connection is not None:
+                object.__setattr__(running, "_reached", running._has_held(connection))
+            self._started = None
+            _report_ended(running)
         self._track_options(request, isinstance(event, ResultEvent))
         if isinstance(event, ResultEvent):
             if request.method == "begin":

@@ -495,3 +495,21 @@
   and a change of the default pool settings retires the pools of profiles without their own.
   `ProfileRegistry.resolve()` discards a provider's answer when the configuration changes meanwhile. An acquisition
   waiting on a pool retired after a profile change continues on the profile's current pool (`Pool.retired`).
+- Waiting in tests until an operation is in the database (`adorm.testing`): `wait_for_operation(task=None, *,
+  session=None, timeout=10.0, interval=0.01)` returns once an operation of the task (or session) has been sent to the
+  database and has its database session, `wait_for_lock(task=None, *, session=None, timeout=10.0, interval=0.01)`
+  once it waits there for a lock, with the sessions that hold it (`LockWait`), and `running_operations()` lists those running now. Both waits raise
+  `RuntimeError` when the task finishes first and `TimeoutError` on expiry; a lock wait read for an operation that
+  ended during the read is not reported. They work with both drivers, also inside Django's `TestCase`, where a
+  statement waiting for the shared test connection is not reported until it holds it.
+- Running requests (`adorm.executor`): `Slot.running`, `running_requests()` and `on_request_started(callback)` follow a
+  request from the start of its driver connection call (after its connection options are set) to its end, with the
+  task that sent it; a request cancelled while queued or while its options are set never runs and its cancellation
+  is `NOT_STARTED`. Requests of other event loops are not seen. `RunningRequest.in_session` and `reached_session` tell
+  whether the call has its database session.
+- Database sessions in the driver contract: `DriverConnection.backend_pid`, `holds_session` and `session_holds` (for a
+  session shared with other connections, as in Django's `TestCase`), `Driver.open_monitor(profile)` and
+  `DatabaseMonitor.activity(pids)` with `BackendActivity` (state, wait event, blocking pids). The Django driver
+  (`DjangoMonitor`, `adorm.drivers.django.backend_pid()`) and the native PostgreSQL driver (`AsyncpgMonitor`) read
+  `pg_stat_activity` on a connection of their own (`adorm.drivers.postgresql.activity_sql()`,
+  `backend_activity()`); the demo's memory driver reports its row lock waits.

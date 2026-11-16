@@ -52,7 +52,8 @@ event's `encode`.
 ### `adorm.events.CancelledEvent(request_id, started)`
 
 The request `request_id` was cancelled at the client's request. `started` is `False` when the request's call never
-started: it was still queued, or it was cancelled while the slot set its connection options. It is `True` when it was
+started: it was still queued, or it was cancelled before the slot handed it to the connection, as while the slot set its
+connection options. It is `True` when it was
 cancelled in the connection while it ran, so that whether it took effect is unknown. Kind `"cancelled"`.
 
 ### `adorm.events.CallbackEvent(name, payload=None)`
