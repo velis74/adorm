@@ -49,6 +49,7 @@ dev = [
     "pytest",
     "pytest-asyncio",
     "pytest-django",
+    "python-dotenv>=1.2.4",
     "ruff",
     "sqlalchemy>=2.0",
     "uvicorn>=0.54.0",

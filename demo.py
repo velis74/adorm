@@ -6,7 +6,8 @@ Runs the demo: prepares the PostgreSQL database and serves the API.
     uv run python demo.py --reset              # refill the demo data first
     uv run python demo.py --list-drivers
 
-The database is ``ADORM_DEMO_DATABASE_URL`` (default ``postgres://postgres@127.0.0.1:5432/adorm_demo``). Setup
+The database is ``ADORM_DEMO_DATABASE_URL`` (default ``postgres://postgres@127.0.0.1:5432/adorm_demo``), from the
+environment or the file ``.env`` in the repository root. Setup
 creates the database when the server lacks it, applies the Django migrations, seeds the demo data when the database
 has none, checks that the generated models in ``demo/models`` are up to date (``adorm generate --check``) and compares
 them with the Django models (``manage.py check_adorm_models``).
@@ -18,6 +19,8 @@ import subprocess
 import sys
 
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 from demo.api import drivers
 from demo.database import DEFAULT_DATABASE_NAME, DEFAULT_SERVER_URL, ensure_database, with_database
@@ -82,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{driver.name:10} {driver.target:40} {state}")
         return 0
 
+    load_dotenv(ROOT / ".env")
     env = dict(os.environ)
     env.setdefault(DATABASE_ENV, with_database(DEFAULT_SERVER_URL, DEFAULT_DATABASE_NAME))
     if args.driver:

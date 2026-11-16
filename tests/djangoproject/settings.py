@@ -1,13 +1,19 @@
 """Django settings for the test suite.
 
-The database comes from ``ADORM_TEST_DATABASE_URL``; pytest-django creates and drops the
+The database comes from ``ADORM_TEST_DATABASE_URL``, from the environment or the file ``.env`` in the repository root;
+pytest-django creates and drops the
 ``adorm_test`` database on that server (``ADORM_TEST_DATABASE_NAME`` names another). The alias ``second`` is the
 same test database.
 """
 
 import os
 
+from pathlib import Path
 from urllib.parse import parse_qsl, unquote, urlsplit
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parents[2] / ".env")
 
 DEFAULT_DATABASE_URL = "postgres://postgres@127.0.0.1:5432/postgres"
 TEST_DATABASE_NAME = os.environ.get("ADORM_TEST_DATABASE_NAME", "adorm_test")

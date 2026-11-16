@@ -28,8 +28,12 @@ The tests read the PostgreSQL server URL from `ADORM_TEST_DATABASE_URL` (default
 server and leave other databases untouched; the pool tests also create and drop the login role
 `adorm_test_limited`.
 
+The demo reads its database URL from `ADORM_DEMO_DATABASE_URL`. Both variables can be set in the file `.env` in the
+repository root (ignored by git; `.env.example` lists them); variables set in the environment take precedence.
+
 ```bash
-ADORM_TEST_DATABASE_URL=postgres://user:password@127.0.0.1:5432/postgres uv run pytest
+cp .env.example .env    # then fill in the user and password
+uv run pytest
 ```
 
 ## Demo

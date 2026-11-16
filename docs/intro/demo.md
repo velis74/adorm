@@ -20,11 +20,12 @@ a read runs on any available driver its request names in the header `X-Adorm-Dri
 ## Running it
 
 The demo needs a PostgreSQL server. `ADORM_DEMO_DATABASE_URL` names the database (default
-`postgres://postgres@127.0.0.1:5432/adorm_demo`).
+`postgres://postgres@127.0.0.1:5432/adorm_demo`), set in the environment or in the file `.env` in the repository root
+(ignored by git); the environment takes precedence.
 
 ```bash
 uv sync
-export ADORM_DEMO_DATABASE_URL=postgres://user:password@127.0.0.1:5432/adorm_demo
+cp .env.example .env    # ADORM_DEMO_DATABASE_URL=postgres://user:password@127.0.0.1:5432/adorm_demo
 uv run python demo.py
 ```
 
