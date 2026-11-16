@@ -11,6 +11,7 @@ import sys
 import threading
 
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import replace
 from typing import Any
 
 from adorm.drivers.base import BackendActivity, Capabilities, DatabaseMonitor, ThreadedConnection, ThreadedDriver
@@ -38,14 +39,25 @@ from adorm.drivers.django.translation import (
     translate,
     validation_error,
 )
-from adorm.drivers.postgresql import activity_sql, backend_activity, integrity_details, references_key
+from adorm.drivers.postgresql import (
+    activity_sql,
+    backend_activity,
+    integrity_details,
+    listen_sql,
+    MAX_IDENTIFIER_LENGTH,
+    notice_payload,
+    references_key,
+    unlisten_sql,
+)
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
+from adorm.events import BackendEvent, CONNECTION_LOST, NOTICE, NOTIFY
 from adorm.exceptions import (
     FieldError,
     InterfaceError,
     MultipleObjectsReturned,
     NotSupportedError,
     ObjectDoesNotExist,
+    OperationalError,
     ProgrammingError,
     ProtectedError,
     RestrictedError,
@@ -66,6 +78,8 @@ __all__ = [
     "database_key",
     "map_django_error",
     "model_row",
+    "notice_event",
+    "PSYCOPG2_CAPABILITIES",
 ]
 
 logger = logging.getLogger("adorm.drivers.django")
@@ -148,11 +162,39 @@ CAPABILITIES = Capabilities(
         "clause.on_conflict.update",
     },
     connection_options=POSTGRESQL_OPTIONS,
+    backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
+    max_channel_length=MAX_IDENTIFIER_LENGTH,
     savepoints=True,
     cancellation=True,
 )
-"""What `DjangoDriver` supports: `READ_CAPABILITIES`, the writes, row locks, savepoints and the connection options of
-`adorm.drivers.sql.POSTGRESQL_OPTIONS`."""
+"""What `DjangoDriver` supports with psycopg 3: `READ_CAPABILITIES`, the writes, row locks, savepoints, the connection
+options of `adorm.drivers.sql.POSTGRESQL_OPTIONS` and the backend events `NOTIFY`, `NOTICE` and `CONNECTION_LOST`."""
+
+PSYCOPG2_CAPABILITIES = replace(CAPABILITIES, backend_events=frozenset())
+"""What `DjangoDriver` supports with psycopg 2: `CAPABILITIES` without backend events."""
+
+
+def _is_psycopg3() -> bool:
+    from django.db.backends.postgresql.psycopg_any import is_psycopg3
+
+    return is_psycopg3
+
+
+class _DjangoCapabilities:
+    """`CAPABILITIES` when Django uses psycopg 3, `PSYCOPG2_CAPABILITIES` with psycopg 2; on the class and on
+    instances."""
+
+    def __get__(self, instance: Any, owner: Any = None) -> Capabilities:
+        return CAPABILITIES if _is_psycopg3() else PSYCOPG2_CAPABILITIES
+
+
+def notice_event(diagnostic: Any) -> BackendEvent:
+    """The `NOTICE` backend event of a psycopg 3 notice (``psycopg.errors.Diagnostic``)."""
+    severity = diagnostic.severity_nonlocalized or diagnostic.severity
+    payload = notice_payload(
+        severity, diagnostic.sqlstate, diagnostic.message_primary, diagnostic.message_detail, diagnostic.message_hint
+    )
+    return BackendEvent(NOTICE, severity, payload)
 
 
 def model_row(instance: Any) -> ModelRow:
@@ -237,6 +279,8 @@ class _HookDatabase:
 
 _INERROR = 3
 """libpq's ``PQTRANS_INERROR``: the open transaction failed (psycopg 3 ``TransactionStatus``, psycopg 2 constants)."""
+_CONNECTION_BAD = 1
+"""libpq's ``CONNECTION_BAD`` (psycopg 3 ``pq.ConnStatus.BAD``)."""
 
 
 _CURSOR_MODULE = "django.db.backends.utils"
@@ -315,6 +359,11 @@ class DjangoConnection(ThreadedConnection):
     ``commit()`` or ``rollback()``; a savepoint is a Django savepoint inside it, so Django's ``on_commit()`` callbacks
     and its own atomic blocks behave as in an atomic block of Django code. Inside Django's ``TestCase`` the driver uses
     a subclass that shares the test's connection (`adorm.testing.django`).
+
+    With psycopg 3, the connection emits the notices of its statements (`NOTICE`) and the notifications of the
+    channels it listens on (`NOTIFY`); while it listens and no call runs, its thread waits for the database
+    connection's socket and reads notifications as they arrive, and a failure there emits `CONNECTION_LOST`. With
+    psycopg 2 it emits no backend events and ``listen()`` raises `NotSupportedError`.
     """
 
     driver: DjangoDriver
@@ -324,6 +373,8 @@ class DjangoConnection(ThreadedConnection):
     _base_ids: tuple[Any, ...] = ()
     _test: Any = None
     _backend_pid: int | None = None
+    _watched_raw: Any = None
+    _listen_channels: frozenset[str] = frozenset()
 
     @property
     def target(self) -> Any:
@@ -345,6 +396,7 @@ class DjangoConnection(ThreadedConnection):
         db = getattr(self, "db", None)
         if db is not None:
             self._backend_pid = backend_pid(db)
+            self._watch_backend()
 
     def connect_sync(self) -> None:
         from django.db import connections
@@ -367,6 +419,7 @@ class DjangoConnection(ThreadedConnection):
         db.health_check_enabled = False
         db.close_at = None
         self._backend_pid = backend_pid(db)
+        self._watch_backend()
 
     def _adopt(self, db: Any) -> None:
         """Use Django's connection wrapper ``db``."""
@@ -537,6 +590,63 @@ class DjangoConnection(ThreadedConnection):
         if sql:
             with self.db.cursor() as cursor:
                 cursor.execute(sql)
+
+    # Backend events
+
+    def _watch_backend(self) -> None:
+        """Have the DB-API connection (psycopg 3) report its notices and notifications to `emit()`."""
+        raw = self.db.connection
+        if raw is None or raw is self._watched_raw:
+            return
+        self._watched_raw = raw
+        if hasattr(raw, "add_notice_handler"):
+            raw.add_notice_handler(self._on_notice)
+            raw.add_notify_handler(self._on_notify)
+
+    def _on_notice(self, diagnostic: Any) -> None:
+        self.emit(notice_event(diagnostic))
+
+    def _on_notify(self, notify: Any) -> None:
+        self.emit(BackendEvent(NOTIFY, notify.channel, notify.payload))
+
+    def _psycopg3(self) -> Any:
+        raw = self.db.connection
+        if raw is None or not hasattr(raw, "pgconn"):
+            raise NotSupportedError("the Django driver listens for notifications with psycopg 3 only")
+        return raw
+
+    def listen_sync(self, channel: str) -> None:
+        self._psycopg3()
+        with self.db.cursor() as cursor:
+            cursor.execute(listen_sql(channel))
+        self._listen_channels = self._listen_channels | {channel}
+
+    def unlisten_sync(self, channel: str) -> None:
+        with self.db.cursor() as cursor:
+            cursor.execute(unlisten_sql(channel))
+        self._listen_channels = self._listen_channels - {channel}
+
+    def idle_fileno(self) -> int | None:
+        """The socket of the DB-API connection while the connection listens."""
+        if not self._listen_channels:
+            return None
+        raw = getattr(getattr(self, "db", None), "connection", None)
+        if raw is None or raw.closed or not hasattr(raw, "pgconn"):
+            return None
+        return raw.fileno()
+
+    def idle_sync(self) -> None:
+        """Read the input waiting on the socket: notices and notifications go to their handlers."""
+        raw = self.db.connection
+        with raw.lock:
+            pgconn = raw.pgconn
+            pgconn.consume_input()
+            if pgconn.status == _CONNECTION_BAD:
+                raise OperationalError("the server connection ended")
+            while (notify := pgconn.notifies()) is not None:
+                handler = pgconn.notify_handler
+                if handler is not None:
+                    handler(notify)
 
     def cancel_sync(self) -> None:
         # May run before connect_sync() has opened the connection.
@@ -880,7 +990,18 @@ class DjangoDriver(ThreadedDriver):
 
     name = "django"
     connection_class = DjangoConnection
-    capabilities = CAPABILITIES
+
+    capabilities = _DjangoCapabilities()  # type: ignore[assignment]
+
+    async def check_listen(self, profile: Any) -> None:
+        """Also raise `NotSupportedError` inside Django's ``TestCase``, whose shared connection receives no
+        notifications (`adorm.testing.django.SharedConnectionMixin`)."""
+        from adorm.testing.django import find_test_database, NO_NOTIFICATIONS
+
+        await super().check_listen(profile)
+        test = await find_test_database(profile.alias)
+        if test is not None and test.in_test_case:
+            raise NotSupportedError(NO_NOTIFICATIONS, driver=self.name, unsupported=[NOTIFY])
 
     def database_key(self, profile: Any) -> Any:
         """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""

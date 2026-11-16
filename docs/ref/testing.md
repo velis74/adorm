@@ -155,6 +155,7 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `apply_options(desired)` | sets the connection options `desired` with `SET LOCAL` and resets the others set before (`SET LOCAL … TO DEFAULT`); only differences from what is known to be set are sent |
 | `forget_options()` | treats the options as unknown, after a rollback to a savepoint may have undone a `SET LOCAL`; the next `apply_options()` sets every option it ever set |
 | `unwind(connection, error)` | rolls back `connection`'s transaction and those opened after it; the later ones raise `error` on their next call |
+| `watch_backend()` | adds a notice handler to the test's psycopg 3 connection, once per DB-API connection, that emits each notice as [`NOTICE`](/ref/events#adorm-events-notice) from the connection that holds the shared connection (`owner`) |
 | `check_isolated(what)` | raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction is open that the caller's context is not inside (no `atomic()` block of it is active there) |
 | `attach()` / `detach()` | count the connections that use the shared connection. While one does, an execute wrapper, the wrapper's outermost, makes each statement that another thread runs through the wrapper (Django ORM code of the test or of the code under test) hold the shared connection, run without connection options and pass `check_isolated()` first |
 
@@ -179,9 +180,18 @@ Makes a [`DjangoConnection`](/ref/drivers#adorm-drivers-django-djangoconnection)
 | `commit_sync()`, `rollback_sync()` | leave the savepoint. Django's `on_commit()` callbacks registered inside the transaction stay on the wrapper after the commit, as after Django's nested `atomic()`: they run only when the test runs them (`captureOnCommitCallbacks(execute=True)`). While a transaction begun inside this one is open, both transactions roll back and `TransactionOverlapError` is raised; the inner one raises it on its next call (its rollback then does nothing) |
 | `set_options_sync(options, local)` | records the options: the connection's own and, with `local`, the transaction's (restored by a rollback to a savepoint, dropped at the end of the transaction) |
 | `cancel_sync()` | [`SharedTestConnection.cancel()`](#adorm-testing-django-sharedtestconnection-test) |
+| `listen_sync(channel)` | raises `NotSupportedError` with [`NO_NOTIFICATIONS`](#adorm-testing-django-no-notifications): notifications arrive when a transaction commits, which the test's transaction never does; `DjangoDriver.check_listen()` refuses [`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) inside a `TestCase` before a slot is taken |
 | `close_sync()` | rolls back an open transaction while the test runs, together with the transactions begun inside it, which raise `TransactionOverlapError` on their next call; restores the thread's previous wrapper, calls `dec_thread_sharing()` and [`detach()`](#adorm-testing-django-sharedtestconnection-test)es; the test's connection stays open |
 | `holds_session` | whether the running call holds the shared connection now (`SharedTestConnection.owner` is this connection) |
 | `session_holds` | how many times the connection has taken the shared connection |
+
+The connection that holds the shared connection emits the notices of its statements
+([`watch_backend()`](#adorm-testing-django-sharedtestconnection-test)).
+
+### `adorm.testing.django.NO_NOTIFICATIONS`
+
+The message of the `NotSupportedError` raised for listening inside a `TestCase`: it names `TransactionTestCase`, whose
+transactions commit.
 
 ### `adorm.testing.django.shared_connection_class(cls)`
 

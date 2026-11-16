@@ -67,6 +67,17 @@ driver.check(Select(Member.objects.annotate(n=Unaccent("first_name")).query))
 # NotSupportedError: 'select' operation needs unsupported function.Unaccent (driver 'django')
 ```
 
+#### `async check_listen(profile)`
+
+Raises `NotSupportedError` when a connection for `profile` cannot listen for notifications; opens no connection.
+Defaults to [`capabilities.check_backend_event("notify", name)`](#check-backend-event-name-driver-none).
+[`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) calls it before it takes a slot. `DjangoDriver` also raises it inside
+Django's `TestCase`, whose shared connection receives no notifications.
+
+```python
+await DjangoDriver().check_listen(profile)   # with psycopg 2: NotSupportedError: the backend event 'notify' is not supported (driver 'django')
+```
+
 #### `is_refusal(exc)`
 
 Returns whether `exc`, an adorm exception `open_connection()` raised, means the database refuses more connections.
@@ -157,7 +168,7 @@ thread instead (see [`ThreadedDriver`](#adorm-drivers-threadeddriver)).
 
 ### `adorm.drivers.Capabilities`
 
-`Capabilities(operations=frozenset(), constructs=frozenset(), connection_options=frozenset(), backend_events=frozenset(), savepoints=False, cancellation=False)`
+`Capabilities(operations=frozenset(), constructs=frozenset(), connection_options=frozenset(), backend_events=frozenset(), savepoints=False, cancellation=False, max_channel_length=None)`
 
 What a driver supports; a frozen, hashable dataclass. The four name fields accept any iterable of strings and
 are stored as `frozenset`; a plain string raises `TypeError`.
@@ -170,6 +181,7 @@ are stored as `frozenset`; a plain string raises `TypeError`.
 | `backend_events` | `BackendEvent.name` values the driver emits |
 | `savepoints` | the driver implements savepoints; `False` by default |
 | `cancellation` | the driver cancels a running statement; `False` by default |
+| `max_channel_length` | the longest notification channel name the backend accepts, in bytes of UTF-8; `None` (the default) for no limit |
 
 #### `unsupported(operation)`
 
@@ -186,6 +198,26 @@ message ends with it, and the error's [`driver`](/ref/exceptions#adorm-notsuppor
 #### `check_savepoints(driver=None)`
 
 Raises `NotSupportedError` (`unsupported` `("savepoints",)`) when `savepoints` is `False`.
+
+#### `check_backend_event(name, driver=None)`
+
+Raises `NotSupportedError` (`unsupported` `(name,)`) when `name` is not in `backend_events`.
+
+```python
+CAPABILITIES.check_backend_event("notify", "asyncpg")    # declared: returns None
+Capabilities().check_backend_event("notify", "memory")   # NotSupportedError: the backend event 'notify' is not supported (driver 'memory')
+```
+
+#### `check_channel(channel)`
+
+Returns `channel` when [`adorm.drivers.check_channel()`](#adorm-drivers-check-channel-channel) accepts it and it is
+at most `max_channel_length` bytes in UTF-8; raises `TypeError` or `ValueError` otherwise.
+`DriverConnection.listen()`, `unlisten()` and [`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) check the names with it.
+
+```python
+CAPABILITIES.check_channel("orders")    # 'orders'
+CAPABILITIES.check_channel("x" * 64)    # ValueError: the channel name 'xxx…' is longer than 63 bytes
+```
 
 #### `check_options(options, driver=None)`
 
@@ -238,6 +270,18 @@ is_connection_error(OperationalError(sqlstate="08006"))   # True
 is_connection_error(OperationalError(sqlstate="57014"))   # False
 ```
 
+### `adorm.drivers.check_channel(channel)`
+
+Returns `channel`, a notification channel name, when it is a non-empty string without NUL; raises `TypeError` for a
+value that is not a string and `ValueError` otherwise. The name is used exactly as given: `"Orders"` and `"orders"`
+are different channels, and the PostgreSQL drivers quote it in `LISTEN`. A driver's length limit is checked by
+[`Capabilities.check_channel()`](#check-channel-channel).
+
+```python
+check_channel("orders")       # 'orders'
+check_channel("")             # ValueError: a channel name is a non-empty string without NUL, not ''
+```
+
 ### `adorm.drivers.is_refusal(exc)`
 
 Returns whether `exc` is an `OperationalError` with a SQLSTATE of class `53` (insufficient resources, such as
@@ -269,6 +313,9 @@ The contract the slot calls:
 | `async rollback_to_savepoint(name)` | checks `capabilities.savepoints`, then rolls back to the savepoint `name` |
 | `async commit()` | commits the open transaction |
 | `async rollback()` | rolls back the open transaction |
+| `async listen(channel)` | checks the name ([`capabilities.check_channel()`](#check-channel-channel)) and that `capabilities.backend_events` has `notify`, adds the channel to `listening`, then awaits `_listen(channel)`; from then on each notification on the channel is emitted as `BackendEvent("notify", channel, payload)`, also while no call runs. A failed call removes the channel again; a cancelled one leaves it, since the database may have run it |
+| `async unlisten(channel)` | awaits `_unlisten(channel)` for a channel in `listening` and then removes it; nothing for another channel. A notification received before may still be emitted |
+| `listening` | the `frozenset` of channels the connection listens on; the slot closes a connection that still listens when its lease ends ([`CloseReason.LISTENING`](/ref/pool#adorm-executor-closereason)) |
 | `async set_options(options, local)` | checks the option names against `capabilities.connection_options`, then sets them from a mapping; `local=True` limits them to the open transaction (`SET LOCAL`); a value of `None` resets the option to its default (`RESET`, or `SET LOCAL … TO DEFAULT`). The slot calls it with the options that changed ([`Slot`](/ref/pool#adorm-executor-slot)) |
 | `cancel()` | cancels the running statement, if any; callable from any thread, returns without waiting; the call raises `OperationalError` with SQLSTATE `57014` |
 | `is_usable()` | whether the connection can serve further calls; does no I/O |
@@ -293,6 +340,28 @@ implements:
 | `begin()`, `commit()`, `rollback()`, `cancel()`, `is_usable()`, `close()` | yes | as above |
 | `async _savepoint(name)`, `async _release_savepoint(name)`, `async _rollback_to_savepoint(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
 | `async _set_options(options, local)` | no | sets supported options from a dict, `None` values to their default; raises `NotSupportedError` for any option unless overridden |
+| `async _listen(channel)`, `async _unlisten(channel)` | no | start and stop listening; raise `NotSupportedError` unless overridden. A driver that implements them declares `notify` in `backend_events` |
+
+Backend events a connection emits through the `emit` callable it opened with
+([events](/topics/events#backend-events)):
+
+| Event | When |
+|---|---|
+| `BackendEvent("notify", channel, payload)` ([`NOTIFY`](/ref/events#adorm-events-notify)) | a notification arrives on a channel the connection listens on |
+| `BackendEvent("notice", severity, {...})` ([`NOTICE`](/ref/events#adorm-events-notice)) | the server sends a notice or warning with a statement's result; emitted before that request's outcome |
+| `BackendEvent("connection_lost", None, reason)` ([`CONNECTION_LOST`](/ref/events#adorm-events-connection-lost)) | the driver notices that the database connection ended without adorm closing it; at most once per connection. A driver that declares it notices the end at least while the connection listens and no call runs; it may notice it at other times too (asyncpg: whenever the server ends the connection). `is_usable()` is then `False` |
+
+```python
+class RawConnection(DriverConnection):
+    async def _listen(self, channel):
+        await self.conn.add_listener(channel, self._notified)
+
+    async def _unlisten(self, channel):
+        await self.conn.remove_listener(channel, self._notified)
+
+    def _notified(self, _conn, _pid, channel, payload):
+        self.emit(BackendEvent(NOTIFY, channel, payload))
+```
 
 #### `ran_custom_sql`
 
@@ -443,6 +512,9 @@ caller's context variables are visible; changes made inside the call do not flow
 | `savepoint_sync(name)`, `release_savepoint_sync(name)`, `rollback_to_savepoint_sync(name)` | no | savepoints; raise `NotSupportedError` unless overridden |
 | `set_options_sync(options, local)` | no | connection options, `None` values to their default; raises `NotSupportedError` for any option unless overridden |
 | `prepare_call_sync()` | no | runs before every other `*_sync` method and every hook, in the same context copy, to prepare that context; an exception it raises is the call's; does nothing unless overridden |
+| `listen_sync(channel)`, `unlisten_sync(channel)` | no | start and stop listening (`listen()`, `unlisten()`); raise `NotSupportedError` unless overridden |
+| `idle_fileno()` | no | a file descriptor to watch while no call runs, `None` for none (the default); asked after every call, not watched once the connection is closed or unusable |
+| `idle_sync()` | no | reads what arrived on `idle_fileno()`, such as notifications, and emits it; runs between calls when the descriptor is readable. An exception it raises makes the connection unusable, is logged and is emitted as `BackendEvent("connection_lost", payload=<the mapped error's text>)` |
 
 `cancel_sync()` is the one method that runs on another thread, while a call is running. It asks the target to
 cancel the running statement and returns once the request is delivered; it never waits for the call. The
@@ -466,6 +538,10 @@ What the connection does around those methods:
 - `cancel()` runs `cancel_sync()` for the running call: on a thread of its own when called on the event loop's
   thread, otherwise on the calling thread. It does nothing when no call is running.
 - `close()` runs `close_sync()` on the thread and stops the thread; a call after it raises `InterfaceError`.
+- Between calls, while `idle_fileno()` returns a descriptor, the thread waits for that descriptor or the next call,
+  whichever comes first, and runs `idle_sync()` when the descriptor is readable; a queued call wakes it at once. A
+  `direct` connection has the event loop watch the descriptor (`loop.add_reader()`) and runs `idle_sync()` on the
+  loop's thread.
 - `after_call_sync(fn)`, called from a `*_sync` method, runs `fn()` on the thread once that call has ended and its
   outcome is delivered, before the next call starts, in the call's context. `cancel()` never reaches it, and an
   exception it raises is logged on the `adorm.drivers` logger. Work that must not decide or delay the call's outcome
@@ -552,7 +628,10 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | `set_options_sync(options, local)` | [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the wrapper, one `execute()` without parameters; nothing for no options |
 | `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
 | `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's); then the wrapper gets back the settings, DB-API module, health check flag and closing time it had before `connect_sync()` |
-| `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals), then reads `backend_pid` |
+| `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals), then reads `backend_pid` and, for a DB-API connection of psycopg 3 it has not seen, adds the notice and notify handlers that emit `NOTICE` ([`notice_event()`](#adorm-drivers-django-notice-event-diagnostic)) and `NOTIFY` (also in `connect_sync()`) |
+| `listen_sync(channel)`, `unlisten_sync(channel)` | [`listen_sql(channel)`](#adorm-drivers-postgresql-listen-sql-channel) or `unlisten_sql(channel)` on a cursor of the wrapper; with psycopg 2 `listen_sync()` raises `NotSupportedError` |
+| `idle_fileno()` | the socket of the psycopg 3 connection while it listens on a channel |
+| `idle_sync()` | reads the socket's input (`pgconn.consume_input()`) and hands each notification to psycopg's notify handler; a connection libpq reports as bad raises `OperationalError` |
 | `backend_pid` | [`backend_pid(wrapper)`](#adorm-drivers-django-backend-pid-db), read on the connection's thread when it connects and before each call |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc) |
 
@@ -603,6 +682,18 @@ async with await DjangoDriver().open_monitor(ConnectionProfile("default", driver
     await monitor.activity([pid])
 ```
 
+### `adorm.drivers.django.notice_event(diagnostic)`
+
+The [`NOTICE`](/ref/events#adorm-events-notice) backend event of a psycopg 3 notice (`psycopg.errors.Diagnostic`):
+`channel` is its untranslated severity (`severity_nonlocalized`, else `severity`), `payload`
+[`notice_payload()`](#adorm-drivers-postgresql-notice-payload-severity-sqlstate-message-detail-hint) of its fields.
+
+```python
+notice_event(diagnostic)
+# BackendEvent(name='notice', channel='WARNING', payload={'severity': 'WARNING', 'sqlstate': '01000',
+#              'message': 'check the clubs', 'detail': None, 'hint': None})
+```
+
 ### `adorm.drivers.django.backend_pid(db)`
 
 The server process id of the DB-API connection under Django's wrapper `db` (psycopg 3's `info.backend_pid`, psycopg
@@ -618,7 +709,16 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 | `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` |
-| `backend_events` | none |
+| `backend_events` | `notify`, `notice`, `connection_lost` |
+| `max_channel_length` | [`MAX_IDENTIFIER_LENGTH`](#adorm-drivers-postgresql-max-identifier-length) (63) |
+
+`DjangoDriver.capabilities` is `CAPABILITIES` when Django uses psycopg 3 and
+[`PSYCOPG2_CAPABILITIES`](#adorm-drivers-django-psycopg2-capabilities) with psycopg 2.
+
+### `adorm.drivers.django.PSYCOPG2_CAPABILITIES`
+
+`CAPABILITIES` without `backend_events`: with psycopg 2 the Django driver emits no backend events and `adorm.listen()`
+raises `NotSupportedError` before it takes a slot.
 
 The constructs are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON
 fields); `DjangoConnection` refuses other database backends.
@@ -1087,6 +1187,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 | `is_usable()` | `False` once a connection error was raised, once a statement was cancelled before it finished, once a write was cancelled inside a transaction of its own (also right after its `BEGIN` or during its `COMMIT`) or that transaction's `ROLLBACK` failed or was cancelled, after `close()` and when asyncpg reports the connection closed |
 | `close()` | asyncpg's `close()` within the driver's `close_timeout` (asyncpg aborts the connection when it fails); logs errors, a second call does nothing |
 | `backend_pid` | asyncpg's `get_server_pid()` |
+| `_listen(channel)`, `_unlisten(channel)` | asyncpg's `add_listener()` and `remove_listener()`, which send `LISTEN` and `UNLISTEN` with the channel quoted; errors as for any statement |
 | `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc): Django's exceptions as on the Django driver, asyncpg's by their SQLSTATE; asyncpg's `InternalClientError` (its protocol in an unexpected state, as after the server ended an idle connection) is `InterfaceError` |
 
 Each statement runs in a task of its own, so `cancel()` stops it without cancelling the caller. Cancelling the
@@ -1095,6 +1196,12 @@ task that awaits `execute()` cancels the statement as well (asyncpg sends a canc
 server may have run it without the protocol's closing Sync message and keep its transaction and locks open until
 the connection's next message, so the slot closes the connection instead of releasing it to the pool. A statement
 inside a transaction compiles with `in_transaction=True`.
+
+The connection registers asyncpg's log listener and termination listener when it opens: every notice or warning the
+server sends is emitted as a [`NOTICE`](/ref/events#adorm-events-notice) event before the outcome of the request
+that caused it, and a connection that ends without `close()` (the server terminated the session) becomes unusable and
+emits [`CONNECTION_LOST`](/ref/events#adorm-events-connection-lost), also while no call runs. asyncpg reads
+notifications on the event loop whenever they arrive.
 
 ```python
 connection = await AsyncpgDriver().open_connection(ConnectionProfile("default", driver), emit)
@@ -1123,7 +1230,8 @@ async with await AsyncpgDriver().open_monitor(profile) as monitor:
 The [`Capabilities`](#adorm-drivers-capabilities) of `AsyncpgDriver`: the `operations` and `constructs` of the
 Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (every read, `aggregate` included, the writes
 and every construct listed there), `savepoints`, `cancellation` and the `connection_options` of
-[`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options). No `backend_events`.
+[`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options). `backend_events`: `notify`, `notice`,
+`connection_lost`; `max_channel_length`: [`MAX_IDENTIFIER_LENGTH`](#adorm-drivers-postgresql-max-identifier-length).
 
 ### `adorm.drivers.asyncpg.writes.Writer(connection)`
 
@@ -1329,6 +1437,37 @@ ORM or database library. The Django and the native PostgreSQL drivers pass
 
 ```python
 from adorm.drivers.postgresql import integrity_details, parse_key_detail, references_key
+```
+
+### `adorm.drivers.postgresql.listen_sql(channel)`
+
+`LISTEN` for `channel` as a quoted identifier, so that the name is used exactly as given.
+
+```python
+listen_sql('Orders "EU"')     # 'LISTEN "Orders ""EU"""'
+```
+
+### `adorm.drivers.postgresql.unlisten_sql(channel)`
+
+`UNLISTEN` for `channel`, quoted as in [`listen_sql()`](#adorm-drivers-postgresql-listen-sql-channel).
+
+```python
+unlisten_sql("orders")        # 'UNLISTEN "orders"'
+```
+
+### `adorm.drivers.postgresql.MAX_IDENTIFIER_LENGTH`
+
+`63`: the longest PostgreSQL identifier in bytes (`NAMEDATALEN - 1`), and so the longest channel name; the
+`max_channel_length` of the Django and the native PostgreSQL driver.
+
+### `adorm.drivers.postgresql.notice_payload(severity, sqlstate, message, detail, hint)`
+
+The payload of a [`NOTICE`](/ref/events#adorm-events-notice) event: a dict of the notice's untranslated severity,
+SQLSTATE, primary message, detail and hint, `None` for a field the server did not send.
+
+```python
+notice_payload("NOTICE", "00000", "clubs updated", None, None)
+# {'severity': 'NOTICE', 'sqlstate': '00000', 'message': 'clubs updated', 'detail': None, 'hint': None}
 ```
 
 ### `adorm.drivers.postgresql.activity_sql(parameter)`

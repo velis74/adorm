@@ -1,5 +1,5 @@
-"""What PostgreSQL reports about a violated constraint, read from the errors of psycopg (2 and 3) and asyncpg, and about
-the sessions of a database."""
+"""What PostgreSQL reports about a violated constraint, read from the errors of psycopg (2 and 3) and asyncpg, about
+the sessions of a database and in its notices, and the statements that listen for notifications."""
 
 from __future__ import annotations
 
@@ -10,7 +10,21 @@ from typing import Any
 from adorm.drivers.base import BackendActivity
 from adorm.exceptions import _sqlstate
 
-__all__ = ["activity_sql", "backend_activity", "integrity_details", "parse_key_detail", "references_key"]
+__all__ = [
+    "MAX_IDENTIFIER_LENGTH",
+    "activity_sql",
+    "backend_activity",
+    "integrity_details",
+    "listen_sql",
+    "notice_payload",
+    "parse_key_detail",
+    "references_key",
+    "unlisten_sql",
+]
+
+MAX_IDENTIFIER_LENGTH = 63
+"""The longest PostgreSQL identifier in bytes (``NAMEDATALEN - 1``), and so the longest notification channel name: the
+``max_channel_length`` of the PostgreSQL drivers' `Capabilities`."""
 
 # The key part of PostgreSQL's detail message of a unique, foreign key or exclusion violation.
 _KEY_DETAIL = re.compile(
@@ -119,3 +133,25 @@ def backend_activity(
 ) -> BackendActivity:
     """The `BackendActivity` of a row of `activity_sql()`."""
     return BackendActivity(int(pid), state, wait_event_type, wait_event, tuple(int(p) for p in blocking_pids or ()))
+
+
+def notice_payload(
+    severity: str | None, sqlstate: str | None, message: str | None, detail: str | None, hint: str | None
+) -> dict[str, str | None]:
+    """The payload of a `NOTICE` backend event: a PostgreSQL notice's untranslated severity, SQLSTATE, primary
+    message, detail and hint, ``None`` for a field the server did not send."""
+    return {"severity": severity, "sqlstate": sqlstate, "message": message, "detail": detail, "hint": hint}
+
+
+def _quote_channel(channel: str) -> str:
+    return '"' + channel.replace('"', '""') + '"'
+
+
+def listen_sql(channel: str) -> str:
+    """``LISTEN`` for ``channel``, quoted, so that the channel name is used exactly as given."""
+    return f"LISTEN {_quote_channel(channel)}"
+
+
+def unlisten_sql(channel: str) -> str:
+    """``UNLISTEN`` for ``channel``, quoted as in `listen_sql()`."""
+    return f"UNLISTEN {_quote_channel(channel)}"

@@ -79,3 +79,13 @@ async def blocker(conformance_driver, driver, demo_data):
         yield blocker
     finally:
         await blocker.close()
+
+
+@pytest.fixture
+async def notifier(conformance_driver, driver, demo_data):
+    """The driver's `Notifier`, closed afterwards."""
+    notifier = conformance_driver.notifier(driver, demo_data)
+    try:
+        yield notifier
+    finally:
+        await notifier.close()

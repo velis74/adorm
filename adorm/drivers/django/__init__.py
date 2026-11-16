@@ -15,11 +15,14 @@ from adorm.drivers.django.driver import (
     DjangoMonitor,
     map_django_error,
     model_row,
+    notice_event,
+    PSYCOPG2_CAPABILITIES,
     READ_CAPABILITIES,
 )
 
 __all__ = [
     "CAPABILITIES",
+    "PSYCOPG2_CAPABILITIES",
     "READ_CAPABILITIES",
     "DjangoConnection",
     "DjangoDriver",
@@ -30,4 +33,5 @@ __all__ = [
     "database_key",
     "map_django_error",
     "model_row",
+    "notice_event",
 ]

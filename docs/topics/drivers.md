@@ -61,7 +61,7 @@ Besides return values a connection reports events through the `emit` callable it
 | Event | Meaning | Example |
 |---|---|---|
 | `CallbackEvent(name, payload)` | a point in the connection's life the client runs callbacks for; not `on_commit` or `on_rollback`, which the slot delivers itself | `cache_cleared` |
-| `BackendEvent(name, channel, payload)` | something the database or the target raised on its own | PostgreSQL `NOTIFY` |
+| `BackendEvent(name, channel, payload)` | something the database or the target raised on its own | PostgreSQL `NOTIFY`, a server notice, a lost connection |
 
 The slot forwards them over its event queue together with the outcome of each request (`ResultEvent`,
 `ErrorEvent`, `CancelledEvent`) and its own `CallbackEvent("on_commit")` and `CallbackEvent("on_rollback")` after a
@@ -72,10 +72,22 @@ dispatches the unclaimed ones to subscribers; the [events topic](/topics/events)
 target (Django's `post_save`, SQLAlchemy's ORM events) and the target's own `on_commit` hooks run on the driver
 side only; the client sees what the driver emits.
 
+A driver lists the backend event names it emits in `Capabilities.backend_events`. The names adorm interprets:
+
+| Name | Emitted | Interpreted by |
+|---|---|---|
+| `notify` | for each notification on a channel the connection listens on (`listen(channel)`), also while no call runs | [`adorm.listen()`](/topics/events#listening-for-notifications) |
+| `notice` | for each notice or warning the server sends, before the outcome of the request that caused it | subscribers of the pool's `EventBus` |
+| `connection_lost` | at most once, when the driver notices that the database connection ended without adorm closing it: at least while the connection listens and no call runs, at other times when the driver can tell (the native PostgreSQL driver: whenever the server ends the connection) | `adorm.listen()`, which raises `InterfaceError` |
+
+A threaded connection that must read while idle returns a descriptor from `idle_fileno()`; its thread then runs
+`idle_sync()` whenever the descriptor is readable ([`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection)).
+
 ## Capabilities
 
 A driver declares what it supports in a [`Capabilities`](/ref/drivers#adorm-drivers-capabilities) value:
-operation kinds, constructs, connection options, backend event names, savepoints and cancellation. `savepoints`
+operation kinds, constructs, connection options, backend event names, savepoints, cancellation and the longest
+notification channel name (`max_channel_length`). `savepoints`
 and `cancellation` default to `False`, so a driver declares only what it implements.
 
 `DriverConnection` checks every call against the declaration before the driver sees it: an operation that uses an
@@ -266,7 +278,7 @@ methods), no direct call reaches the test's connection; the installed contract d
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| `add_notify_handler()` on the psycopg connection; the handler runs on the connection's thread while a statement executes and calls `emit()` | `add_listener()`; the callback runs on the event loop | through the raw DBAPI connection (`driver_connection`), as for the DBAPI itself |
+| `add_notify_handler()` and `add_notice_handler()` on the psycopg connection; the handlers run on the connection's thread and call `emit()`, during a statement or, between calls, from `idle_sync()` while `idle_fileno()` returns the connection's socket | `add_listener()`, `add_log_listener()` and `add_termination_listener()`; the callbacks run on the event loop | through the raw DBAPI connection (`driver_connection`), as for the DBAPI itself |
 
 ### Capabilities
 

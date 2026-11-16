@@ -29,6 +29,9 @@ would close a cycle raises `OperationalError` with SQLSTATE ``40P01``. A locking
 slicing. Rolling back to a savepoint releases the locks taken after it. A lookup, arithmetic or ordering on values
 that do not compare raises `ProgrammingError` with SQLSTATE ``42883``. Every call is recorded in the trace of the
 calling context (`tracing()`).
+
+A connection listens for notifications (``listen()``); `MemoryDatabase.notify()` delivers one at once to every
+connection listening on its channel, which emits it as the backend event ``notify``.
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from adorm.drivers import BackendActivity, Capabilities, DatabaseMonitor, Driver, DriverConnection
-from adorm.events import Emit
+from adorm.events import BackendEvent, Emit, NOTIFY
 from adorm.exceptions import (
     DatabaseError,
     FieldError,
@@ -173,6 +176,7 @@ CAPABILITIES = Capabilities(
         "clause.select_for_update.skip_locked",
         "expression.CombinedExpression",
     },
+    backend_events={NOTIFY},
     savepoints=True,
     cancellation=True,
 )
@@ -217,7 +221,9 @@ def tracing() -> Iterator[list[TraceEntry]]:
 
 class MemoryDatabase:
     """Committed tables by model label, the row locks of open transactions (``locks``: (label, pk) → owner), the
-    connections waiting for a lock (``waiters``: waiter → (owner, (label, pk))) and the primary key sequences.
+    connections waiting for a lock (``waiters``: waiter → (owner, (label, pk))), the primary key sequences and the
+    connections listening on each notification channel (``listeners``: channel → connections in the order they
+    started listening).
 
     ``tables`` maps a label to its rows (mappings of field names to values). Only the labels given have tables; an
     operation on another label raises `NotSupportedError`.
@@ -228,6 +234,7 @@ class MemoryDatabase:
         self.locks: dict[tuple[str, Any], MemoryConnection] = {}
         self.waiters: dict[MemoryConnection, tuple[MemoryConnection, tuple[str, Any]]] = {}
         self._sequences: dict[str, Iterator[int]] = {}
+        self.listeners: dict[str, dict[MemoryConnection, None]] = {}
         self.load(tables or {})
 
     def load(self, tables: Mapping[str, Iterable[Mapping[str, Any]]]) -> None:
@@ -248,6 +255,14 @@ class MemoryDatabase:
         """Copies of the committed rows of ``label``, by primary key."""
         table = self.tables[label]
         return [copy.deepcopy(table[pk]) for pk in sorted(table, key=_sort_key)]
+
+    def notify(self, channel: str, payload: str = "") -> int:
+        """Emit ``BackendEvent(NOTIFY, channel, payload)`` from every connection listening on ``channel``, at once;
+        return how many there are."""
+        listening = tuple(self.listeners.get(channel, ()))
+        for connection in listening:
+            connection.emit(BackendEvent(NOTIFY, channel, payload))
+        return len(listening)
 
     def next_pk(self, label: str) -> int:
         """The next value of the integer primary key sequence of ``label``; a rollback does not return it."""
@@ -1004,11 +1019,30 @@ class MemoryConnection(DriverConnection):
     def is_usable(self) -> bool:
         return not self.closed
 
+    async def _listen(self, channel: str) -> None:
+        self._check_open()
+        self.record("listen")
+        self.database.listeners.setdefault(channel, {})[self] = None
+
+    async def _unlisten(self, channel: str) -> None:
+        self._check_open()
+        self.record("unlisten")
+        self._stop_listening(channel)
+
+    def _stop_listening(self, channel: str) -> None:
+        listeners = self.database.listeners.get(channel)
+        if listeners is not None:
+            listeners.pop(self, None)
+            if not listeners:
+                del self.database.listeners[channel]
+
     async def close(self) -> None:
         if self.closed:
             return
         if self._overlay is not None:
             self._end()
+        for channel in self.listening:
+            self._stop_listening(channel)
         self.closed = True
 
 

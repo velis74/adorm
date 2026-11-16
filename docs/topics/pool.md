@@ -116,6 +116,10 @@ slot closes its connection and leaves the pool, and the next request gets a fres
 - the connection ran custom SQL, SQL that adorm did not generate, such as a Django signal receiver's
   `cursor.execute()` ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), also when the transaction committed: that SQL
   may have changed the connection's state;
+- the connection still listens on a notification channel
+  ([`listening`](/ref/drivers#adorm-drivers-driverconnection)), as after an
+  [`adorm.listen()`](/topics/events#listening-for-notifications) block that did not unlisten: a later lease would
+  receive its notifications;
 - the connection reports itself unusable, or the lease was released with `discard=True`.
 
 ```python

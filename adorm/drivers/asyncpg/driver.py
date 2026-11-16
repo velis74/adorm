@@ -31,9 +31,9 @@ from adorm.drivers.django.translation import (
     translate,
     validation_error,
 )
-from adorm.drivers.postgresql import activity_sql, backend_activity
+from adorm.drivers.postgresql import activity_sql, backend_activity, MAX_IDENTIFIER_LENGTH, notice_payload
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
-from adorm.events import Emit
+from adorm.events import BackendEvent, CONNECTION_LOST, Emit, NOTICE, NOTIFY
 from adorm.exceptions import (
     InterfaceError,
     MultipleObjectsReturned,
@@ -63,11 +63,14 @@ CAPABILITIES = Capabilities(
     operations=DJANGO_CAPABILITIES.operations,
     constructs=DJANGO_CAPABILITIES.constructs,
     connection_options=POSTGRESQL_OPTIONS,
+    backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
+    max_channel_length=MAX_IDENTIFIER_LENGTH,
     savepoints=True,
     cancellation=True,
 )
 """What `AsyncpgDriver` supports: the operations and constructs of `adorm.drivers.django.CAPABILITIES` (reads,
-writes, row locks), savepoints, cancellation and the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`."""
+writes, row locks), savepoints, cancellation, the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS` and
+the backend events `NOTIFY`, `NOTICE` and `CONNECTION_LOST`."""
 
 MAX_GET_RESULTS = 21
 """How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""
@@ -225,10 +228,41 @@ class AsyncpgConnection(DriverConnection):
         self._usable = True
         self._closed = False
         self._test: Any = None
+        conn.add_log_listener(self._on_log)
+        conn.add_termination_listener(self._on_terminated)
 
     @property
     def target(self) -> Any:
         return self.conn
+
+    # Backend events
+
+    def _on_notify(self, _conn: Any, _pid: int, channel: str, payload: str) -> None:
+        self._emit(BackendEvent(NOTIFY, channel, payload))
+
+    def _on_log(self, _conn: Any, message: Any) -> None:
+        severity = getattr(message, "severity_en", None) or getattr(message, "severity", None)
+        payload = notice_payload(
+            severity,
+            getattr(message, "sqlstate", None),
+            getattr(message, "message", None),
+            getattr(message, "detail", None),
+            getattr(message, "hint", None),
+        )
+        self._emit(BackendEvent(NOTICE, severity, payload))
+
+    def _on_terminated(self, _conn: Any) -> None:
+        if self._closed:
+            return
+        self._usable = False
+        self._emit(BackendEvent(CONNECTION_LOST, payload="the server connection ended"))
+
+    async def _listen(self, channel: str) -> None:
+        """Listen with ``asyncpg.Connection.add_listener()``."""
+        await self._guarded(self.conn.add_listener(channel, self._on_notify))
+
+    async def _unlisten(self, channel: str) -> None:
+        await self._guarded(self.conn.remove_listener(channel, self._on_notify))
 
     @property
     def backend_pid(self) -> int | None:
@@ -371,8 +405,12 @@ class AsyncpgConnection(DriverConnection):
 
     async def _command(self, sql: str) -> str:
         """Run ``sql``, a statement without parameters, and return its status; errors are mapped."""
+        return await self._guarded(self.conn.execute(sql))
+
+    async def _guarded(self, coroutine: Any) -> Any:
+        """`_run()` ``coroutine``; errors are mapped."""
         try:
-            return await self._run(self.conn.execute(sql))
+            return await self._run(coroutine)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

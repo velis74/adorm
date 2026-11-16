@@ -505,8 +505,32 @@ class MemberTests(TestCase):
 
 ## Events
 
-The driver emits no events and consumes none. Each operation reports its outcome as the result of the call, which
-the slot delivers as a `ResultEvent` or `ErrorEvent` (`CancelledEvent` for a cancelled operation). The slot delivers
-`CallbackEvent("on_commit")` after a successful `commit()`, and `CallbackEvent("on_rollback")` after a rollback; the
-transaction's own `on_commit()` callbacks run on that event. Django's `on_commit()` callbacks run on the slot's thread
-after the commit's outcome, before the slot's next request. Django's signals and `on_commit()` callbacks stay on the driver side and produce no event.
+Each operation reports its outcome as the result of the call, which the slot delivers as a `ResultEvent` or
+`ErrorEvent` (`CancelledEvent` for a cancelled operation). The slot delivers `CallbackEvent("on_commit")` after a
+successful `commit()`, and `CallbackEvent("on_rollback")` after a rollback; the transaction's own `on_commit()`
+callbacks run on that event. Django's `on_commit()` callbacks run on the slot's thread after the commit's outcome,
+before the slot's next request. Django's signals and `on_commit()` callbacks stay on the driver side and produce no
+event. The driver consumes no events.
+
+With psycopg 3 each connection emits three [backend events](/topics/events#backend-events), from handlers it adds to
+the psycopg connection. A connection that does not listen does not notice that the server ended it until its next
+call fails:
+
+| Event | Source | When |
+|---|---|---|
+| `BackendEvent("notice", severity, {...})` | psycopg's notice handler, on the slot's thread | the server sends a notice or warning while a statement runs; it arrives before the outcome of the request that caused it |
+| `BackendEvent("notify", channel, payload)` | psycopg's notify handler | a notification on a channel an [`adorm.listen()`](/topics/events#listening-for-notifications) block listens on. While the connection listens and no call runs, its thread waits on the connection's socket and reads notifications as they arrive; a call queued meanwhile wakes it at once. A `direct` driver has the event loop watch the socket |
+| `BackendEvent("connection_lost", None, reason)` | the thread's wait on the socket | reading the socket failed or libpq reports the connection bad while the connection listens; the connection is unusable from then on |
+
+`LISTEN` and `UNLISTEN` run on the wrapper's cursor and do not count as custom SQL. With psycopg 2 the driver emits no
+backend events: `DjangoDriver.capabilities` is then
+[`PSYCOPG2_CAPABILITIES`](/ref/drivers#adorm-drivers-django-psycopg2-capabilities), and `adorm.listen()` raises
+`NotSupportedError` before it takes a slot. On the shared connection of Django's `TestCase` the
+connection that holds it emits the notices of its statements, and `adorm.listen()` raises `NotSupportedError`:
+PostgreSQL delivers notifications when a transaction commits, which the test's transaction never does; a test that
+listens uses `TransactionTestCase`.
+
+```python
+pool.events.subscribe(BackendEvent, lambda e: print(e.channel, e.payload["message"]), name="notice")
+await Club.objects.filter(slug="koper-sailing").update(city="Koper")   # prints "NOTICE clubs updated" (a trigger)
+```

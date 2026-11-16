@@ -179,6 +179,41 @@ class NotifyingConnection(SQLiteConnection):
         self.db.set_trace_callback(lambda sql: self.emit(BackendEvent("trace", payload=sql)))
 ```
 
+A driver whose target delivers notifications declares `notify` and implements listening. An async connection
+implements `_listen()` and `_unlisten()`; a threaded one `listen_sync()` and `unlisten_sync()`, and, when the target
+only reads its socket during a call, `idle_fileno()` and `idle_sync()`: the connection's thread then waits for that
+socket between calls and reads what arrived. An exception from `idle_sync()` makes the connection unusable and is
+emitted as `BackendEvent("connection_lost")`, which ends an `adorm.listen()` block.
+
+```python
+from adorm.drivers.postgresql import listen_sql, unlisten_sql
+from adorm.events import BackendEvent, NOTIFY
+
+
+class ListeningConnection(PostgresConnection):       # psycopg 3 under the hood
+    channels = frozenset()
+
+    def listen_sync(self, channel):
+        self.db.execute(listen_sql(channel))
+        self.channels |= {channel}
+
+    def unlisten_sync(self, channel):
+        self.db.execute(unlisten_sql(channel))
+        self.channels -= {channel}
+
+    def idle_fileno(self):
+        return self.db.fileno() if self.channels else None
+
+    def idle_sync(self):
+        for notify in self.db.notifies(timeout=0):
+            self.emit(BackendEvent(NOTIFY, notify.channel, notify.payload))
+
+
+class ListeningDriver(PostgresDriver):
+    connection_class = ListeningConnection
+    capabilities = Capabilities(operations={"raw"}, backend_events={NOTIFY})
+```
+
 ## 5. Use the connection
 
 The slot drives a connection; the same calls work in a test or a script:

@@ -63,6 +63,8 @@ REQUEST_METHODS = frozenset(
         "release_savepoint",
         "rollback_to_savepoint",
         "set_options",
+        "listen",
+        "unlisten",
     }
 )
 """The `DriverConnection` methods a request can call."""
@@ -96,6 +98,8 @@ class CloseReason(enum.StrEnum):
     """A request failed with an error that leaves the connection unusable (`DriverConnection.is_connection_lost()`)."""
     CUSTOM_SQL = "custom_sql"
     """The connection ran SQL adorm did not generate (`DriverConnection.ran_custom_sql`)."""
+    LISTENING = "listening"
+    """The connection still listened for notifications when its lease ended (`DriverConnection.listening`)."""
     UNUSABLE = "unusable"
     """The connection reported itself unusable, or the slot stopped serving requests."""
     UNSETTLED = "unsettled"
@@ -526,8 +530,9 @@ class Slot:
     When its lease ends, the slot waits for the connection to settle (`DriverConnection.settle()`; the release does not
     wait for it), then leaves the pool, closing the connection, when the lease was released with ``discard``, the
     lease ended inside a transaction, a request failed with an error that leaves the connection unusable, the
-    connection ran custom SQL (`DriverConnection.ran_custom_sql`), even after a commit, or the connection is no longer
-    usable. ``close_reason`` tells which. Acquiring the slot does nothing to the connection.
+    connection ran custom SQL (`DriverConnection.ran_custom_sql`), even after a commit, the connection still listens
+    for notifications (`DriverConnection.listening`), or the connection is no longer usable. ``close_reason`` tells
+    which. Acquiring the slot does nothing to the connection.
     """
 
     _ids = itertools.count(1)
@@ -555,9 +560,14 @@ class Slot:
         self._broken = False
         self.idle_since: float | None = None
         self.close_reason: CloseReason | None = None
+        self._closed = asyncio.Event()
 
     def __repr__(self) -> str:
         return f"<Slot {self.slot_id} of {self.pool.name!r}, {self.state}>"
+
+    async def wait_closed(self) -> None:
+        """Wait until the slot is closed (`close()`)."""
+        await self._closed.wait()
 
     @property
     def running(self) -> RunningRequest | None:
@@ -876,6 +886,8 @@ class Slot:
             return CloseReason.CUSTOM_SQL
         if not self.is_usable():
             return CloseReason.UNUSABLE
+        if connection is not None and connection.listening:
+            return CloseReason.LISTENING
         return None
 
     async def _return(self, lease: SlotLease, reason: CloseReason | None) -> None:
@@ -973,6 +985,7 @@ class Slot:
         self.state = _CLOSED
         self.close_reason = CloseReason(reason)
         self.idle_since = None
+        self._closed.set()
         logger.debug("%r leaves the pool: %s", self, self.close_reason)
         server = self._server
         if server is not None and not server.done():

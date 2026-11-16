@@ -18,8 +18,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
-from adorm.drivers.django.driver import _transaction_failed, DjangoConnection
+from adorm.drivers.django.driver import _transaction_failed, DjangoConnection, notice_event
 from adorm.drivers.sql import set_options_sql
+from adorm.events import NOTIFY
 from adorm.exceptions import NotSupportedError, OperationalError, TransactionManagementError, TransactionOverlapError
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from adorm.events import Emit
 
 __all__ = [
+    "NO_NOTIFICATIONS",
     "QUERY_CANCELED",
     "SharedConnectionMixin",
     "SharedTestConnection",
@@ -42,6 +44,12 @@ __all__ = [
 
 QUERY_CANCELED = "57014"
 """The SQLSTATE of a call cancelled while it waited for the shared test connection, as of a cancelled statement."""
+
+NO_NOTIFICATIONS = (
+    "the shared connection of Django's TestCase receives no notifications: PostgreSQL delivers them when a "
+    "transaction commits, and the test's transaction never does; use TransactionTestCase"
+)
+"""The message of the `NotSupportedError` raised for listening inside a ``TestCase``."""
 
 _STATEMENT_CALLS = frozenset({"execute_sync"})
 """The calls that run with the connection options in effect."""
@@ -147,6 +155,7 @@ class SharedTestConnection:
         self._holding = threading.local()
         self._attached = 0
         self._guard_wrapper = self._guard
+        self._watched_raw: Any = None
 
     @property
     def wrapper(self) -> Any:
@@ -177,6 +186,20 @@ class SharedTestConnection:
             if self.owner is connection:
                 self.owner = None
                 self._condition.notify_all()
+
+    def watch_backend(self) -> None:
+        """Have the test's DB-API connection (psycopg 3) report its notices to the connection that holds it."""
+        raw = self.wrapper.connection
+        if raw is None or raw is self._watched_raw:
+            return
+        self._watched_raw = raw
+        if hasattr(raw, "add_notice_handler"):
+            raw.add_notice_handler(self._on_notice)
+
+    def _on_notice(self, diagnostic: Any) -> None:
+        owner = self.owner
+        if isinstance(owner, SharedConnectionMixin):
+            owner.emit(notice_event(diagnostic))  # type: ignore[attr-defined]
 
     def hold(self, connection: SharedConnectionMixin | _Foreign) -> _Hold:
         """``with shared.hold(connection):`` runs the block as ``connection``'s call (`acquire()`, `release()`)."""
@@ -345,6 +368,10 @@ class SharedConnectionMixin:
     Connection options are kept per connection and applied before each operation. A profile with ``params`` that
     differ from the wrapper's settings, a ``connect`` hook or an ``on_acquire`` or ``on_release`` hook raises
     `NotSupportedError` on connecting: a hook's changes to the session would reach every connection.
+
+    A notice is emitted by the connection that holds the shared connection when the server sends it. ``listen()``
+    raises `NotSupportedError`: notifications arrive when a transaction commits, which the test's transaction never
+    does.
     """
 
     _shared: SharedTestConnection
@@ -405,6 +432,13 @@ class SharedConnectionMixin:
 
     def cancel_sync(self) -> None:
         self._shared.cancel(self, super().cancel_sync)  # type: ignore[misc]
+
+    def _watch_backend(self) -> None:
+        self._shared.watch_backend()
+
+    def listen_sync(self, channel: str) -> None:  # noqa: ARG002 - the contract's signature
+        driver = self.driver.name  # type: ignore[attr-defined]
+        raise NotSupportedError(NO_NOTIFICATIONS, driver=driver, unsupported=[NOTIFY])
 
     # Connecting
 

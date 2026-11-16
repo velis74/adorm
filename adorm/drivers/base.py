@@ -16,6 +16,8 @@ import inspect
 import itertools
 import logging
 import queue
+import selectors
+import socket
 import threading
 
 from abc import ABC, abstractmethod
@@ -23,7 +25,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Literal, Protocol, runtime_checkable
 
-from adorm.events import Emit, Event
+from adorm.events import BackendEvent, CONNECTION_LOST, Emit, Event, NOTIFY
 from adorm.exceptions import InterfaceError, NotSupportedError, OperationalError, wrap_driver_error
 
 __all__ = [
@@ -37,6 +39,7 @@ __all__ = [
     "Profile",
     "ThreadedConnection",
     "ThreadedDriver",
+    "check_channel",
     "is_connection_error",
     "is_refusal",
 ]
@@ -93,7 +96,8 @@ class Capabilities:
     ``operations`` and ``constructs`` are the names `Operation` reports, ``connection_options`` the options
     ``set_options()`` accepts and ``backend_events`` the `BackendEvent` names the driver emits. ``savepoints`` and
     ``cancellation`` tell whether the driver implements savepoints and cancels a running statement; both default
-    to ``False``, so a driver declares only what it implements.
+    to ``False``, so a driver declares only what it implements. ``max_channel_length`` is the longest notification
+    channel name in bytes of UTF-8 the backend accepts, ``None`` (the default) for no limit.
     """
 
     operations: frozenset[str] = frozenset()
@@ -102,11 +106,12 @@ class Capabilities:
     backend_events: frozenset[str] = frozenset()
     savepoints: bool = False
     cancellation: bool = False
+    max_channel_length: int | None = None
 
     def __post_init__(self) -> None:
         for field in fields(self):
             value = getattr(self, field.name)
-            if isinstance(value, bool):
+            if value is None or isinstance(value, (bool, int)):
                 continue
             if isinstance(value, str):
                 raise TypeError(f"{field.name} must be an iterable of names, not a string")
@@ -137,6 +142,22 @@ class Capabilities:
                 f"savepoints are not supported{_on(driver)}", driver=driver, unsupported=["savepoints"]
             )
 
+    def check_backend_event(self, name: str, driver: str | None = None) -> None:
+        """Raise `NotSupportedError` when the driver does not declare the `BackendEvent` name ``name``."""
+        if name not in self.backend_events:
+            raise NotSupportedError(
+                f"the backend event {name!r} is not supported{_on(driver)}", driver=driver, unsupported=[name]
+            )
+
+    def check_channel(self, channel: Any) -> str:
+        """Return ``channel`` when it is a valid channel name (`check_channel()`) of at most ``max_channel_length``
+        bytes in UTF-8; raise `TypeError` or `ValueError` otherwise."""
+        check_channel(channel)
+        limit = self.max_channel_length
+        if limit is not None and len(channel.encode()) > limit:
+            raise ValueError(f"the channel name {channel!r} is longer than {limit} bytes")
+        return channel
+
     def check_options(self, options: Iterable[str], driver: str | None = None) -> None:
         """Raise `NotSupportedError` naming every option the driver does not support."""
         missing = sorted(set(options) - self.connection_options)
@@ -152,6 +173,17 @@ def _on(driver: str | None) -> str:
 
 _QUERY_CANCELED = "57014"
 _CONNECTION_LOST_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
+
+
+def check_channel(channel: Any) -> str:
+    """Return ``channel``, a notification channel name: a non-empty string without NUL; raise `TypeError` or
+    `ValueError` otherwise. The name is used exactly as given: ``"Orders"`` and ``"orders"`` are different channels.
+    A driver's length limit is checked by `Capabilities.check_channel()`."""
+    if not isinstance(channel, str):
+        raise TypeError(f"a channel name is a string, not {type(channel).__name__}")
+    if not channel or "\x00" in channel:
+        raise ValueError(f"a channel name is a non-empty string without NUL, not {channel!r}")
+    return channel
 
 
 def is_connection_error(exc: BaseException) -> bool:
@@ -211,6 +243,7 @@ class DriverConnection(ABC):
     def __init__(self, driver: Driver) -> None:
         self.driver = driver
         self._custom_sql = False
+        self._listening: frozenset[str] = frozenset()
 
     async def execute(self, operation: Operation) -> Any:
         """Execute ``operation``; return plain data: rows as dicts keyed by adorm field names, a scalar or a count.
@@ -240,6 +273,39 @@ class DriverConnection(ABC):
         resets the option to its default."""
         self.driver.capabilities.check_options(options, self.driver.name)
         await self._set_options(dict(options), local)
+
+    async def listen(self, channel: str) -> None:
+        """Listen for notifications on ``channel`` (`Capabilities.check_channel()`): each one the database delivers is
+        emitted as ``BackendEvent(NOTIFY, channel, payload)``, also while no call runs. Raises `NotSupportedError`
+        unless the driver declares the backend event `NOTIFY`. The channel counts in ``listening`` from the start of
+        the call, and stays there when the call is cancelled."""
+        self.driver.capabilities.check_channel(channel)
+        self.driver.capabilities.check_backend_event(NOTIFY, self.driver.name)
+        listening = self._listening
+        self._listening = listening | {channel}
+        try:
+            await self._listen(channel)
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            if channel not in listening:
+                self._listening = self._listening - {channel}
+            raise
+
+    async def unlisten(self, channel: str) -> None:
+        """Stop listening on ``channel``; nothing happens for a channel the connection does not listen on. A
+        notification already received may still be emitted afterwards."""
+        self.driver.capabilities.check_channel(channel)
+        if channel not in self._listening:
+            return
+        await self._unlisten(channel)
+        self._listening = self._listening - {channel}
+
+    @property
+    def listening(self) -> frozenset[str]:
+        """The channels the connection listens on (`listen()`). The slot closes a connection that still listens when
+        its lease ends."""
+        return getattr(self, "_listening", frozenset())
 
     @property
     def target(self) -> Any:
@@ -304,6 +370,14 @@ class DriverConnection(ABC):
         option unless overridden."""
         if options:
             raise NotSupportedError(f"unsupported connection options: {', '.join(sorted(options))}")
+
+    async def _listen(self, channel: str) -> None:  # noqa: ARG002 - subclasses use it
+        """Start listening on ``channel``. Raises `NotSupportedError` unless overridden."""
+        raise NotSupportedError(f"the {self.driver.name} driver does not listen for notifications")
+
+    async def _unlisten(self, channel: str) -> None:  # noqa: ARG002 - subclasses use it
+        """Stop listening on ``channel``. Raises `NotSupportedError` unless overridden."""
+        raise NotSupportedError(f"the {self.driver.name} driver does not listen for notifications")
 
     @abstractmethod
     async def begin(self) -> None:
@@ -388,6 +462,11 @@ class Driver(ABC):
             raise
         if operation.kind == "call":
             _check_call(operation)
+
+    async def check_listen(self, profile: Profile) -> None:  # noqa: ARG002 - subclasses use it
+        """Raise `NotSupportedError` when a connection for ``profile`` cannot listen for notifications. Defaults to
+        checking that `capabilities` declares the backend event `NOTIFY`. Opens no connection."""
+        self.capabilities.check_backend_event(NOTIFY, self.name)
 
     def is_refusal(self, exc: BaseException) -> bool:
         """Whether ``exc``, raised by `open_connection()`, means the database refuses more connections.
@@ -528,7 +607,8 @@ class ThreadedConnection(DriverConnection):
     call runs in a copy of the awaiting task's context. Errors are mapped with ``map_error()`` on that thread.
     ``cancel_sync()`` runs on another thread while a call is running, and no further call starts until it
     returns. ``emit()`` may be called from any thread. Work a call hands to ``after_call_sync()`` runs once the call's
-    outcome is delivered, before the next call.
+    outcome is delivered, before the next call. While no call runs, the thread watches ``idle_fileno()`` and runs
+    ``idle_sync()`` when it becomes readable (for a ``direct`` driver, the event loop watches it).
     """
 
     driver: ThreadedDriver
@@ -549,6 +629,11 @@ class ThreadedConnection(DriverConnection):
         self._closed = False
         self._settling: concurrent.futures.Future[None] | None = None
         self._requests: queue.SimpleQueue[_Call | None] = queue.SimpleQueue()
+        # Watching idle_fileno(): a wake-up socket pair, the selector and the watched descriptor.
+        self._waker: tuple[socket.socket, socket.socket] | None = None
+        self._selector: selectors.BaseSelector | None = None
+        self._watched: int | None = None
+        self._idle_waiting = False
         if self._direct:
             self._thread = threading.current_thread()
         else:
@@ -605,6 +690,24 @@ class ThreadedConnection(DriverConnection):
         if options:
             raise NotSupportedError(f"unsupported connection options: {', '.join(sorted(options))}")
 
+    def listen_sync(self, channel: str) -> None:  # noqa: ARG002 - subclasses use it
+        """Start listening on ``channel``. Raises `NotSupportedError` unless overridden."""
+        raise NotSupportedError(f"the {self.driver.name} driver does not listen for notifications")
+
+    def unlisten_sync(self, channel: str) -> None:  # noqa: ARG002 - subclasses use it
+        """Stop listening on ``channel``. Raises `NotSupportedError` unless overridden."""
+        raise NotSupportedError(f"the {self.driver.name} driver does not listen for notifications")
+
+    def idle_fileno(self) -> int | None:
+        """A file descriptor to watch while no call runs, ``None`` (the default) for none. Asked on the connection's
+        thread after every call; it is not watched once the connection is closed or unusable."""
+        return None
+
+    def idle_sync(self) -> None:  # noqa: B027 - optional hook
+        """Read what arrived on ``idle_fileno()``, such as notifications; runs on the connection's thread between
+        calls, when the descriptor is readable. An exception it raises makes the connection unusable and is emitted as
+        ``BackendEvent(CONNECTION_LOST, payload=<the mapped error's text>)``. Does nothing unless overridden."""
+
     def prepare_call_sync(self) -> None:  # noqa: B027 - optional hook
         """Prepare the call's context; runs on the connection's thread, in the call's copy of the caller's context,
         before every ``*_sync`` call and hook. An exception it raises is the call's. Does nothing unless overridden."""
@@ -634,6 +737,8 @@ class ThreadedConnection(DriverConnection):
             self._closed = True
             self._shut_down()
             raise
+        if self._direct:
+            self._update_reader()
 
     async def _execute(self, operation: Operation) -> Any:
         return await self._request(self.execute_sync, operation)
@@ -658,6 +763,12 @@ class ThreadedConnection(DriverConnection):
 
     async def _set_options(self, options: dict[str, Any], local: bool) -> None:
         await self._request(self.set_options_sync, options, local)
+
+    async def _listen(self, channel: str) -> None:
+        await self._request(self.listen_sync, channel)
+
+    async def _unlisten(self, channel: str) -> None:
+        await self._request(self.unlisten_sync, channel)
 
     async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
         """Call ``hook(self.target, *args)`` on the connection's thread and return its result. The hook is a plain
@@ -705,6 +816,7 @@ class ThreadedConnection(DriverConnection):
             return
         self._closed = True
         if self._direct:
+            self._update_reader()
             ok, value = self._run_now(self.close_sync, map_errors=False)
             if not ok:
                 logger.error("closing %s connection failed", self.driver.name, exc_info=value)
@@ -712,8 +824,8 @@ class ThreadedConnection(DriverConnection):
         if not self._thread.is_alive():
             return
         call = _Call(self.close_sync, (), self._loop.create_future())
-        self._requests.put(call)
-        self._requests.put(None)
+        self._put(call)
+        self._put(None)
         if self._stuck:
             call.future.add_done_callback(_consume)
             return
@@ -733,8 +845,8 @@ class ThreadedConnection(DriverConnection):
         if self._direct or self._stuck or not self._thread.is_alive():
             return False
         self._closed = True
-        self._requests.put(_Call(self.close_sync, (), None))
-        self._requests.put(None)
+        self._put(_Call(self.close_sync, (), None))
+        self._put(None)
         return True
 
     def emit(self, event: Event) -> None:
@@ -766,7 +878,7 @@ class ThreadedConnection(DriverConnection):
         if self._direct:
             return self._call_inline(fn, *args)
         call = _Call(fn, args, self._loop.create_future())
-        self._requests.put(call)
+        self._put(call)
         try:
             return await asyncio.shield(call.future)
         except asyncio.CancelledError:
@@ -788,6 +900,7 @@ class ThreadedConnection(DriverConnection):
             ok, value = cast("tuple[bool, Any]", self._invoke(call, map_errors=True))
         finally:
             self._inline_events = None
+            self._update_reader()
         for event in events:
             try:
                 self._emit(event)
@@ -864,8 +977,8 @@ class ThreadedConnection(DriverConnection):
             return
         close = _Call(self.close_sync, (), self._loop.create_future())
         close.future.add_done_callback(_consume)
-        self._requests.put(close)
-        self._requests.put(None)
+        self._put(close)
+        self._put(None)
 
     def _cancel_in_background(self, call: _Call) -> None:
         # cancel_sync() may block on I/O; a thread of its own keeps it off the event loop and the shared executor.
@@ -904,8 +1017,14 @@ class ThreadedConnection(DriverConnection):
         _consume(call.future)
 
     def _serve(self) -> None:
+        try:
+            self._serve_calls()
+        finally:
+            self._stop_watching()
+
+    def _serve_calls(self) -> None:
         while True:
-            call = self._requests.get()
+            call = self._next_call()
             if call is None:
                 return
             outcome = self._invoke(call, map_errors=True)
@@ -929,6 +1048,120 @@ class ThreadedConnection(DriverConnection):
             finally:
                 if settling is not None:
                     settling.set_result(None)
+
+    # Watching idle_fileno() between calls.
+
+    def _put(self, item: _Call | None) -> None:
+        """Queue ``item`` for the thread and wake the thread when it watches ``idle_fileno()``."""
+        self._requests.put(item)
+        # Read after the put: the thread sets the flag before it checks the queue a last time.
+        if self._idle_waiting:
+            waker = self._waker
+            if waker is not None:
+                try:
+                    waker[1].send(b"\0")
+                except OSError:  # full: wake-ups are pending already
+                    pass
+
+    def _watched_fileno(self) -> int | None:
+        """``idle_fileno()`` of a usable, open connection; ``None`` when it fails."""
+        if self._closed or not self._usable:
+            return None
+        try:
+            return self.idle_fileno()
+        except Exception:
+            logger.exception("%s.idle_fileno failed", type(self).__name__)
+            return None
+
+    def _next_call(self) -> _Call | None:
+        """The next queued item; while there is none, run ``idle_sync()`` whenever ``idle_fileno()`` is readable."""
+        while True:
+            fd = self._watched_fileno()
+            if fd is None:
+                self._unwatch()
+                return self._requests.get()
+            try:
+                return self._requests.get_nowait()
+            except queue.Empty:
+                pass
+            if self._wait_idle(fd):
+                self._run_idle()
+
+    def _wait_idle(self, fd: int) -> bool:
+        """Wait until ``fd`` is readable or an item is queued; return whether ``fd`` is readable."""
+        selector = self._selector
+        if selector is None:
+            reader, writer = socket.socketpair()
+            reader.setblocking(False)
+            writer.setblocking(False)
+            selector = selectors.DefaultSelector()
+            selector.register(reader, selectors.EVENT_READ, None)
+            self._waker, self._selector = (reader, writer), selector
+        if self._watched != fd:
+            self._unwatch()
+            selector.register(fd, selectors.EVENT_READ, fd)
+            self._watched = fd
+        self._idle_waiting = True
+        try:
+            if not self._requests.empty():
+                return False
+            ready = selector.select()
+        finally:
+            self._idle_waiting = False
+        readable = False
+        for key, _events in ready:
+            if key.data is None:
+                try:
+                    while cast("socket.socket", key.fileobj).recv(4096):
+                        pass
+                except OSError:  # drained
+                    pass
+            else:
+                readable = True
+        return readable
+
+    def _run_idle(self) -> None:
+        """Run ``idle_sync()``; a failure makes the connection unusable and is emitted as `CONNECTION_LOST`."""
+        try:
+            self.idle_sync()
+        except Exception as exc:
+            mapped = self._map(exc)
+            self._usable = False
+            logger.warning("%s connection failed while idle: %s", self.driver.name, mapped)
+            self.emit(BackendEvent(CONNECTION_LOST, payload=str(mapped)))
+
+    def _unwatch(self) -> None:
+        if self._watched is not None and self._selector is not None:
+            try:
+                self._selector.unregister(self._watched)
+            except (KeyError, ValueError, OSError):
+                pass
+        self._watched = None
+
+    def _stop_watching(self) -> None:
+        self._unwatch()
+        selector, self._selector = self._selector, None
+        waker, self._waker = self._waker, None
+        if selector is not None:
+            selector.close()
+        if waker is not None:
+            for end in waker:
+                end.close()
+
+    def _update_reader(self) -> None:
+        """For a ``direct`` driver: have the event loop watch ``idle_fileno()`` (`_read_idle()`)."""
+        fd = self._watched_fileno()
+        if fd == self._watched:
+            return
+        if self._watched is not None:
+            self._loop.remove_reader(self._watched)
+        self._watched = fd
+        if fd is not None:
+            self._loop.add_reader(fd, self._read_idle)
+
+    def _read_idle(self) -> None:
+        self._run_idle()
+        self._update_reader()
 
     def _map(self, exc: BaseException) -> BaseException:
         try:

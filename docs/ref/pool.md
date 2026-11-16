@@ -85,6 +85,11 @@ pool = Pool(AsyncpgDriver(), profile, purge_stale_connections_at=60)     # idle 
 
 The unreleased leases holding a slot of the pool.
 
+#### `async wait_closed()`
+
+Waits until `close()` is called; slots held then may still be open. A [`Listener`](/ref/events#adorm-listener) waits
+for it to end the waits of its `get()`.
+
 #### `async close()`
 
 Closes the idle slots and refuses further acquisitions with [`InterfaceError`](/ref/exceptions); waiting requests
@@ -382,7 +387,8 @@ Request("set_options", ({"statement_timeout": 5}, True))
 ### `adorm.executor.REQUEST_METHODS`
 
 The [`DriverConnection`](/ref/drivers#adorm-drivers-driverconnection) methods a request can call: `execute`,
-`begin`, `commit`, `rollback`, `savepoint`, `release_savepoint`, `rollback_to_savepoint` and `set_options`.
+`begin`, `commit`, `rollback`, `savepoint`, `release_savepoint`, `rollback_to_savepoint`, `set_options`, `listen`
+and `unlisten`.
 
 ### `adorm.executor.Slot`
 
@@ -429,6 +435,7 @@ connection and leaves the pool for the first of these reasons that applies; the 
 | `UNCLEAN_END` | the lease ended inside a transaction: no successful `commit` or `rollback` ended its `begin` |
 | `CUSTOM_SQL` | the connection ran SQL adorm did not generate ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), even when the transaction committed |
 | `UNUSABLE` | the connection reports itself unusable, the slot's serving task stopped, or deciding raised an unexpected error |
+| `LISTENING` | the connection still listens on a notification channel ([`listening`](/ref/drivers#adorm-drivers-driverconnection)) |
 | `UNSETTLED` | the connection did not settle within `release_timeout` |
 | `HOOK_FAILED` | the profile's `on_release` hook failed or timed out |
 
@@ -474,6 +481,11 @@ the differences. The slot must be leased and idle.
 #### `forget_options()`
 
 Makes every option the slot remembers unknown, so the next request with options sets it again.
+
+#### `async wait_closed()`
+
+Waits until the slot is closed (`close()`). A [`Listener`](/ref/events#adorm-listener) waits for it to end the waits
+of its `get()`.
 
 #### `is_usable()`
 
@@ -550,6 +562,7 @@ A `StrEnum` of why a slot closed its connection and left the pool, the value of
 | `CONNECTION_ERROR` | `"connection_error"` | a request failed with an error that leaves the connection unusable |
 | `CUSTOM_SQL` | `"custom_sql"` | the connection ran SQL adorm did not generate |
 | `UNUSABLE` | `"unusable"` | the connection reported itself unusable, or the slot stopped serving requests |
+| `LISTENING` | `"listening"` | the connection still listened for notifications when its lease ended |
 | `UNSETTLED` | `"unsettled"` | the connection did not finish the work of its last call within the pool's `release_timeout` |
 | `HOOK_FAILED` | `"hook_failed"` | setting the session's options and running the profile's `on_acquire` hook, or running its `on_release` hook, failed or timed out |
 | `STALE` | `"stale"` | it stayed idle for the pool's `purge_stale_connections_at` seconds |

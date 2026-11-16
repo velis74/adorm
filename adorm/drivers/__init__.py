@@ -7,6 +7,7 @@ connection profile names it, so importing ``adorm`` imports no ORM.
 from adorm.drivers.base import (
     BackendActivity,
     Capabilities,
+    check_channel,
     DatabaseMonitor,
     Driver,
     DriverConnection,
@@ -30,6 +31,7 @@ __all__ = [
     "Profile",
     "ThreadedConnection",
     "ThreadedDriver",
+    "check_channel",
     "is_connection_error",
     "is_refusal",
 ]

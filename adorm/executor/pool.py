@@ -164,6 +164,7 @@ class Pool:
         )
         self.events = EventBus()
         self.closed = False
+        self._closed_event = asyncio.Event()
         self.retired = False
         self.router: Router | None = None
         self._slots: set[Slot] = set()
@@ -326,6 +327,10 @@ class Pool:
                 waiter.future.set_result(_OPEN)
                 return
 
+    async def wait_closed(self) -> None:
+        """Wait until `close()` is called; held slots may still be open then."""
+        await self._closed_event.wait()
+
     async def close(self) -> None:
         """Close idle slots and refuse further requests; waiting requests raise `InterfaceError`. Returns once the
         idle slots, the slots being discarded and the released slots whose connections are settling are closed. A held
@@ -333,6 +338,7 @@ class Pool:
         if self.closed:
             return
         self.closed = True
+        self._closed_event.set()
         self._schedule_purge()
         while self._waiters:
             waiter = self._waiters.popleft()

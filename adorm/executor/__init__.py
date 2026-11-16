@@ -1,7 +1,9 @@
 """The executor: sessions, models bound to a session, transactions and the active transactions of a context, the
-pools and router that assign slots to sessions, connection options and the time limit of operations."""
+pools and router that assign slots to sessions, connection options, the time limit of operations and listeners for
+notifications."""
 
 from adorm.executor.debug import debug_enabled, set_debug
+from adorm.executor.listen import listen, Listener
 from adorm.executor.options import connection_options, Timeout, timeout
 from adorm.executor.pool import held_leases, holding, Pool, Router
 from adorm.executor.sessions import (
@@ -43,6 +45,7 @@ __all__ = [
     "BoundModel",
     "CancellationOutcome",
     "CloseReason",
+    "Listener",
     "Pool",
     "Request",
     "RequestQueue",
@@ -67,6 +70,7 @@ __all__ = [
     "get_runner",
     "held_leases",
     "holding",
+    "listen",
     "on_commit",
     "on_request_started",
     "running_requests",

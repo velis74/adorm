@@ -41,6 +41,7 @@ from adorm import (
 )
 from adorm.drivers.asyncpg import AsyncpgDriver
 from adorm.drivers.django import backend_pid, DjangoConnection, DjangoDriver
+from adorm.events import BackendEvent, NOTICE
 from adorm.executor import CloseReason, Pool, Router, set_runner
 from adorm.testing import running_operations, wait_for_lock, wait_for_operation
 from adorm.testing.django import (
@@ -673,6 +674,27 @@ class SharedConnectionTests(TestCase):
         assert not wrapper.allow_thread_sharing
         assert await sync_to_async(names_on_test_thread)() == ["direct", "seed"]
 
+    async def test_notices_reach_the_slot_that_holds_the_shared_connection(self):
+        await sync_to_async(create_raising_trigger)()
+        async with executor() as pool:
+            seen = []
+            pool.events.subscribe(BackendEvent, seen.append, name=NOTICE)
+            for _ in REPEAT:
+                seen.clear()
+                await asyncio.gather(*(tags().filter(name="seed").update(name="seed") for _ in range(4)))
+                assert [event.payload["message"] for event in seen] == ["tags updated"] * 4
+        await sync_to_async(drop_raising_trigger)()
+
+    async def test_listening_on_the_shared_connection_is_refused(self):
+        async with executor(max_connections=1) as pool:
+            with pytest.raises(NotSupportedError, match="TransactionTestCase") as raised:
+                async with adorm.listen("orders"):
+                    pytest.fail("entered")
+            assert raised.value.unsupported == ("notify",)
+            # Refused before a slot is taken.
+            assert (pool.size, pool.in_use) == (0, 0)
+            assert await tags().count() == 1
+
     async def test_the_native_postgresql_driver_refuses_to_run(self):
         async with executor(driver=AsyncpgDriver()):
             with pytest.raises(NotSupportedError, match="TransactionTestCase"):
@@ -689,6 +711,24 @@ class SharedConnectionTests(TestCase):
         finally:
             set_runner(previous)
             await router.close()
+
+
+def create_raising_trigger() -> None:
+    """A trigger raising a NOTICE for every update of tags, created in the test's transaction."""
+    with connections["default"].cursor() as cursor:
+        cursor.execute(
+            "CREATE FUNCTION adorm_test_tag_notice() RETURNS trigger LANGUAGE plpgsql AS $$"
+            " BEGIN RAISE NOTICE 'tags updated'; RETURN NULL; END $$;"
+            f" CREATE TRIGGER adorm_test_tag_notice AFTER UPDATE ON {dj.Tag._meta.db_table}"
+            " FOR EACH STATEMENT EXECUTE FUNCTION adorm_test_tag_notice()"
+        )
+
+
+def drop_raising_trigger() -> None:
+    with connections["default"].cursor() as cursor:
+        cursor.execute(
+            f"DROP TRIGGER adorm_test_tag_notice ON {dj.Tag._meta.db_table}; DROP FUNCTION adorm_test_tag_notice()"
+        )
 
 
 def shared_of(pool) -> SharedTestConnection:

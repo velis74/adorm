@@ -143,6 +143,7 @@ SUBMODULES = (
     "adorm.drivers.sql",
     "adorm.exceptions",
     "adorm.executor.debug",
+    "adorm.executor.listen",
     "adorm.executor.options",
     "adorm.executor.pool",
     "adorm.executor.sessions",

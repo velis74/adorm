@@ -3,6 +3,7 @@
 Every driver of the demo (`demo.api.drivers.DRIVERS`) has an entry here; a driver that is not available is skipped
 with the reason. ``create()`` returns a driver instance over the seeded test database. ``blocker()`` returns a
 `Blocker`: while it holds, the operation ``blocked()`` builds waits in the database until it is released.
+``notifier()`` returns a `Notifier` that sends notifications from outside the pool.
 """
 
 from __future__ import annotations
@@ -76,8 +77,6 @@ class Blocker:
 class TableLock(Blocker):
     """An exclusive lock on the clubs' table, taken and watched on two asyncpg connections of its own; a read of
     clubs waits for it."""
-
-    lost_connections = True
 
     def __init__(self, url: str) -> None:
         self.url = url
@@ -193,6 +192,59 @@ class RowLock(Blocker):
         await self.release()
 
 
+class Notifier:
+    """Sends notifications from outside the driver's pool."""
+
+    async def notify(self, channel: str, *payloads: str) -> None:
+        """Send one notification on ``channel`` per payload, in order, together."""
+        raise NotImplementedError
+
+    async def terminate(self, pid: int) -> None:
+        """End the server connection of the backend ``pid``."""
+        raise NotImplementedError
+
+    async def close(self) -> None:
+        pass
+
+
+class PostgresNotifier(Notifier):
+    """Notifications sent with ``pg_notify()`` on an asyncpg connection of its own; a batch commits together."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+        self.conn: asyncpg.Connection | None = None
+
+    async def _connection(self) -> asyncpg.Connection:
+        if self.conn is None:
+            self.conn = await asyncpg.connect(self.url)
+        return self.conn
+
+    async def notify(self, channel: str, *payloads: str) -> None:
+        conn = await self._connection()
+        await conn.execute(
+            "SELECT pg_notify($1, p) FROM unnest($2::text[]) WITH ORDINALITY AS t(p, n) ORDER BY n",
+            channel,
+            list(payloads),
+        )
+
+    async def terminate(self, pid: int) -> None:
+        conn = await self._connection()
+        await conn.execute("SELECT pg_terminate_backend($1)", pid)
+
+    async def close(self) -> None:
+        if self.conn is not None:
+            await self.conn.close()
+
+
+class MemoryNotifier(Notifier):
+    def __init__(self, driver: memory.MemoryDriver) -> None:
+        self.driver = driver
+
+    async def notify(self, channel: str, *payloads: str) -> None:
+        for payload in payloads:
+            self.driver.database.notify(channel, payload)
+
+
 class TrackedMemoryDriver(memory.MemoryDriver):
     """The memory driver, keeping a weak set of the connections it opened."""
 
@@ -215,12 +267,14 @@ refuse a write that would call an override or handler, or run none of it."""
 @dataclass(frozen=True)
 class ConformanceDriver:
     """A driver under test: ``create(url)`` returns an instance over the seeded test database at ``url``;
-    ``blocker(driver, url)`` returns its `Blocker`; ``driver_code`` is one of `DRIVER_CODE`."""
+    ``blocker(driver, url)`` returns its `Blocker`; ``driver_code`` is one of `DRIVER_CODE`; ``notifier(driver, url)``
+    returns a `Notifier` that reaches its listeners."""
 
     name: str
     create: Callable[[str], Awaitable[Driver]]
     blocker: Callable[[Driver, str], Blocker]
     driver_code: str
+    notifier: Callable[[Driver, str], Notifier]
 
     def unavailable_reason(self) -> str | None:
         return demo_drivers.get(self.name).unavailable_reason()
@@ -236,7 +290,25 @@ async def _memory_driver(_url: str) -> Driver:
 
 
 DRIVERS: tuple[ConformanceDriver, ...] = (
-    ConformanceDriver("django", lambda _url: _sql_driver("django"), lambda _driver, url: TableLock(url), "runs"),
-    ConformanceDriver("asyncpg", lambda _url: _sql_driver("asyncpg"), lambda _driver, url: TableLock(url), "refused"),
-    ConformanceDriver("memory", _memory_driver, lambda driver, _url: RowLock(driver), "not run"),  # type: ignore[arg-type]
+    ConformanceDriver(
+        "django",
+        lambda _url: _sql_driver("django"),
+        lambda _driver, url: TableLock(url),
+        "runs",
+        lambda _driver, url: PostgresNotifier(url),
+    ),
+    ConformanceDriver(
+        "asyncpg",
+        lambda _url: _sql_driver("asyncpg"),
+        lambda _driver, url: TableLock(url),
+        "refused",
+        lambda _driver, url: PostgresNotifier(url),
+    ),
+    ConformanceDriver(
+        "memory",
+        _memory_driver,
+        lambda driver, _url: RowLock(driver),  # type: ignore[arg-type]
+        "not run",
+        lambda driver, _url: MemoryNotifier(driver),  # type: ignore[arg-type]
+    ),
 )

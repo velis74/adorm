@@ -584,6 +584,15 @@ false, so `exclude()` and `~Q()` keep the row, as in Django. A lookup, arithmeti
 compare (a date with a datetime, text with a number, `overlap` with an expression that is not a list) raises
 `ProgrammingError` with SQLSTATE `42883`.
 
+A connection listens for notifications ([`adorm.listen()`](/topics/events#listening-for-notifications) works on the
+driver; it declares the backend event `notify` and no channel length limit). `MemoryDatabase.notify(channel,
+payload="")` emits `BackendEvent("notify", channel, payload)` at once from every connection listening on `channel` and
+returns how many there are; nothing is delivered on commit, as the driver has no `NOTIFY` statement.
+
+```python
+memory.DATABASE.notify("orders", "42")     # 1 while one adorm.listen("orders") block runs
+```
+
 The driver records each call in the list of the enclosing `tracing()` block, from tasks created inside it too; the
 profile hooks `on_acquire` and `on_release` record the slot's assignment to a session:
 

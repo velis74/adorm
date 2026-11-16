@@ -77,6 +77,43 @@ names it emits in `Capabilities.backend_events`. Kind `"backend"`.
 self.emit(BackendEvent("notify", "orders", "42"))
 ```
 
+### `adorm.events.NOTIFY`
+
+`"notify"`: the `BackendEvent` name of a PostgreSQL notification (`NOTIFY`, `pg_notify()`) on a channel the
+connection listens on ([`adorm.listen()`](#adorm-listen-channels-session-none)). `channel` is the notification's
+channel, exactly as sent; `payload` its payload string, `""` when it has none.
+
+```python
+BackendEvent("notify", "orders", "42")      # SELECT pg_notify('orders', '42')
+BackendEvent("notify", "Orders", "")        # NOTIFY "Orders"
+```
+
+### `adorm.events.NOTICE`
+
+`"notice"`: the `BackendEvent` name of a message the server sends with a statement's result, such as PL/pgSQL's
+`RAISE NOTICE` or a `WARNING`. `channel` is its untranslated severity (`"NOTICE"`, `"WARNING"`, `"INFO"`, `"DEBUG"`,
+`"LOG"`); `payload` a dict with `severity`, `sqlstate`, `message`, `detail` and `hint`, `None` for a field the server
+did not send. The server's `client_min_messages` decides which severities it sends (`NOTICE` and above by default).
+It arrives before the outcome of the request whose statement caused it.
+
+```python
+# RAISE WARNING 'check the clubs' USING ERRCODE = '01000';
+BackendEvent("notice", "WARNING", {"severity": "WARNING", "sqlstate": "01000", "message": "check the clubs",
+                                   "detail": None, "hint": None})
+```
+
+### `adorm.events.CONNECTION_LOST`
+
+`"connection_lost"`: the `BackendEvent` name a connection emits when its database connection ends without adorm
+closing it, as when the server terminates the session; at most once per connection. A driver that declares it notices
+the end at least while the connection listens and no call runs; the native PostgreSQL driver notices it at any time,
+the Django driver only while the connection listens. `channel` is `None`, `payload` the reason as text. The connection is no longer usable; a [`Listener`](#adorm-listener) raises
+`InterfaceError` once it reaches the event.
+
+```python
+BackendEvent("connection_lost", None, "the server connection ended")
+```
+
 ### `adorm.events.OUTCOME_EVENTS`
 
 `(ResultEvent, ErrorEvent, CancelledEvent)`: the event types that end a request. A slot delivers exactly one of
@@ -243,4 +280,61 @@ bus.subscribe(CallbackEvent, lambda e: print("cache cleared"), name="cache_clear
 bus.dispatch(BackendEvent("notify", "orders", "42"))   # prints "order 42", returns 1
 bus.dispatch(CallbackEvent("cache_cleared"))           # prints "cache cleared", returns 1
 unsubscribe()
+```
+
+## Listening for notifications
+
+### `adorm.listen(*channels, session=None)`
+
+A [`Listener`](#adorm-listener) for `channels` on `session`, the current session by default. Each channel name is
+checked with [`check_channel()`](/ref/drivers#adorm-drivers-check-channel-channel) at once, and against the driver's
+[`max_channel_length`](/ref/drivers#check-channel-channel) before a slot is taken.
+
+```python
+async with adorm.listen("orders", "invoices") as listener:
+    async for event in listener:
+        print(event.channel, event.payload)        # orders 42
+```
+
+### `adorm.Listener`
+
+`Listener(*channels, session=None)`
+
+Backend notifications (PostgreSQL's `LISTEN` / `NOTIFY`) received on a slot the `async with` block holds.
+
+Entering acquires a slot for `session` from the [`TransactionRunner`](/ref/sessions#adorm-executor-transactionrunner),
+as [`atomic()`](/ref/transactions#adorm-atomic) does: the acquisition timeout raises `SessionTimeout`, a flow holding
+another slot `DeadlockError`. A driver that cannot listen ([`Driver.check_listen()`](/ref/drivers#async-check-listen-profile):
+`notify` missing from its [`backend_events`](/ref/drivers#adorm-drivers-capabilities), Django's `TestCase`) raises
+`NotSupportedError` before a slot is taken. The
+connection then listens on each channel; a failure or cancellation there releases the slot and raises. While the
+block runs, its flow holds the slot, so an operation of that flow that needs another slot of a full pool raises
+`DeadlockError`. Leaving the block releases the slot; the slot closes its connection while it still listens on a
+channel ([`CloseReason.LISTENING`](/ref/pool#adorm-executor-closereason)) and returns it to the pool otherwise. Only the
+task that entered the block may leave it. A listener is entered once.
+
+| Member | Does |
+|---|---|
+| `async get()` | the next notification, `BackendEvent("notify", channel, payload)`, waiting for it. Notifications arrive in the order the connection received them; callbacks and other backend events of the slot go to the pool's [`EventBus`](#adorm-events-eventbus). A cancelled wait loses no notification. Once the connection is lost ([`CONNECTION_LOST`](#adorm-events-connection-lost)), the slot closes or its pool closes, the notifications received before are returned first, then it raises `InterfaceError` in every waiting call and every later one. Several tasks may wait at once; each notification goes to one of them |
+| `async for event in listener` | `get()` in a loop; ends with the `InterfaceError` of a lost connection |
+| `async listen(*channels)` | listens on `channels` too; a channel already listened on is skipped |
+| `async unlisten(*channels)` | stops listening on `channels`; a channel not listened on is skipped. Notifications already received stay queued |
+| `channels` | the channels the connection listens on ([`DriverConnection.listening`](/ref/drivers#adorm-drivers-driverconnection)), in the order they were added; a channel of a cancelled `listen()` counts while the connection counts it |
+| `lease` | the [`SlotLease`](/ref/pool#adorm-executor-slotlease) of the held slot; `None` outside the block |
+| `session` | the session the slot is acquired for |
+| `async close()` | releases the slot, as leaving the block does; a `get()` another task waits in raises `InterfaceError`. A second call does nothing |
+
+`get()`, `listen()` and `unlisten()` outside the block raise `InterfaceError`.
+
+```python
+async def watch_orders():
+    async with adorm.listen("orders") as listener:
+        await listener.listen("invoices")
+        while True:
+            try:
+                event = await listener.get()
+            except adorm.InterfaceError:
+                return                          # connection lost: the caller listens again
+            if event.channel == "orders":
+                await refresh_order(int(event.payload))
 ```

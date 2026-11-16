@@ -2,8 +2,9 @@
 
 ::: info Status
 The installed version provides the event types, their encoded form, the client's event channel on every slot lease,
-the slot's own callbacks and `on_commit` callbacks of [transactions](/topics/transactions). The remote driver that
-carries encoded events between processes is not part of it yet.
+the slot's own callbacks, `on_commit` callbacks of [transactions](/topics/transactions), the backend events of the
+Django and native PostgreSQL drivers (notifications, notices, lost connections) and `adorm.listen()`. The remote
+driver that carries encoded events between processes is not part of it yet.
 :::
 
 A slot answers the client with events. Every request it runs ends with one outcome event; a commit or rollback adds
@@ -91,6 +92,97 @@ unsubscribe = pool.events.subscribe(
 )
 ```
 
+## Backend events
+
+A driver connection reports what the database does on its own as a `BackendEvent`. The Django driver (with
+psycopg 3) and the native PostgreSQL driver emit:
+
+| Event | When | Where it goes |
+|---|---|---|
+| [`BackendEvent("notice", severity, payload)`](/ref/events#adorm-events-notice) | the server sends a notice or warning with a statement's result: `RAISE NOTICE` in a trigger or function, a `WARNING` | the lease's channel, before the request's outcome; unread, to the pool's `EventBus` when the lease ends |
+| [`BackendEvent("notify", channel, payload)`](/ref/events#adorm-events-notify) | a notification arrives on a channel the connection listens on | an [`adorm.listen()`](#listening-for-notifications) block |
+| [`BackendEvent("connection_lost", None, reason)`](/ref/events#adorm-events-connection-lost) | the database connection ended without adorm closing it; the Django driver notices it only while the connection listens, the native driver at any time | the lease's channel, or the pool's `EventBus` while the slot is idle |
+
+An operation of a session does not read its lease's queue, so its notices reach the subscribers of the pool's
+`EventBus` once the slot is released, in the order the server sent them; inside a transaction, when the transaction
+ends. Subscribe by name, and by severity as the channel:
+
+```python
+pool = await adorm.settings.default_router().get_pool("default")
+pool.events.subscribe(BackendEvent, lambda e: log.info("%s", e.payload["message"]), name="notice")
+pool.events.subscribe(BackendEvent, alert, name="notice", channel="WARNING")
+
+await Club.objects.filter(slug="koper-sailing").update(city="Koper")
+# the trigger's RAISE WARNING 'check the clubs' → alert(BackendEvent("notice", "WARNING", {"message": "check the clubs", ...}))
+```
+
+Code that holds a lease reads the notices of its own requests from `lease.events`: they are queued before the
+request's outcome returns.
+
+```python
+async with router.slot(session) as lease:
+    await lease.call("execute", update)
+    notices = [lease.events.get_nowait() for _ in range(lease.events.qsize())]
+```
+
+## Listening for notifications
+
+`adorm.listen()` holds a slot whose connection listens on PostgreSQL channels and returns each notification as a
+`BackendEvent("notify", channel, payload)`. Channel names are used exactly as given (quoted in `LISTEN`), so
+`"Orders"` and `"orders"` differ; on the PostgreSQL drivers a name is at most 63 bytes.
+
+```python
+async with adorm.listen("orders", "invoices") as listener:
+    async for event in listener:
+        match event.channel:
+            case "orders":
+                await refresh_order(int(event.payload))
+            case "invoices":
+                await listener.unlisten("invoices")
+```
+
+```sql
+-- any session of the database, e.g. a trigger
+SELECT pg_notify('orders', '42');
+```
+
+- The slot counts against the pool's `max_connections` for as long as the block runs, and the block's flow holds it:
+  an operation of the same flow that needs a slot of a full pool raises `DeadlockError`. Another task or another
+  pool serves the block's other work.
+- PostgreSQL delivers a notification sent inside a transaction when that transaction commits, never after a
+  rollback; notifications of one sending transaction arrive in the order they were sent.
+- `listener.listen()` and `listener.unlisten()` change the channels while the block runs; a notification received
+  before `unlisten()` is still returned.
+- A cancelled `get()` loses no notification: the next `get()` returns it.
+- When the server ends the connection (`pg_terminate_backend()`, a restart), the slot closes or its pool closes,
+  `get()` returns the notifications received before, then raises `InterfaceError`, in every task waiting in it. Notifications sent while no connection listens are lost; a
+  service that must not miss one reads the state it reflects again after listening anew.
+- Leaving the block releases the slot; the slot closes a connection that still listens instead of returning it to
+  the pool. A `get()` another task still waits in raises `InterfaceError`.
+
+```python
+async def follow_orders():
+    pool = await adorm.settings.default_router().get_pool("default")
+    delay = 0.1
+    while True:
+        try:
+            async with adorm.listen("orders") as listener:
+                delay = 0.1
+                await reload_all_orders()              # what changed while nothing listened
+                async for event in listener:
+                    await refresh_order(int(event.payload))
+        except adorm.InterfaceError:
+            if pool.closed:
+                return                                 # the application shuts down
+            await asyncio.sleep(delay)                 # the connection was lost: listen again
+            delay = min(delay * 2, 30)
+```
+
+A closed pool ends the loop: `adorm.listen()` and `get()` raise `InterfaceError` once the pool is closed.
+
+A driver that does not declare `notify` in `Capabilities.backend_events` raises `NotSupportedError` before a slot is
+taken; inside Django's `TestCase`, whose transaction never commits, the Django driver refuses as well.
+
 ## Cancellation outcomes
 
 A cancelled request ends with a `CancelledEvent`. `started=False` means the request was still queued, or was
@@ -154,4 +246,6 @@ instead.
 | [Pool, router and slots](/topics/pool#events) | outcomes, `on_commit`, `on_rollback` | callbacks and backend events of idle connections and of released leases (the pool's `EventBus`) |
 | [Connection profiles](/topics/profiles#events) | nothing | nothing; events emitted during `on_acquire` / `on_release` follow the pool's rules |
 | [Drivers](/topics/drivers#events) | callbacks, backend events | nothing; a remote driver decodes the server's events into return values, errors and `emit` |
-| [Django driver](/topics/django-driver#events) | nothing: outcomes only; Django's signals and `on_commit()` callbacks stay on the driver side | nothing |
+| [Django driver](/topics/django-driver#events) | `notice`, `notify`, `connection_lost` (psycopg 3); Django's signals and `on_commit()` callbacks stay on the driver side | nothing |
+| [Native PostgreSQL driver](/topics/postgresql-driver#events) | `notice`, `notify`, `connection_lost` | nothing |
+| [`adorm.listen()`](#listening-for-notifications) | nothing | `notify`, `connection_lost` of its slot; passes other events to the pool's `EventBus` |

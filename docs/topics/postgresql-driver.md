@@ -424,9 +424,23 @@ task.cancel()          # neither the library_book row nor the library_edition ro
 
 ## Events
 
-The driver emits no events: an operation reports its outcome as the result of the call, which the slot delivers as a
-`ResultEvent` or `ErrorEvent` (`CancelledEvent` for a cancelled operation). It consumes none. The pool delivers
-`CallbackEvent("on_commit")` and `CallbackEvent("on_rollback")` for its transactions, as for every driver; the
-transaction's own `on_commit()` callbacks run on that event. Django's signals do not fire and Django's `on_commit()`
-callbacks are not registered, so neither produces an event. It registers no asyncpg listeners, so `NOTIFY` messages
-and server log messages are not reported as `BackendEvent`.
+An operation reports its outcome as the result of the call, which the slot delivers as a `ResultEvent` or
+`ErrorEvent` (`CancelledEvent` for a cancelled operation). The pool delivers `CallbackEvent("on_commit")` and
+`CallbackEvent("on_rollback")` for its transactions, as for every driver; the transaction's own `on_commit()`
+callbacks run on that event. Django's signals do not fire and Django's `on_commit()` callbacks are not registered, so
+neither produces an event. The driver consumes no events.
+
+Each connection emits three [backend events](/topics/events#backend-events):
+
+| Event | Source | When |
+|---|---|---|
+| `BackendEvent("notice", severity, {...})` | asyncpg's log listener | the server sends a notice or warning (`RAISE NOTICE` of a trigger, a `WARNING`); it arrives before the outcome of the request that caused it |
+| `BackendEvent("notify", channel, payload)` | asyncpg's `add_listener()` | a notification on a channel an [`adorm.listen()`](/topics/events#listening-for-notifications) block listens on; asyncpg reads it on the event loop as soon as it arrives |
+| `BackendEvent("connection_lost", None, reason)` | asyncpg's termination listener | the server ended the connection, whether a call runs, the connection listens or its slot is idle in the pool; the connection is unusable from then on |
+
+```python
+pool.events.subscribe(BackendEvent, lambda e: log.warning("%s", e.payload["message"]), name="notice", channel="WARNING")
+
+async with adorm.listen("orders") as listener:      # LISTEN "orders" on a slot of its own
+    event = await listener.get()                     # BackendEvent("notify", "orders", "42")
+```

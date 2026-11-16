@@ -513,3 +513,17 @@
   (`DjangoMonitor`, `adorm.drivers.django.backend_pid()`) and the native PostgreSQL driver (`AsyncpgMonitor`) read
   `pg_stat_activity` on a connection of their own (`adorm.drivers.postgresql.activity_sql()`,
   `backend_activity()`); the demo's memory driver reports its row lock waits.
+- Backend events from both drivers: every connection emits `BackendEvent("notice", severity, payload)` for the
+  server's notices and warnings (before the outcome of the request that caused them), `BackendEvent("notify",
+  channel, payload)` for notifications on the channels it listens on, and `BackendEvent("connection_lost")` when the
+  server ends the connection (`adorm.events.NOTICE`, `NOTIFY`, `CONNECTION_LOST`; the Django driver with psycopg 3).
+  `adorm.listen(*channels)` (`Listener`) holds a slot whose connection listens and returns each notification from
+  `get()` and `async for`; a lost connection, a closed slot or a closed pool ends every waiting and later `get()` with
+  `InterfaceError`, as leaving the block does (`Pool.wait_closed()`). The driver contract adds `Driver.check_listen()`,
+  `DriverConnection.listen()`, `unlisten()`, `listening`, `Capabilities.max_channel_length`, `check_channel()` and
+  `check_backend_event()`, `adorm.drivers.check_channel()`, `adorm.drivers.postgresql.MAX_IDENTIFIER_LENGTH`, and on
+  `ThreadedConnection` `listen_sync()`, `unlisten_sync()`, `idle_fileno()` and `idle_sync()`, which let the
+  connection's thread read while no call runs. With psycopg 2 the Django driver declares no backend events
+  (`PSYCOPG2_CAPABILITIES`); inside Django's `TestCase` it refuses to listen before a slot is taken. A slot closes a
+  connection that still listens when its lease ends (`CloseReason.LISTENING`). The demo's memory driver listens too
+  (`MemoryDatabase.notify()`).

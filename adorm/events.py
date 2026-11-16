@@ -29,6 +29,9 @@ __all__ = [
     "ON_ROLLBACK",
     "OUTCOME_EVENTS",
     "RESERVED_CALLBACKS",
+    "CONNECTION_LOST",
+    "NOTICE",
+    "NOTIFY",
     "BackendEvent",
     "CallbackEvent",
     "CancelledEvent",
@@ -53,6 +56,20 @@ when it rolls back an abandoned transaction itself."""
 
 RESERVED_CALLBACKS = frozenset({ON_COMMIT, ON_ROLLBACK})
 """Callback names only a slot delivers; a slot drops a `CallbackEvent` with one of them that a connection emits."""
+
+NOTIFY = "notify"
+"""The `BackendEvent` name of a PostgreSQL notification (``NOTIFY``, ``pg_notify()``) on a channel the connection
+listens on: ``channel`` is the notification's channel, ``payload`` its payload string (``""`` when it has none)."""
+
+NOTICE = "notice"
+"""The `BackendEvent` name of a message the database server sends with a statement's result, such as PostgreSQL's
+``RAISE NOTICE`` or a ``WARNING``: ``channel`` is its untranslated severity (``"NOTICE"``, ``"WARNING"``, ``"INFO"``,
+``"DEBUG"``, ``"LOG"``), ``payload`` a dict with ``severity``, ``sqlstate``, ``message``, ``detail`` and ``hint``
+(``None`` when the server sent none)."""
+
+CONNECTION_LOST = "connection_lost"
+"""The `BackendEvent` name a connection emits when its database connection ends without adorm closing it, as when
+the server terminates the session; ``payload`` is the reason as text. The connection is no longer usable."""
 
 Encode = Callable[[Any], Any]
 Decode = Callable[[Any], Any]
