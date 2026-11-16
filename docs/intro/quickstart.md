@@ -164,20 +164,10 @@ async def lend(book_id: int) -> Book:
 - `select_for_update()` locks the row until the transaction ends: two concurrent `lend()` calls for the last copy
   run one after the other, and the second raises `LookupError`.
 
-With two books of Ursula K. Le Guin in the database (*The Dispossessed*, 1974, two copies; *The Telling*, 2000,
-one copy):
+Run it:
 
 ```bash
 DJANGO_SETTINGS_MODULE=mysite.settings uvicorn mysite.main:app
-```
-
-```console
-$ curl localhost:8000/authors/ursula%20k.%20le%20guin
-{"author":"Ursula K. Le Guin","titles":2,"since_2000":["The Telling"],"newest":"The Telling by Ursula K. Le Guin","shelf":{"titles":2,"on_loan":0,"copies":3}}
-$ curl -X POST localhost:8000/books/2/loans
-{"title":"The Telling","copies_left":0}
-$ curl -X POST localhost:8000/books/2/loans
-{"detail":"no copy of 'The Telling' left"}
 ```
 
 ## Next
