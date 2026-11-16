@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.1 - 2026-11-15
+## 0.0.1 - 2026-11-16
 
 - Package `adorm` (typed, `py.typed`) with optional extras `django` and `asyncpg`.
 - Exceptions modelled on Django's: `ObjectDoesNotExist` and `MultipleObjectsReturned` with per-model
