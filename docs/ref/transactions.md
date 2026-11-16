@@ -262,8 +262,8 @@ The executor's debug checks run when its debug switch is on. The switch is set b
 
 `True` turns the checks on and `False` off. `None` makes them follow the running event loop's debug mode
 (`asyncio.run(..., debug=True)`, `loop.set_debug(True)` or `PYTHONASYNCIODEBUG=1`); it is the value before the
-switch is set. Every `adorm.configure()` call sets the switch, to `None` when `debug` is not given; the value set last
-applies.
+switch is set. Every `adorm.configure()` call that does not raise sets the switch, to `None` when `debug` is not
+given; a call that raises leaves it unchanged. The value set last applies.
 
 ### `adorm.executor.set_debug(value)`
 
