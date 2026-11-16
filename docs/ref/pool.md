@@ -75,6 +75,7 @@ pool = Pool(AsyncpgDriver(), profile, purge_stale_connections_at=60)     # idle 
 | `waiting` | requests waiting for a slot |
 | `events` | an [`EventBus`](/ref/events#adorm-events-eventbus) for the callbacks and backend events a connection emits while no lease holds its slot, and for those a lease left unread |
 | `closed` | whether `close()` was called |
+| `retired` | whether its router stopped routing to it after a change of its profile |
 | `router` | the router the pool was added to, `None` before |
 
 #### `leases()`
@@ -105,8 +106,11 @@ With `profiles`, a [`ProfileRegistry`](/ref/settings#adorm-settings-profileregis
 `using` no added pool serves gets a pool created from the registry's profile of that name
 ([`resolve()`](/ref/settings#adorm-settings-profileregistry-pool-none), which may ask its providers), with the
 profile's `pool` settings or the registry's. Concurrent first uses of a name create one pool. When the profile is
-unregistered or replaced by another object, the router stops routing to its pool and closes it
-([`Pool.close()`](#async-close)); the next acquisition creates a pool from the current profile. Pools added with
+unregistered or replaced by another object, or when the registry's default pool settings change and the profile has
+none of its own, the router retires its pool: it stops routing to the pool and closes it
+([`Pool.close()`](#async-close)); the next acquisition creates a pool from the current profile. An acquisition that
+waits on a retired pool, or reaches it before it waits, continues on the pool that serves the profile now, within its
+original timeout; `run()` then checks the operation against that pool's driver. Pools added with
 `add()` are not affected by profile changes. The default routers of the settings
 ([`default_router()`](/ref/settings#adorm-settings-default-router-create-true)) are built this way.
 

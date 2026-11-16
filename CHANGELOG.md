@@ -119,7 +119,8 @@
   `CallbackEvent("on_rollback")`, ends its lease (`SlotLease.aborted`; further requests
   raise `TransactionClosed`) and leaves the pool; `None` sets no limit.
 - Connection profiles in `adorm.settings`: `adorm.configure()` (profiles, profile providers, default
-  `PoolSettings`, debug switch; validated before anything changes), `ConnectionProfile` (driver as an instance, a
+  `PoolSettings`, debug switch; validated before anything changes, applied in one step by
+  `ProfileRegistry.reset()`), `ConnectionProfile` (driver as an instance, a
   class or an import path imported on first use; alias, read-only `params` kept out of the representation, pool
   settings and the hooks `connect`, `on_acquire` and `on_release`), and the `ProfileRegistry` behind
   `adorm.settings.profiles` with `register_profile()`, `unregister_profile()`, `get_profile()` and providers that
@@ -479,3 +480,14 @@
   constructor or `create()` keyword, `get_or_create()` and `update_or_create()` defaults) sets the object id, and the
   next write sets the content type id read on the executor that writes; `update_fields` takes the relation's name;
   `GenericForeignKey(for_concrete_model=...)`.
+- Django app `adorm.contrib.django` (`AdormConfig`, label `adorm`): on `django.setup()` it configures adorm from the
+  `ADORM` setting (the keys of `adorm.configure()`; without `profiles`, one Django driver profile per `DATABASES`
+  alias; hooks and providers as import paths; driver paths checked), raises `ImproperlyConfigured` for an invalid
+  value, and configures again when a test overrides `ADORM`, or `DATABASES` while `ADORM` has no `profiles`.
+  `configure_from_settings()`, `settings_configuration()`, `default_profiles()` and `DEFAULT_DRIVER` for processes
+  that configure adorm themselves; `adorm.settings.import_object()`.
+- `adorm.configure()` and `ProfileRegistry.reset()` replace the profiles, providers and default pool settings in one
+  step; a profile with the same values as the registered one (`ConnectionProfile.same_as()`) keeps it and its pools,
+  and a change of the default pool settings retires the pools of profiles without their own.
+  `ProfileRegistry.resolve()` discards a provider's answer when the configuration changes meanwhile. An acquisition
+  waiting on a pool retired after a profile change continues on the profile's current pool (`Pool.retired`).

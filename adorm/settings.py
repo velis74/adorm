@@ -41,6 +41,7 @@ __all__ = [
     "configure",
     "default_router",
     "get_profile",
+    "import_object",
     "profiles",
     "register_profile",
     "remove_profile_provider",
@@ -89,15 +90,17 @@ class PoolSettings:
         return asdict(self)
 
 
-def _import_driver(path: str) -> Any:
+def import_object(path: str, what: str = "object") -> Any:
+    """The object at ``path``, ``"package.module.Name"`` or ``"package.module:Name"``; ``what`` names it in errors.
+    Raises `ValueError` for a path of another form and `ImportError` when the module or the name does not exist."""
     module_name, sep, attribute = path.partition(":") if ":" in path else path.rpartition(".")
     if not sep or not module_name or not attribute:
-        raise ValueError(f"a driver path is 'package.module.Name' or 'package.module:Name', not {path!r}")
+        raise ValueError(f"a {what} path is 'package.module.Name' or 'package.module:Name', not {path!r}")
     module = importlib.import_module(module_name)
     try:
         return getattr(module, attribute)
     except AttributeError:
-        raise ImportError(f"module {module_name!r} has no driver {attribute!r}") from None
+        raise ImportError(f"module {module_name!r} has no {what} {attribute!r}") from None
 
 
 logger = logging.getLogger("adorm.settings")
@@ -191,13 +194,19 @@ class ConnectionProfile:
             return driver
         with _driver_lock:
             if self._driver is None:  # type: ignore[attr-defined]
-                found = _import_driver(self.driver) if isinstance(self.driver, str) else self.driver
+                found = import_object(self.driver, "driver") if isinstance(self.driver, str) else self.driver
                 if isinstance(found, type) and issubclass(found, Driver):
                     found = found()
                 if not isinstance(found, Driver):
                     raise TypeError(f"{self.driver!r} of profile {self.name!r} is not a Driver")
                 object.__setattr__(self, "_driver", found)
             return self._driver  # type: ignore[attr-defined]
+
+    def same_as(self, other: ConnectionProfile) -> bool:
+        """Whether ``other`` has the same values as this profile in every field."""
+        if not isinstance(other, ConnectionProfile):
+            return False
+        return all(getattr(self, f.name) == getattr(other, f.name) for f in fields(self))
 
     def replace(self, **changes: Any) -> ConnectionProfile:
         """A copy of the profile with ``changes``."""
@@ -219,6 +228,7 @@ class ProfileRegistry:
         self._profiles: dict[str, ConnectionProfile] = {}
         self._providers: list[ProfileProvider] = []
         self._routers: weakref.WeakSet[Router] = weakref.WeakSet()
+        self._generation = 0
         self.pool = PoolSettings() if pool is None else PoolSettings.coerce(pool)
 
     def __contains__(self, name: object) -> bool:
@@ -252,6 +262,7 @@ class ProfileRegistry:
             if previous is not None and not replace:
                 raise ValueError(f"connection profile {profile.name!r} is already registered")
             self._profiles[profile.name] = profile
+            self._generation += 1
         if previous is not None and previous is not profile:
             self._changed(profile.name)
         return profile
@@ -261,6 +272,7 @@ class ProfileRegistry:
         the name again on its next use."""
         with self._lock:
             profile = self._profiles.pop(name, None)
+            self._generation += 1
         if profile is not None:
             self._changed(name)
         return profile
@@ -271,29 +283,81 @@ class ProfileRegistry:
             raise TypeError(f"a profile provider is a callable, not {type(provider).__name__}")
         with self._lock:
             self._providers.append(provider)
+            self._generation += 1
         return provider
 
     def remove_provider(self, provider: ProfileProvider) -> None:
         """Remove ``provider``; the profiles it provided stay registered. An unknown provider raises `ValueError`."""
         with self._lock:
             self._providers.remove(provider)
+            self._generation += 1
 
     def clear(self) -> None:
         """Remove every profile and provider."""
+        self.reset()
+
+    def reset(
+        self,
+        profiles: Iterable[ConnectionProfile] = (),
+        providers: Iterable[ProfileProvider] = (),
+        *,
+        pool: PoolSettings | Mapping[str, Any] | None = None,
+    ) -> None:
+        """Replace every profile, every provider and the default pool settings in one step: no reader sees a state
+        between the old and the new ones. A profile with the same values as the registered one of its name
+        (`ConnectionProfile.same_as()`) keeps the registered one. Routers retire the pools of profiles that are
+        removed or replaced, and of kept profiles without own pool settings when the default pool settings change.
+        Raises `TypeError` or `ValueError` (two profiles of one name) and then changes nothing."""
+        built: dict[str, ConnectionProfile] = {}
+        for profile in profiles:
+            if not isinstance(profile, ConnectionProfile):
+                raise TypeError(f"reset() takes ConnectionProfile objects, not {type(profile).__name__}")
+            if profile.name in built:
+                raise ValueError(f"connection profile {profile.name!r} is given twice")
+            built[profile.name] = profile
+        providers = list(providers)
+        for provider in providers:
+            if not callable(provider):
+                raise TypeError(f"a profile provider is a callable, not {type(provider).__name__}")
+        defaults = PoolSettings() if pool is None else PoolSettings.coerce(pool)
         with self._lock:
-            names = list(self._profiles)
-            self._profiles.clear()
-            self._providers.clear()
-        for name in names:
-            self._changed(name)
+            previous, previous_pool = self._profiles, self.pool
+            for name, profile in built.items():
+                kept = previous.get(name)
+                if kept is not None and kept.same_as(profile):
+                    built[name] = kept
+            self._profiles = built
+            self._providers = providers
+            self.pool = defaults
+            self._generation += 1
+        for name, profile in previous.items():
+            if built.get(name) is not profile or (profile.pool is None and defaults != previous_pool):
+                self._changed(name)
 
     async def resolve(self, name: str) -> ConnectionProfile:
         """The profile ``name``: the registered one, else the first one a provider returns, registered. Raises
-        `InterfaceError` when there is none, and `ValueError` when a provider returns a profile of another name."""
-        profile = self._profiles.get(name)
-        if profile is not None:
-            return profile
-        for provider in self.providers:
+        `InterfaceError` when there is none, and `ValueError` when a provider returns a profile of another name. When
+        the profiles or providers change while a provider runs, the providers' answer is discarded and the profile
+        is resolved again from the current ones."""
+        while True:
+            with self._lock:
+                profile = self._profiles.get(name)
+                if profile is not None:
+                    return profile
+                generation = self._generation
+                providers = tuple(self._providers)
+            result = await self._ask(providers, name)
+            with self._lock:
+                if self._generation != generation:
+                    continue
+                if result is None:
+                    raise InterfaceError(f"no connection profile is named {name!r}")
+                return self._profiles.setdefault(name, result)
+
+    @staticmethod
+    async def _ask(providers: Iterable[ProfileProvider], name: str) -> ConnectionProfile | None:
+        """The first profile one of ``providers`` returns for ``name``, ``None`` when none does."""
+        for provider in providers:
             result = provider(name)
             if inspect.isawaitable(result):
                 result = await result
@@ -303,9 +367,8 @@ class ProfileRegistry:
                 raise TypeError(f"profile provider {provider!r} returned {type(result).__name__} for {name!r}")
             if result.name != name:
                 raise ValueError(f"profile provider {provider!r} returned profile {result.name!r} for {name!r}")
-            with self._lock:
-                return self._profiles.setdefault(name, result)
-        raise InterfaceError(f"no connection profile is named {name!r}")
+            return result
+        return None
 
     def _attach(self, router: Router) -> None:
         self._routers.add(router)
@@ -332,24 +395,15 @@ def configure(
 ) -> None:
     """Replace adorm's settings: the connection profiles by name (a `ConnectionProfile` or the keyword arguments of
     one), the profile providers, the pool settings of profiles that set none, and the executor's debug switch
-    (`adorm.executor.set_debug()`). Everything is validated before anything changes."""
+    (`adorm.executor.set_debug()`). Everything is validated before anything changes, and the profiles, providers and
+    pool settings change in one step (`ProfileRegistry.reset()`)."""
     registry = _registry
     if profiles is not None and not isinstance(profiles, Mapping):
         raise TypeError(f"profiles is a mapping of names to profiles, not {type(profiles).__name__}")
     built = [ConnectionProfile.coerce(name, value) for name, value in (profiles or {}).items()]
-    providers = list(providers)
-    for provider in providers:
-        if not callable(provider):
-            raise TypeError(f"a profile provider is a callable, not {type(provider).__name__}")
-    defaults = PoolSettings() if pool is None else PoolSettings.coerce(pool)
     if debug is not None and not isinstance(debug, bool):
         raise TypeError(f"debug is a bool or None, not {debug!r}")
-    registry.clear()
-    registry.pool = defaults
-    for profile in built:
-        registry.register(profile)
-    for provider in providers:
-        registry.add_provider(provider)
+    registry.reset(built, providers, pool=pool)
     set_debug(debug)
 
 

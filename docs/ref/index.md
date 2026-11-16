@@ -34,7 +34,7 @@ the names it covers:
 | [Transactions](./transactions) | `atomic`, `Atomic`, `on_commit`, the active transactions of a context (`adorm.executor`) |
 | [Connection options and timeouts](./options) | `connection_options`, `timeout`, `Timeout`, the layers of options (`adorm.executor.options`) |
 | [Exceptions](./exceptions) | the exception hierarchy |
-| [Settings](./settings) | `configure`, connection profiles, pool settings, run-time profiles (`adorm.settings`) |
+| [Settings](./settings) | `configure`, connection profiles, pool settings, run-time profiles (`adorm.settings`), the `ADORM` setting and the Django app (`adorm.contrib.django`) |
 | [Drivers](./drivers) | the driver contract (`adorm.drivers`), the Django driver and its query translation (`adorm.drivers.django`, `adorm.drivers.django.translation`), the native PostgreSQL driver (`adorm.drivers.asyncpg`, its writes in `adorm.drivers.asyncpg.writes`), SQL statements (`adorm.drivers.sql`), Django's compiler for asyncpg (`adorm.drivers.asyncpg.compiler`) |
 | [Events](./events) | event types, their encoded form, the client's event channel and dispatch (`adorm.events`) |
 | [Model generator](./codegen) | `adorm generate`, the model description, rendering and files, `expose` and `client_base` (`adorm.codegen`, `adorm.cli`, `adorm.porting`) |

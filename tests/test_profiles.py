@@ -5,6 +5,7 @@ import asyncio
 import contextvars
 import logging
 import pickle
+import sys
 import threading
 
 import pytest
@@ -449,6 +450,239 @@ def test_configure_changes_nothing_when_a_value_is_invalid(kwargs):
     assert [p.name for p in adorm.settings.profiles] == ["kept"]
 
 
+# Replacing the configuration in one step (ProfileRegistry.reset(), configure())
+
+
+def test_routers_are_told_about_a_change_only_once_the_new_profile_is_in_place():
+    seen = []
+
+    class Observer:
+        def _profile_changed(self, name):
+            seen.append((name, adorm.settings.get_profile(name)))
+
+    observer = Observer()
+    adorm.configure(profiles={"default": {"driver": FakeDriver()}, "gone": {"driver": FakeDriver()}})
+    adorm.settings.profiles._attach(observer)
+    adorm.configure(profiles={"default": {"driver": FakeDriver()}})
+    current = adorm.settings.get_profile("default")
+    assert sorted(seen, key=lambda item: item[0]) == [("default", current), ("gone", None)]
+
+
+def test_reset_validates_before_it_changes_anything():
+    registry = ProfileRegistry()
+    kept = registry.register(ConnectionProfile("kept", FakeDriver()))
+    for args, kwargs in [
+        (([ConnectionProfile("a", FakeDriver()), ConnectionProfile("a", FakeDriver())],), {}),
+        ((["a"],), {}),
+        (((), [1]), {}),
+        ((), {"pool": {"max_connections": -1}}),
+    ]:
+        with pytest.raises((TypeError, ValueError)):
+            registry.reset(*args, **kwargs)
+        assert list(registry) == [kept]
+    registry.reset([kept], pool={"acquire_timeout": 1})
+    assert list(registry) == [kept]
+    assert registry.pool == PoolSettings(acquire_timeout=1)
+
+
+@pytest.mark.parametrize("attempt", range(3))
+def test_concurrent_configuration_never_hides_a_profile_or_fails(attempt):  # noqa: ARG001
+    """Threads reconfiguring adorm while others read it: every reader finds the profile, no configure() fails."""
+    drivers = [FakeDriver() for _ in range(4)]
+    adorm.configure(profiles={"default": {"driver": drivers[0]}})
+    stop = threading.Event()
+    errors: list[BaseException] = []
+    missing = []
+
+    def configure(driver):
+        try:
+            for _ in range(300):
+                adorm.configure(profiles={"default": {"driver": driver}}, pool={"acquire_timeout": 1})
+        except BaseException as exc:
+            errors.append(exc)
+
+    def read():
+        while not stop.is_set():
+            if adorm.settings.get_profile("default") is None:
+                missing.append(True)
+
+    def resolve():
+        async def main():
+            while not stop.is_set():
+                try:
+                    await adorm.settings.profiles.resolve("default")
+                except BaseException as exc:
+                    errors.append(exc)
+                    return
+
+        asyncio.run(main())
+
+    switch = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        readers = [threading.Thread(target=read), threading.Thread(target=resolve)]
+        writers = [threading.Thread(target=configure, args=(driver,)) for driver in drivers]
+        for thread in readers + writers:
+            thread.start()
+        for thread in writers:
+            thread.join(GUARD * 6)
+        stop.set()
+        for thread in readers:
+            thread.join(GUARD)
+    finally:
+        sys.setswitchinterval(switch)
+    assert errors == []
+    assert missing == []
+    assert len(adorm.settings.profiles) == 1
+
+
+def test_a_profile_with_the_same_values_keeps_the_registered_one():
+    registry = ProfileRegistry()
+    seen = []
+
+    class Observer:
+        def _profile_changed(self, name):
+            seen.append(name)
+
+    observer = Observer()
+    registry._attach(observer)
+    driver = FakeDriver()
+    first = ConnectionProfile("default", driver, params={"a": 1}, pool=PoolSettings(max_connections=2))
+    registry.reset([first])
+    registry.reset([ConnectionProfile("default", driver, params={"a": 1}, pool={"max_connections": 2})])
+    assert registry.get("default") is first
+    assert seen == []
+    registry.reset([ConnectionProfile("default", driver, params={"a": 2})])
+    assert registry.get("default") is not first
+    assert seen == ["default"]
+    assert first.same_as(first.replace())
+    assert not first.same_as(first.replace(alias="other"))
+    assert not first.same_as("default")
+
+
+def test_a_change_of_the_default_pool_settings_retires_pools_of_kept_profiles_without_their_own():
+    registry = ProfileRegistry()
+    seen = []
+
+    class Observer:
+        def _profile_changed(self, name):
+            seen.append(name)
+
+    observer = Observer()
+    registry._attach(observer)
+    plain = ConnectionProfile("plain", FakeDriver())
+    own = ConnectionProfile("own", FakeDriver(), pool=PoolSettings(max_connections=1))
+    registry.reset([plain, own])
+    registry.reset([plain, own])
+    assert seen == []
+    registry.reset([plain, own], pool=PoolSettings(max_connections=2))
+    assert seen == ["plain"]
+
+
+async def test_a_pool_retired_for_new_default_settings_is_rebuilt_with_them():
+    prof = ConnectionProfile("default", FakeDriver())
+    adorm.configure(profiles={"default": prof}, pool={"max_connections": 1})
+    assert await create_session().execute(Op("first")) == "first"
+    pool = adorm.settings.default_router().pool("default")
+    assert pool.max_connections == 1
+    adorm.configure(profiles={"default": prof}, pool={"max_connections": 3})
+    await until(lambda: pool.closed)
+    assert await create_session().execute(Op("second")) == "second"
+    assert adorm.settings.default_router().pool("default").max_connections == 3
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_waiter_keeps_its_pool_across_a_configuration_with_the_same_values(attempt):  # noqa: ARG001
+    driver = FakeDriver()
+    adorm.configure(profiles={"default": {"driver": driver}}, pool={"max_connections": 1, "acquire_timeout": GUARD})
+    holder = create_session("default", "holder")
+    async with holder.atomic():
+        await holder.execute(Op("held"))
+        waiter = asyncio.create_task(create_session("default", "waiter").execute(Op("waited")))
+        pool = adorm.settings.default_router().pool("default")
+        await until(lambda: pool.waiting == 1)
+        adorm.configure(profiles={"default": {"driver": driver}}, pool={"max_connections": 1, "acquire_timeout": GUARD})
+        await asyncio.sleep(0)
+        assert not pool.retired
+    assert await waiter == "waited"
+    assert adorm.settings.default_router().pool("default") is pool
+    assert len(driver.connections) == 1
+
+
+@pytest.mark.parametrize("through", ["run", "atomic"])
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_waiter_moves_to_the_new_pool_when_its_profile_changes(through, attempt):  # noqa: ARG001
+    old, new = FakeDriver(), FakeDriver()
+    settings = {"max_connections": 1, "acquire_timeout": GUARD}
+    adorm.configure(profiles={"default": {"driver": old}}, pool=settings)
+
+    async def wait():
+        session = create_session("default", "waiter")
+        if through == "run":
+            return await session.execute(Op("waited"))
+        async with session.atomic():
+            return await session.execute(Op("waited"))
+
+    holder = create_session("default", "holder")
+    async with holder.atomic():
+        await holder.execute(Op("held"))
+        waiter = asyncio.create_task(wait())
+        pool = adorm.settings.default_router().pool("default")
+        await until(lambda: pool.waiting == 1)
+        adorm.configure(profiles={"default": {"driver": new}}, pool=settings)
+        assert await waiter == "waited"
+        assert pool.retired
+        # the holder's transaction is still open on the old slot
+        assert await holder.execute(Op("still")) == "still"
+    assert ["execute", "waited"] in [list(call[:2]) for call in new.connections[0].calls]
+    assert len(old.connections) == 1
+    await until(lambda: old.connections[0].closed)
+    assert adorm.settings.default_router().pool("default").waiting == 0
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_waiter_on_a_removed_profile_raises_interface_error(attempt):  # noqa: ARG001
+    adorm.configure(
+        profiles={"default": {"driver": FakeDriver()}}, pool={"max_connections": 1, "acquire_timeout": GUARD}
+    )
+    holder = create_session("default", "holder")
+    async with holder.atomic():
+        await holder.execute(Op("held"))
+        waiter = asyncio.create_task(create_session("default", "waiter").execute(Op("waited")))
+        pool = adorm.settings.default_router().pool("default")
+        await until(lambda: pool.waiting == 1)
+        adorm.configure()
+        with pytest.raises(InterfaceError, match="no connection profile is named 'default'"):
+            await waiter
+        assert await holder.execute(Op("still")) == "still"
+
+
+@pytest.mark.parametrize("replacement", [None, "new"], ids=["removed", "redefined"])
+async def test_a_provider_answer_from_a_replaced_configuration_is_discarded(replacement):
+    release = asyncio.Event()
+    asked = asyncio.Event()
+    registry = ProfileRegistry()
+
+    async def stale(name):
+        asked.set()
+        await release.wait()
+        return ConnectionProfile(name, FakeDriver())
+
+    registry.reset([], [stale])
+    task = asyncio.create_task(registry.resolve("reports"))
+    await asked.wait()
+    current = ConnectionProfile("reports", FakeDriver())
+    registry.reset([current] if replacement else [])
+    release.set()
+    if replacement:
+        assert await task is current
+    else:
+        with pytest.raises(InterfaceError, match="no connection profile is named 'reports'"):
+            await task
+        assert registry.get("reports") is None
+    assert registry.get("reports") is (current if replacement else None)
+
+
 def test_settings_functions_use_the_global_registry():
     prof = adorm.settings.register_profile(profile("x"))
     assert adorm.settings.get_profile("x") is prof
@@ -647,15 +881,30 @@ async def test_registering_the_same_profile_again_keeps_the_pool():
     assert not pool.closed
 
 
-async def test_waiters_of_a_retired_pool_raise_interface_error():
+async def test_waiters_of_a_retired_pool_raise_interface_error_when_no_profile_remains():
     router, registry = routed(profile(pool=PoolSettings(max_connections=1, acquire_timeout=LONG)))
     held = await router.acquire(session("held"))
     waiter = asyncio.create_task(router.acquire(session("waiter")))
     await until(lambda: router.pool("default").waiting == 1)
     registry.unregister("default")
-    with pytest.raises(InterfaceError, match="closed"):
+    with pytest.raises(InterfaceError, match="no connection profile is named 'default'"):
         await asyncio.wait_for(waiter, GUARD)
     await held.release()
+
+
+async def test_waiters_of_a_retired_pool_acquire_from_the_replacement():
+    router, registry = routed(profile(pool=PoolSettings(max_connections=1, acquire_timeout=LONG)))
+    held = await router.acquire(session("held"))
+    old = router.pool("default")
+    waiter = asyncio.create_task(router.acquire(session("waiter")))
+    await until(lambda: old.waiting == 1)
+    replacement = registry.register(profile(alias="replica"), replace=True)
+    lease = await asyncio.wait_for(waiter, GUARD)
+    assert lease.pool is not old
+    assert lease.pool.profile is replacement
+    await lease.release()
+    await held.release()
+    await until(lambda: old.closed)
 
 
 async def test_unregistering_from_another_thread_retires_on_the_router_loop():

@@ -131,6 +131,8 @@ SUBMODULES = (
     "adorm.codegen.files",
     "adorm.codegen.render",
     "adorm.codegen.spec",
+    "adorm.contrib.django.apps",
+    "adorm.contrib.django.config",
     "adorm.drivers.asyncpg.compiler",
     "adorm.drivers.asyncpg.driver",
     "adorm.drivers.asyncpg.writes",

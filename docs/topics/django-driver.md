@@ -20,12 +20,14 @@ pip install "adorm[django]"
 ```
 
 ```python
+# settings.py
+INSTALLED_APPS = [..., "adorm.contrib.django"]       # configures adorm on django.setup()
+```
+
+```python
 import django
 
-import adorm
-
 django.setup()      # the driver needs Django's app registry; the API process sets Django up once
-adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})
 
 from myapp.adorm_models import Activity, Member
 
@@ -34,6 +36,11 @@ async def coaches(club_slug: str) -> list[Member]:
     activities = Activity.objects.filter(club__slug=club_slug, coach__isnull=False)
     return [member async for member in Member.objects.filter(pk__in=activities.values("coach")).order_by("last_name")]
 ```
+
+With the app [`adorm.contrib.django`](/topics/profiles#configuring-from-django-settings) and no `ADORM` setting, every
+alias of `DATABASES` is a profile of the same name on this driver. Without the app, the process calls
+`adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})` after
+`django.setup()`.
 
 ## Connections
 

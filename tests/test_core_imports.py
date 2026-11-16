@@ -1,5 +1,6 @@
 """The core package imports no ORM or database library; drivers do, in their own subpackages, and so do the model
-generator's Django source (`adorm.codegen.django`) and the Django test mode (`adorm.testing.django`)."""
+generator's Django source (`adorm.codegen.django`), the Django test mode (`adorm.testing.django`) and the Django app
+(`adorm.contrib.django`)."""
 
 import ast
 import json
@@ -25,11 +26,13 @@ ORM_SOURCES = {
 
 
 def core_modules() -> list[Path]:
-    """Every module of the package outside a driver subpackage (``adorm/drivers/<name>/``) and the generator's ORM
-    sources."""
-    drivers = PACKAGE / "drivers"
+    """Every module of the package outside a driver subpackage (``adorm/drivers/<name>/``), a framework integration
+    (``adorm/contrib/<name>/``) and the other ORM sources."""
+    nested = (PACKAGE / "drivers", PACKAGE / "contrib")
     return sorted(
-        p for p in PACKAGE.rglob("*.py") if not (p.parent != drivers and drivers in p.parents) and p not in ORM_SOURCES
+        p
+        for p in PACKAGE.rglob("*.py")
+        if not any(p.parent != root and root in p.parents for root in nested) and p not in ORM_SOURCES
     )
 
 

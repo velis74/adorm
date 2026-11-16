@@ -164,6 +164,7 @@ class Pool:
         )
         self.events = EventBus()
         self.closed = False
+        self.retired = False
         self.router: Router | None = None
         self._slots: set[Slot] = set()
         self._idle: deque[Slot] = deque()
@@ -355,8 +356,9 @@ class Router:
 
     With ``profiles``, a `ProfileRegistry`, a session whose ``using`` no added pool serves gets a pool created
     from the registry's profile of that name (`ProfileRegistry.resolve()`), with the profile's pool settings or the
-    registry's. When that profile is unregistered or replaced, the router stops routing to its pool and closes it;
-    the next acquisition creates a pool from the current profile.
+    registry's. When that profile is unregistered or replaced, or the registry's default pool settings change for a
+    profile without its own, the router retires its pool: it stops routing to it and closes it. The next acquisition,
+    and one waiting on the retired pool, uses a pool created from the current profile.
 
     A router serves one event loop. It is a `Runner`: ``set_runner(router)`` makes it run the operations of
     sessions outside a transaction.
@@ -474,6 +476,7 @@ class Router:
             return
         del self._pools[name]
         self._from_profiles.discard(pool)
+        pool.retired = True
         task = asyncio.get_running_loop().create_task(pool.close())
         self._retiring.add(task)
         task.add_done_callback(self._retiring.discard)
@@ -518,13 +521,26 @@ class Router:
     async def _acquire(
         self, pool: Pool, session: Session, timeout: float | None, options: ResolvedOptions
     ) -> SlotLease:
+        """Acquire a slot of ``pool``; when ``pool`` is retired after a profile change, of the pool that serves the
+        session's profile now, within the same deadline."""
         timeout = options.acquire_timeout if timeout is None else check_timeout(timeout, "timeout")
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            try:
+                return await self._acquire_from(pool, session, deadline, timeout, options)
+            except InterfaceError:
+                if not pool.retired:
+                    raise
+            pool = await self.get_pool(session.using)
+            options = resolve_options(session, pool)
+
+    async def _acquire_from(
+        self, pool: Pool, session: Session, deadline: float, timeout: float, options: ResolvedOptions
+    ) -> SlotLease:
         pool.driver.capabilities.check_options(options.database, pool.driver.name)
-        if pool.closed:
+        if pool.closed or pool.retired:
             raise InterfaceError(f"pool {pool.name!r} is closed")
         task = asyncio.current_task()
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
         slot = pool._take_idle()
         refused = False
         if slot is None and not pool._waiters and pool._can_open():
@@ -734,6 +750,15 @@ class Router:
             pool.driver.capabilities.check_options(options.database, pool.driver.name)
             with tracking("waiting_for_slot", operation, session):
                 lease = await self._acquire_bound(session, None, pool, options)
+            if lease.pool is not pool:
+                # acquired from the pool that replaced a retired one
+                pool = lease.pool
+                try:
+                    pool.driver.check(operation)
+                    options = resolve_options(session, pool)
+                except BaseException:
+                    await lease.release()
+                    raise
         except asyncio.CancelledError as exc:
             mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
             raise

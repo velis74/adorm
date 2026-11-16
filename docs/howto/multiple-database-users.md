@@ -112,6 +112,23 @@ adorm.configure(
 )
 ```
 
+With the [Django app](/topics/profiles#configuring-from-django-settings) installed, the same profile is the
+`ADORM` setting, with the hooks as import paths:
+
+```python
+# settings.py
+ADORM = {
+    "profiles": {
+        "default": {
+            "driver": "adorm.drivers.django.DjangoDriver",
+            "on_acquire": "myapp.roles.set_role",
+            "on_release": "myapp.roles.reset_role",
+            "pool": {"max_connections": 20},
+        },
+    },
+}
+```
+
 All users share the profile's pool, so `max_connections` caps the connections of the whole application.
 
 ## 5. Run queries
