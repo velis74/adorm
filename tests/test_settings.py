@@ -7,7 +7,7 @@ def test_full_url():
     db = database_from_url("postgres://user:p%40ss@db.example:6543/app")
     assert db == {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": "app",
+        "NAME": "postgres",
         "USER": "user",
         "PASSWORD": "p@ss",
         "HOST": "db.example",

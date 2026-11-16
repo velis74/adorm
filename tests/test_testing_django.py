@@ -511,7 +511,7 @@ class SharedConnectionTests(TestCase):
     async def test_a_profile_with_session_hooks_cannot_share_the_test_connection(self):
         def hook(db, _profile, _session):
             with db.cursor() as cursor:
-                cursor.execute("SET ROLE postgres")
+                cursor.execute("RESET ROLE")
 
         for hooks in ({"on_acquire": hook}, {"on_release": hook}):
             async with executor(**hooks) as pool:

@@ -235,14 +235,15 @@ async def test_the_connect_hook_opens_the_connection_and_the_driver_configures_i
     def on_acquire(connection, profile, session):  # noqa: ARG001
         levels.append(connection)
 
-    options = {**connections.settings["default"].get("OPTIONS", {}), "isolation_level": 4, "assume_role": "postgres"}
+    user = connections.settings["default"]["USER"]
+    options = {**connections.settings["default"].get("OPTIONS", {}), "isolation_level": 4, "assume_role": user}
     pool = await run_pool(params={"OPTIONS": options}, connect=connect, on_acquire=on_acquire)
     counts = await asyncio.gather(*(Author.objects.filter(rating__gte=n).count() for n in range(10)))
     assert counts == [4, 4, 3, 3, 2, 1, 0, 0, 0, 0]
     assert len(opened) == pool.size
     conn = levels[-1]
     assert await conn.fetchval("SHOW TimeZone") == "UTC"
-    assert await conn.fetchval("SHOW role") == "postgres"
+    assert await conn.fetchval("SHOW role") == user
     async with adorm.atomic():
         assert await Author.objects.filter(rating__gte=4).count() == 2
         conn = levels[-1]

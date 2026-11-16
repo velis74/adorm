@@ -218,7 +218,7 @@ that wait until an operation is in the database:
 ## Running it
 
 ```console
-$ ADORM_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5432/postgres uv run pytest tests/conformance
+$ ADORM_TEST_DATABASE_URL=postgres://adorm@127.0.0.1:5432/adorm_test uv run pytest tests/conformance
 $ uv run pytest tests/conformance -k memory               # one driver
 $ uv run pytest tests/conformance -k exclude_keeps_rows   # one case on every driver
 ```

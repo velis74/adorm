@@ -1,6 +1,5 @@
 import asyncio
 import datetime
-import os
 
 from decimal import Decimal
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -23,9 +22,9 @@ def _forget_content_types():
 @pytest.fixture(scope="session")
 def database_url() -> str:
     """URL of the PostgreSQL server the suite runs against."""
-    from tests.djangoproject.settings import DEFAULT_DATABASE_URL
+    from tests.djangoproject.settings import TEST_DATABASE_URL
 
-    return os.environ.get("ADORM_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
+    return TEST_DATABASE_URL
 
 
 def pytest_collection_modifyitems(items):
