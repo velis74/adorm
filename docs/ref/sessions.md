@@ -67,6 +67,10 @@ reports.bind(Loan, "all_loans")
 The registered model with that class name, bound to this session: `bind(model)`. No such model raises
 `AttributeError`; so do two registered models with that class name (bind one of them by label instead).
 
+```python
+await reports.Member.objects.filter(active=True).count()
+```
+
 #### `activate()`
 
 A synchronous context manager that makes this session the current session for its block and restores the previous

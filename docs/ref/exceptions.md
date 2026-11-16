@@ -210,6 +210,17 @@ available. An `OSError` from the driver, such as an unknown host or a connect ti
 detects is an `OperationalError`; `DeadlockError` (see [Executor errors](#executor-errors)) is a different
 condition, between slots of adorm's pool.
 
+```python
+for attempt in range(3):
+    try:
+        async with adorm.atomic():
+            await transfer(source, target, amount)
+        break
+    except adorm.OperationalError as exc:
+        if exc.sqlstate not in ("40001", "40P01"):   # serialization failure, deadlock detected
+            raise
+```
+
 ### `adorm.IntegrityError(message=None, *, constraint_name=None, table_name=None, schema_name=None, columns=(), values=(), detail=None, model=None, fields=(), **kwargs)`
 
 A constraint was violated: unique, foreign key, not null, check, exclusion (SQLSTATE class `23`). Besides `original`

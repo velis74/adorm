@@ -133,6 +133,13 @@ Ends the block now as an exit with an exception does: rolls back (to the savepoi
 when the block is not open. A failing rollback propagates, unless an operation of the block failed before; then it
 is logged.
 
+```python
+async with adorm.atomic() as tx:
+    invoice = await Invoice.objects.create(member_id=member.id, total=total)
+    if not await charge(invoice):
+        await tx.rollback()          # the invoice is not kept; the block ends here
+```
+
 #### `on_commit(func, *, robust=False)`
 
 Registers `func` to run after the transaction commits. A plain method: it only registers. `func()` is called
@@ -183,6 +190,16 @@ A `StrEnum` of how a transaction ended in the database, the value of [`Atomic.ou
 | `COMMITTED` | `"committed"` | the slot delivered `CallbackEvent("on_commit")`: the commit succeeded, also when the end of the block was cancelled while it ran |
 | `ROLLED_BACK` | `"rolled_back"` | the block rolled back, the slot aborted the transaction, the commit failed with an error other than a lost connection, or the end was cancelled before the commit reached the driver connection |
 | `UNKNOWN` | `"unknown"` | the commit was cancelled after it reached the slot, or failed with a lost connection ([`is_connection_error()`](/ref/drivers#adorm-drivers-is-connection-error-exc)): the transaction may have committed |
+
+```python
+tx = adorm.atomic()
+try:
+    async with tx:
+        await payment.save()
+finally:
+    if tx.outcome is adorm.TransactionOutcome.UNKNOWN:
+        log.warning("payment %s may have been committed", payment.pk)
+```
 
 ## Transactions in the context
 

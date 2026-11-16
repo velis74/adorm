@@ -168,6 +168,11 @@ Query("club.Member").values_list("name", "age", named=True)
 Loads only `fields` (and the primary key) of model rows; the other fields are deferred. It replaces an earlier
 `only()`; fields deferred before are left out. After `values()` or `values_list()` raises `TypeError`.
 
+```python
+Query("club.Member").only("name", "email")          # pk, name and email loaded
+Query("club.Member").defer("biography")            # every field but biography
+```
+
 #### `defer(*fields)`
 
 Leaves `fields` unloaded until they are accessed. Calls add up; after `only()` it removes the fields from the loaded
