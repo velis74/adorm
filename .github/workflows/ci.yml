@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  ADORM_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+  ADORM_TEST_DATABASE_URL: postgres://adorm:adorm@localhost:5432/adorm_test
   ADORM_DEMO_REQUIRED_DRIVERS: django,asyncpg,memory
 
 jobs:
@@ -16,6 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.11', '3.12', '3.13']
+    env:
+      ADORM_TEST_CREATE_ROLES: "1"
     services:
       postgres:
         image: postgres:17
@@ -33,6 +35,8 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Create the test database user
+        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB CREATEROLE PASSWORD 'adorm'"
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
@@ -76,6 +80,8 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.3
         with:
           python-version: '3.13'
+      - name: Create the test database user
+        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB CREATEROLE PASSWORD 'adorm'"
       - run: uv sync --locked
       - name: Tests with coverage
         run: |

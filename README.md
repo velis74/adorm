@@ -22,11 +22,20 @@ uv run ruff format --check .
 uv run pytest
 ```
 
-The tests read the PostgreSQL server URL from `ADORM_TEST_DATABASE_URL` (default
-`postgres://postgres@127.0.0.1:5432/postgres`). They create and drop their own `adorm_test`, `adorm_test_demo`,
-`adorm_test_parallel` and `adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`) databases on that
-server and leave other databases untouched; the pool tests also create and drop the login role
-`adorm_test_limited`.
+The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
+`postgres://postgres@127.0.0.1:5432/adorm_test`). They create and drop the database it names (`adorm_test` when it names
+`postgres` or none) and their own `adorm_test_demo`, `adorm_test_limited`, `adorm_test_parallel` and
+`adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`) databases on that server and leave other
+databases and the server's roles untouched. Run them as a dedicated user with `CREATEDB`, not as a superuser (a
+database's connection limit does not apply to a superuser, so the test of the pool's refusal handling is skipped):
+
+```sql
+CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
+```
+
+With `ADORM_TEST_CREATE_ROLES=1` the tests of `SET ROLE` in connection profiles also run: they create and drop the
+roles `adorm_test_login`, `adorm_test_alice` and `adorm_test_bob`, which need `CREATEROLE`. Roles belong to the whole
+server and outlive the test databases, so set it only on a server of the tests' own (CI sets it).
 
 The demo reads its database URL from `ADORM_DEMO_DATABASE_URL`. Both variables can be set in the file `.env` in the
 repository root (ignored by git; `.env.example` lists them); variables set in the environment take precedence.

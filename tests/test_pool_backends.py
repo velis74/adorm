@@ -1,10 +1,9 @@
 """The pool and router on real backends: Django ORM (threaded) and asyncpg (async)."""
 
 import asyncio
-import secrets
 import threading
 
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import asyncpg
 import pytest
@@ -13,7 +12,7 @@ from adorm import create_session, OperationalError
 from adorm.executor import Pool, Router
 from tests.contract.drivers import AsyncpgDriver, DjangoDriver, Profile, RawQuery
 
-ROLE = "adorm_test_limited"
+LIMITED = "adorm_test_limited"
 
 
 class RefusalAwareDjangoDriver(DjangoDriver):
@@ -26,39 +25,32 @@ class RefusalAwareDjangoDriver(DjangoDriver):
 
 
 @pytest.fixture
-async def limited_role(test_database_url):
-    """A login role allowed one connection; yields its password."""
-    password = secrets.token_hex(16)
+async def limited_database(test_database_url):
+    """A database of the test's own that allows one connection to users other than superusers; yields its URL."""
     conn = await asyncpg.connect(test_database_url)
-    await conn.execute(f"DROP ROLE IF EXISTS {ROLE}")
-    await conn.execute(f"CREATE ROLE {ROLE} LOGIN PASSWORD '{password}' CONNECTION LIMIT 1")
-    try:
-        yield password
-    finally:
-        await conn.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = $1 AND pid <> pg_backend_pid()",
-            ROLE,
-        )
-        await conn.execute(f"DROP ROLE IF EXISTS {ROLE}")
+    if await conn.fetchval("SELECT rolsuper FROM pg_roles WHERE rolname = current_user"):
         await conn.close()
-
-
-def as_role(url, password):
-    parts = urlsplit(url)
-    netloc = f"{ROLE}:{quote(password)}@{parts.hostname}:{parts.port or 5432}"
-    return urlunsplit(parts._replace(netloc=netloc))
+        pytest.skip("a database's connection limit does not apply to a superuser")
+    await conn.execute(f"DROP DATABASE IF EXISTS {LIMITED} WITH (FORCE)")
+    await conn.execute(f"CREATE DATABASE {LIMITED} CONNECTION LIMIT 1")
+    try:
+        yield urlunsplit(urlsplit(test_database_url)._replace(path=f"/{LIMITED}"))
+    finally:
+        await conn.execute(f"DROP DATABASE IF EXISTS {LIMITED} WITH (FORCE)")
+        await conn.close()
 
 
 @pytest.fixture(params=["django", "asyncpg"])
 def backend(request, test_database_url, django_db_blocker):
-    """``make(max_connections, password=None)`` returns a router with one pool on the backend."""
+    """``make(max_connections, url=None)`` returns a router with one pool on the backend; ``url`` names another
+    database than the test database."""
 
-    def make(max_connections=0, password=None):
+    def make(max_connections=0, url=None):
         if request.param == "django":
-            params = {} if password is None else {"USER": ROLE, "PASSWORD": password}
+            params = {} if url is None else {"NAME": urlsplit(url).path.lstrip("/")}
             pool = Pool(RefusalAwareDjangoDriver(), Profile("default", params=params), max_connections=max_connections)
         else:
-            dsn = test_database_url if password is None else as_role(test_database_url, password)
+            dsn = test_database_url if url is None else url
             pool = Pool(AsyncpgDriver(), Profile("default", params={"dsn": dsn}), max_connections=max_connections)
         return Router([pool])
 
@@ -131,9 +123,9 @@ async def test_a_transaction_on_a_lease_is_isolated_until_commit(router_of, test
 
 
 @pytest.mark.parametrize("attempt", range(3))
-async def test_a_database_refusal_queues_the_request_until_a_slot_returns(router_of, limited_role, attempt):  # noqa: ARG001
+async def test_a_database_refusal_queues_the_request_until_a_slot_returns(router_of, limited_database, attempt):  # noqa: ARG001
     _, build = router_of
-    router = build(max_connections=0, password=limited_role)
+    router = build(max_connections=0, url=limited_database)
     pool = router.pool("default")
     first = await router.acquire(create_session("default", "first"))
     second = asyncio.create_task(router.run(create_session("default", "second"), PID))
