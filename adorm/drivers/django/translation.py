@@ -43,6 +43,8 @@ __all__ = [
     "SELECT_RELATED_DEPTH",
     "TranslatedQuery",
     "aggregation",
+    "bulk_create_options",
+    "check_bulk_create",
     "check_in_bulk_field",
     "child_instance",
     "clean_exclude",
@@ -814,6 +816,55 @@ def field_kwargs(query: Query | str, values: Mapping[str, Any] | Iterable[tuple[
     translator = _Translator(query if isinstance(query, Query) else Query(query))
     items = values.items() if isinstance(values, Mapping) else values
     return dict(translator.write_value(name, value) for name, value in items)
+
+
+def bulk_create_options(operation: Any) -> dict[str, Any]:
+    """The keyword arguments of Django's ``bulk_create()`` for the `adorm.operations.BulkCreate` ``operation``, with
+    adorm field names translated to Django's (``"pk"`` kept)."""
+    adorm = _adorm_model(django_model(operation.model))
+
+    def names(values: tuple[str, ...] | None) -> list[str] | None:
+        return None if values is None else [n if n == "pk" else _orm_name(adorm, n) for n in values]
+
+    return {
+        "batch_size": operation.batch_size,
+        "ignore_conflicts": operation.ignore_conflicts,
+        "update_conflicts": operation.update_conflicts,
+        "update_fields": names(operation.update_fields),
+        "unique_fields": names(operation.unique_fields),
+    }
+
+
+def check_bulk_create(operation: Any) -> None:
+    """Raise `ProgrammingError` for an `adorm.operations.BulkCreate` ``operation`` Django's ``bulk_create()`` refuses
+    on PostgreSQL: a model with a multi-table inheritance parent, and under ``update_conflicts`` no ``unique_fields``,
+    a primary key or a field without a column of its own in ``update_fields``, or such a field in ``unique_fields``.
+    A name that is no field raises `FieldError`."""
+    model = django_model(operation.model)
+    opts = model._meta
+    parents = getattr(opts, "all_parents", None) or opts.get_parent_list()
+    if any(parent._meta.concrete_model is not opts.concrete_model for parent in parents):
+        raise ProgrammingError(
+            f"bulk_create() cannot insert rows of {operation.model}, a multi-table inheritance child"
+        )
+    if not operation.update_conflicts:
+        return
+    options = bulk_create_options(operation)
+    if not operation.unique_fields:
+        raise ProgrammingError("update_conflicts needs unique_fields, the fields whose conflict updates the row")
+    fields = {}
+    for key in ("update_fields", "unique_fields"):
+        names = [opts.pk.name if name == "pk" else name for name in options[key]]
+        missing = [name for name in names if _field(model, name) is None]
+        if missing:
+            raise FieldError(f"{operation.model} has no field {missing[0]!r}", model=operation.model, key=missing[0])
+        fields[key] = [opts.get_field(name) for name in names]
+    if any(not field.concrete for field in (*fields["update_fields"], *fields["unique_fields"])):
+        raise ProgrammingError(
+            "bulk_create() takes only fields with a column of their own in update_fields and unique_fields"
+        )
+    if any(field in opts.pk_fields for field in fields["update_fields"]):
+        raise ProgrammingError("bulk_create() cannot update a primary key on a conflict")
 
 
 def lookup_kwargs(query: Query, lookups: Iterable[tuple[str, Any]]) -> dict[str, Any]:

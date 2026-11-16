@@ -269,6 +269,10 @@ class BoundModel:
         """``await all().create(...)``."""
         return await self.all().create(**values)
 
+    async def bulk_create(self, objs: Any, *args: Any, **kwargs: Any) -> list[Any]:
+        """``await all().bulk_create(...)``."""
+        return await self.all().bulk_create(objs, *args, **kwargs)
+
     async def create_from_parent(self, parent: Any, **values: Any) -> Any:
         """``await all().create_from_parent(...)``."""
         return await self.all().create_from_parent(parent, **values)

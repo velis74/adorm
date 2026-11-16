@@ -154,7 +154,7 @@ it runs.
 The query methods of [`QuerySet`](./queryset) are also methods of the bound model, applied to `all()`: `filter`,
 `exclude`, `annotate`, `alias`, `order_by`, `values`, `values_list`, `only`, `defer`, `select_related`,
 `prefetch_related`, `distinct`, `none`, `select_for_update`, and the coroutines `get`, `first`, `last`, `count`, `exists`,
-`in_bulk`, `aggregate`, `create`, `create_from_parent`, `get_or_create`, `update_or_create`, `update` and `delete`. `async for` iterates over every row. A public method of `queryset_class` that `QuerySet`
+`in_bulk`, `aggregate`, `create`, `bulk_create`, `create_from_parent`, `get_or_create`, `update_or_create`, `update` and `delete`. `async for` iterates over every row. A public method of `queryset_class` that `QuerySet`
 does not define is a method of the bound model too, applied to `get_queryset()`, unless it is a driver method
 declared `queryset_only` or a function with a true `queryset_only` attribute.
 

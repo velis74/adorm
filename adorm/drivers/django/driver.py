@@ -15,6 +15,8 @@ from adorm.drivers.base import Capabilities, ThreadedConnection, ThreadedDriver
 from adorm.drivers.django.translation import (
     AGGREGATES,
     aggregation,
+    bulk_create_options,
+    check_bulk_create,
     check_in_bulk_field,
     child_instance,
     clean_exclude,
@@ -116,6 +118,7 @@ CAPABILITIES = Capabilities(
     operations=READ_CAPABILITIES.operations
     | {
         "create",
+        "bulk_create",
         "create_from_parent",
         "save",
         "update",
@@ -132,6 +135,8 @@ CAPABILITIES = Capabilities(
         "clause.select_for_update.skip_locked",
         "clause.select_for_update.of",
         "clause.select_for_update.no_key",
+        "clause.on_conflict.ignore",
+        "clause.on_conflict.update",
     },
     connection_options=POSTGRESQL_OPTIONS,
     savepoints=True,
@@ -550,6 +555,14 @@ def _create(alias: str, operation: Any) -> dict[str, Any]:
     return instance_row(instance)
 
 
+def _bulk_create(alias: str, operation: Any) -> list[dict[str, Any]]:
+    model = django_model(operation.model)
+    check_bulk_create(operation)
+    objs = [model(**field_kwargs(operation.model, row)) for row in operation.rows]
+    _manager(model, operation.manager).db_manager(alias).bulk_create(objs, **bulk_create_options(operation))
+    return [instance_row(instance) for instance in objs]
+
+
 def _insert(alias: str, model: Any, kwargs: dict[str, Any], pk: Any, force: bool) -> dict[str, Any]:
     instance = model(**kwargs)
     if pk is not None:
@@ -689,6 +702,7 @@ def _update_or_create(alias: str, operation: Any) -> tuple[dict[str, Any], bool]
 
 _WRITES: dict[str, Callable[[str, Any], Any]] = {
     "create": _create,
+    "bulk_create": _bulk_create,
     "create_from_parent": _create_from_parent,
     "full_clean": _full_clean,
     "save": _save,

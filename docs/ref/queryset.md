@@ -198,8 +198,8 @@ result. On a query set built with `none()`, `async for`, `get()`, `first()`, `la
 `in_bulk()` (`{}`), `update()` and `delete()` return an empty result (`get()` raises `DoesNotExist`) without running
 an operation;
 `aggregate()` does so when the result over no rows is known without the database (see
-[`aggregate()`](#async-aggregate-args-kwargs)); `create()`, `get_or_create()` and `update_or_create()` run their
-operation.
+[`aggregate()`](#async-aggregate-args-kwargs)); `create()`, `bulk_create()`, `get_or_create()` and
+`update_or_create()` run their operation.
 
 A generic `ObjectDoesNotExist` or `MultipleObjectsReturned` from the executor (not a model's own) is raised as the
 model's `DoesNotExist` or `MultipleObjectsReturned`, with the original as `__cause__`. A model's own exception, also
@@ -340,6 +340,47 @@ values of the instance.
 member = await Member.objects.create(name="Ana", club=club)
 member.pk          # set by the database
 reader = await Reader.objects.create(name="Ann", username="ann")   # Create(..., manager="objects")
+```
+
+#### `async bulk_create(objs, batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None, unique_fields=None)`
+
+Inserts the model instances `objs` (any iterable) with one
+[`BulkCreate`](./operations#adorm-operations-bulkcreate-model-rows-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none-manager-none)
+operation and returns them as a list, in order. Each instance writes its loaded and assigned fields
+(`model_fields_set`; a primary key of `None` is left to the target), so the instances may set different fields and
+take the target's defaults for the rest. After the operation each instance has the values the target set, such as a
+generated primary key, and is bound to `executor`; a failing operation leaves the instances unchanged. As Django's
+`bulk_create()`, it calls no `save()` and sends no signals.
+
+- `batch_size`: the most rows one statement inserts. The statements of one call run in one transaction, or in the
+  open transaction without a savepoint of their own: a failing row inserts none of the rows.
+- `ignore_conflicts=True`: a row that violates a unique constraint is skipped. The database returns no primary keys
+  then, so a generated one stays `None`, also for the rows it inserted.
+- `update_conflicts=True`: a row that conflicts on `unique_fields` updates `update_fields` of the stored row instead,
+  and an instance without a primary key gets that row's.
+
+An object that is not an instance of the model raises `TypeError` and a `batch_size` that is not a positive integer
+`ValueError`, also for an empty `objs`; the other argument combinations `BulkCreate` refuses raise `ValueError` when
+there are instances, as in Django. With no instances it returns `[]` without an operation, so the driver's checks do
+not run either: a multi-table inheritance child, which Django refuses also with no instances, returns `[]`. When the query
+carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), that manager's
+`bulk_create()` inserts the rows (an override runs on the Django driver; the native PostgreSQL driver raises
+`NotSupportedError`).
+
+```python
+tags = await Tag.objects.bulk_create([Tag(name="night"), Tag(name="dawn")])
+[tag.pk for tag in tags]                                   # [7, 8]
+
+await Tag.objects.bulk_create(new_tags, batch_size=500)   # 500 rows per INSERT, all in one transaction
+
+await Tag.objects.bulk_create([Tag(name="indoor"), Tag(name="night")], ignore_conflicts=True)
+
+members = await Member.objects.bulk_create(
+    [Member(email="ana@example.com", level="advanced", ...), Member(email="new@example.com", ...)],
+    update_conflicts=True,
+    update_fields=["level"],
+    unique_fields=["email"],
+)
 ```
 
 #### `async create_from_parent(parent, **values)`

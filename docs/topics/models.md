@@ -222,6 +222,30 @@ await member.save(update_fields=["active"])  # updates one column
 `save()` builds a [`Save`](/ref/operations) operation and runs it on the instance's executor: the session of the query
 set that loaded the instance, or else the [current session](/topics/sessions#the-current-session). See the [Model API](/ref/models) for every option and error.
 
+### Creating many instances
+
+[`bulk_create()`](/ref/queryset#async-bulk-create-objs-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none)
+inserts new instances with one operation instead of one `save()` each. Each instance writes the same fields `save()`
+would write for it; the target fills in the rest with its defaults. The instances come back with the values the
+database set, primary keys included, and are stored instances from then on. As in Django, no `save()` override runs
+and no signal fires, and a multi-table inheritance child cannot be inserted this way.
+
+```python
+clubs = await Club.objects.bulk_create(Club(name=name) for name in ("Koper", "Piran", "Izola"))
+[club.pk for club in clubs]                  # [7, 8, 9]
+clubs[0].name = "Koper Sailing"
+await clubs[0].save()                        # an UPDATE: the instance is stored
+
+# 10 000 rows, 1 000 per INSERT; one transaction, so a failing row stores none of them.
+await Member.objects.bulk_create(members, batch_size=1000)
+
+# Rows whose primary key exists are skipped; with update_conflicts they update the stored row instead.
+await Member.objects.bulk_create(members, ignore_conflicts=True)
+await Member.objects.bulk_create(members, update_conflicts=True, update_fields=["fee"], unique_fields=["pk"])
+```
+
+Under `ignore_conflicts` the database reports no primary keys, so the instances keep `None` for a generated one.
+
 ## Validating
 
 Pydantic validates the values given to the constructor. `await instance.full_clean()` validates the instance as the

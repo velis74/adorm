@@ -26,6 +26,7 @@ from adorm import (
 )
 from adorm.executor import bind_transaction
 from adorm.operations import (
+    BulkCreate,
     Count,
     Create,
     Delete,
@@ -340,6 +341,95 @@ async def test_create_with_a_primary_key_and_invalid_values():
     assert len(executor.operations) == 1
 
 
+async def test_bulk_create_inserts_every_instance_with_one_operation():
+    executor = Executor([{"id": 7, "name": "Ana", "fee": decimal.Decimal(10)}, {"id": 5, "name": "Bo"}])
+    team = Team.from_row({"id": 3, "name": "Red"})
+    ana, bo = Player(name="Ana", team=team), Player(id=5, name="Bo", fee=2)
+    created = await players(executor).bulk_create(iter([ana, bo]), batch_size=10)
+    assert executor.operations == [
+        BulkCreate(
+            "querysettest.Player",
+            [{"name": "Ana", "team_id": 3}, {"id": 5, "name": "Bo", "fee": decimal.Decimal(2)}],
+            batch_size=10,
+        )
+    ]
+    assert created == [ana, bo]
+    assert created[0] is ana
+    assert (ana.pk, ana.fee, bo.pk) == (7, decimal.Decimal(10), 5)
+    assert all(p._state.adding is False and p._state.executor is executor for p in created)
+
+
+async def test_bulk_create_passes_conflict_options_and_the_orm_manager():
+    executor = Executor([{"id": None, "name": "Ana"}])
+    qs = QuerySet(Player, executor, Query("querysettest.Player", manager="objects"))
+    (ana,) = await qs.bulk_create([Player(name="Ana")], ignore_conflicts=True)
+    assert ana.pk is None
+    assert ana._state.adding is False
+    executor.results.append([{"id": 4, "name": "Ana"}])
+    await qs.bulk_create([Player(name="Ana")], update_conflicts=True, update_fields=["fee"], unique_fields=["name"])
+    assert executor.operations == [
+        BulkCreate("querysettest.Player", [{"name": "Ana"}], ignore_conflicts=True, manager="objects"),
+        BulkCreate(
+            "querysettest.Player",
+            [{"name": "Ana"}],
+            update_conflicts=True,
+            update_fields=["fee"],
+            unique_fields=["name"],
+            manager="objects",
+        ),
+    ]
+
+
+async def test_bulk_create_without_instances_checks_only_batch_size_as_django_does():
+    executor = Executor()
+    assert await players(executor).bulk_create([]) == []
+    assert await players(executor).none().bulk_create(()) == []
+    with pytest.raises(ValueError, match="batch_size"):
+        await players(executor).bulk_create([], batch_size=0)
+    assert await players(executor).bulk_create([], ignore_conflicts=True, update_conflicts=True) == []
+    assert await players(executor).bulk_create([], update_conflicts=True) == []
+    assert executor.operations == []
+    with pytest.raises(ValueError, match="batch_size"):
+        await players(executor).bulk_create([Player(name="Ana")], batch_size=-1)
+    with pytest.raises(ValueError, match="exclusive"):
+        await players(executor).bulk_create(
+            [Player(name="Ana")], ignore_conflicts=True, update_conflicts=True, update_fields=["fee"]
+        )
+    assert executor.operations == []
+
+
+@pytest.mark.parametrize(
+    "objs",
+    [[Team(name="x")], [{"name": "Ana"}], "ab", 3, [Player(name="Ana"), None]],
+    ids=["another model", "a dict", "a string", "not iterable", "None"],
+)
+async def test_bulk_create_takes_instances_of_the_model(objs):
+    executor = Executor()
+    with pytest.raises(TypeError, match="bulk_create"):
+        await players(executor).bulk_create(objs)
+    assert executor.operations == []
+
+
+async def test_bulk_create_leaves_the_instances_unchanged_when_the_operation_fails():
+    from adorm import IntegrityError
+
+    executor = Executor(IntegrityError("duplicate key"))
+    ana = Player(name="Ana")
+    with pytest.raises(IntegrityError):
+        await players(executor).bulk_create([ana])
+    assert (ana.pk, ana._state.adding) == (None, True)
+
+
+async def test_bulk_create_refuses_a_result_that_does_not_match_the_instances():
+    from adorm import InterfaceError
+
+    executor = Executor([{"id": 1}])
+    ana, bo = Player(name="Ana"), Player(name="Bo")
+    with pytest.raises(InterfaceError, match="2 instances returned 1 rows"):
+        await players(executor).bulk_create([ana, bo])
+    assert ana._state.adding is True
+
+
 async def test_get_or_create():
     executor = Executor(({"id": 1, "name": "Ana"}, True), ({"id": 1, "name": "Ana"}, 0))
     qs = players(executor)
@@ -441,6 +531,7 @@ async def test_bound_model_methods_run_on_its_session():
         {"id": 4},
         ({"id": 1}, False),
         ({"id": 1}, False),
+        [{"id": 5}],
     )
     bound = session.Player
     with bind_transaction(session, executor):
@@ -455,6 +546,7 @@ async def test_bound_model_methods_run_on_its_session():
         assert (await bound.create(name="X")).pk == 4
         assert (await bound.get_or_create(name="X"))[1] is False
         assert (await bound.update_or_create(name="X"))[1] is False
+        assert [p.pk for p in await bound.bulk_create([Player(name="Y")])] == [5]
     assert [op.kind for op in executor.operations] == [
         "count",
         "exists",
@@ -467,6 +559,7 @@ async def test_bound_model_methods_run_on_its_session():
         "create",
         "get_or_create",
         "update_or_create",
+        "bulk_create",
     ]
     query = Query("querysettest.Player")
     assert bound.all().executor is session

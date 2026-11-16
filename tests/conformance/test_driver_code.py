@@ -1,9 +1,10 @@
 """Python code of the target ORM that a write would call: a model's ``save()`` and ``delete()`` overrides, query set
-overrides of ``create()`` and ``update()``, custom ``on_delete`` handlers, Django's signals and ``on_commit()``
-callbacks. The Django driver runs it on the driver side; the native PostgreSQL driver runs none of it and refuses a
-write that would call an override or a custom handler, before anything is written; the memory driver runs none of it.
-Either way the client sees no signal and the pool and the transaction stay usable. ``pre_init`` and ``post_init``
-fire on the drivers that build Django model instances."""
+overrides of ``create()``, ``update()`` and ``bulk_create()``, custom ``on_delete`` handlers, Django's signals and
+``on_commit()`` callbacks. ``bulk_create()`` calls no ``save()`` and sends no signal on any driver. The Django driver
+runs the rest on the driver side; the native PostgreSQL driver runs none of it and refuses a write that would call an
+override or a custom handler, before anything is written; the memory driver runs none of it. Either way the client
+sees no signal and the pool and the transaction stay usable. ``pre_init`` and ``post_init`` fire on the drivers that
+build Django model instances."""
 
 import datetime
 
@@ -84,6 +85,60 @@ async def test_a_models_save_override(conformance_driver, router, calls):
                 await Tag.objects.create(name="night")
         assert await Tag.objects.filter(name="indoor").update(name="Indoor") == 1
     assert await Tag.objects.filter(name="Indoor").count() == 1
+
+
+@pytest.mark.usefixtures("save_override")
+async def test_bulk_create_calls_no_save_override_and_sends_no_signal_on_any_driver(router, calls):
+    from django.db.models.signals import post_save, pre_save
+
+    received = []
+
+    def receiver(signal, sender, instance, **kwargs):  # noqa: ARG001
+        received.append(instance.name)
+
+    for signal in (pre_save, post_save):
+        signal.connect(receiver, sender=DjangoTag, weak=False)
+    try:
+        for _ in REPEAT:
+            await Tag.objects.filter(name__istartswith="n").delete()
+            created = await Tag.objects.bulk_create([Tag(name="night"), Tag(name="noon")])
+            assert [tag.name for tag in created] == ["night", "noon"]
+            assert (await names(), calls, received) == (["night", "noon"], [], [])
+    finally:
+        for signal in (pre_save, post_save):
+            signal.disconnect(receiver, sender=DjangoTag)
+    assert router.pools[0].in_use == 0
+
+
+async def test_a_query_set_override_of_bulk_create(conformance_driver, router, calls, monkeypatch):
+    from django.db.models import QuerySet
+
+    class TagQuerySet(QuerySet):
+        def bulk_create(self, objs, *args, **kwargs):
+            calls.append(("bulk_create", [obj.name for obj in objs]))
+            for obj in objs:
+                obj.name = obj.name.upper()
+            return super().bulk_create(objs, *args, **kwargs)
+
+    pool = router.pools[0]
+    code = conformance_driver.driver_code
+    monkeypatch.setattr(DjangoTag._base_manager, "_queryset_class", TagQuerySet)
+    expected = {
+        "runs": (["NIGHT", "NOON"], [("bulk_create", ["night", "noon"])]),
+        "refused": ([], []),
+        "not run": (["night", "noon"], []),
+    }[code]
+    for _ in REPEAT:
+        calls.clear()
+        if code == "refused":
+            with pytest.raises(NotSupportedError, match=r"overrides bulk_create\(\)"):
+                await Tag.objects.bulk_create([Tag(name="night"), Tag(name="noon")])
+        else:
+            created = await Tag.objects.bulk_create([Tag(name="night"), Tag(name="noon")])
+            assert [tag.name for tag in created] == expected[0]
+        assert (await names(), calls) == expected
+        assert pool.in_use == 0
+        await Tag.objects.filter(name__istartswith="n").delete()
 
 
 async def test_a_models_delete_override(conformance_driver, router, calls, delete_override):

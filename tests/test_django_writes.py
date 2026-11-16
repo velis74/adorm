@@ -22,9 +22,11 @@ from adorm import (
     ConnectionProfile,
     DatabaseError,
     F,
+    FieldError,
     IntegrityError,
     NotSupportedError,
     OperationalError,
+    ProgrammingError,
     RestrictedError,
     TransactionClosed,
     TransactionManagementError,
@@ -786,3 +788,37 @@ def test_capabilities_of_writes():
     assert "expression.CombinedExpression" in READ_CAPABILITIES.constructs
     assert "clause.select_for_update" not in READ_CAPABILITIES.constructs
     assert CAPABILITIES.savepoints
+
+
+# Bulk creates
+
+
+async def test_bulk_create_runs_djangos_bulk_create_in_one_operation(library, pool):  # noqa: ARG001
+    books = [Book(isbn=f"979000000000{n}", title=f"B{n}", pages=n + 1, keywords=["k"] * n) for n in range(3)]
+    created = await Book.objects.bulk_create(books, batch_size=2)
+    assert [book.isbn for book in created] == ["9790000000000", "9790000000001", "9790000000002"]
+    assert all(book.added is not None for book in created)
+    stored = await in_thread(
+        lambda: list(dj.Book.objects.filter(isbn__startswith="979").values_list("pages", "keywords"))
+    )
+    assert sorted(stored) == [(1, []), (2, ["k"]), (3, ["k", "k"])]
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_bulk_create_refuses_what_django_refuses_before_anything_runs(library, pool):  # noqa: ARG001
+    with pytest.raises(ProgrammingError, match="multi-table inheritance child"):
+        await Edition.objects.bulk_create(
+            [Edition(isbn="9790000000010", title="E", pages=1, released=datetime.date(2024, 1, 1))]
+        )
+    with pytest.raises(ProgrammingError, match="update_conflicts needs unique_fields"):
+        await Author.objects.bulk_create([Author(name="A", slug="a")], update_conflicts=True, update_fields=["name"])
+    with pytest.raises(ProgrammingError, match="cannot update a primary key"):
+        await Author.objects.bulk_create(
+            [Author(name="A", slug="a")], update_conflicts=True, update_fields=["id"], unique_fields=["slug"]
+        )
+    with pytest.raises(FieldError, match="no field 'nope'"):
+        await Author.objects.bulk_create(
+            [Author(name="A", slug="a")], update_conflicts=True, update_fields=["nope"], unique_fields=["slug"]
+        )
+    assert not await Author.objects.filter(slug="a").exists()
+    assert (pool.size, pool.in_use) == (1, 0)

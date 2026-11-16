@@ -4,7 +4,7 @@
 The installed version of the native PostgreSQL driver executes what the [Django driver](/topics/django-driver)
 executes ([`CAPABILITIES`](/ref/drivers#adorm-drivers-django-capabilities)): the reads (`select`, `get`, `first`,
 `last`, `count`, `exists`, `aggregate`) with their lookups, functions, aggregates, subqueries and clauses, the writes
-(`create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks
+(`create`, `bulk_create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks
 (`select_for_update()`), transactions, savepoints and the connection options. Driver methods raise
 `NotSupportedError` before anything runs.
 :::
@@ -184,6 +184,7 @@ statements Django's own method would run, one after the other on the slot's conn
 | adorm | What runs |
 |---|---|
 | `Model.objects.create(**values)` | `Model(**values)`, then Django's insert of each table of the model (a multi-table inheritance child: the parents' rows first), with the fields' `pre_save()` (`auto_now_add`) and defaults; `RETURNING` gives the primary key and the values the database sets |
+| `Model.objects.bulk_create(objs, ...)` | Django's `bulk_create()` steps for the installed Django version: `Model(**values)` per row, the instances with a primary key and those without inserted separately, one `INSERT ... RETURNING` per batch (`ON CONFLICT DO NOTHING` / `DO UPDATE` for the conflict options), more than one statement in a transaction; no `save()`, no signals |
 | `obj.save()` of a new instance, `force_insert` | the same insert |
 | `obj.save()` with a primary key | `Model.from_db()` with the adorm instance's fields loaded; `UPDATE` of the loaded fields per table, then the insert when no row was updated, as Django's `save()`; a partly loaded instance whose row is missing is inserted after one `exists()` query, as on the Django driver |
 | `obj.save(update_fields=[...])`, `force_update=True` | `UPDATE` of those fields; no row updated raises `DatabaseError` |
@@ -209,8 +210,8 @@ total, counts = await Author.objects.filter(slug="ann").delete()
 ```
 
 Results are those of the Django driver: the row as stored for `create`, `save`, `get_or_create` and
-`update_or_create`, the number of rows for `update`, `(total, {label: count})` for deletes, as Django counts them.
-A delete that a `PROTECT` or `RESTRICT` reference forbids raises `ProtectedError` or `RestrictedError` before
+`update_or_create`, a list of the rows as stored, in order, for `bulk_create`, the number of rows for `update`,
+`(total, {label: count})` for deletes, as Django counts them. A delete that a `PROTECT` or `RESTRICT` reference forbids raises `ProtectedError` or `RestrictedError` before
 anything is deleted, with the referencing rows read in full, and leaves the transaction usable:
 
 ```python
@@ -223,7 +224,7 @@ async with adorm.atomic():
 ```
 
 Several statements that Django runs in one atomic block (a multi-table insert or update, a delete with cascades,
-`update_or_create()`) run in a transaction of their own outside `adorm.atomic()`. Inside one they run in its
+`update_or_create()`, a `bulk_create()` of several batches) run in a transaction of their own outside `adorm.atomic()`. Inside one they run in its
 transaction, and a step that Django runs in a savepoint (the insert of `get_or_create()`) runs in a savepoint. A write
 of several statements that fails after its first statement ran, without a savepoint around it (a value of a
 multi-table child that fails to convert after the parent's row was inserted), leaves the transaction rollback-only,
@@ -242,7 +243,15 @@ async with adorm.atomic():
 A delete names at most [`BATCH_SIZE`](/ref/drivers#adorm-drivers-asyncpg-writes-batch-size) keys per foreign key in
 one statement, and at most 32 767 parameters
 ([`MAX_QUERY_PARAMS`](/ref/drivers#adorm-drivers-asyncpg-compiler-max-query-params)) in all: a delete of more rows
-runs more statements, in its transaction.
+runs more statements, in its transaction. A `bulk_create()` inserts at most `MAX_QUERY_PARAMS` divided by the number
+of columns rows per statement, fewer when `batch_size` asks for fewer. Django's PostgreSQL backend limits a statement
+only with psycopg's `server_side_binding` (65 535 parameters), so without it the Django driver inserts a call without
+`batch_size` with one statement. The statements of one call run in one
+transaction on both drivers, so the rows stored are the same.
+
+```python
+await Member.objects.bulk_create(members)      # 10 000 members without primary keys, 7 columns: 3 INSERTs of 4 681 rows at most
+```
 
 ### What runs and what does not
 
@@ -254,7 +263,7 @@ The driver runs no Python code of the target ORM beyond building queries and ins
 | a model's `save()` (or `save_base()`) override | runs when the write saves | `create`, `save`, `get_or_create` and `update_or_create` raise `NotSupportedError` before anything runs; `get_or_create()` and `update_or_create()` are refused before the lookup, also when the row exists |
 | a child model's `save_base()` override in `create_from_parent` | runs (`save()` does not run) | `create_from_parent` raises `NotSupportedError` before anything runs; a `save()` override is not called, as on the Django driver |
 | a model's `delete()` override | runs for `obj.delete()` | `obj.delete()` raises `NotSupportedError` before anything runs |
-| a manager's or query set's override of the method the write calls | runs | the write raises `NotSupportedError` before anything runs: `create()` for `create`; `update()` for `update`; `delete()` for `qs.delete()`; `get_or_create()`, `get()`, `create()` for `get_or_create`; `update_or_create()`, `select_for_update()`, `get_or_create()`, `get()`, `create()` for `update_or_create` |
+| a manager's or query set's override of the method the write calls | runs | the write raises `NotSupportedError` before anything runs: `create()` for `create`; `bulk_create()` for `bulk_create`; `update()` for `update`; `delete()` for `qs.delete()`; `get_or_create()`, `get()`, `create()` for `get_or_create`; `update_or_create()`, `select_for_update()`, `get_or_create()`, `get()`, `create()` for `update_or_create` |
 | a manager's `get_queryset()` | applies | applies (it must only build a query) |
 | `pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` | fire on the slot's thread | do not fire |
 | `pre_init`, `post_init` | fire for every instance a write builds | fire for every instance a write builds, on the event loop |

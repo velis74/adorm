@@ -51,8 +51,11 @@ CLAUSES: tuple[str, ...] = (
     "clause.select_for_update.skip_locked",
     "clause.select_for_update.of",
     "clause.select_for_update.no_key",
+    "clause.on_conflict.ignore",
+    "clause.on_conflict.update",
 )
-"""The construct names of `Query` clauses and `ForUpdate` options."""
+"""The construct names of `Query` clauses, `ForUpdate` options and the conflict handling of
+`adorm.operations.BulkCreate`."""
 
 NESTED_PATH = "path.nested"
 """The construct name of a field path with several segments (``club__name``): a relation or a transform. `F` reports

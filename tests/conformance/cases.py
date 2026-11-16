@@ -2027,6 +2027,204 @@ async def create_a_multi_table_child():
     return await Activity.objects.count(), await Competition.objects.count()
 
 
+def _django_bulk_create():
+    from demo.backend.activities.models import Tag as DjangoTag
+
+    tags = DjangoTag.objects.bulk_create([DjangoTag(name="night"), DjangoTag(name="dawn")])
+    stored = sorted(DjangoTag.objects.filter(pk__in=[tag.pk for tag in tags]).values_list("name", flat=True))
+    return [isinstance(tag.pk, int) for tag in tags], [tag.name for tag in tags], stored
+
+
+@case(
+    "bulk_create",
+    "select",
+    "lookup.in",
+    expected=([True, True], ["night", "dawn"], ["dawn", "night"]),
+    django=_django_bulk_create,
+)
+async def bulk_create():
+    tags = await Tag.objects.bulk_create([Tag(name="night"), Tag(name="dawn")])
+    stored = sorted(
+        [name async for name in Tag.objects.filter(pk__in=[tag.pk for tag in tags]).values_list("name", flat=True)]
+    )
+    return [isinstance(tag.pk, int) for tag in tags], [tag.name for tag in tags], stored
+
+
+def _django_bulk_create_fills_defaults_and_generated_primary_keys():
+    from demo.backend.billing.models import Invoice as DjangoInvoice, Payment as DjangoPayment
+
+    invoice = DjangoInvoice.objects.get(number="2026-0003")
+    given = uuid.UUID("00000000-0000-4000-8000-000000000063")
+    payments = DjangoPayment.objects.bulk_create(
+        [
+            DjangoPayment(invoice_id=invoice.pk, amount=Decimal("5.00"), paid_at=START),
+            DjangoPayment(code=given, invoice_id=invoice.pk, amount=Decimal("6.00"), paid_at=START, reference="r"),
+        ]
+    )
+    stored = [DjangoPayment.objects.get(code=payment.code) for payment in payments]
+    return (
+        isinstance(payments[0].code, uuid.UUID),
+        payments[1].code == given,
+        [(payment.amount, payment.reference) for payment in stored],
+    )
+
+
+@case(
+    "get",
+    "bulk_create",
+    "lookup.exact",
+    expected=(True, True, [(Decimal("5.00"), ""), (Decimal("6.00"), "r")]),
+    django=_django_bulk_create_fills_defaults_and_generated_primary_keys,
+)
+async def bulk_create_fills_defaults_and_generated_primary_keys():
+    invoice = await Invoice.objects.get(number="2026-0003")
+    given = uuid.UUID("00000000-0000-4000-8000-000000000063")
+    payments = await Payment.objects.bulk_create(
+        [
+            Payment(invoice_id=invoice.pk, amount=Decimal("5.00"), paid_at=START),
+            Payment(code=given, invoice_id=invoice.pk, amount=Decimal("6.00"), paid_at=START, reference="r"),
+        ]
+    )
+    stored = [await Payment.objects.get(code=payment.code) for payment in payments]
+    return (
+        isinstance(payments[0].code, uuid.UUID),
+        payments[1].code == given,
+        [(payment.amount, payment.reference) for payment in stored],
+    )
+
+
+def _django_bulk_create_in_batches_inserts_all_rows_or_none():
+    from django.db import IntegrityError as DjangoIntegrityError, transaction
+
+    from demo.backend.activities.models import Tag as DjangoTag
+
+    existing = DjangoTag.objects.get(name="indoor")
+    DjangoTag.objects.bulk_create([DjangoTag(name=f"batch {n}") for n in range(5)], batch_size=2)
+    failed = False
+    try:
+        with transaction.atomic():
+            DjangoTag.objects.bulk_create(
+                [DjangoTag(pk=9001, name="a"), DjangoTag(pk=9002, name="b"), DjangoTag(pk=existing.pk, name="c")],
+                batch_size=2,
+            )
+    except DjangoIntegrityError:
+        failed = True
+    batches = DjangoTag.objects.filter(name__startswith="batch ").count()
+    return batches, failed, DjangoTag.objects.filter(pk=9001).count()
+
+
+@case(
+    "get",
+    "bulk_create",
+    "count",
+    "lookup.exact",
+    "lookup.startswith",
+    expected=(5, True, 0),
+    django=_django_bulk_create_in_batches_inserts_all_rows_or_none,
+)
+async def bulk_create_in_batches_inserts_all_rows_or_none():
+    existing = await Tag.objects.get(name="indoor")
+    await Tag.objects.bulk_create([Tag(name=f"batch {n}") for n in range(5)], batch_size=2)
+    failed = False
+    try:
+        # The first batch is inserted before the second fails on the existing primary key.
+        await Tag.objects.bulk_create(
+            [Tag(pk=9001, name="a"), Tag(pk=9002, name="b"), Tag(pk=existing.pk, name="c")], batch_size=2
+        )
+    except adorm.IntegrityError:
+        failed = True
+    batches = await Tag.objects.filter(name__startswith="batch ").count()
+    return batches, failed, await Tag.objects.filter(pk=9001).count()
+
+
+def _django_bulk_create_ignoring_conflicts():
+    from demo.backend.activities.models import Tag as DjangoTag
+
+    tags = DjangoTag.objects.bulk_create([DjangoTag(name="indoor"), DjangoTag(name="night")], ignore_conflicts=True)
+    return [tag.pk for tag in tags], DjangoTag.objects.filter(name__in=["indoor", "night"]).count()
+
+
+@case(
+    "bulk_create",
+    "count",
+    "lookup.in",
+    "clause.on_conflict.ignore",
+    expected=([None, None], 2),
+    django=_django_bulk_create_ignoring_conflicts,
+)
+async def bulk_create_ignoring_conflicts():
+    tags = await Tag.objects.bulk_create([Tag(name="indoor"), Tag(name="night")], ignore_conflicts=True)
+    return [tag.pk for tag in tags], await Tag.objects.filter(name__in=["indoor", "night"]).count()
+
+
+def _django_bulk_create_updating_conflicts():
+    from demo.backend.clubs.models import Member as DjangoMember
+
+    ana = DjangoMember.objects.get(email="ana.0@example.com")
+    members = DjangoMember.objects.bulk_create(
+        [
+            DjangoMember(first_name="X", last_name="Y", email="ana.0@example.com", joined=START, level="advanced"),
+            DjangoMember(first_name="Nina", last_name="Nova", email="nina@example.com", joined=START),
+        ],
+        update_conflicts=True,
+        update_fields=["level"],
+        unique_fields=["email"],
+    )
+    stored = DjangoMember.objects.get(email="ana.0@example.com")
+    return members[0].pk == ana.pk, isinstance(members[1].pk, int), (stored.first_name, stored.level)
+
+
+@case(
+    "get",
+    "bulk_create",
+    "lookup.exact",
+    "clause.on_conflict.update",
+    expected=(True, True, ("Ana", "advanced")),
+    django=_django_bulk_create_updating_conflicts,
+)
+async def bulk_create_updating_conflicts():
+    ana = await Member.objects.get(email="ana.0@example.com")
+    members = await Member.objects.bulk_create(
+        [
+            Member(first_name="X", last_name="Y", email="ana.0@example.com", joined=START, level="advanced"),
+            Member(first_name="Nina", last_name="Nova", email="nina@example.com", joined=START),
+        ],
+        update_conflicts=True,
+        update_fields=["level"],
+        unique_fields=["email"],
+    )
+    stored = await Member.objects.get(email="ana.0@example.com")
+    return members[0].pk == ana.pk, isinstance(members[1].pk, int), (stored.first_name, stored.level)
+
+
+def _django_bulk_create_ignores_conflict_fields_without_update_conflicts():
+    from demo.backend.activities.models import Tag as DjangoTag
+
+    tags = DjangoTag.objects.bulk_create(
+        [DjangoTag(name="upsert off")], update_conflicts=False, update_fields=["name"], unique_fields=["name"]
+    )
+    ignored = DjangoTag.objects.bulk_create(
+        [DjangoTag(name="upsert off")], ignore_conflicts=True, unique_fields=["name"]
+    )
+    return isinstance(tags[0].pk, int), ignored[0].pk, DjangoTag.objects.filter(name="upsert off").count()
+
+
+@case(
+    "bulk_create",
+    "count",
+    "lookup.exact",
+    "clause.on_conflict.ignore",
+    expected=(True, None, 1),
+    django=_django_bulk_create_ignores_conflict_fields_without_update_conflicts,
+)
+async def bulk_create_ignores_conflict_fields_without_update_conflicts():
+    tags = await Tag.objects.bulk_create(
+        [Tag(name="upsert off")], update_conflicts=False, update_fields=["name"], unique_fields=["name"]
+    )
+    ignored = await Tag.objects.bulk_create([Tag(name="upsert off")], ignore_conflicts=True, unique_fields=["name"])
+    return isinstance(tags[0].pk, int), ignored[0].pk, await Tag.objects.filter(name="upsert off").count()
+
+
 # Prefetching, in_bulk(), generic foreign keys
 
 

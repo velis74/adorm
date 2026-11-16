@@ -2,7 +2,7 @@
 
 ::: info Status
 The installed [Django driver](/topics/django-driver) applies a manager's `get_queryset()` (`clause.manager`) and its
-write overrides (`create()`, `update()`, `delete()`, `get_or_create()`, `update_or_create()`); the
+write overrides (`create()`, `bulk_create()`, `update()`, `delete()`, `get_or_create()`, `update_or_create()`); the
 [native PostgreSQL driver](/topics/postgresql-driver) applies `get_queryset()` to reads and writes and refuses a
 write whose manager or query set overrides the method it would call. Driver methods (`call` operations) raise
 `NotSupportedError` on both.
@@ -32,7 +32,7 @@ ORM's query sets applies it: the Django driver and the native PostgreSQL driver.
 the query on the event loop, so there a manager's `get_queryset()` must only build a query; one that accesses the
 database raises `NotSupportedError`. It runs no Python code of the manager's other methods: a write whose manager
 or query set overrides the method it would call raises `NotSupportedError` before anything is written: `create()`,
-`update()`, `delete()`, `get_or_create()` or `update_or_create()`, and for `get_or_create()` also `get()` and
+`bulk_create()`, `update()`, `delete()`, `get_or_create()` or `update_or_create()`, and for `get_or_create()` also `get()` and
 `create()`, for `update_or_create()` also `select_for_update()`, `get_or_create()`, `get()` and `create()` ([what runs on the driver side](/topics/postgresql-driver#what-runs-and-what-does-not)). A driver method is a `call` operation and needs a driver that runs the ORM's
 code: the Django driver. A driver without these capabilities refuses them with `NotSupportedError` before anything
 runs. A manager that only has driver methods keeps its queries off the ORM manager, so on such a driver only its
@@ -56,7 +56,7 @@ class Loan(Model):
     all_loans = Manager()             # the plain rows, on every driver
 ```
 
-`Manager(orm_name)` names the target ORM's manager. Every query, `create()`, `update()`, `delete()`,
+`Manager(orm_name)` names the target ORM's manager. Every query, `create()`, `bulk_create()`, `update()`, `delete()`,
 `get_or_create()` and `update_or_create()` of `Loan.objects` carries that name ([`Query.manager`](/ref/query#adorm-query-query-model-manager-none)),
 so the driver starts from that manager: Django's `Loan.objects.get_queryset()` decides the rows and Django's
 query set methods run the writes. `Manager()` without a name reads and writes the rows without manager logic.

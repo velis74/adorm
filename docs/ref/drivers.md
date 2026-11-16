@@ -465,6 +465,7 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | Write | Django call | Result |
 |---|---|---|
 | `create` | `create(**values)` of the manager `manager` names (`_base_manager` without one), through `db_manager(profile.alias)` | [`instance_row()`](#adorm-drivers-django-translation-instance-row-instance) of the new instance |
+| `bulk_create` | [`check_bulk_create()`](#adorm-drivers-django-translation-check-bulk-create-operation), then `bulk_create(objs, **bulk_create_options(operation))` of the manager `manager` names (`_base_manager` without one), through `db_manager(profile.alias)`; `objs` are `Model(**values)` per row | a list of `instance_row()` of each instance, in order |
 | `save` without `pk`, or with `force_insert` | `Model(**values)`, the `pk` set when given, `save(force_insert=...)` | the instance's row |
 | `save` with `pk` | `Model.from_db()` with the given fields loaded and the others deferred, then `save(update_fields=..., force_update=...)`; Django updates a partly loaded instance's loaded fields only. Without `update_fields` and `force_update`, a partly loaded instance whose row is missing is inserted (`force_insert`), the target's defaults filling the other fields; the check is one `exists()` query | the instance's row, without fields that hold an expression |
 | `update` | `update(**values)` on [`model_queryset()`](#adorm-drivers-django-translation-model-queryset-query) | the number of rows |
@@ -497,8 +498,8 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 
 | Field | Value |
 |---|---|
-| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
+| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` |
 | `backend_events` | none |
@@ -660,6 +661,33 @@ refers to, as in a lookup.
 ```python
 field_kwargs("library.Note", {"json_": "{}", "copy_id": book})     # {"json": "{}", "copy_id": book.pk}
 field_kwargs("library.Author", {"rating": F("rating") + 1})       # {"rating": CombinedExpression(F(rating) + Value(1))}
+```
+
+### `adorm.drivers.django.translation.bulk_create_options(operation)`
+
+Returns the keyword arguments of Django's `bulk_create()` for a
+[`BulkCreate`](/ref/operations#adorm-operations-bulkcreate-model-rows-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none-manager-none)
+operation: `batch_size`, `ignore_conflicts`, `update_conflicts`, and `update_fields` and `unique_fields` with each
+adorm field name translated by the model's `orm_names` (`"pk"` kept), or `None`.
+
+```python
+bulk_create_options(BulkCreate("library.Note", [{}], update_conflicts=True, update_fields=["json_"], unique_fields=["pk"]))
+# {"batch_size": None, "ignore_conflicts": False, "update_conflicts": True,
+#  "update_fields": ["json"], "unique_fields": ["pk"]}
+```
+
+### `adorm.drivers.django.translation.check_bulk_create(operation)`
+
+Raises `ProgrammingError` for a `BulkCreate` operation that Django's `bulk_create()` refuses on PostgreSQL, before
+any statement runs: a model with a multi-table inheritance parent (a proxy model is allowed), and under
+`update_conflicts` no `unique_fields`, a primary key in `update_fields`, or a field without a column of its own (a
+many-to-many field, a reverse relation) in `update_fields` or `unique_fields`. A name that is no field raises
+[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none). Both SQL
+drivers call it.
+
+```python
+check_bulk_create(BulkCreate("library.Edition", [{"isbn": "9790000000010"}]))
+# ProgrammingError: bulk_create() cannot insert rows of library.Edition, a multi-table inheritance child
 ```
 
 ### `adorm.drivers.django.translation.lookup_kwargs(query, lookups)`
@@ -944,6 +972,8 @@ Django's, built with the model's constructor or `Model.from_db()`.
 | Method | Django's counterpart |
 |---|---|
 | `create(operation)`, `save(operation)`, `update(operation)`, `delete(operation)`, `delete_instance(operation)`, `get_or_create(operation)`, `update_or_create(operation)` | what the [Django driver](#adorm-drivers-django-djangoconnection) calls for that operation; the same results |
+| `bulk_create(operation)` | the Django driver's `bulk_create` call, with `bulk_create_instances()`; the same results |
+| `bulk_create_instances(model, objs, *, batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None, unique_fields=None)` | `QuerySet.bulk_create()` of the installed Django version: the instances with a primary key (one a field default generates is set first) and those without inserted separately, in batches of at most `batch_size` rows and at most `MAX_QUERY_PARAMS // columns` rows, `RETURNING` the fields the database sets (not under `ignore_conflicts`); `ON CONFLICT DO NOTHING` or `DO UPDATE`; more than one statement in `atomic(savepoint=False)`; on Django 6 the `_order` of a model with `order_with_respect_to` numbered first |
 | `create_from_parent(operation)` | `save_base(raw=True)` of a multi-table inheritance child: the parent's row read with `get()`, the child's table inserted as `Model.save()` inserts it |
 | `full_clean(operation)` | `Model.full_clean()`, run as Python on the event loop with [`DjangoCompiler.replay()`](#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none): each statement the validation runs is awaited, then the validation runs again with its rows, so the model's `clean()` and overrides run as on the Django driver, once per statement plus once |
 | `save_instance(instance, *, force_insert=False, force_update=False, update_fields=None)` | `Model.save()`: parents' tables first, an `UPDATE` then an `INSERT` per table, `RETURNING` the primary key and the values the database sets |
@@ -957,9 +987,9 @@ Django's, built with the model's constructor or `Model.from_db()`.
 | `get(queryset, lookups=None)`, `instances(queryset)`, `keys(queryset)`, `exists(queryset)`, `rows(queryset)`, `row_count(query)` | `get()`, model instances by primary key, `values_list("pk")`, `exists()`, the rows of a query, the rows a statement affected |
 
 A write whose model, manager or query set overrides the Django method it would call (`save()`, `save_base()`,
-`delete()`, `create()`, `update()`, `get_or_create()`, `update_or_create()`, `get()`, `select_for_update()`), and a
-delete that reaches an `on_delete` handler other than Django's own, raise `NotSupportedError` before any statement
-changes data. A cancellation inside a transaction `atomic()` opened makes the connection unusable, so the slot closes
+`delete()`, `create()`, `bulk_create()`, `update()`, `get_or_create()`, `update_or_create()`, `get()`,
+`select_for_update()`), and a delete that reaches an `on_delete` handler other than Django's own, raise
+`NotSupportedError` before any statement changes data. A cancellation inside a transaction `atomic()` opened makes the connection unusable, so the slot closes
 it and the server rolls the transaction back.
 
 ```python
@@ -987,7 +1017,7 @@ total, counts = await collector.delete()
 
 ### `adorm.drivers.asyncpg.writes.WRITES`
 
-The `Writer` method for each write operation kind: `create`, `create_from_parent`, `full_clean`, `save`, `update`,
+The `Writer` method for each write operation kind: `create`, `bulk_create`, `create_from_parent`, `full_clean`, `save`, `update`,
 `delete`, `delete_instance`, `get_or_create`, `update_or_create`.
 
 ### `adorm.drivers.asyncpg.writes.MAX_VALIDATION_STATEMENTS`

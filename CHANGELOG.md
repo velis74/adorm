@@ -448,3 +448,14 @@
   key inside a JSON field. A lookup that a JSON or hstore field does not have raises `FieldError` on both SQL drivers,
   also on an annotation that refers to such a field, instead of reading the name as a key. The demo's `Club` has the
   array field `disciplines`.
+- `QuerySet.bulk_create(objs, batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None,
+  unique_fields=None)` (also on bound models and managers) and the `BulkCreate` operation (kind `bulk_create`, the
+  constructs `clause.on_conflict.ignore` and `clause.on_conflict.update`): the instances inserted with one operation,
+  each with the fields it set, and returned with the values the database set, as Django's `bulk_create()`. The Django
+  driver calls `bulk_create()` of the base manager or the query's manager; the native PostgreSQL driver runs Django's
+  `bulk_create()` steps for the installed Django version, at most `MAX_QUERY_PARAMS` parameters per statement, and
+  refuses a manager or query set that overrides `bulk_create()`. Several statements of one call run in one
+  transaction on both drivers. Both refuse what Django refuses on PostgreSQL with `ProgrammingError`
+  (`adorm.drivers.django.translation.check_bulk_create()`, `bulk_create_options()`). The demo's memory driver inserts
+  every row or none and refuses the conflict options. Without `update_conflicts`, `update_fields` and `unique_fields`
+  are ignored, and with no instances only `batch_size` is checked, as in Django.

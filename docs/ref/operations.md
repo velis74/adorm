@@ -6,8 +6,8 @@ connection: one read or write, described without I/O, models by their label and 
 ```python
 from adorm import F, Now, Q
 from adorm.models import registry
-from adorm.operations import Aggregate, Call, Count, Create, CreateFromParent, Delete, FullClean, Get, GetOrCreate
-from adorm.operations import InBulk, ModelRow, Save, Select, Update, UpdateOrCreate
+from adorm.operations import Aggregate, BulkCreate, Call, Count, Create, CreateFromParent, Delete, FullClean, Get
+from adorm.operations import GetOrCreate, InBulk, ModelRow, Save, Select, Update, UpdateOrCreate
 from adorm.query import Query
 ```
 
@@ -30,6 +30,7 @@ expressions.
 | `qs.in_bulk(id_list, field_name=...)` | `InBulk(query, field_name, ids)` |
 | `qs.prefetch_related(...)` | no operation of its own: a sequence of `Select` operations after the query's own, one per relation, level and batch of keys, each with a slot of its own outside a transaction |
 | `Model.objects.create(**values)` | `Create(label, values)`, `Create(label, values, manager)` on a manager with an ORM name |
+| `Model.objects.bulk_create(objs, batch_size=..., ...)` | `BulkCreate(label, rows, batch_size, ...)`, one row per instance |
 | `obj.save(update_fields=...)` | `Save(label, pk, values, update_fields)` |
 | `qs.update(**values)` | `Update(query, values)` |
 | `qs.delete()`, `obj.delete()` | `Delete(query)`, `DeleteInstance(label, pk)` |
@@ -91,6 +92,7 @@ A read-only mapping of kind to operation class:
 | `exists` | `Exists` | a `bool` |
 | `aggregate` | `Aggregate` | a dict of the values by name |
 | `create` | `Create` | the row as stored |
+| `bulk_create` | `BulkCreate` | a list of rows, one per row of the operation, in order |
 | `save` | `Save` | the values the database set |
 | `update` | `Update` | the number of rows |
 | `delete` | `Delete` | `(total, {label: count})` |
@@ -208,6 +210,49 @@ there is one.
 ```python
 Create("club.Member", {"name": "Ann", "joined": Now()})
 Create("library.Reader", {"name": "Ann", "username": "ann"}, manager="objects")
+```
+
+### `adorm.operations.BulkCreate(model, rows=(), batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None, unique_fields=None, manager=None)`
+
+Inserts a row of the model `model` (a label) for each item of `rows`, as the target inserts several instances at
+once (Django's `bulk_create()`): no `save()`, no signals. Result: a list with one row per item of `rows`, in order:
+its values with those the database set, such as a generated primary key. Under `ignore_conflicts` the database
+returns nothing, so a generated primary key stays `None`.
+
+- `rows` is an iterable of mappings or `(name, value)` pairs. Rows may name different fields; a field a row does not
+  name gets the target's default. Values follow the rules of `Create`: an expression value that refers to a field
+  of the row or contains an aggregate raises `TypeError`.
+- `batch_size`, `None` or a positive `int` (`ValueError` otherwise, `bool` included), is the most rows one statement
+  inserts. A driver may insert fewer per statement (the native PostgreSQL driver keeps every statement within
+  asyncpg's parameter limit). Several statements run in one transaction, or inside an open one without a
+  savepoint of their own, so a failing row inserts none of the rows.
+- `ignore_conflicts` skips a row that violates a unique constraint; construct `clause.on_conflict.ignore`.
+- `update_conflicts` updates `update_fields` of the stored row a row conflicts with on `unique_fields`; construct
+  `clause.on_conflict.update`. `unique_fields` may name `"pk"`.
+- `manager` names the target ORM's manager whose `bulk_create()` inserts the rows, as
+  [`Query.manager`](./query#adorm-query-query-model-manager-none); construct `clause.manager`. The encoded form has
+  `"manager"` only when there is one.
+
+`ignore_conflicts` with `update_conflicts` and `update_conflicts` without `update_fields` raise `ValueError`.
+`update_fields` and `unique_fields` are iterables of field names without `__` (a string raises `TypeError`); repeats
+are dropped. Without `update_conflicts` they are checked as names and then dropped (`None`), as Django's
+`bulk_create()` ignores them. The SQL drivers raise `ProgrammingError` for what Django's `bulk_create()` refuses on
+PostgreSQL ([`check_bulk_create()`](./drivers#adorm-drivers-django-translation-check-bulk-create-operation)): a
+multi-table inheritance child, `update_conflicts` without `unique_fields`, a primary key in `update_fields`, or a
+field without a column of its own in `update_fields` or `unique_fields`; a name that is no field raises
+`FieldError`.
+
+```python
+BulkCreate("club.Tag", [{"name": "night"}, {"name": "dawn"}])
+BulkCreate("club.Tag", [{"name": "indoor"}], ignore_conflicts=True)
+BulkCreate(
+    "club.Member",
+    [{"email": "ann@example.com", "level": "advanced"}],
+    batch_size=500,
+    update_conflicts=True,
+    update_fields=["level"],
+    unique_fields=["email"],
+)
 ```
 
 ### `adorm.operations.Save(model, pk, values=(), update_fields=None, force_insert=False, force_update=False)`

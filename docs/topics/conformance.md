@@ -57,9 +57,11 @@ placement, slicing, `distinct()` and `DISTINCT ON`, the row formats, `only()` an
 many-to-many relations, multi-table inheritance, generic relations, JSON keys, subqueries, annotations, every function
 and aggregate, `select_for_update()` with its options, `prefetch_related()` (reverse, forward and many-to-many
 relations, a `Prefetch` query set into `to_attr`, across a generic foreign key), generic foreign key objects,
-`in_bulk()`, `full_clean()`, and the writes (`create`, `create_from_parent`, `save` also with arithmetic, `update`,
-`delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught inside a transaction
-that then commits, `get_or_create`, `update_or_create`).
+`in_bulk()`, `full_clean()`, and the writes (`create`, `bulk_create` with generated primary keys, defaults, batches
+that insert every row or none, `ignore_conflicts` and `update_conflicts`, `update_fields` and `unique_fields` ignored
+without `update_conflicts`, `create_from_parent`, `save` also with
+arithmetic, `update`, `delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught
+inside a transaction that then commits, `get_or_create`, `update_or_create`).
 
 Coverage tests fail when:
 
@@ -118,7 +120,7 @@ would call. Each driver states in its `ConformanceDriver.driver_code` what it do
 and not on the memory driver.
 
 The tests override the Django model `Tag`'s `save()` (it stores the name in upper case), `delete()` (it deletes
-nothing) and the `create()` and `update()` of its base manager's query set after the data is seeded, replace the
+nothing) and the `create()`, `update()` and `bulk_create()` of its base manager's query set after the data is seeded, replace the
 `on_delete` handler of `Activity.coach` with a custom one, and connect signal receivers:
 
 | Test | What holds |
@@ -127,6 +129,8 @@ nothing) and the `create()` and `update()` of its base manager's query set after
 | `delete()` of an instance with the `delete()` override | `(0, {})` with the row kept (`"runs"`), `NotSupportedError` with the row kept (`"refused"`), the row deleted (`"not run"`); a query set delete runs no model's `delete()` on any driver |
 | create, save and delete with signal receivers | the receivers see six calls on the Django driver and none on the others |
 | `create()` and `update()` with the query set overrides | the override's calls and stored names on `"runs"`, `NotSupportedError` with nothing written on `"refused"`, the plain write on `"not run"` |
+| `bulk_create()` with the query set's `bulk_create()` override | the same, for `bulk_create` |
+| `bulk_create()` with the `save()` override and `pre_save` / `post_save` receivers | on every driver: no `save()` call, no signal, the names stored as given |
 | deleting a coach with the custom `on_delete` handler | the handler runs and the coach is deleted (`"runs"`); `NotSupportedError` with nothing deleted (`"refused"`, `"not run"`) |
 | a `post_save` receiver that registers `transaction.on_commit()` inside `adorm.atomic()` | the callback runs after the commit, not inside the block or after a rollback, on `"runs"`; never on the others |
 | `create()` with `pre_init` and `post_init` receivers | both fire once on the Django and the native PostgreSQL driver, never on the memory driver |
@@ -173,6 +177,21 @@ repeated:
 | a block cancelled racing its commit, after 0 to 6859 event loop iterations | `TransactionOutcome.COMMITTED` and a cancelled commit both occur; the row is changed after `COMMITTED` and unchanged after `ROLLED_BACK`; the slot is released |
 | cancelling inside a transaction | the transaction rolls back; no other connection stays in a transaction |
 | a server connection terminated mid-operation, also inside a transaction | a connection error; the slot is dropped, no other connection stays in a transaction and the next operation gets a new one |
+
+`tests/conformance/test_bulk_create.py` runs `bulk_create()` through the same failures. The tests that need a table
+lock or a unique constraint other than the primary key run on the SQL drivers only:
+
+| Test | What holds |
+|---|---|
+| a duplicate primary key in the last of three one-row batches, repeated | `IntegrityError`; none of the rows stored, the instances unchanged; one slot, released |
+| a failing `bulk_create()` in a nested `atomic()` | the savepoint rolls back its rows; the outer transaction inserts again and commits |
+| five `TaskGroup` tasks inserting in one transaction, repeated | every row stored with its own primary key, on the transaction's slot |
+| eight concurrent calls on a pool of two | every row stored, at most two slots |
+| cancelling a call that waits for a table lock | nothing inserted; the slot returns |
+| a call of three one-row batches whose connection is terminated, or which is cancelled, while its second batch waits for a row another transaction inserted; with and without an outer `atomic()`, repeated | a connection error or `CancelledError`; the first batch's row is not stored, the slot returns and the next call inserts |
+| a call of three statements cancelled racing its completion | all three rows or none, never one or two; a result or `SUCCEEDED` means three rows |
+| `ignore_conflicts` racing a transaction that inserted the same unique key | the call waits for it (seen in `pg_stat_activity`); the row is skipped when the transaction commits and inserted when it rolls back; the other row is inserted either way |
+| `update_conflicts` racing a transaction that inserted the same unique key | the call waits for it; it updates that row when the transaction commits and inserts its own when it rolls back |
 
 Each driver's `Blocker` (`tests/conformance/drivers.py`) makes an operation wait without sleeping: the SQL drivers
 read clubs while another connection holds an exclusive lock on their table, the memory driver updates a club while

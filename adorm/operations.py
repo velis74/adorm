@@ -23,6 +23,7 @@ from adorm.schema import SchemaSource
 __all__ = [
     "OPERATIONS",
     "Aggregate",
+    "BulkCreate",
     "Call",
     "Count",
     "Create",
@@ -560,6 +561,127 @@ class Create(Operation):
         with decoder.scope(model):
             values = _decode_values(decoder, _get(data, "values"), "values", extra=manager is not None)
             return cls(model, values, manager)
+
+
+def _names(names: Any, what: str, *, pk: bool = False) -> tuple[str, ...] | None:
+    """``names`` (``None`` or an iterable of field names, not a string) as a tuple without repeats; ``pk`` allows
+    ``"pk"``."""
+    if names is None:
+        return None
+    if isinstance(names, str) or not isinstance(names, Iterable):
+        raise TypeError(f"{what} is an iterable of field names, not a string")
+    result = tuple(dict.fromkeys(names))
+    for name in result:
+        if not isinstance(name, str) or not name.isidentifier() or "__" in name or (name == "pk" and not pk):
+            raise ValueError(f"{name!r} is not a field name")
+    return result
+
+
+@dataclass(frozen=True, eq=False)
+class BulkCreate(Operation):
+    """Insert a row of ``model`` for each of ``rows``, as the target inserts several instances at once (Django's
+    ``bulk_create()``). Result: a list with one row per item of ``rows``, in order: its values with those the
+    database set (a primary key it generated, except under ``ignore_conflicts``).
+
+    ``rows`` is an iterable of mappings or ``(name, value)`` pairs; the rows may name different fields, and an
+    expression value refers to no field and contains no aggregate (``TypeError``). ``batch_size`` is ``None`` or a
+    positive ``int`` (``ValueError``), the most rows one statement inserts; the driver may insert fewer per statement,
+    and several statements run in one transaction (savepoint-free inside an open one). ``ignore_conflicts`` skips a
+    row that violates a unique constraint; ``update_conflicts`` updates ``update_fields`` of the row it conflicts with
+    on ``unique_fields`` (field names; ``unique_fields`` may name ``"pk"``). Both at once and ``update_conflicts``
+    without ``update_fields`` raise ``ValueError``; without ``update_conflicts``, ``update_fields`` and
+    ``unique_fields`` are checked as names and dropped (``None``), as Django ignores them.
+    ``manager`` names the target ORM's manager whose ``bulk_create()`` inserts the rows (`Query.manager`). The encoded
+    form has ``"manager"`` only when there is one.
+    """
+
+    kind: ClassVar[str] = "bulk_create"
+    model: str
+    rows: tuple[tuple[tuple[str, Any], ...], ...] = ()
+    batch_size: int | None = None
+    ignore_conflicts: bool = False
+    update_conflicts: bool = False
+    update_fields: tuple[str, ...] | None = None
+    unique_fields: tuple[str, ...] | None = None
+    manager: str | None = None
+
+    def __post_init__(self) -> None:
+        check_model_label(self.model)
+        Query(self.model, manager=self.manager)
+        if isinstance(self.rows, str | bytes | Mapping) or not isinstance(self.rows, Iterable):
+            raise TypeError("rows is an iterable of field values")
+        object.__setattr__(self, "rows", tuple(_field_values(row, refs=False) for row in self.rows))
+        size = self.batch_size
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size <= 0):
+            raise ValueError(f"batch_size is a positive integer or None, not {size!r}")
+        object.__setattr__(self, "ignore_conflicts", bool(self.ignore_conflicts))
+        object.__setattr__(self, "update_conflicts", bool(self.update_conflicts))
+        object.__setattr__(self, "update_fields", _names(self.update_fields, "update_fields"))
+        object.__setattr__(self, "unique_fields", _names(self.unique_fields, "unique_fields", pk=True))
+        if self.ignore_conflicts and self.update_conflicts:
+            raise ValueError("ignore_conflicts and update_conflicts are mutually exclusive")
+        if self.update_conflicts and not self.update_fields:
+            raise ValueError("update_conflicts needs update_fields, the fields a conflicting row gets")
+        if not self.update_conflicts:
+            object.__setattr__(self, "update_fields", None)
+            object.__setattr__(self, "unique_fields", None)
+
+    def constructs(self) -> Iterator[str]:
+        yield from super().constructs()
+        if self.ignore_conflicts:
+            yield "clause.on_conflict.ignore"
+        if self.update_conflicts:
+            yield "clause.on_conflict.update"
+        if self.manager is not None:
+            yield "clause.manager"
+
+    def nodes(self) -> Iterator[Node]:
+        return (value for row in self.rows for _, value in row if isinstance(value, Node))
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:
+        with encoder.scope(self.model):
+            data: dict[str, Any] = {
+                "model": self.model,
+                "rows": [_encode_values(encoder, row) for row in self.rows],
+                "batch_size": self.batch_size,
+                "ignore_conflicts": self.ignore_conflicts,
+                "update_conflicts": self.update_conflicts,
+                "update_fields": None if self.update_fields is None else list(self.update_fields),
+                "unique_fields": None if self.unique_fields is None else list(self.unique_fields),
+            }
+        if self.manager is not None:
+            data["manager"] = self.manager
+        return data
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
+        model = check_model_label(_get(data, "model"))
+        manager = data.get("manager")
+        if manager is not None and not isinstance(manager, str):
+            raise ValueError("the manager is a name or null")
+        raw = _get(data, "rows")
+        if not isinstance(raw, list):
+            raise ValueError("the rows are a list of mappings of field names to values")
+        batch_size = _get(data, "batch_size")
+        if batch_size is not None and (isinstance(batch_size, bool) or not isinstance(batch_size, int)):
+            raise ValueError("batch_size is an integer or null")
+        names = {}
+        for key in ("update_fields", "unique_fields"):
+            value = _get(data, key)
+            if value is not None and not (isinstance(value, list) and all(isinstance(n, str) for n in value)):
+                raise ValueError(f"{key} is a list of field names or null")
+            names[key] = value
+        with decoder.scope(model):
+            rows = tuple(_decode_values(decoder, row, "row values") for row in raw)
+        return cls(
+            model,
+            rows,
+            batch_size,
+            ignore_conflicts=_flag(data, "ignore_conflicts"),
+            update_conflicts=_flag(data, "update_conflicts"),
+            manager=manager,
+            **names,
+        )
 
 
 @dataclass(frozen=True, eq=False)

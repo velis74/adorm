@@ -266,10 +266,12 @@ Its construct names are `clause.select_for_update`, plus `clause.select_for_upda
 
 ### `adorm.query.CLAUSES`
 
-The construct names of `Query` clauses and `ForUpdate` options, a tuple: `clause.annotate`, `clause.alias`,
-`clause.group_by`, `clause.distinct`,
-`clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`,
-`clause.select_for_update` and `clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`.
+The construct names of `Query` clauses, `ForUpdate` options and the conflict handling of
+[`BulkCreate`](./operations#adorm-operations-bulkcreate-model-rows-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none-manager-none),
+a tuple: `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`,
+`clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` and
+`clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`, `clause.on_conflict.ignore` and
+`clause.on_conflict.update`.
 
 ### `adorm.query.NESTED_PATH`
 

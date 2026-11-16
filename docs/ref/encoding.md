@@ -71,7 +71,8 @@ A value is typed by:
   field's type; each value of `in` and `range` has that type, each value of `overlap` the item type of the array
   field (`str` for `list[str]`); an expression in place of the values (`disciplines__overlap=Value(["Lead"])`) has the type of
   the expression on the left;
-- a field value of `Create`, `Save`, `Update` and the defaults of `GetOrCreate` and `UpdateOrCreate`: the field's type; the primary key of
+- a field value of `Create`, each row of `BulkCreate`, `Save`, `Update` and the defaults of `GetOrCreate` and
+  `UpdateOrCreate`: the field's type; the primary key of
   `Save` and `DeleteInstance`: the primary key's type;
 - `Value(value, output_type=...)`: the `output_type`;
 - a `Value` without `output_type`: the type of its position. A `Case` passes its `output_type`, or else its own

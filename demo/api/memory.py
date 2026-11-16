@@ -62,6 +62,7 @@ from adorm.exceptions import (
 )
 from adorm.models import ForeignKey, Model, registry
 from adorm.operations import (
+    BulkCreate,
     Count,
     Create,
     Delete,
@@ -149,6 +150,7 @@ CAPABILITIES = Capabilities(
         "exists",
         "in_bulk",
         "create",
+        "bulk_create",
         "save",
         "update",
         "delete",
@@ -667,6 +669,19 @@ class MemoryConnection(DriverConnection):
         self._write(label, row[pk], row)
         return copy.deepcopy(row)
 
+    async def _bulk_create(self, operation: BulkCreate) -> list[dict[str, Any]]:
+        """Insert every row or none: in a transaction of its own, or in a savepoint of the open one."""
+        name = f"bulk_create_{id(operation)}"
+        own = not self.in_transaction
+        await (self.begin() if own else self._savepoint(name))
+        try:
+            rows = [await self._insert(operation.model, dict(values)) for values in operation.rows]
+        except BaseException:
+            await (self.rollback() if own else self._rollback_to_savepoint(name))
+            raise
+        await (self.commit() if own else self._release_savepoint(name))
+        return rows
+
     async def _update(self, query: Query, values: Iterable[tuple[str, Any]]) -> int:
         rows = _Rows(query.model)
         values = list(values)
@@ -827,6 +842,8 @@ class MemoryConnection(DriverConnection):
                 return await self._fetch(operation.select_query())
             case Create():
                 return await self._insert(operation.model, dict(operation.values))
+            case BulkCreate():
+                return await self._bulk_create(operation)
             case Save():
                 return await self._save(operation)
             case Update():

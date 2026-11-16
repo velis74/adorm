@@ -26,6 +26,7 @@ from adorm import (
     IntegrityError,
     NotSupportedError,
     OperationalError,
+    ProgrammingError,
     ProtectedError,
     RestrictedError,
     TransactionClosed,
@@ -1088,3 +1089,160 @@ def test_delete_batches_stay_within_the_parameter_limit(monkeypatch):
     assert writes._batch_size(4) == compiler.MAX_QUERY_PARAMS // 4
     monkeypatch.setattr(compiler, "MAX_QUERY_PARAMS", 5)
     assert [writes._batch_size(n) for n in (1, 2, 6)] == [5, 2, 1]
+
+
+# Bulk creates, compared with the Django ORM
+
+
+def _books(model, prefix):
+    return [
+        model(isbn=f"{prefix}0000000001", title="No extras", pages=1, weight=None, cover=None),
+        model(
+            isbn=f"{prefix}0000000002",
+            title="Every type",
+            genre="science",
+            pages=2,
+            price=Decimal("3.50"),
+            weight=1.25,
+            reading_time=datetime.timedelta(hours=2),
+            cover=b"\x89PNG",
+            keywords=["a", "b"],
+            extra={"k": [1, None]},
+            in_print=False,
+        ),
+        model(isbn=f"{prefix}0000000003", title="Nulls last", pages=3, weight=2.5, cover=b"", keywords=[]),
+    ]
+
+
+BULK_CASES = {
+    "fields of every type with NULLs first": (
+        lambda: dj.Book.objects.bulk_create(_books(dj.Book, "979")),
+        lambda: Book.objects.bulk_create(_books(Book, "979")),
+    ),
+    "renamed fields and a proxy model": (
+        lambda: dj.BookProxy.objects.bulk_create([dj.BookProxy(isbn="9790000000009", title="P", pages=1, schema="v7")]),
+        lambda: Book.objects.bulk_create([Book(isbn="9790000000009", title="P", pages=1, schema_="v7")]),
+    ),
+    "given primary keys and foreign keys": (
+        lambda: dj.Author.objects.bulk_create(
+            [dj.Author(id=800 + n, name=f"N{n}", slug=f"n{n}", mentor_id=800 if n else None) for n in range(4)]
+        ),
+        lambda: Author.objects.bulk_create(
+            [Author(id=800 + n, name=f"N{n}", slug=f"n{n}", mentor_id=800 if n else None) for n in range(4)]
+        ),
+    ),
+    "a row that conflicts is ignored": (
+        lambda: dj.Tag.objects.bulk_create(
+            [dj.Tag(id=700, name="rare"), dj.Tag(id=701, name="fresh")], ignore_conflicts=True
+        ),
+        lambda: Tag.objects.bulk_create([Tag(id=700, name="rare"), Tag(id=701, name="fresh")], ignore_conflicts=True),
+    ),
+    "a row that conflicts updates the stored row": (
+        lambda: dj.Author.objects.bulk_create(
+            [dj.Author(id=810, name="X", slug="ann", rating=0), dj.Author(id=811, name="Y", slug="yan", rating=1)],
+            update_conflicts=True,
+            update_fields=["rating", "name"],
+            unique_fields=["slug"],
+        ),
+        lambda: Author.objects.bulk_create(
+            [Author(id=810, name="X", slug="ann", rating=0), Author(id=811, name="Y", slug="yan", rating=1)],
+            update_conflicts=True,
+            update_fields=["rating", "name"],
+            unique_fields=["slug"],
+        ),
+    ),
+    "a duplicate key inserts nothing": (
+        lambda: dj.Author.objects.bulk_create(
+            [dj.Author(id=820, name="Z", slug="zed"), dj.Author(id=821, name="Ann", slug="ann")], batch_size=1
+        ),
+        lambda: Author.objects.bulk_create(
+            [Author(id=820, name="Z", slug="zed"), Author(id=821, name="Ann", slug="ann")], batch_size=1
+        ),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", BULK_CASES)
+async def test_a_bulk_create_matches_django(library, pool, name):  # noqa: ARG001
+    django_write, adorm_write = BULK_CASES[name]
+
+    async def created():
+        return [instance.pk for instance in await adorm_write()]
+
+    expected = await django_outcome(lambda: [instance.pk for instance in django_write()])
+    actual = await adorm_outcome(created())
+    if actual != expected:
+        import pprint
+
+        print("RESULT", expected[0], actual[0])
+        for k in expected[1]:
+            if expected[1][k] != actual[1][k]:
+                pprint.pprint((k, expected[1][k], actual[1][k]))
+    assert actual == expected
+    assert pool.in_use == 0
+
+
+async def test_bulk_create_numbers_rows_with_order_with_respect_to_as_django_does(library, pool):  # noqa: ARG001
+    def django_write():
+        shelf = dj.Shelf.objects.create(id=60, code="B1")
+        dj.Placement.objects.create(id=60, shelf=shelf, book_id=DUNE)
+        dj.Placement.objects.bulk_create(
+            [dj.Placement(id=61 + n, shelf=shelf, book_id=isbn) for n, isbn in enumerate((DUNE, POEMS, DUNE))]
+        )
+
+    async def adorm_write():
+        # Django 5.2 leaves _order unset, which the database refuses: the block leaves no row then, as Django's.
+        async with adorm.atomic():
+            await Shelf.objects.create(id=60, code="B1")
+            await Placement.objects.create(id=60, shelf_id="B1", book_id=DUNE)
+            placements = [
+                Placement(id=61 + n, shelf_id="B1", book_id=isbn) for n, isbn in enumerate((DUNE, POEMS, DUNE))
+            ]
+            await Placement.objects.bulk_create(placements)
+
+    expected = await django_outcome(django_write)
+    assert await adorm_outcome(adorm_write()) == expected
+
+
+async def test_bulk_create_refuses_what_django_refuses_before_anything_runs(library, pool):  # noqa: ARG001
+    with pytest.raises(ProgrammingError, match="multi-table inheritance child"):
+        await Edition.objects.bulk_create(
+            [Edition(isbn="9790000000010", title="E", pages=1, released=datetime.date(2024, 1, 1))]
+        )
+    with pytest.raises(ProgrammingError, match="update_conflicts needs unique_fields"):
+        await Author.objects.bulk_create([Author(name="A", slug="a")], update_conflicts=True, update_fields=["name"])
+    with pytest.raises(ProgrammingError, match="cannot update a primary key"):
+        await Author.objects.bulk_create(
+            [Author(name="A", slug="a")], update_conflicts=True, update_fields=["id"], unique_fields=["slug"]
+        )
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_a_bulk_create_beyond_the_parameter_limit_is_one_transaction(library, executor, database, monkeypatch):  # noqa: ARG001
+    # Seven columns per author and at most 20 parameters per statement: two rows per INSERT.
+    from adorm.drivers.asyncpg import compiler
+
+    monkeypatch.setattr(compiler, "MAX_QUERY_PARAMS", 20)
+    pool = executor(max_connections=1, acquire_timeout=5)
+    inserts = []
+    compile_insert = compiler.DjangoCompiler.compile_insert
+
+    def counting(self, query, returning=()):
+        inserts.append(len(query.objs))
+        return compile_insert(self, query, returning)
+
+    monkeypatch.setattr(compiler.DjangoCompiler, "compile_insert", counting)
+    created = await Author.objects.bulk_create([Author(name=f"B{n}", slug=f"bulk{n}") for n in range(7)])
+    assert inserts == [2, 2, 2, 1]
+    assert len({author.pk for author in created}) == 7
+    assert await Author.objects.filter(slug__startswith="bulk").count() == 7
+    # The last statement fails on a duplicate slug; the three before it are rolled back with it.
+    inserts.clear()
+    with pytest.raises(IntegrityError):
+        await Author.objects.bulk_create(
+            [Author(name=f"C{n}", slug=f"cut{n}") for n in range(6)] + [Author(name="D", slug="ann")]
+        )
+    assert inserts == [2, 2, 2, 1]
+    assert await Author.objects.filter(slug__startswith="cut").count() == 0
+    await database.transactions_ended()
+    assert pool.in_use == 0

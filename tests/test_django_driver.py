@@ -182,6 +182,7 @@ def test_capabilities():
     assert READ_CAPABILITIES.operations == {"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"}
     assert CAPABILITIES.operations == READ_CAPABILITIES.operations | {
         "create",
+        "bulk_create",
         "create_from_parent",
         "full_clean",
         "save",
@@ -212,6 +213,8 @@ def test_capabilities():
         "clause.select_for_update.skip_locked",
         "clause.select_for_update.of",
         "clause.select_for_update.no_key",
+        "clause.on_conflict.ignore",
+        "clause.on_conflict.update",
     }
     assert CAPABILITIES.savepoints
     assert not READ_CAPABILITIES.savepoints

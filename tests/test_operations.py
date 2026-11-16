@@ -63,6 +63,20 @@ OPERATION_EXAMPLES = [
         },
     ),
     Create("club.Member", {"name": "Bob", "joined": Now()}),
+    operations.BulkCreate(
+        "club.Member",
+        [{"name": "Ann", "joined": JOINED, "fee": decimal.Decimal("1.50")}, {"name": "Bob", "token": uuid.UUID(int=4)}],
+    ),
+    operations.BulkCreate("club.Member", [{"name": "Ann"}], batch_size=100, ignore_conflicts=True),
+    operations.BulkCreate(
+        "club.Member",
+        [[("name", "Ann"), ("joined", Now())]],
+        update_conflicts=True,
+        update_fields=["joined", "name"],
+        unique_fields=["pk", "token"],
+        manager="objects",
+    ),
+    operations.BulkCreate("club.Payment", [{"amount": decimal.Decimal("3.20")}, {"code": uuid.UUID(int=8)}]),
     Save("club.Member", 5, {"name": "Ann", "age": 31}, update_fields=["age"]),
     Save("club.Member", None, {"name": "New"}, force_insert=True),
     Save("club.Member", 5, {"age": F("age") + 1}, force_update=True),
@@ -104,6 +118,7 @@ def test_registry():
         "delete_instance": operations.DeleteInstance,
         "update": Update,
         "create": Create,
+        "bulk_create": operations.BulkCreate,
         "save": Save,
         "get_or_create": GetOrCreate,
         "update_or_create": UpdateOrCreate,
@@ -562,3 +577,111 @@ def test_get_or_create_lookups_on_annotations_are_typed_by_the_annotation():
     data = operation.to_dict(SCHEMA)
     assert data["lookups"][0] == ["lv", {"value": "master"}]
     assert Operation.from_dict(json.loads(json.dumps(data)), SCHEMA) == operation
+
+
+def test_bulk_create_keeps_rows_in_order_with_their_own_fields():
+    operation = operations.BulkCreate("club.Member", ({"name": "Ann", "age": 3}, [("name", "Bob")], {}))
+    assert operation.rows == ((("name", "Ann"), ("age", 3)), (("name", "Bob"),), ())
+    assert operation.model == "club.Member"
+    assert list(operation.constructs()) == []
+    assert operations.BulkCreate("club.Member", iter([{"name": "Ann"}])).rows == ((("name", "Ann"),),)
+    assert operations.BulkCreate("club.Member").rows == ()
+
+
+def test_bulk_create_reports_its_constructs():
+    names = operations.BulkCreate(
+        "club.Member", [{"name": Lower(Value("ANN"))}], ignore_conflicts=True, manager="objects"
+    ).constructs()
+    assert sorted(set(names)) == ["clause.manager", "clause.on_conflict.ignore", "function.Lower"]
+    update = operations.BulkCreate("club.Member", [{}], update_conflicts=True, update_fields=["age"])
+    assert list(update.constructs()) == ["clause.on_conflict.update"]
+    with pytest.raises(NotSupportedError, match=r"needs unsupported clause\.on_conflict\.update"):
+        Capabilities(operations={"bulk_create"}, constructs={"clause.on_conflict.ignore"}).check(update)
+
+
+def test_bulk_create_keeps_field_names_without_repeats():
+    operation = operations.BulkCreate(
+        "club.Member", [{}], update_conflicts=True, update_fields=("age", "age", "name"), unique_fields=iter(["pk"])
+    )
+    assert (operation.update_fields, operation.unique_fields) == (("age", "name"), ("pk",))
+    assert operation.to_dict()["update_fields"] == ["age", "name"]
+    assert "manager" not in operation.to_dict()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "error", "message"),
+    [
+        ({"model": "Member"}, ValueError, "not a model label"),
+        ({"rows": "ab"}, TypeError, "rows is an iterable"),
+        ({"rows": {"name": "Ann"}}, TypeError, "rows is an iterable"),
+        ({"rows": 3}, TypeError, "rows is an iterable"),
+        ({"rows": [{"age": F("age") + 1}]}, TypeError, "cannot refer to a field"),
+        ({"rows": [{"age": Count("*")}]}, TypeError, "cannot contain an aggregate"),
+        ({"rows": [{"club__name": "x"}]}, ValueError, "is not a field name"),
+        ({"rows": [[("age", 1), ("age", 2)]]}, ValueError, "given twice"),
+        ({"batch_size": 0}, ValueError, "batch_size is a positive integer"),
+        ({"batch_size": -5}, ValueError, "batch_size is a positive integer"),
+        ({"batch_size": True}, ValueError, "batch_size is a positive integer"),
+        ({"batch_size": 2.0}, ValueError, "batch_size is a positive integer"),
+        ({"ignore_conflicts": True, "update_conflicts": True, "update_fields": ["age"]}, ValueError, "exclusive"),
+        ({"update_conflicts": True}, ValueError, "needs update_fields"),
+        ({"update_conflicts": True, "update_fields": []}, ValueError, "needs update_fields"),
+        ({"update_fields": ["a__b"]}, ValueError, "is not a field name"),
+        ({"ignore_conflicts": True, "unique_fields": "pk"}, TypeError, "not a string"),
+        ({"update_conflicts": True, "update_fields": "age"}, TypeError, "not a string"),
+        ({"update_conflicts": True, "update_fields": ["pk"]}, ValueError, "'pk' is not a field name"),
+        ({"update_conflicts": True, "update_fields": ["a__b"]}, ValueError, "is not a field name"),
+        ({"update_conflicts": True, "update_fields": ["age"], "unique_fields": [3]}, ValueError, "not a field name"),
+        ({"manager": "_private"}, ValueError, "not a manager name"),
+    ],
+)
+def test_bulk_create_errors(kwargs, error, message):
+    arguments = {"model": "club.Member", "rows": [{"name": "Ann"}], **kwargs}
+    with pytest.raises(error, match=message):
+        operations.BulkCreate(**arguments)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"update_fields": ["age"]},
+        {"unique_fields": ["pk"]},
+        {"ignore_conflicts": True, "update_fields": ["age"], "unique_fields": ["name"]},
+    ],
+)
+def test_bulk_create_drops_conflict_fields_without_update_conflicts(kwargs):
+    operation = operations.BulkCreate("club.Member", [{"name": "Ann"}], **kwargs)
+    assert operation.update_fields is None
+    assert operation.unique_fields is None
+    data = roundtrip(operation.to_dict(SCHEMA))
+    assert data["update_fields"] is None
+    assert data["unique_fields"] is None
+    assert "clause.on_conflict.update" not in set(operation.constructs())
+
+
+def test_bulk_create_rows_are_typed_by_the_model():
+    operation = operations.BulkCreate("club.Member", [{"joined": JOINED, "fee": decimal.Decimal("1.5")}])
+    data = roundtrip(operation.to_dict(SCHEMA))
+    assert data["rows"] == [{"joined": {"value": "2026-11-14T09:30:00Z"}, "fee": {"value": "1.5"}}]
+    assert operations.BulkCreate.from_dict(data, SCHEMA) == operation
+    with pytest.raises(FieldError):
+        operations.BulkCreate("club.Member", [{"nope": 1}]).to_dict(SCHEMA)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"rows": {"name": "Ann"}}, "the rows are a list"),
+        ({"rows": ["x"]}, "row values are a mapping"),
+        ({"batch_size": "3"}, "batch_size is an integer"),
+        ({"batch_size": 0}, "batch_size is a positive integer"),
+        ({"update_fields": "age"}, "update_fields is a list"),
+        ({"unique_fields": [1]}, "unique_fields is a list"),
+        ({"ignore_conflicts": 1}, "ignore_conflicts is a bool"),
+        ({"manager": 3}, "the manager is a name"),
+    ],
+)
+def test_bulk_create_decoding_errors(change, message):
+    data = {**operations.BulkCreate("club.Member", [{"name": "Ann"}]).to_dict(), **change}
+    with pytest.raises(ValueError, match=message):
+        Operation.from_dict(data)

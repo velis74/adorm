@@ -2,8 +2,8 @@
 
 ::: info Status
 The installed version of the Django driver executes reads (`select`, `get`, `first`, `last`, `count`, `exists`,
-`aggregate`) with annotations, aliases, grouping, functions, aggregates and subqueries, writes (`create`, `save`,
-`update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks (`select_for_update()`),
+`aggregate`) with annotations, aliases, grouping, functions, aggregates and subqueries, writes (`create`, `bulk_create`,
+`save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks (`select_for_update()`),
 transactions, savepoints and the connection options of
 [`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options). Driver methods raise `NotSupportedError`
 before anything runs.
@@ -225,6 +225,7 @@ signals and the overrides of the query's manager run as in Django code, on the s
 | adorm | Django |
 |---|---|
 | `Model.objects.create(**values)` | `create(**values)` of `_base_manager`, or of the manager the query names (`Query.manager`), so its `create()` override receives arguments that are not fields |
+| `Model.objects.bulk_create(objs, ...)` | `bulk_create([Model(**values), ...], batch_size=..., ignore_conflicts=..., update_conflicts=..., update_fields=..., unique_fields=...)` of `_base_manager` or of the query's manager: Django inserts the rows without `save()` and without signals, in one statement per batch (several in one atomic block), and sets the primary keys PostgreSQL returns |
 | `obj.save()` of a new instance (no primary key, or `force_insert`) | `Model(**values).save()` |
 | `obj.save()` with a primary key | the instance with the adorm instance's fields loaded and the others deferred, then `save()`: Django updates only the loaded fields |
 | `obj.save(update_fields=[...])`, `force_update=True` | `save(update_fields=[...])`, `save(force_update=True)`: a missing row raises `DatabaseError` |

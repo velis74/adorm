@@ -12,7 +12,13 @@ from collections.abc import AsyncIterator, Iterable, Mapping
 from functools import lru_cache
 from typing import Any, Self, TYPE_CHECKING
 
-from adorm.exceptions import MultipleObjectsReturned, ObjectDoesNotExist, ProtectedError, RestrictedError
+from adorm.exceptions import (
+    InterfaceError,
+    MultipleObjectsReturned,
+    ObjectDoesNotExist,
+    ProtectedError,
+    RestrictedError,
+)
 from adorm.query.query import Query
 
 if TYPE_CHECKING:
@@ -50,6 +56,16 @@ def _bind_error_objects(exc: BaseException, executor: Executor) -> None:
                 pass
         objects.append(item)
     setattr(exc, attribute, tuple(objects))
+
+
+def _stored_values(instance: Model, pk: str) -> dict[str, Any]:
+    """The field values an insert of ``instance`` writes: its loaded and assigned fields, without a primary key of
+    ``None``."""
+    return {
+        name: instance.__dict__[name]
+        for name in type(instance).__pydantic_fields__
+        if name in instance.model_fields_set and not (name == pk and instance.__dict__[name] is None)
+    }
 
 
 def _empty_aggregation(aggregations: Iterable[tuple[str, Any]]) -> dict[str, Any] | None:
@@ -430,17 +446,68 @@ class QuerySet:
         from adorm.operations import Create
 
         instance = self.model(**values)
-        pk = self.model._require_meta().pk
-        stored = {
-            name: instance.__dict__[name]
-            for name in self.model.__pydantic_fields__
-            if name in instance.model_fields_set and not (name == pk and instance.__dict__[name] is None)
-        }
+        stored = _stored_values(instance, self.model._require_meta().pk)
         manager = self.query.manager
         if manager is not None and instance.__pydantic_extra__:
             stored.update(instance.__pydantic_extra__)
         instance._stored(await self._run(Create(self.query.model, stored, manager=manager)), self.executor)
         return instance
+
+    async def bulk_create(
+        self,
+        objs: Iterable[Model],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_conflicts: bool = False,
+        update_fields: Iterable[str] | None = None,
+        unique_fields: Iterable[str] | None = None,
+    ) -> list[Model]:
+        """Insert the instances ``objs`` with one `BulkCreate` operation and return them as a list, in order, each with
+        the values the target set (a generated primary key, except under ``ignore_conflicts``).
+
+        Each instance writes its loaded and assigned fields (``model_fields_set``; a primary key of ``None`` is left
+        to the target), so the instances may set different fields. The arguments are those of `BulkCreate`. An
+        object that is not an instance of the model raises ``TypeError`` and an invalid ``batch_size`` ``ValueError``,
+        also for no instances; no instances return ``[]`` without an operation, so the other arguments and the driver's
+        checks (a multi-table inheritance child) are not applied to them. The query's ORM manager (`Query.manager`)
+        inserts the rows when it has one.
+        """
+        from adorm.models.base import Model
+        from adorm.operations import BulkCreate
+
+        if batch_size is not None and (
+            isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0
+        ):
+            raise ValueError(f"batch_size is a positive integer or None, not {batch_size!r}")
+        if isinstance(objs, str | bytes) or not isinstance(objs, Iterable):
+            raise TypeError("bulk_create() takes an iterable of model instances")
+        instances = list(objs)
+        meta = self.model._require_meta()
+        for instance in instances:
+            if (
+                not isinstance(instance, Model)
+                or type(instance)._meta is None
+                or type(instance)._meta.label != meta.label
+            ):
+                raise TypeError(f"bulk_create() takes {meta.label} instances, not {instance!r}")
+        if not instances:
+            return instances
+        operation = BulkCreate(
+            meta.label,
+            [_stored_values(instance, meta.pk) for instance in instances],
+            batch_size,
+            ignore_conflicts=ignore_conflicts,
+            update_conflicts=update_conflicts,
+            update_fields=update_fields,
+            unique_fields=unique_fields,
+            manager=self.query.manager,
+        )
+        rows = await self._run(operation)
+        if len(rows) != len(instances):
+            raise InterfaceError(f"bulk_create() of {len(instances)} instances returned {len(rows)} rows")
+        for instance, row in zip(instances, rows, strict=True):
+            instance._stored(row, self.executor)
+        return instances
 
     async def create_from_parent(self, parent: Any, **values: Any) -> Model:
         """A new multi-table inheritance child for the existing parent row ``parent`` (an instance or its primary
