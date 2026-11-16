@@ -1,4 +1,4 @@
-"""adorm: an asynchronous ORM interface."""
+"""adorm: an asynchronous database ORM."""
 
 from adorm.checks import check_schema, SchemaProblem
 from adorm.exceptions import (

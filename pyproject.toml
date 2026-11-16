@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "adorm"
 version = "0.0.1"
-description = "Async ORM interface: an asynchronous query and model API executed by pluggable ORM drivers."
+description = "Asynchronous database ORM: one async query and model API executed by pluggable drivers."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

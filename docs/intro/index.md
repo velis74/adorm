@@ -1,14 +1,18 @@
 # What is adorm
 
-adorm (Async Django ORM, pronounced "adore") is an asynchronous ORM interface for Python. Applications build
-queries and model operations with adorm's own API, and a **driver** executes them on a target ORM or database.
-The first drivers target the Django ORM and PostgreSQL directly; a SQLAlchemy driver can follow.
+adorm (asynchronous database ORM, pronounced "adore") is an asynchronous ORM for Python. Applications build
+queries and model operations with adorm's API, and a **driver** executes them: natively on PostgreSQL (asyncpg) or
+through an existing ORM (Django).
 
 ::: info Status
 adorm is pre-release. The [API reference](/ref/) lists what the installed version provides.
 :::
 
-## The problem adorm solves
+## Why adorm
+
+adorm's API is modelled on the Django ORM: querysets, lookups, `Q` and `F`, managers and model instances work as
+Django developers know them, without the `a` prefix. The Django driver lets an existing Django project move to
+adorm one task at a time, on its existing models and migrations.
 
 Django's ORM is synchronous. Its `a`-prefixed methods (`aget`, `acreate`, …) run the synchronous ORM in a
 thread through `sync_to_async`, one call at a time, and part of the API (forward relation access,

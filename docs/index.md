@@ -1,12 +1,12 @@
 ---
-title: Async ORM interface
-description: 'adorm is a fully asynchronous ORM interface for Python: Django-style queries and models, executed by pluggable drivers.'
+title: Asynchronous database ORM
+description: 'adorm is an asynchronous ORM for Python: one async API for queries and models, executed by pluggable drivers.'
 layout: home
 
 hero:
   name: adorm
-  text: Async ORM interface
-  tagline: Django-style queries and models with one async API, executed by pluggable drivers
+  text: Asynchronous database ORM
+  tagline: One async API for queries and models, executed by pluggable drivers
   actions:
     - theme: brand
       text: Introduction
