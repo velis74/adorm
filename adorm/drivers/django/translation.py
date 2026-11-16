@@ -433,7 +433,11 @@ class _Translator:
     def combined(self, parts: Sequence[Any]) -> Any:
         """The Django query set of the set operation over the query sets ``parts``, ordered and sliced."""
         query = self.query
-        first, *rest = parts
+        # Ordering of an unsliced part has no effect; Django 5.2 keeps it when only one part remains, which PostgreSQL
+        # refuses under the combined ordering.
+        first, *rest = (
+            part if part.query.is_sliced or part.query.distinct_fields else part.order_by() for part in parts
+        )
         if query.is_none:
             return first.none()
         if query.combinator == "union":

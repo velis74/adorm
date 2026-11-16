@@ -642,7 +642,8 @@ def _django_union_reduced_to_one_query():
     levels = DjangoMember.objects.order_by("level").values_list("level", flat=True)
     union = levels[:6].union(DjangoMember.objects.none()).order_by("-level")
     union_all = levels[:6].union(DjangoMember.objects.none(), all=True).order_by("-level")
-    unsliced = levels.union(DjangoMember.objects.none()).order_by("-level")
+    # Django 5.2 keeps the ordering of the single unsliced query, which PostgreSQL refuses; adorm drops it.
+    unsliced = levels.order_by().union(DjangoMember.objects.none()).order_by("-level")
     return list(union[:5]), list(union_all[:5]), list(unsliced)
 
 
