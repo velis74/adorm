@@ -18,3 +18,8 @@ coverage.json
 .venv/
 
 .env
+
+# The demo on SQLite
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

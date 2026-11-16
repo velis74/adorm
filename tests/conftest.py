@@ -35,12 +35,16 @@ def pytest_collection_modifyitems(items):
 
 
 @pytest.fixture(scope="session")
-def test_database_url(database_url, django_db_setup) -> str:  # noqa: ARG001 - needs the test database created
-    """``database_url`` pointing at the test database pytest-django created."""
+def test_database_url(django_db_setup) -> str:  # noqa: ARG001 - needs the test database created
+    """The URL of the test database pytest-django created: ``database_url`` pointing at it, on SQLite
+    ``sqlite:///<path>``."""
     from django.db import connection
 
-    from tests.djangoproject.settings import TEST_DATABASE_NAME
+    if connection.vendor == "sqlite":
+        return f"sqlite:///{connection.settings_dict['NAME']}"
+    from tests.djangoproject.settings import TEST_DATABASE_NAME, TEST_DATABASE_URL
 
+    database_url = TEST_DATABASE_URL
     name = connection.settings_dict["NAME"]
     if not name.startswith(TEST_DATABASE_NAME):
         pytest.fail(f"the test database was not created; Django points at {name!r}")

@@ -85,8 +85,8 @@ unsubscribe = pool.events.subscribe(
 
 ## Backend events
 
-A driver connection reports what the database does on its own as a `BackendEvent`. The Django driver (with
-psycopg 3) and the native PostgreSQL driver emit:
+A driver connection reports what the database does on its own as a `BackendEvent`. The Django driver (on
+PostgreSQL with psycopg 3) and the native PostgreSQL driver emit:
 
 | Event | When | Where it goes |
 |---|---|---|
@@ -239,6 +239,6 @@ instead.
 | [Pool, router and slots](/topics/pool#events) | outcomes, `on_commit`, `on_rollback` | callbacks and backend events of idle connections and of released leases (the pool's `EventBus`) |
 | [Connection profiles](/topics/profiles#events) | nothing | nothing; events emitted during `on_acquire` / `on_release` follow the pool's rules |
 | [Drivers](/topics/drivers#events) | callbacks, backend events | nothing; a remote driver decodes the server's events into return values, errors and `emit` |
-| [Django driver](/topics/django-driver#events) | `notice`, `notify`, `connection_lost` (psycopg 3); Django's signals and `on_commit()` callbacks stay on the driver side | nothing |
+| [Django driver](/topics/django-driver#events) | `notice`, `notify`, `connection_lost` (on PostgreSQL with psycopg 3); Django's signals and `on_commit()` callbacks stay on the driver side | nothing |
 | [Native PostgreSQL driver](/topics/postgresql-driver#events) | `notice`, `notify`, `connection_lost` | nothing |
 | [`adorm.listen()`](#listening-for-notifications) | nothing | `notify`, `connection_lost` of its slot; passes other events to the pool's `EventBus` |

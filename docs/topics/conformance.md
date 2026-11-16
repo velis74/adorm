@@ -4,6 +4,18 @@ The conformance suite (`tests/conformance`) runs every driver of the [demo appli
 PostgreSQL, memory) over the same schema and data: the demo's apps `clubs`, `activities` and `billing`, filled by
 `manage.py seed_demo` in the test database. It runs in `uv run pytest` and in CI.
 
+The suite also runs the Django driver on SQLite, with the settings `tests.djangoproject.settings_sqlite`: the demo's
+schema in a SQLite database file in a temporary directory of the process, removed when it ends. The other drivers
+are skipped there, and the tests that read PostgreSQL's catalogue or sessions, drive its locks or listen for its
+notifications are skipped or replaced by `tests/conformance/test_sqlite.py`, which runs only on SQLite. CI runs both.
+
+```bash
+uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
+```
+
+On SQLite the `Blocker` is `SQLiteWriteLock`: a `BEGIN IMMEDIATE` transaction on a `sqlite3` connection of its own,
+which an update waits for (`DjangoConnection.waiting_for_write_lock`).
+
 The suite checks each driver against its [capabilities](/topics/drivers#capabilities):
 
 - an operation whose kind and constructs the driver declares returns the same result on every driver;
@@ -36,8 +48,10 @@ Every case runs on every driver (`test_case[<driver>-<case>]`):
 
 After each case no slot is in use, and the pool serves the next operation on the slot it kept.
 
-`refusals` lists drivers that refuse the case during execution, for a limit that depends on the schema or the rows
-and so does not show in the names. The memory driver refuses a delete that would cascade and a condition on a
+`refusals` lists drivers that refuse the case during execution, for a limit that depends on the schema, the rows or
+the database and so does not show in the names (the Django driver on SQLite refuses a sliced or ordered query in a
+set operation). `on_vendor` holds the result on a database where it differs, by Django's vendor name: SQLite sorts `NULL`
+first in ascending order. The memory driver refuses a delete that would cascade and a condition on a
 reverse or many-to-many relation name such as `clubs=club`:
 
 ```python

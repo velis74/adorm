@@ -4,7 +4,9 @@ Each `Case` names in ``uses`` every operation kind and construct name its operat
 driver that declares all of them must return ``expected``; a driver that lacks one must refuse with
 `NotSupportedError` naming only names it lacks. ``refusals`` lists the drivers that may refuse the case at execution
 instead, for a limit the operation's names cannot show (it depends on the schema or the rows), with a pattern of the
-message. ``django`` is a synchronous mirror of a write case in the Django ORM; it returns ``expected`` over the seeded
+message (a query the database's backend refuses, such as a sliced query in a set operation on SQLite). ``on_vendor``
+holds the result on a database where it differs, by Django's vendor name (SQLite sorts ``NULL`` first in ascending
+order). ``django`` is a synchronous mirror of a write case in the Django ORM; it returns ``expected`` over the seeded
 database, which holds the write cases to Django's results whatever the drivers support.
 """
 
@@ -71,9 +73,17 @@ class Case:
     expected: Any
     refusals: Mapping[str, str] = field(default_factory=dict)
     django: Callable[[], Any] | None = None
+    on_vendor: Mapping[str, Any] = field(default_factory=dict)
+
+    def expected_on(self, vendor: str) -> Any:
+        """The result on a database of Django's vendor ``vendor``."""
+        return self.on_vendor.get(vendor, self.expected)
 
 
 CASES: list[Case] = []
+
+COMPOUND_SLICES = "LIMIT/OFFSET not allowed in subqueries of compound statements"
+"""SQLite's refusal of a sliced query in a set operation, which Django raises before the query runs."""
 
 
 def case(
@@ -81,9 +91,12 @@ def case(
     expected: Any,
     refusals: Mapping[str, str] | None = None,
     django: Callable[[], Any] | None = None,
+    on_vendor: Mapping[str, Any] | None = None,
 ):
     def register(run: Callable[[], Awaitable[Any]]) -> Callable[[], Awaitable[Any]]:
-        CASES.append(Case(run.__name__, frozenset(uses), run, expected, dict(refusals or {}), django))
+        CASES.append(
+            Case(run.__name__, frozenset(uses), run, expected, dict(refusals or {}), django, dict(on_vendor or {}))
+        )
         return run
 
     return register
@@ -506,6 +519,13 @@ ACTIVITIES_BY_COACH = [
     "Dinghy handling",
 ]
 
+SQLITE_NULL_ORDER = (
+    ["Spring regatta", *ACTIVITIES_BY_COACH],
+    ["Spring regatta", *ACTIVITIES_BY_COACH],
+    ["Dinghy handling", "Bouldering basics", "Crag day", "Regional bouldering cup", "Ergometer session"],
+)
+"""`order_by_nulls_first_and_last` on SQLite, which sorts ``NULL`` first in ascending and last in descending order."""
+
 
 @case(
     "select",
@@ -514,6 +534,7 @@ ACTIVITIES_BY_COACH = [
         [*ACTIVITIES_BY_COACH, "Spring regatta"],
         ["Spring regatta", "Dinghy handling", "Bouldering basics", "Crag day", "Regional bouldering cup"],
     ),
+    on_vendor={"sqlite": SQLITE_NULL_ORDER},
 )
 async def order_by_nulls_first_and_last():
     return (
@@ -656,6 +677,7 @@ def _django_union_reduced_to_one_query():
         ["intermediate"] * 4 + ["beginner"] * 4 + ["advanced"] * 4,
     ),
     django=_django_union_reduced_to_one_query,
+    refusals={"django": COMPOUND_SLICES},
 )
 async def union_reduced_to_one_query():
     levels = Member.objects.order_by("level").values_list("level", flat=True)
@@ -687,6 +709,7 @@ def _django_set_operations_of_one_query():
         ["advanced", "beginner", "intermediate"],
     ),
     django=_django_set_operations_of_one_query,
+    refusals={"django": COMPOUND_SLICES},
 )
 async def set_operations_of_one_query():
     levels = Member.objects.values_list("level", flat=True)

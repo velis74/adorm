@@ -3,8 +3,9 @@
 Cancelling the task that awaits an adorm operation cancels the operation:
 
 - a request waiting for a slot or queued on one never runs;
-- a statement running in the slot is cancelled in the database (psycopg's `cancel_safe()` in the
-  [Django driver](/topics/django-driver#cancellation), asyncpg's cancellation in the
+- a statement running in the slot is cancelled in the database (the database's own cancellation in the
+  [Django driver](/topics/django-driver#cancellation): psycopg's `cancel_safe()`, SQLite's `interrupt()`, MySQL's
+  `KILL QUERY`, Oracle's `cancel()`; asyncpg's cancellation in the
   [native PostgreSQL driver](/topics/postgresql-driver)).
 
 The task gets `asyncio.CancelledError`, so `asyncio.timeout()`, `TaskGroup` and `gather()` work as with any other

@@ -40,7 +40,7 @@ Celery task. The driver's code is the same in both cases.
 import sqlite3
 
 from adorm.drivers import ThreadedConnection
-from adorm.exceptions import InterfaceError, OperationalError
+from adorm.exceptions import InterfaceError
 
 LOST = {sqlite3.SQLITE_IOERR, sqlite3.SQLITE_NOTADB, sqlite3.SQLITE_CANTOPEN, sqlite3.SQLITE_CORRUPT}
 
@@ -84,11 +84,10 @@ class SQLiteConnection(ThreadedConnection):
     def cancel_sync(self):
         self.db.interrupt()  # thread-safe; the running statement fails with sqlite3.OperationalError
 
-    def map_error(self, exc):
-        if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
-            # A cancelled statement, not a lost connection.
-            return OperationalError("statement cancelled", original=exc, sqlstate="57014")
-        return super().map_error(exc)
+    def is_cancellation(self, exc):
+        # sqlite3 reports an interrupted statement without a SQLSTATE.
+        code = getattr(getattr(exc, "original", None), "sqlite_errorcode", None)
+        return code is not None and (code & 0xFF) == sqlite3.SQLITE_INTERRUPT
 
     def is_connection_lost(self, exc):
         # sqlite3 reports a missing table or a locked database as OperationalError without a SQLSTATE.
@@ -107,8 +106,9 @@ class SQLiteConnection(ThreadedConnection):
 - `cancel_sync()` runs on another thread while a call runs, possibly during `connect_sync()`. It must return without
   waiting for the call.
 - `map_error()` runs on the connection's thread. The default, `wrap_driver_error`, maps `sqlite3.IntegrityError` to
-  `IntegrityError` by its PEP 249 class name. The override gives a cancelled statement SQLSTATE `57014`, adorm's code
-  for a cancelled statement.
+  `IntegrityError` by its PEP 249 class name.
+- `is_cancellation()` decides which mapped error is the end of a cancelled statement, so that the awaiting task gets
+  `asyncio.CancelledError`. The default accepts SQLSTATE `57014`; the override accepts SQLite's `SQLITE_INTERRUPT`.
 - `is_connection_lost()` decides which errors leave the connection unusable. The default,
   [`is_connection_error`](/ref/drivers#adorm-drivers-is-connection-error-exc), follows PostgreSQL and treats every
   `OperationalError` without a SQLSTATE as a lost connection; with `sqlite3` a misspelt table name would discard the
@@ -129,7 +129,8 @@ class SQLiteDriver(ThreadedDriver):
 
 `Capabilities` lists the operation kinds, constructs and connection options the driver supports, and whether it
 implements savepoints and cancellation (both `False` by default). The connection checks every call against it before
-the driver's code runs. This driver accepts no options, so `set_options()` raises `NotSupportedError`:
+the driver's code runs. A driver whose support depends on the database a profile names overrides
+[`capabilities_for(profile)`](/ref/drivers#capabilities-for-profile), which the pool reads once without I/O. This driver accepts no options, so `set_options()` raises `NotSupportedError`:
 
 ```python
 await connection.set_options({"statement_timeout": 5}, local=False)
@@ -380,7 +381,7 @@ A driver whose target knows the models takes part in the [schema checks](/topics
 
 - `schema_hash(label)` returns the target's hash of a model, computed as `adorm generate` computes it, and raises
   `LookupError` for a model the target lacks. The driver computes a label's hash once and keeps it.
-- [`check()`](/ref/drivers#check-operation-schema-hashes-none) compares it with the hash the client expects for
+- [`check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) compares it with the hash the client expects for
   every model an operation reaches and raises `SchemaMismatchError` on a difference.
 - The client's hashes come from the process's model registry by default. A driver that executes operations for
   clients in other processes receives each client's hashes when the client connects (the client sends

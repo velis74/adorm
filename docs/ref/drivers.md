@@ -44,10 +44,21 @@ class RawSQLDriver(Driver):
         return RawSQLConnection(self, conn, emit)
 ```
 
-#### `check(operation, *, schema_hashes=None)`
+#### `capabilities_for(profile)`
+
+What the driver supports on connections for `profile`; defaults to `capabilities`. A driver whose support depends on
+the database a profile names overrides it ([`DjangoDriver`](#adorm-drivers-django-djangodriver)). Does no I/O. A
+[pool](/ref/pool) reads it once, as its `capabilities`, and checks operations and connection options against it.
+
+```python
+DjangoDriver().capabilities_for(ConnectionProfile("default", DjangoDriver))   # SQLITE_CAPABILITIES for a SQLite alias
+```
+
+#### `check(operation, *, schema_hashes=None, capabilities=None)`
 
 Raises `NotSupportedError` when the driver does not support `operation`: its kind or a construct it uses is missing
-from `capabilities` ([`Capabilities.check()`](#check-operation-driver-none) with the driver's `name`), or it is a
+from `capabilities` (default: the driver's `capabilities`; a pool passes its own)
+([`Capabilities.check()`](#check-operation-driver-none) with the driver's `name`), or it is a
 `Call` of a method the registered model does not declare. When a construct is missing and a lookup of the operation's
 query does not resolve against the model registry ([`check_lookups()`](/ref/lookups#resolving-keys)), it raises that
 [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
@@ -106,7 +117,7 @@ did not register) or `schema_hash()` returns `None`.
 - The driver's hash of a label is computed at the label's first check and kept for the driver's lifetime; an error
   of `schema_hash()` is kept too and reported in every later mismatch. `expected` is compared at every check.
 - Callable from any thread; concurrent first checks of one label compute its hash once. Does no I/O.
-- [`check()`](#check-operation-schema-hashes-none) calls it for every model of an operation.
+- [`check()`](#check-operation-schema-hashes-none-capabilities-none) calls it for every model of an operation.
 
 ```python
 driver.check_schema_hash("clubs.Club", Club._meta.schema_hash)
@@ -117,7 +128,7 @@ driver.check_schema_hash("clubs.Club", Club._meta.schema_hash)
 #### `async check_listen(profile)`
 
 Raises `NotSupportedError` when a connection for `profile` cannot listen for notifications; opens no connection.
-Defaults to [`capabilities.check_backend_event("notify", name)`](#check-backend-event-name-driver-none).
+Defaults to [`capabilities_for(profile).check_backend_event("notify", name)`](#check-backend-event-name-driver-none).
 [`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) calls it before it takes a slot. `DjangoDriver` also raises it inside
 Django's `TestCase`, whose shared connection receives no notifications.
 
@@ -306,7 +317,9 @@ A runtime-checkable protocol for the connection profile a connection is opened f
 
 ### `adorm.drivers.is_connection_error(exc)`
 
-Returns whether `exc`, an adorm exception, leaves a PostgreSQL connection unusable. `True` for:
+Returns whether `exc`, an adorm exception, leaves a PostgreSQL connection unusable. An `adorm.Error` whose
+`connection_lost` a connection set (a threaded connection sets it from its `is_connection_lost()`) gives that value.
+Otherwise `True` for:
 
 - `InterfaceError`;
 - `OperationalError` without a SQLSTATE, or with a SQLSTATE of class `08` (connection exception) or `57P01` to
@@ -391,21 +404,23 @@ The contract the slot calls:
 | `async unlisten(channel)` | awaits `_unlisten(channel)` for a channel in `listening` and then removes it; nothing for another channel. A notification received before may still be emitted |
 | `listening` | the `frozenset` of channels the connection listens on; the slot closes a connection that still listens when its lease ends ([`CloseReason.LISTENING`](/ref/pool#adorm-executor-closereason)) |
 | `async set_options(options, local)` | checks the option names against `capabilities.connection_options`, then sets them from a mapping; `local=True` limits them to the open transaction (`SET LOCAL`); a value of `None` resets the option to its default (`RESET`, or `SET LOCAL … TO DEFAULT`). The slot calls it with the options that changed ([`Slot`](/ref/pool#adorm-executor-slot)) |
-| `cancel()` | cancels the running statement, if any; callable from any thread, returns without waiting; the call raises `OperationalError` with SQLSTATE `57014` |
+| `cancel()` | cancels the running statement, if any; callable from any thread, returns without waiting; the call raises the target's cancellation error (`is_cancellation()`; SQLSTATE `57014` on PostgreSQL) |
 | `is_usable()` | whether the connection can serve further calls; does no I/O |
 | `async close()` | closes the connection; logs errors instead of raising them; a second call does nothing |
 | `target` | the target's connection that the profile's `on_acquire` and `on_release` hooks receive; defaults to the driver connection itself |
 | `async call_hook(hook, *args)` | calls `hook(self.target, *args)`, awaits the result when it is awaitable and returns it; an exception the hook raises is mapped with `map_error()` |
 | `map_error(exc)` | returns the adorm exception for an exception the target raised; defaults to `wrap_driver_error(exc)` |
-| `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it. The slot closes a connection whose request failed with such an error when the lease ends, whatever `is_usable()` says |
+| `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it. The slot closes a connection whose request failed with such an error when the lease ends, whatever `is_usable()` says. A threaded connection records the answer in the error's `connection_lost` |
+| `is_cancellation(exc)` | whether a mapped adorm exception is the error of a statement the target cancelled; defaults to SQLSTATE `57014`. A [threaded connection](#adorm-drivers-threadedconnection) raises `CancelledError` for a cancelled call that ended with such an error |
+| `capabilities` | what the connection supports: [`Driver.capabilities_for()`](#capabilities-for-profile) of its `profile` attribute, the driver's `capabilities` without one |
 | `ran_custom_sql` | whether the connection ran SQL adorm did not generate ([below](#ran-custom-sql)) |
 | `backend_pid` | the process id of the connection's session on the database server ([below](#backend-pid)) |
 | `holds_session`, `session_holds` | whether the running call has a database session the connection shares with others, and how many times it has taken it ([below](#holds-session-session-holds)) |
 | `settled`, `async settle()` | whether, and until when, the connection still works for its last call after the call's outcome ([below](#settled)) |
 
 A failed check raises `NotSupportedError`, naming the driver, before the subclass is called: `execute()` runs
-[`Driver.check()`](#check-operation-schema-hashes-none), the savepoint calls check `savepoints`, `set_options()`
-checks `connection_options`. A subclass implements:
+[`Driver.check()`](#check-operation-schema-hashes-none-capabilities-none) with the connection's `capabilities`, the savepoint calls
+check `savepoints`, `set_options()` checks `connection_options`. A subclass implements:
 
 | Method | Required | Does |
 |---|---|---|
@@ -604,7 +619,8 @@ Behaviour around those methods:
 - Cancelling the awaiting task: a call that has not started never runs; for a running call `cancel_sync()` runs
   on a short-lived thread of its own, and the task waits for the call to finish. A request method (`execute()`,
   `begin()`, `commit()`, `rollback()`, the savepoint methods, `set_options()`) then returns the call's result or
-  raises its error, and raises `asyncio.CancelledError` when the call failed with SQLSTATE `57014`; `start()` and
+  raises its error, and raises `asyncio.CancelledError` when the call failed with an error `is_cancellation()` accepts
+  (by default SQLSTATE `57014`); `start()` and
   `call_hook()` always raise `asyncio.CancelledError`. When the call does not finish within `cancel_grace`, the
   connection becomes unusable, the task raises `asyncio.CancelledError`, and further calls raise `InterfaceError`. Cancelling `open_connection()` during `connect_sync()` works the same
   way, then runs `close_sync()` and stops the thread.
@@ -670,8 +686,16 @@ from adorm.drivers.django.translation import translate
 
 A [`ThreadedDriver`](#adorm-drivers-threadeddriver): `name` `"django"`, `mode` `"threaded"`, `connection_class`
 [`DjangoConnection`](#adorm-drivers-django-djangoconnection), `capabilities`
-[`CAPABILITIES`](#adorm-drivers-django-capabilities). Created without arguments; a profile names it by class,
-instance or import path.
+[`CAPABILITIES`](#adorm-drivers-django-capabilities), what it supports on PostgreSQL. Created without arguments; a
+profile names it by class, instance or import path. It runs on the database of any Django backend.
+
+| Method | Does |
+|---|---|
+| `capabilities_for(profile)` | the capabilities of the database `profile`'s alias names: [`profile_vendor(profile)`](#adorm-drivers-django-profile-vendor-profile)`.capabilities()` ([vendors](#adorm-drivers-django-vendors)); `capabilities` for an alias without a `DATABASES` entry or whose backend does not load. Reads the backend class of the entry's `ENGINE`; does not connect |
+| `is_refusal(exc)` | [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc) or [`vendors.is_refusal(exc)`](#adorm-drivers-django-vendors-is-refusal-exc) (MySQL's and Oracle's errors of too many connections) |
+| `database_key(profile)` | [`database_key(profile)`](#adorm-drivers-django-database-key-profile) |
+| `async open_monitor(profile)` | a started [`DjangoMonitor`](#adorm-drivers-django-djangomonitor-profile); `NotSupportedError` for a database other than PostgreSQL, before anything opens |
+| `async check_listen(profile)` | also `NotSupportedError` inside Django's `TestCase` |
 
 `open_connection(profile, emit)` creates the connection with
 [`adorm.testing.django.django_connection()`](/ref/testing#adorm-testing-django-django-connection-driver-profile-emit) and starts it:
@@ -695,23 +719,27 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 
 | Method | Does |
 |---|---|
-| `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread (a backend other than PostgreSQL raises `NotSupportedError`); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged), and then `CONN_HEALTH_CHECKS` becomes `False`, `CONN_MAX_AGE` `None` and `OPTIONS["pool"]` is left out, so the connection is opened directly, never taken from Django's pool, and Django neither pings nor closes the connection the slot keeps; a connection of Django's pool that a `direct` driver's thread holds goes back to that pool first; `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; then `ensure_connection()` |
-| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool` (for a combined query, whether its first row exists), `aggregate` → a dict by name (Django's `aggregate()` on the query set of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations)); a write runs as the table below shows. Every statement through the wrapper's cursor is watched (`connection.execute_wrapper()`): unless, searching its callers upward, a frame of Django's query compiler or a database backend (Django's or the alias's backend package) comes before a signal dispatch, an `on_commit()` callback runner or the driver's own code, it calls [`mark_custom_sql()`](#mark-custom-sql) (raw SQL of a `post_save` receiver, `Manager.raw()`); frames of instrumentation wrapping the cursor are skipped |
-| `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block; a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError`. On the shared connection of a Django `TestCase` the block is a savepoint of the test's transaction ([`SharedConnectionMixin`](/ref/testing#adorm-testing-django-sharedconnectionmixin)) |
+| `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread and its `vendor` (an `ENGINE` in `profile.params` other than the entry's raises `NotSupportedError`) ([`wrapper_vendor()`](#adorm-drivers-django-wrapper-vendor-db)); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged), and then `CONN_HEALTH_CHECKS` becomes `False`, `CONN_MAX_AGE` `None` and `OPTIONS["pool"]` is left out, so the connection is opened directly, never taken from Django's pool, and Django neither pings nor closes the connection the slot keeps; a connection of Django's pool that a `direct` driver's thread holds goes back to that pool first; `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; the vendor adjusts the settings ([`Vendor.slot_settings()`](#adorm-drivers-django-vendors-vendor-name-features-none)) and refuses those a slot cannot use (`check_settings()`, `NotSupportedError` before connecting); then `ensure_connection()` and `Vendor.connected()` (on SQLite: WAL and the progress handler). A thread's wrapper already connected with other `OPTIONS` (a `direct` driver's) is closed first |
+| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool` (for a combined query, whether its first row exists), `aggregate` → a dict by name (Django's `aggregate()` on the query set of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations)); a write runs as the table below shows. Every statement through the wrapper's cursor is watched (`connection.execute_wrapper()`): unless, searching its callers upward, a frame of Django's query compiler or a database backend (Django's or the alias's backend package) comes before a signal dispatch, an `on_commit()` callback runner or the driver's own code, it calls [`mark_custom_sql()`](#mark-custom-sql) (raw SQL of a `post_save` receiver, `Manager.raw()`); frames of instrumentation wrapping the cursor are skipped. Django's own refusal of what the database cannot run, raised before any SQL (a `django.db.NotSupportedError` or a `DatabaseError` without a database library's error as its cause, such as a sliced query in a set operation on SQLite), raises `NotSupportedError` without `original`, which leaves an open transaction usable |
+| `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block, on SQLite waiting for the write lock (below); a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError`. On the shared connection of a Django `TestCase` the block is a savepoint of the test's transaction ([`SharedConnectionMixin`](/ref/testing#adorm-testing-django-sharedconnectionmixin)) |
 | `savepoint_sync(name)` | creates a Django savepoint (`savepoint()`) and adds it to the block's savepoint ids, so Django's `on_commit()` callbacks registered inside it belong to it; `name` already open, or no transaction, raises `TransactionManagementError` |
 | `release_savepoint_sync(name)` | releases the savepoint and the savepoints opened after it |
 | `rollback_to_savepoint_sync(name)` | rolls back to the savepoint, which stays open, discarding the savepoints opened after it and the `on_commit()` callbacks registered since; clears Django's `needs_rollback` first, since Django refuses every statement of a transaction marked for rollback |
 | `commit_sync()` | leaves the block, which commits, and hands Django's `on_commit()` callbacks to `after_call_sync()` (see below), watched for custom SQL as in `execute_sync()`; raises `TransactionManagementError` and rolls back when Django marked the transaction for rollback or the database transaction failed, `InterfaceError` when the connection was closed inside it |
 | `rollback_sync()` | leaves the block with a rollback; nothing without an open transaction |
+| `transaction_ended` | whether the database ended the open transaction on its own: SQLite after an interrupted `INSERT`, `UPDATE` or `DELETE` (`Vendor.transaction_ended()`, checked after every failed operation). Until the rollback, operations, savepoint methods and `commit_sync()` raise `OperationalError` [`TRANSACTION_ENDED`](#adorm-drivers-django-vendors-transaction-ended) without running SQL; `commit_sync()` leaves the block first |
 | `set_options_sync(options, local)` | [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the wrapper, one `execute()` without parameters; nothing for no options |
-| `cancel_sync()` | `cancel_safe()` on the psycopg connection under the wrapper (`cancel()` without it); nothing before the connection exists |
+| `cancel_sync()` | [`vendor.cancel()`](#adorm-drivers-django-vendors-vendor-name-features-none) on the DB-API connection under the wrapper: psycopg's `cancel_safe()` (`cancel()` without it), SQLite's `interrupt()` and the end of a wait for the write lock, MySQL's `KILL QUERY` on a connection of its own, Oracle's `cancel()`; nothing for another backend and before the connection exists |
 | `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's); then the wrapper gets back the settings, DB-API module, health check flag and closing time it had before `connect_sync()` |
 | `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals), then reads `backend_pid` and, for a DB-API connection of psycopg 3 it has not seen, adds the notice and notify handlers that emit `NOTICE` ([`notice_event()`](#adorm-drivers-django-notice-event-diagnostic)) and `NOTIFY` (also in `connect_sync()`) |
 | `listen_sync(channel)`, `unlisten_sync(channel)` | [`listen_sql(channel)`](#adorm-drivers-postgresql-listen-sql-channel) or `unlisten_sql(channel)` on a cursor of the wrapper; with psycopg 2 `listen_sync()` raises `NotSupportedError` |
 | `idle_fileno()` | the socket of the psycopg 3 connection while it listens on a channel |
 | `idle_sync()` | reads the socket's input (`pgconn.consume_input()`) and hands each notification to psycopg's notify handler; a connection libpq reports as bad raises `OperationalError` |
-| `backend_pid` | [`backend_pid(wrapper)`](#adorm-drivers-django-backend-pid-db), read on the connection's thread when it connects and before each call |
-| `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc) |
+| `backend_pid` | `vendor.backend_pid()` of the DB-API connection (PostgreSQL's process id, MySQL's connection id, `None` elsewhere), read on the connection's thread when it connects and before each call |
+| `map_error(exc)` | [`map_django_error(exc, vendor)`](#adorm-drivers-django-map-django-error-exc-vendor-none) |
+| `is_connection_lost(exc)`, `is_cancellation(exc)` | those of `vendor`: on SQLite only an `InterfaceError` loses the connection and `SQLITE_INTERRUPT` or a cancelled lock wait is a cancellation; MySQL's error numbers (2006, 2013, 2055 lost; 1317 cancelled); Oracle's `ORA-` numbers (`ORA-03113` and others lost; `ORA-01013` cancelled) |
+| `vendor` | the connection's [`Vendor`](#adorm-drivers-django-vendors-vendor-name-features-none) |
+| `waiting_for_write_lock` | whether the running call waits for SQLite's write lock; readable from any thread |
 
 | Write | Django call | Result |
 |---|---|---|
@@ -742,10 +770,22 @@ Django's `on_commit()` callbacks registered during a transaction (by a `save()` 
 
 Outside a transaction Django runs a callback at once, inside the operation that registers it.
 
+On SQLite ([`vendors.SQLite`](#adorm-drivers-django-vendors-sqlite)) every transaction begins with `BEGIN IMMEDIATE`,
+and a write operation outside a transaction (`create`, `bulk_create`, `save`, `update`, `delete`, `get_or_create`,
+`update_or_create`, a driver method call) runs in a transaction of its own that begins so: the write lock is taken
+before the first statement. While another connection holds it, the connection tries again after pauses of 1 ms
+growing to 100 ms, with SQLite's busy timeout set to 0 meanwhile, until the busy timeout of the `DATABASES` entry
+(`OPTIONS["timeout"]`, 5 seconds by default) passes; then the operation raises Django's `OperationalError`
+`database is locked`. `waiting_for_write_lock` is true meanwhile. A cancellation ends the wait at once. A driver
+method outside a transaction holds the write lock for its whole call, whether it writes or not.
+
 A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation reads the
 catalogue through the wrapper's cursor outside the execute wrapper (not custom SQL). The expected tables come
-from [`expected_tables(operation, self.db, driver.name)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none), each table's
-columns from [`columns_sql("%s")`](#adorm-drivers-postgresql-columns-sql-parameter), and the result is the
+from [`expected_tables(operation, self.db, driver.name, check_types=...)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true), each table's
+columns from `vendor.columns()`: [`columns_sql("%s")`](#adorm-drivers-postgresql-columns-sql-parameter) on PostgreSQL,
+Django's introspection (`table_names()`, `get_table_description()`) elsewhere. Column types are compared on PostgreSQL
+and SQLite, whose catalogues report a column's type as Django declared it; on other databases only the columns and
+their nullability. The result is the
 [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field`
 problems. A label without an installed Django model raises `SchemaMismatchError` before any statement; an open
 transaction stays usable.
@@ -765,7 +805,7 @@ The constructor opens nothing; `async start()` opens the wrapper's connection on
 monitor on failure. `open_monitor()` calls both.
 `activity(pids)` runs [`activity_sql("%s")`](#adorm-drivers-postgresql-activity-sql-parameter) on the wrapper's cursor;
 errors go through `map_django_error()`. An alias without an entry raises `ProgrammingError`, a backend other than
-PostgreSQL `NotSupportedError`.
+PostgreSQL `NotSupportedError`: the other databases have no session catalogue the monitor reads.
 
 ```python
 async with await DjangoDriver().open_monitor(ConnectionProfile("default", driver)) as monitor:
@@ -786,14 +826,32 @@ notice_event(diagnostic)
 
 ### `adorm.drivers.django.backend_pid(db)`
 
-The server process id of the DB-API connection under Django's wrapper `db` (psycopg 3's `info.backend_pid`, psycopg
-2's `get_backend_pid()`); `None` while the wrapper has no connection.
+The server's id of the session of the DB-API connection under Django's wrapper `db`: PostgreSQL's process id
+(psycopg 3's `info.backend_pid`, psycopg 2's `get_backend_pid()`), MySQL's connection id (`thread_id()`); `None`
+while the wrapper has no connection and on other databases.
+
+### `adorm.drivers.django.profile_vendor(profile)`
+
+The [`Vendor`](#adorm-drivers-django-vendors-vendor-name-features-none) of the database `profile` names: of the backend
+of its alias's `DATABASES` entry ([`engine_vendor()`](#adorm-drivers-django-vendors-engine-vendor-engine)); a
+profile's `params` do not change the backend (`DjangoConnection` refuses an `ENGINE` among them). `None` for an alias
+without an entry or a backend that does not load. Does not connect.
+
+```python
+profile_vendor(ConnectionProfile("local", DjangoDriver, alias="local"))   # DATABASES["local"] is SQLite
+# <SQLite 'sqlite'>
+```
+
+### `adorm.drivers.django.wrapper_vendor(db)`
+
+The [`Vendor`](#adorm-drivers-django-vendors-vendor-name-features-none) of Django's connection wrapper `db`: by its
+`vendor`, with its features class for a backend without a vendor of its own.
 
 ### `adorm.drivers.django.CAPABILITIES`
 
-The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`. The constructs are those Django's PostgreSQL
-backend supports (`clause.distinct_on`, `contains` on array and JSON fields); `DjangoConnection` refuses other
-database backends.
+The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver` on PostgreSQL, with psycopg 3. The constructs
+are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON fields); the
+other databases have the [capabilities of their vendor](#adorm-drivers-django-vendors).
 
 | Field | Value |
 |---|---|
@@ -828,9 +886,11 @@ model_row(Author.objects.only("name").get(slug="ann"))
 # ModelRow(model='library.Author', row={'id': 1, 'name': 'Ann'})
 ```
 
-### `adorm.drivers.django.map_django_error(exc)`
+### `adorm.drivers.django.map_django_error(exc, vendor=None)`
 
-Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` as `__cause__`:
+Returns the adorm exception for `exc`, raised by Django or its database library on a database of `vendor` (a
+[`Vendor`](#adorm-drivers-django-vendors-vendor-name-features-none); PostgreSQL's by default), with `exc` as
+`__cause__`:
 
 | `exc` | Result |
 |---|---|
@@ -841,7 +901,7 @@ Returns the adorm exception for `exc`, raised by Django or psycopg, with `exc` a
 | `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
 | `SynchronousOnlyOperation` | `InterfaceError` |
 | `django.db.models.ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with Django's message and the objects as [`model_row()`](#adorm-drivers-django-model-row-instance) values (`protected_objects`, `restricted_objects`) |
-| anything else | [`wrap_driver_error(exc, details)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name, else `DatabaseError`; an `IntegrityError` with the violation [`integrity_details(exc)`](#adorm-drivers-postgresql-integrity-details-exc) reads, the label of the model whose table it names as `model` ([`table_model()`](#adorm-drivers-django-translation-table-model-table)) and that model's adorm field names of the key's columns as `fields` ([`column_fields()`](#adorm-drivers-django-translation-column-fields-model-columns)), except for the key of a referenced row ([`references_key()`](#adorm-drivers-postgresql-references-key-detail)) |
+| anything else | [`wrap_driver_error(exc, details)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name of Django's exception (SQLite, MySQL and Oracle report no SQLSTATE: `sqlstate` is `None`), else `DatabaseError`; an `IntegrityError` with the violation `vendor.integrity_details(exc)` reads (on PostgreSQL [`integrity_details(exc)`](#adorm-drivers-postgresql-integrity-details-exc)), the label of the model whose table it names as `model` ([`table_model()`](#adorm-drivers-django-translation-table-model-table)) and that model's adorm field names of the key's columns as `fields` ([`column_fields()`](#adorm-drivers-django-translation-column-fields-model-columns)), except for the key of a referenced row ([`references_key()`](#adorm-drivers-postgresql-references-key-detail)) |
 
 ```python
 map_django_error(Author.DoesNotExist("Author matching query does not exist."))
@@ -885,9 +945,11 @@ call_command("migrate")          # post_migrate: adorm.content_types forgets eve
 
 ### `adorm.drivers.django.database_key(profile)`
 
-`("postgresql", host, port, name)` of the `DATABASES` entry `profile.alias` with `profile.params` replacing its keys
-(`HOST` and `PORT` as strings, `""` when not set). `None` for a profile with a `connect` hook, an alias without an
-entry, a backend other than PostgreSQL and a `NAME` that is not hashable. The database key of `DjangoDriver` and
+The database of the `DATABASES` entry `profile.alias` with `profile.params` replacing its keys,
+[`Vendor.database_key(entry)`](#adorm-drivers-django-vendors-vendor-name-features-none): `(vendor, host, port, name)`
+(`HOST` and `PORT` as strings, `""` when not set), on SQLite `("sqlite", path)` with the file's real path (a
+`file:` URI as written). `None` for a profile with a `connect` hook, an alias without an entry, a
+backend that does not load, an in-memory SQLite database and a `NAME` that is not hashable. The database key of `DjangoDriver` and
 `AsyncpgDriver` ([`Driver.database_key()`](#database-key-profile)).
 
 ```python
@@ -909,7 +971,7 @@ from adorm.drivers.django import model_schema_hash
 model_schema_hash("clubs.Club") == Club._meta.schema_hash   # True while the generated module is up to date
 ```
 
-### `adorm.drivers.django.expected_tables(operation, connection, driver=None)`
+### `adorm.drivers.django.expected_tables(operation, connection, driver=None, *, check_types=True)`
 
 What the [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) `operation` expects of
 the database, for the Django database wrapper `connection`: a list of
@@ -920,8 +982,8 @@ accessor name).
 
 - A column belongs to the table of the model that declares its field: an inherited field of a multi-table
   inheritance child is in the parent's table.
-- Each column's type is the field's `db_type(connection)` (no connection is opened); it takes `NULL` when the field
-  has `null=True` and is not the primary key.
+- Each column's type is the field's `db_type(connection)` (no connection is opened), `None` with `check_types` false;
+  it takes `NULL` when the field has `null=True` and is not the primary key.
 - A many-to-many relation adds its automatic link table with every column, the primary key without a type (adorm
   neither reads nor writes it); an explicit link model is checked as a model of its own.
 
@@ -933,6 +995,172 @@ with `actual` `None` when no such model is installed, naming `driver` in it. Def
 tables, problems = expected_tables(CheckTable("library.Book", ("isbn", "title"), ("authors",)), connection)
 [table.name for table in tables]   # ['library_book', 'library_book_authors']
 tables[0].columns[1]               # ExpectedColumn(name='title', type='varchar(200)', nullable=False, field='title')
+```
+
+### `adorm.drivers.django.vendors`
+
+What the Django driver does per database backend, by Django's `DatabaseWrapper.vendor`. A
+[`DjangoConnection`](#adorm-drivers-django-djangoconnection) holds the `Vendor` of its wrapper, and
+[`DjangoDriver.capabilities_for()`](#adorm-drivers-django-djangodriver) returns the `Vendor`'s capabilities of a
+profile's database.
+
+| Vendor | Capabilities | Cancellation | Errors | Tested |
+|---|---|---|---|---|
+| `postgresql` | [`CAPABILITIES`](#adorm-drivers-django-capabilities) (psycopg 2: `PSYCOPG2_CAPABILITIES`) | psycopg's cancel request | SQLSTATE; psycopg's diagnostics | in CI |
+| `sqlite` | [`SQLITE_CAPABILITIES`](#adorm-drivers-django-vendors-sqlite-capabilities) | `interrupt()`, a progress handler, the end of a lock wait | `sqlite3` result codes; the table and columns of the constraint message | in CI (`tests.djangoproject.settings_sqlite`) |
+| `mysql` (MySQL, MariaDB) | [`MYSQL_CAPABILITIES`](#adorm-drivers-django-vendors-mysql-capabilities) | `KILL QUERY` on a connection opened per cancellation | MySQL's error numbers; key, column and constraint from the message | no |
+| `oracle` | [`ORACLE_CAPABILITIES`](#adorm-drivers-django-vendors-oracle-capabilities) | the driver's `cancel()` | `ORA-` numbers; constraint, table and column from the message | no |
+| any other | [`features_capabilities()`](#adorm-drivers-django-vendors-features-capabilities-features) of its features class | none | PEP 249 class names; no details | no |
+
+```python
+from adorm.drivers.django.vendors import engine_vendor
+
+engine_vendor("django.db.backends.sqlite3").capabilities() == SQLITE_CAPABILITIES   # True
+```
+
+#### `adorm.drivers.django.vendors.Vendor(name="", features=None)`
+
+The driver's behaviour on databases of the vendor `name`. The class itself serves backends without a vendor of their
+own; `features` is the backend's `DatabaseFeatures` class.
+
+| Member | Does |
+|---|---|
+| `name` | Django's vendor name (`DatabaseWrapper.vendor`) |
+| `capabilities()` | what the driver supports: here [`features_capabilities(features)`](#adorm-drivers-django-vendors-features-capabilities-features) |
+| `slot_settings(settings)` | the `DATABASES` entry a slot's connection opens with; here unchanged |
+| `check_settings(settings)` | raises `NotSupportedError` for an entry a slot cannot use; here nothing |
+| `connected(connection)` | configures the DB-API connection of a [`DjangoConnection`](#adorm-drivers-django-djangoconnection) once it is open; here nothing |
+| `cancel(connection, raw)` | cancels the statement running on the DB-API connection `raw`; here nothing |
+| `backend_pid(raw)` | the server's id of the session; here `None` |
+| `is_cancellation(exc)` | whether a mapped error is a cancelled statement's; here `False` |
+| `is_connection_lost(exc)` | whether a mapped error leaves the connection unusable; here [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc) |
+| `integrity_details(exc)` | the keyword arguments of `IntegrityError` the error gives; here `{}` |
+| `database_key(entry)` | `(name, HOST, PORT, NAME)` of the `DATABASES` entry |
+| `transaction_ended(raw)` | whether the database ended the transaction open on the DB-API connection `raw` on its own after a failed statement; here `False` |
+| `check_types()` | whether the schema check compares column types; here `False` |
+| `columns(db, cursor, table)` | the rows of [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) for an [`ExpectedTable`](#adorm-drivers-postgresql-expectedtable-name-regclass-columns), read with Django's introspection; the type is `None` unless `check_types()` |
+| `writes_wait_for_lock` | whether writes take the database's write lock when they begin; here `False` |
+
+#### `adorm.drivers.django.vendors.PostgreSQL`
+
+`CAPABILITIES` (`PSYCOPG2_CAPABILITIES` with psycopg 2); cancellation with psycopg's `cancel_safe()` (`cancel()` on
+psycopg 2); `backend_pid` the server process; SQLSTATE `57014` is a cancellation; integrity details from psycopg's
+diagnostics; column types compared, the columns read with [`columns_sql()`](#adorm-drivers-postgresql-columns-sql-parameter).
+
+#### `adorm.drivers.django.vendors.SQLite`
+
+SQLite allows one writer at a time beside any number of readers.
+
+- `slot_settings()` sets `OPTIONS["transaction_mode"]` to `IMMEDIATE` (an `EXCLUSIVE` one stays): every transaction
+  takes the write lock when it begins. `check_settings()` raises `NotSupportedError` before Django 5.1, which has no
+  `transaction_mode`, and for an in-memory database (`":memory:"`, `mode=memory`), which has no WAL and, unless
+  it is a shared cache, is visible to its own connection only.
+- `connected()` switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file), so reads run
+  beside the writer, and installs a progress handler that stops the statements of a
+  cancelled call every [`PROGRESS_STEPS`](#adorm-drivers-django-vendors-sqlite) (1000) virtual machine instructions.
+- `writes_wait_for_lock`: a write outside a transaction runs in one of its own; `take_write_lock(connection,
+  atomic)` enters the outermost atomic block and retries while another connection holds the lock (`SQLITE_BUSY`,
+  `SQLITE_LOCKED`), until the connection's busy timeout (`PRAGMA busy_timeout`) passes, with it set to 0 meanwhile
+  and restored afterwards.
+- `cancel()` ends a wait for the write lock (`OperationalError` [`LOCK_WAIT_CANCELLED`](#adorm-drivers-django-vendors-lock-wait-cancelled))
+  and calls `interrupt()`; `interrupt()` before a statement starts is lost, the progress handler stops it.
+- `is_cancellation()`: `SQLITE_INTERRUPT` or `LOCK_WAIT_CANCELLED`. `is_connection_lost()`: never an
+  `OperationalError` (a lock, a full disk), as SQLite has no server connection. `transaction_ended()`: the
+  connection is no longer in a transaction, as after an interrupted `INSERT`, `UPDATE` or `DELETE`, which rolls back
+  the whole transaction.
+- `integrity_details()`: [`sqlite_integrity_details()`](#adorm-drivers-django-vendors-sqlite-integrity-details-message).
+- `database_key()`: `("sqlite", realpath(NAME))`, `("sqlite", NAME)` for a `file:` URI; `None` for an in-memory database.
+- `check_types()`: `True`; SQLite's catalogue keeps a column's declared type.
+
+#### `adorm.drivers.django.vendors.MySQL`
+
+MySQL and MariaDB. `cancel()` opens a connection, with the profile's `connect` hook when it has one, else with the
+wrapper's `get_connection_params()`, runs `KILL QUERY <thread_id>` and closes it; `backend_pid` is the connection id. Error 1317 is a cancellation; 2006, 2013 and 2055 a
+lost connection, other operational errors not. `integrity_details()` reads the key name and value of a duplicate
+entry (1062), the column of a null violation (1048) and the table, constraint and columns of a foreign key (1451,
+1452). Untested: no CI service runs MySQL.
+
+#### `adorm.drivers.django.vendors.Oracle`
+
+`cancel()` is the driver's `cancel()`. `ORA-01013` is a cancellation; `ORA-00028`, `ORA-01012`, `ORA-03113`,
+`ORA-03114`, `ORA-03135`, `ORA-12537`, `ORA-12570` and python-oracledb's `DPY-1001`, `DPY-4011` a lost connection.
+`integrity_details()` reads the owner and constraint of `ORA-00001`, `ORA-02290`, `ORA-02291`, `ORA-02292` and the
+table and column of `ORA-01400`. Untested.
+
+#### `adorm.drivers.django.vendors.SQLITE_CAPABILITIES`
+
+`CAPABILITIES` without `clause.select_for_update` (and its options), the [`POSTGRESQL_ONLY`](#adorm-drivers-django-vendors-postgresql-only)
+constructs, `lookup.contains`, `lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII
+letters), connection options and backend events. It has `clause.on_conflict.ignore` and `.update`, the set
+operations, savepoints and cancellation.
+
+#### `adorm.drivers.django.vendors.MYSQL_CAPABILITIES`
+
+`CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `clause.select_for_update.of` (MariaDB has none; the vendor
+name does not tell MariaDB apart without connecting), `clause.select_for_update.no_key`, `clause.on_conflict.update`
+(`ON DUPLICATE KEY UPDATE` takes no conflict target), `clause.intersection`, `clause.difference` (MySQL before
+8.0.31), connection options and backend events.
+
+#### `adorm.drivers.django.vendors.ORACLE_CAPABILITIES`
+
+`CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `clause.select_for_update.no_key`, `clause.on_conflict.ignore`,
+`clause.on_conflict.update`, connection options and backend events.
+
+#### `adorm.drivers.django.vendors.POSTGRESQL_ONLY`
+
+`lookup.overlap` and `clause.distinct_on`: array overlap and `DISTINCT ON`.
+
+#### `adorm.drivers.django.vendors.LOCK_WAIT_CANCELLED`
+
+The message of the `OperationalError` a write on SQLite ends with when its call is cancelled while it waits for the
+write lock; the caller gets `CancelledError`.
+
+#### `adorm.drivers.django.vendors.TRANSACTION_ENDED`
+
+The message of the `OperationalError` every request of a transaction that SQLite rolled back on its own raises, until
+the rollback ([`DjangoConnection.transaction_ended`](#adorm-drivers-django-djangoconnection)).
+
+#### `adorm.drivers.django.vendors.vendor(name, features=None)`
+
+The `Vendor` of Django's vendor name `name`, one instance per name: `PostgreSQL`, `SQLite`, `MySQL`, `Oracle`; for
+another name a `Vendor` with the capabilities of the `DatabaseFeatures` class `features`.
+
+#### `adorm.drivers.django.vendors.engine_vendor(engine)`
+
+The `Vendor` of the Django backend `engine` (a `DATABASES` entry's `ENGINE`), from its `DatabaseWrapper` class without
+connecting. Raises `ImportError` or `ImproperlyConfigured` for a backend that does not load.
+
+#### `adorm.drivers.django.vendors.features_capabilities(features)`
+
+The capabilities of a backend without a vendor of its own, from its `DatabaseFeatures` class: `CAPABILITIES` without
+connection options, backend events, cancellation and the `POSTGRESQL_ONLY` constructs; a row lock, `ON CONFLICT` and
+set operation only when its flag (`has_select_for_update`, `has_select_for_update_nowait`, …,
+`supports_ignore_conflicts`, `supports_update_conflicts_with_target`, `supports_select_union`, …) is `True` on the class; savepoints
+when `uses_savepoints` is. A flag the backend computes per connection (a property) counts as `False`.
+
+```python
+features_capabilities(load_backend("django_cockroachdb").DatabaseWrapper.features_class)
+```
+
+#### `adorm.drivers.django.vendors.is_refusal(exc)`
+
+Whether `exc`, raised while opening a connection, is MySQL's `ER_CON_COUNT_ERROR` (1040) or
+`ER_TOO_MANY_USER_CONNECTIONS` (1203), or Oracle's `ORA-00018`, `ORA-12516`, `ORA-12519` or `ORA-12520`.
+
+#### `adorm.drivers.django.vendors.sqlite_error_code(exc)`
+
+The primary result code (`sqlite_errorcode & 0xFF`) of the first `sqlite3` exception on `exc`'s chain (`original` of
+an adorm error, else `__cause__`); `None` without one.
+
+#### `adorm.drivers.django.vendors.sqlite_integrity_details(message)`
+
+The keyword arguments of `IntegrityError` that SQLite's constraint message gives: `detail` the message; for a `UNIQUE`
+or `NOT NULL` violation `table_name` and `columns` (not for an expression index, `index 'name'`); for a `CHECK`
+violation `constraint_name`. SQLite reports no values and does not name the table of a foreign key.
+
+```python
+sqlite_integrity_details("UNIQUE constraint failed: clubs_membership.club_id, clubs_membership.member_id")
+# {'detail': '...', 'table_name': 'clubs_membership', 'columns': ('club_id', 'member_id')}
 ```
 
 ### `adorm.drivers.django.translation.translate(query)`
@@ -1316,7 +1544,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 | Method | Does |
 |---|---|
 | `_execute(operation)` | a read: [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`; for a combined query, whether its first row exists), `aggregate` → a dict by name ([`compile_aggregate()`](#compile-aggregate-query-aggregates) of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations); no statement runs when the query matches no rows), `in_bulk` → list of rows ([`check_in_bulk_field()`](#adorm-drivers-django-translation-check-in-bulk-field-operation), then one statement per [`IN_BULK_BATCH_SIZE`](#adorm-drivers-asyncpg-in-bulk-batch-size) ids). A write: the [`WRITES`](#adorm-drivers-asyncpg-writes-writes) method of a new [`Writer`](#adorm-drivers-asyncpg-writes-writer-connection), with the results of the Django driver. Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while a query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement, or a cancellation inside a transaction the write opened, can make the connection unusable. While the transaction is rollback-only (a write failed after its first statement, outside a savepoint of its own) every operation raises `TransactionManagementError` |
-| `_execute(CheckTable)` | [`expected_tables(operation, compiler.connection, driver.name)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none), then one [`columns_sql("$1")`](#adorm-drivers-postgresql-columns-sql-parameter) statement per table; the result is the [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field` problems. A label without an installed Django model raises `SchemaMismatchError` before any statement |
+| `_execute(CheckTable)` | [`expected_tables(operation, compiler.connection, driver.name)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true), then one [`columns_sql("$1")`](#adorm-drivers-postgresql-columns-sql-parameter) statement per table; the result is the [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field` problems. A label without an installed Django model raises `SchemaMismatchError` before any statement |
 | `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)); inside a transaction `TransactionManagementError` |
 | `commit()`, `rollback()` | `COMMIT`, `ROLLBACK`; a `COMMIT` whose status is `ROLLBACK` (the transaction failed earlier) raises `TransactionManagementError`, and so does `commit()` of a rollback-only transaction, after sending `ROLLBACK` instead |
 | `savepoint(name)`, `release_savepoint(name)`, `rollback_to_savepoint(name)` | `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` with `name` quoted. Outside a transaction, for a savepoint name already open (`savepoint`) and for one that is not open (the others) `TransactionManagementError`. Releasing a savepoint releases those opened after it; rolling back to one discards those opened after it and keeps it open, and ends the rollback-only state of a write that failed after it was opened |
@@ -1326,7 +1554,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 | `close()` | asyncpg's `close()` within the driver's `close_timeout` (asyncpg aborts the connection when it fails); logs errors, a second call does nothing |
 | `backend_pid` | asyncpg's `get_server_pid()` |
 | `_listen(channel)`, `_unlisten(channel)` | asyncpg's `add_listener()` and `remove_listener()`, which send `LISTEN` and `UNLISTEN` with the channel quoted; errors as for any statement |
-| `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc): Django's exceptions as on the Django driver, asyncpg's by their SQLSTATE; asyncpg's `InternalClientError` (its protocol in an unexpected state, as after the server ended an idle connection) is `InterfaceError` |
+| `map_error(exc)` | [`map_django_error(exc)`](#adorm-drivers-django-map-django-error-exc-vendor-none): Django's exceptions as on the Django driver, asyncpg's by their SQLSTATE; asyncpg's `InternalClientError` (its protocol in an unexpected state, as after the server ended an idle connection) is `InterfaceError` |
 
 - Each statement runs in its own task; `cancel()` stops it without cancelling the caller.
 - Cancelling the task that awaits `execute()` cancels the statement too (asyncpg sends a cancel request) and raises
@@ -1571,7 +1799,7 @@ psycopg 2 and asyncpg, and holds the query of the database's sessions that the d
 ORM or database library. The Django and the native PostgreSQL drivers pass
 [`integrity_details`](#adorm-drivers-postgresql-integrity-details-exc) to
 [`wrap_driver_error()`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none) through
-[`map_django_error()`](#adorm-drivers-django-map-django-error-exc).
+[`map_django_error()`](#adorm-drivers-django-map-django-error-exc-vendor-none).
 
 ```python
 from adorm.drivers.postgresql import integrity_details, parse_key_detail, references_key
@@ -1685,7 +1913,7 @@ references_key('Key (club_id)=(9) is not present in table "clubs_club".')       
 `adorm.drivers.postgresql` also compares a table's columns in PostgreSQL's catalogue with a
 model's expectations. A driver turns a [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation into
 `ExpectedTable` values (the Django and the native PostgreSQL drivers with
-[`expected_tables()`](#adorm-drivers-django-expected-tables-operation-connection-driver-none)), runs `columns_sql()` for each and
+[`expected_tables()`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true)), runs `columns_sql()` for each and
 returns the `table_problems()`.
 
 ```python

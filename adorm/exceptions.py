@@ -158,7 +158,11 @@ class ValidationError(AdormError):
 
 
 class Error(AdormError):
-    """Base class of database errors (PEP 249 ``Error``)."""
+    """Base class of database errors (PEP 249 ``Error``).
+
+    ``connection_lost`` is set by the driver connection that raised the error: whether it left the connection unusable
+    (`adorm.drivers.DriverConnection.is_connection_lost()`); ``None`` when no connection judged it.
+    """
 
     def __init__(
         self, message: str | None = None, *, original: BaseException | None = None, sqlstate: str | None = None
@@ -168,6 +172,7 @@ class Error(AdormError):
         super().__init__(message)
         self.original = original
         self.sqlstate = sqlstate
+        self.connection_lost: bool | None = None
 
 
 class InterfaceError(Error):

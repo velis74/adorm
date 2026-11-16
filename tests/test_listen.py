@@ -479,10 +479,10 @@ async def test_a_too_long_channel_is_refused_before_a_slot_is_taken(setup):
 
 
 async def test_the_django_driver_declares_no_backend_events_with_psycopg_2(setup, monkeypatch):
-    from adorm.drivers.django import driver as django_driver
+    from adorm.drivers.django import driver as django_driver, vendors
 
     assert django_driver.DjangoDriver().capabilities.backend_events == {NOTIFY, NOTICE, CONNECTION_LOST}
-    monkeypatch.setattr(django_driver, "_is_psycopg3", lambda: False)
+    monkeypatch.setattr(vendors, "_is_psycopg3", lambda: False)
     _router, pool, _driver = setup(django_driver.DjangoDriver(), max_connections=1)
     assert pool.driver.capabilities.backend_events == frozenset()
     with pytest.raises(NotSupportedError, match="'notify'"):

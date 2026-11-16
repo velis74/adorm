@@ -41,9 +41,10 @@ Layers, from first to last; a later layer overrides an earlier one:
 A database option is sent only to a driver that declares it in
 [`Capabilities.connection_options`](/ref/drivers#adorm-drivers-capabilities). An operation with an undeclared option
 raises [`NotSupportedError`](/ref/exceptions) before it takes a slot. An option whose value is `None` is not sent and
-needs no declaration. The [Django driver](/topics/django-driver) and the
+needs no declaration. The [Django driver](/topics/django-driver) on PostgreSQL and the
 [native PostgreSQL driver](/topics/postgresql-driver) declare `statement_timeout`, `lock_timeout` and
-`idle_in_transaction_session_timeout`.
+`idle_in_transaction_session_timeout`; the Django driver on other databases declares none
+([databases](/topics/django-driver#databases)).
 
 ### `adorm.connection_options(**options)`
 

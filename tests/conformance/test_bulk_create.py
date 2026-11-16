@@ -16,6 +16,7 @@ from adorm import cancellation_outcome, CancellationOutcome, DatabaseError, Inte
 from adorm.drivers import is_connection_error
 from demo.models.activities import Tag
 from demo.models.clubs import Club, Member
+from tests.conformance.drivers import on_sqlite
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -42,12 +43,15 @@ def clubs(prefix, count=3):
 
 
 async def stored(prefix):
-    return await Club.objects.filter(slug__startswith=f"{prefix}-").count()
+    return await Club.objects.filter(slug__istartswith=f"{prefix}-").count()
 
 
 @pytest.fixture
 async def catalogue(demo_data):
-    """A connection of the test's own to the test database."""
+    """A connection of the test's own to the test database, which watches PostgreSQL's sessions; the test is skipped
+    on SQLite."""
+    if on_sqlite():
+        pytest.skip("the test watches PostgreSQL's sessions")
     conn = await asyncpg.connect(demo_data)
     try:
         yield conn
@@ -71,7 +75,7 @@ async def test_a_failing_row_in_a_later_batch_inserts_nothing_and_keeps_the_slot
         ]
         with pytest.raises(IntegrityError) as raised:
             await Club.objects.bulk_create(objs, batch_size=1)
-        assert raised.value.sqlstate == "23505"
+        assert raised.value.sqlstate == (None if on_sqlite() else "23505")
         assert await stored(f"fail-{n}") == 0
         assert all(obj._state.adding for obj in objs)
         assert (pool.size, pool.in_use) == (1, 0)

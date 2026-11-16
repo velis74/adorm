@@ -152,6 +152,9 @@ class Pool:
     first layer of `adorm.connection_options()`; ``options`` is that mapping, checked. An option the driver does
     not declare raises `NotSupportedError` and ``acquire_timeout`` or ``commit_timeout`` among them `ValueError`.
 
+    ``capabilities`` is what the driver supports for the profile (`Driver.capabilities_for()`); the pool checks
+    operations and connection options against it before acquiring a slot.
+
     A pool serves one event loop; its slots are acquired through a `Router`. ``events`` receives the callbacks and
     backend events a connection emits while no lease holds its slot.
     """
@@ -188,7 +191,8 @@ class Pool:
         self.on_acquire = self._hook(profile, "on_acquire")
         self.on_release = self._hook(profile, "on_release")
         self.options = check_profile_options(getattr(profile, "options", None), profile.name)
-        driver.capabilities.check_options(
+        self.capabilities = driver.capabilities_for(profile)
+        self.capabilities.check_options(
             [name for name, value in self.options.items() if value is not None], driver.name
         )
         self.events = EventBus()
@@ -608,7 +612,7 @@ class Router:
             try:
 
                 async def execute(operation: Operation) -> Any:
-                    pool.driver.check(operation)
+                    pool.driver.check(operation, capabilities=pool.capabilities)
                     return await lease.call("execute", operation, options=options.database)
 
                 problems = await check_models(list(registry), execute)
@@ -625,7 +629,7 @@ class Router:
     async def _acquire_from(
         self, pool: Pool, session: Session, deadline: float, timeout: float, options: ResolvedOptions
     ) -> SlotLease:
-        pool.driver.capabilities.check_options(options.database, pool.driver.name)
+        pool.capabilities.check_options(options.database, pool.driver.name)
         if pool.closed or pool.retired:
             raise InterfaceError(f"pool {pool.name!r} is closed")
         task = asyncio.current_task()
@@ -833,16 +837,16 @@ class Router:
         the phase ``"waiting_for_slot"``, then ``"executing"``."""
         try:
             pool = await self.get_pool(session.using)
-            pool.driver.check(operation)
+            pool.driver.check(operation, capabilities=pool.capabilities)
             options = resolve_options(session, pool)
-            pool.driver.capabilities.check_options(options.database, pool.driver.name)
+            pool.capabilities.check_options(options.database, pool.driver.name)
             with tracking("waiting_for_slot", operation, session):
                 lease = await self._acquire_bound(session, None, pool, options)
             if lease.pool is not pool:
                 # acquired from the pool that replaced a retired one
                 pool = lease.pool
                 try:
-                    pool.driver.check(operation)
+                    pool.driver.check(operation, capabilities=pool.capabilities)
                     options = resolve_options(session, pool)
                 except BaseException:
                     await lease.release()

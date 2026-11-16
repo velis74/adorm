@@ -89,6 +89,7 @@ pool = Pool(AsyncpgDriver(), profile, check_schema="raise")              # refus
 | `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout`, `purge_stale_connections_at`, `check_schema` | the constructor arguments |
 | `on_acquire`, `on_release` | the profile's hooks, `None` when it has none |
 | `options` | the profile's database connection options, checked, as a read-only mapping |
+| `capabilities` | what the driver supports for the profile ([`Driver.capabilities_for(profile)`](/ref/drivers#capabilities-for-profile)), read once; operations, connection options and channels are checked against it before a slot is acquired |
 | `limit` | the current maximum number of slots: the lower of `max_connections` and the slot count at the last refusal, `None` when neither applies |
 | `size` | slots in the pool, opening ones included |
 | `idle` | slots no lease holds |
@@ -232,9 +233,9 @@ current task (the default), those of `held_leases()`.
 Acquires a slot for `session`, executes `operation`, releases the slot and returns the result. The slot is released
 also after an error or a cancellation.
 
-- An operation the pool's driver does not support, and a database connection option in effect
+- An operation the pool's driver does not support for the profile (`capabilities`), and a database connection option in effect
   ([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)) that it does not declare,
-  raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none)) before a slot is
+  raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none)) before a slot is
   acquired.
 - The operation's request carries the database options in effect; the slot sets them before it executes the
   operation.

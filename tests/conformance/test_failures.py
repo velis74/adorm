@@ -333,6 +333,8 @@ async def test_cancellation_racing_completion_leaves_the_slot_usable(make_router
         task = asyncio.create_task(blocker.blocked("koper-sailing"))
         await blocker.waiting()
         await blocker.release()
+        if blocker.polls_for_lock:
+            await blocker.idle()
         # Cancel after 0 to 14 loop iterations, then after up to 2744, or once the operation has finished.
         for _ in range(attempt % 15 if attempt < 120 else (attempt % 15) ** 3):
             if task.done():
@@ -403,6 +405,8 @@ async def test_a_write_cancelled_racing_completion_reports_its_effect(make_route
             task = asyncio.create_task(_recorded(write, raised))
             await blocker.waiting()
             await blocker.release()
+            if blocker.polls_for_lock:
+                await blocker.idle()
             for _ in range(attempt % 15 if attempt < 90 else (attempt % 15) ** 3):
                 if task.done():
                     break

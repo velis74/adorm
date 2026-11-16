@@ -11,8 +11,17 @@ import adorm
 from adorm import ConnectionProfile, TransactionOutcome
 from adorm.testing import running_operations, wait_for_lock, wait_for_operation
 from demo.models.clubs import Member
+from tests.conformance.drivers import on_sqlite
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+@pytest.fixture(autouse=True)
+def _monitored():
+    """These tests read the database's sessions, which SQLite does not have."""
+    if on_sqlite():
+        pytest.skip("SQLite has no database sessions to monitor")
+
 
 REPEAT = range(3)
 

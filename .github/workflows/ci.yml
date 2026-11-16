@@ -41,6 +41,8 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      - name: Conformance suite on SQLite
+        run: uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
       - run: uv build
 
   docs:
@@ -86,6 +88,7 @@ jobs:
       - name: Tests with coverage
         run: |
           uv run coverage run -m pytest
+          uv run coverage run -a -m pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
           uv run coverage json
       - name: Incremental coverage check
         uses: velis74/incremental-coverage-check@v3

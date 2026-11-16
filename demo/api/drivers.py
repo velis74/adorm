@@ -14,15 +14,17 @@ from __future__ import annotations
 import importlib
 import os
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
 from adorm import ConnectionProfile
 from adorm.drivers import Driver
 from demo.api import memory
+from demo.database import is_sqlite
 
 DRIVER_ENV = "ADORM_DEMO_DRIVER"
+DATABASE_ENV = "ADORM_DEMO_DATABASE_URL"
 
 
 def setup_django() -> None:
@@ -47,24 +49,29 @@ Hook = Callable[[Any, ConnectionProfile, Any], Any]
 class DemoDriver:
     """A driver of the demo: ``target`` is ``"module:ClassName"``; ``setup`` prepares the process for it (it runs
     synchronously, outside the event loop). ``on_acquire`` and ``on_release`` are the hooks of its connection
-    profile."""
+    profile; a ``postgresql_only`` driver is not available on a SQLite demo database."""
 
     name: str
     target: str
     setup: Callable[[], None] | None = None
     on_acquire: Hook | None = None
     on_release: Hook | None = None
+    postgresql_only: bool = False
 
     @property
     def module(self) -> str:
         return self.target.partition(":")[0]
 
-    def unavailable_reason(self) -> str | None:
-        """Why the driver is not available; ``None`` when its module imports and defines the class.
+    def unavailable_reason(self, environ: Mapping[str, str] | None = None) -> str | None:
+        """Why the driver is not available; ``None`` when its module imports and defines the class, and, for a
+        ``postgresql_only`` driver, ``ADORM_DEMO_DATABASE_URL`` in ``environ`` (default ``os.environ``) is not SQLite.
 
         A ``ModuleNotFoundError`` for the module itself or for a package outside adorm makes the driver unavailable;
         any other import error propagates.
         """
+        url = (os.environ if environ is None else environ).get(DATABASE_ENV, "")
+        if self.postgresql_only and is_sqlite(url):
+            return "the demo database is SQLite"
         try:
             module = importlib.import_module(self.module)
         except ModuleNotFoundError as exc:
@@ -78,8 +85,8 @@ class DemoDriver:
             return f"{self.module} does not define {name}"
         return None
 
-    def is_available(self) -> bool:
-        return self.unavailable_reason() is None
+    def is_available(self, environ: Mapping[str, str] | None = None) -> bool:
+        return self.unavailable_reason(environ) is None
 
     def driver_class(self) -> type[Driver]:
         """The driver class, imported without running ``setup``."""
@@ -99,7 +106,7 @@ class DemoDriver:
 
 DRIVERS: tuple[DemoDriver, ...] = (
     DemoDriver("django", "adorm.drivers.django:DjangoDriver", setup_django),
-    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver", setup_django),
+    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver", setup_django, postgresql_only=True),
     DemoDriver(
         "memory",
         "demo.api.memory:MemoryDriver",
@@ -118,9 +125,9 @@ def get(name: str) -> DemoDriver:
     raise LookupError(f"unknown driver {name!r}; the demo knows {', '.join(d.name for d in DRIVERS)}")
 
 
-def available() -> list[str]:
+def available(environ: Mapping[str, str] | None = None) -> list[str]:
     """Names of the available drivers, in the order of `DRIVERS`."""
-    return [driver.name for driver in DRIVERS if driver.is_available()]
+    return [driver.name for driver in DRIVERS if driver.is_available(environ)]
 
 
 def selected(environ: dict[str, str] | None = None) -> str | None:
@@ -130,9 +137,9 @@ def selected(environ: dict[str, str] | None = None) -> str | None:
     """
     name = (os.environ if environ is None else environ).get(DRIVER_ENV, "")
     if not name:
-        names = available()
+        names = available(environ)
         return names[0] if names else None
-    reason = get(name).unavailable_reason()
+    reason = get(name).unavailable_reason(environ)
     if reason is not None:
         raise RuntimeError(f"the {name} driver is not available: {reason}")
     return name

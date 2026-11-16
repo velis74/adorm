@@ -879,7 +879,7 @@ schema.
 | `unregister(label)` | remove the model; an unknown label is ignored |
 | `get(label)` | the model class; `LookupError` when none is registered |
 | `get_for_content_type(app_label, model_name)` | the model class whose label has the app part `app_label` and the model part `model_name`, compared case-insensitively (Django's `ContentType.model`); `LookupError` when none is registered |
-| `schema_hashes()` | the schema hash of every registered model that has one (`_meta.schema_hash`), as a dict by label; the `schema_hashes` argument of [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) |
+| `schema_hashes()` | the schema hash of every registered model that has one (`_meta.schema_hash`), as a dict by label; the `schema_hashes` argument of [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) |
 | `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
 | `label in registry`, `iter(registry)`, `len(registry)` | membership, the model classes, their number |
 

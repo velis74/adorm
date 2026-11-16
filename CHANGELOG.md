@@ -217,8 +217,8 @@
   ordering with NULL placement, `distinct()` and `DISTINCT ON`, slicing, `values()` / `values_list()`, `only()` /
   `defer()`, `none()`, `select_related()` (nested rows in the same query) and the query's Django manager; transactions
   for reads and cancellation of a running statement. Django's exceptions become adorm's (`map_django_error()`), and
-  every call sees the caller's active language and time zone (`adopt_context_locals()`). The driver supports
-  PostgreSQL aliases; profile `params` and the `connect` hook apply per connection, with Django configuring the
+  every call sees the caller's active language and time zone (`adopt_context_locals()`). The driver runs on the
+  database of any Django backend, with capabilities per vendor; profile `params` and the `connect` hook apply per connection, with Django configuring the
   hook's connection. `adorm.drivers.django.translation` turns an adorm `Query` into a Django query set without a
   connection: each filter is one Django `filter()` call, a model instance compared with a foreign key stands for its
   `to_field`, and a typed `Value` gets the Django field for its type (`output_field()`). The `django` and `asyncpg`
@@ -555,3 +555,30 @@
   501. The end-to-end test runs them on every available driver; in-process tests compare them on the Django and
   asyncpg drivers with the database and cover cancelled prefetches, concurrent lines of one invoice (never beyond the
   total's digits) and slots left in use.
+- The Django driver on every database Django supports (`adorm.drivers.django.vendors`): `Vendor` per Django vendor
+  (`PostgreSQL`, `SQLite`, `MySQL`, `Oracle`, and `Vendor` with `features_capabilities()` for any other backend) with
+  its capabilities (`CAPABILITIES`, `PSYCOPG2_CAPABILITIES`, `SQLITE_CAPABILITIES`, `MYSQL_CAPABILITIES`,
+  `ORACLE_CAPABILITIES`, `POSTGRESQL_ONLY`), cancellation (psycopg's cancel, SQLite's `interrupt()` and a progress
+  handler, MySQL's `KILL QUERY`, Oracle's `cancel()`), error mapping without SQLSTATEs where the database has none
+  (`map_django_error(exc, vendor)`, `sqlite_integrity_details()`, `sqlite_error_code()`), refusals of more
+  connections (`is_refusal()`) and database keys. `profile_vendor()` and `wrapper_vendor()` find a profile's or a
+  wrapper's vendor without connecting. Django's refusal of what the database cannot run, before any SQL, raises
+  `NotSupportedError` and leaves an open transaction usable. The monitor and `adorm.listen()` remain PostgreSQL-only.
+- Capabilities per profile: `Driver.capabilities_for(profile)`, `Driver.check(..., capabilities=)`,
+  `Pool.capabilities` (read once; the pool, transactions and listening check against it) and
+  `DriverConnection.capabilities`. `DriverConnection.is_cancellation(exc)` decides which error ends a cancelled call
+  (default SQLSTATE `57014`); `Error.connection_lost` records whether a connection judged an error to leave it
+  unusable, and `is_connection_error()` follows it.
+- SQLite: a slot's connection runs in WAL mode and begins every transaction with `BEGIN IMMEDIATE`
+  (`transaction_mode`, Django 5.1 and newer); a write or driver method outside a transaction runs in a transaction of
+  its own. A wait for the write lock is the driver's own retry loop bounded by the busy timeout
+  (`OPTIONS["timeout"]`), ended at once by a cancellation (`LOCK_WAIT_CANCELLED`,
+  `DjangoConnection.waiting_for_write_lock`). After an interrupted write, which makes SQLite roll back the whole
+  transaction, every further request of the transaction raises `OperationalError` `TRANSACTION_ENDED`
+  (`DjangoConnection.transaction_ended`). In-memory databases are refused. Inside Django's `TestCase` on SQLite the
+  shared connection stops a cancelled call's statements with the progress handler, and a cancelled wait for the
+  shared connection raises `CancelledError`.
+- The conformance suite runs the Django driver on SQLite (`tests.djangoproject.settings_sqlite`, a database file in a
+  temporary directory; `tests/conformance/test_sqlite.py`), locally and in CI. MySQL and Oracle are untested.
+- The demo runs on SQLite (`ADORM_DEMO_DATABASE_URL=sqlite:///path`; the asyncpg driver is not available there).
+  `Club.disciplines` is `demo.backend.clubs.fields.ListField`: PostgreSQL's array, JSON text on other databases.

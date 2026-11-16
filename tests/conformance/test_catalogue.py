@@ -5,6 +5,8 @@ import re
 
 import pytest
 
+from django.db import connection
+
 import adorm
 
 from adorm.operations import OPERATIONS
@@ -51,7 +53,7 @@ async def test_case(driver, router, recorded, case):
             if refusal is None or not re.search(refusal, str(exc)):
                 raise
         else:
-            assert result == case.expected
+            assert result == case.expected_on(connection.vendor)
             assert set().union(*map(names_of, recorded)) == case.uses
     else:
         with pytest.raises(adorm.NotSupportedError) as raised:
@@ -86,7 +88,16 @@ async def test_django_mirror(case):
             transaction.set_rollback(True)
         return result
 
-    assert await in_thread(mirror) == case.expected
+    from django.db import DatabaseError
+
+    try:
+        result = await in_thread(mirror)
+    except DatabaseError as exc:
+        # Django refuses the mirror on this database before it runs (a JSON contains, a sliced compound query).
+        if exc.__cause__ is not None or connection.vendor == "postgresql":
+            raise
+        pytest.skip(f"Django refuses the mirror on {connection.vendor}: {exc}")
+    assert result == case.expected_on(connection.vendor)
 
 
 def test_every_case_completes_on_a_driver_or_in_its_django_mirror():

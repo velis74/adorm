@@ -178,8 +178,10 @@ async def test_a_connection_lost_while_not_listening_is_reported_at_most_once(dr
 
 
 @pytest.fixture
-async def raising_trigger(demo_data):
-    """A trigger on clubs that sends a NOTICE and a WARNING with detail and hint for every updating statement."""
+async def raising_trigger(driver, demo_data):
+    """A trigger on clubs that sends a NOTICE and a WARNING with detail and hint for every updating statement; the
+    test is skipped for a driver that does not declare `NOTICE`."""
+    declares(driver, NOTICE)
     conn = await asyncpg.connect(demo_data)
     await conn.execute(
         """
@@ -259,6 +261,8 @@ async def test_a_direct_django_connection_receives_notifications_between_calls(c
         direct = True
 
     driver = DirectDjangoDriver()
+    if NOTIFY not in driver.capabilities_for(ConnectionProfile("default", driver)).backend_events:
+        pytest.skip("the database delivers no notifications")
     router = Router([Pool(driver, ConnectionProfile("default", driver), max_connections=1, acquire_timeout=5)])
     previous = set_runner(router)
     try:

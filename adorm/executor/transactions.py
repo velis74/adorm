@@ -365,7 +365,7 @@ class Atomic:
         database option the driver does not declare."""
         pool = cast("SlotLease", self.lease).pool
         options = resolve_options(self.session, pool)
-        pool.driver.capabilities.check_options(options.database, pool.driver.name)
+        pool.capabilities.check_options(options.database, pool.driver.name)
         return options
 
     async def _wait_for_savepoint(self, operation: Any, timeout: float | None = None) -> None:

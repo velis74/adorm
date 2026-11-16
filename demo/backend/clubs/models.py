@@ -1,8 +1,9 @@
 """Clubs and their members."""
 
-from django.contrib.postgres.fields import ArrayField
 from django.core.validators import MinValueValidator
 from django.db import models
+
+from demo.backend.clubs.fields import ListField
 
 
 class Level(models.TextChoices):
@@ -23,7 +24,7 @@ class Club(models.Model):
     founded = models.DateField()
     city = models.CharField(max_length=100)
     address = models.JSONField(default=dict, blank=True)
-    disciplines = ArrayField(models.CharField(max_length=30), default=list, blank=True)
+    disciplines = ListField(models.CharField(max_length=30), default=list, blank=True)
     members = models.ManyToManyField("Member", through="Membership", related_name="clubs")
 
     def __str__(self) -> str:

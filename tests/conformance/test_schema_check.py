@@ -16,6 +16,7 @@ from adorm.models.registry import registry
 from adorm.operations import CheckTable
 from demo.models import MODELS
 from demo.models.clubs import Club, Member, Membership
+from tests.conformance.drivers import on_sqlite
 from tests.generated import MODELS as GENERATED
 from tests.generated.library import Author, Book, Edition
 
@@ -39,7 +40,8 @@ async def test_the_models_match_the_test_database(driver, router):
             await check_schema(MODELS, session=session())
         return
     assert await check_schema(MODELS, session=session()) == ()
-    assert await check_schema(GENERATED, session=session()) == ()
+    if not on_sqlite():  # the SQLite settings install no library app
+        assert await check_schema(GENERATED, session=session()) == ()
     assert router.pools[0].in_use == 0
 
 
@@ -56,6 +58,8 @@ async def test_reading_the_catalogue_keeps_the_slot(driver, make_router):
 async def test_names_the_orm_model_lacks_are_unknown_fields(driver, router):  # noqa: ARG001
     if not checks_tables(driver):
         pytest.skip(f"the {driver.name} driver does not check tables")
+    if on_sqlite():
+        pytest.skip("the SQLite settings install no library app")
     result = await session().execute(CheckTable("library.Author", ("id", "nickname", "pupils"), ("mentor",)))
     assert [(item["kind"], item["field"] or item["column"]) for item in result] == [
         ("unknown_field", "nickname"),
@@ -143,7 +147,10 @@ def problems_of(problems):
 
 @pytest.fixture
 async def scratch(test_database_url):
-    """An asyncpg connection with the schema ``SCRATCH`` holding copies of the library's tables, dropped afterwards."""
+    """An asyncpg connection with the schema ``SCRATCH`` holding copies of the library's tables, dropped afterwards;
+    the test is skipped on SQLite."""
+    if on_sqlite():
+        pytest.skip("the test drifts copies of the library's PostgreSQL tables")
     conn = await asyncpg.connect(test_database_url)
     try:
         await conn.execute(f"DROP SCHEMA IF EXISTS {SCRATCH} CASCADE; CREATE SCHEMA {SCRATCH}")
@@ -203,7 +210,10 @@ async def test_check_schema_reports_what_differs_in_the_database(driver, make_ro
 
 @pytest.fixture
 def library_models(driver, monkeypatch):  # noqa: ARG001 - the driver is built with the whole registry
-    """The model registry holds the library's models only, once the driver is built."""
+    """The model registry holds the library's models only, once the driver is built; the test is skipped on SQLite,
+    whose settings install no library app."""
+    if on_sqlite():
+        pytest.skip("the SQLite settings install no library app")
     monkeypatch.setattr(registry, "_models", {model._meta.label: model for model in (Author, Book, Edition)})
 
 

@@ -86,13 +86,18 @@ A driver declares what it supports in a [`Capabilities`](/ref/drivers#adorm-driv
 operation kinds, constructs, connection options, backend event names, savepoints, cancellation and the longest
 notification channel name (`max_channel_length`). `savepoints` and `cancellation` default to `False`.
 
+A driver whose support depends on the database a profile names declares it per profile in
+[`capabilities_for(profile)`](/ref/drivers#capabilities-for-profile); the pool reads it once and checks against it.
+The Django driver declares there what the backend of the profile's alias supports
+([databases](/topics/django-driver#databases)).
+
 `DriverConnection` checks every call against the declaration before the driver sees it. An operation with an
 unsupported kind or construct, an unsupported connection option, or a savepoint call on a driver without savepoints
 raises `NotSupportedError`, and nothing is executed. The error names the driver and the missing names
 (`NotSupportedError.driver`, `.unsupported`).
 
 - Outside a transaction the router checks an operation with
-  [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) before it acquires a slot, so an unsupported
+  [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) before it acquires a slot, so an unsupported
   operation does not wait for a slot of a full pool.
 - Inside a transaction the check in `execute()` refuses before anything reaches the database; the transaction stays
   usable.
@@ -158,7 +163,8 @@ reports it unusable (the native PostgreSQL driver does after every statement can
 statement that completed before the cancellation arrived keeps its effect; its result is discarded.
 
 `cancel()` cancels the running statement from any thread without cancelling the awaiting task: the call then
-raises `OperationalError` with SQLSTATE `57014` (`query_canceled`). A cancellation request reaches only the
+raises the target's cancellation error (`DriverConnection.is_cancellation()`; SQLSTATE `57014`, `query_canceled`, on
+PostgreSQL). A cancellation request reaches only the
 statement it was meant for; a threaded connection starts no further call until `cancel_sync()` returns.
 
 `cancel()` returns without waiting. On the event loop's thread, a threaded connection runs `cancel_sync()` on a
@@ -174,7 +180,8 @@ Every error a connection raises is an adorm [exception](/ref/exceptions); `async
 through. `DriverConnection.map_error()` converts the target's exceptions, by default with
 [`wrap_driver_error`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): SQLSTATE first, then the PEP 249
 class name. A driver overrides it for errors the target reports without a SQLSTATE that adorm classifies
-differently, such as a cancelled statement.
+differently. A driver whose target reports a cancelled statement without SQLSTATE `57014` overrides
+`DriverConnection.is_cancellation()`.
 
 `DriverConnection.is_connection_lost()` decides whether a mapped error leaves the connection unusable. The
 default, [`is_connection_error`](/ref/drivers#adorm-drivers-is-connection-error-exc), follows PostgreSQL:
@@ -262,14 +269,14 @@ methods), no direct call reaches the test's connection, and adorm does not suppo
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| `cancel_sync()` calls `cancel_safe()` on the psycopg connection under Django's wrapper (`connection.connection`); psycopg's cancel is thread-safe and returns once the request is delivered | task cancellation: asyncpg sends a cancel request and handles it before the connection's next statement; `cancel()` cancels the task running the statement | async: task cancellation reaches the DBAPI through SQLAlchemy's greenlet bridge; threaded: `cancel_safe()` on the DBAPI connection |
+| `cancel_sync()` calls the vendor's [`Vendor.cancel()`](/ref/drivers#adorm-drivers-django-vendors) on the DB-API connection under Django's wrapper (`connection.connection`): psycopg's thread-safe `cancel_safe()` on PostgreSQL, `interrupt()` on SQLite, `KILL QUERY` on MySQL, `cancel()` on Oracle | task cancellation: asyncpg sends a cancel request and handles it before the connection's next statement; `cancel()` cancels the task running the statement | async: task cancellation reaches the DBAPI through SQLAlchemy's greenlet bridge; threaded: `cancel_safe()` on the DBAPI connection |
 
 ### Errors
 
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
-| `django.db.IntegrityError` and its siblings carry the psycopg error, with its `sqlstate`, as `__cause__` | exceptions carry `sqlstate` | `sqlalchemy.exc.DBAPIError` subclasses are named after the PEP 249 classes and carry the DBAPI error as `orig` and `__cause__` |
-| connection loss: the default `is_connection_lost()`; psycopg reports a lost connection as `OperationalError` without a SQLSTATE | the default `is_connection_lost()` | the default on PostgreSQL; on other dialects `is_connection_lost()` uses `DBAPIError.connection_invalidated` |
+| `django.db.IntegrityError` and its siblings carry the database library's error as `__cause__`: by its `sqlstate` on PostgreSQL, by the PEP 249 class and the vendor's error numbers elsewhere | exceptions carry `sqlstate` | `sqlalchemy.exc.DBAPIError` subclasses are named after the PEP 249 classes and carry the DBAPI error as `orig` and `__cause__` |
+| connection loss: `Vendor.is_connection_lost()`; on PostgreSQL the default, as psycopg reports a lost connection as `OperationalError` without a SQLSTATE | the default `is_connection_lost()` | the default on PostgreSQL; on other dialects `is_connection_lost()` uses `DBAPIError.connection_invalidated` |
 
 ### Backend events
 

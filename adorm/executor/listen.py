@@ -112,7 +112,7 @@ class Listener:
     async def _check(self, pool: Pool) -> None:
         await pool.driver.check_listen(pool.profile)
         for channel in self._initial:
-            pool.driver.capabilities.check_channel(channel)
+            pool.capabilities.check_channel(channel)
 
     async def __aexit__(self, *exc_info: object) -> None:
         await self.close()
@@ -192,7 +192,7 @@ class Listener:
         """Listen on ``channels`` too; a channel already listened on is skipped."""
         lease = self._open_lease()
         for channel in channels:
-            lease.pool.driver.capabilities.check_channel(channel)
+            lease.pool.capabilities.check_channel(channel)
         await self._listen(lease, tuple(dict.fromkeys(channels)))
 
     async def unlisten(self, *channels: str) -> None:
@@ -200,7 +200,7 @@ class Listener:
         queued for `get()`."""
         lease = self._open_lease()
         for channel in channels:
-            lease.pool.driver.capabilities.check_channel(channel)
+            lease.pool.capabilities.check_channel(channel)
         for channel in dict.fromkeys(channels):
             if channel in self._listening():
                 await lease.call("unlisten", channel)

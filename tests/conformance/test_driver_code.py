@@ -6,6 +6,7 @@ override or a custom handler, before anything is written; the memory driver runs
 sees no signal and the pool and the transaction stay usable. ``pre_init`` and ``post_init`` fire on the drivers that
 build Django model instances."""
 
+import asyncio
 import datetime
 
 import pytest
@@ -291,6 +292,11 @@ async def test_djangos_on_commit_callbacks_run_on_the_django_driver_only(conform
             async with adorm.atomic():
                 await Tag.objects.create(name=f"night{attempt}")
                 assert committed == []
+            if runs:
+                # The callbacks run on the slot's thread after the commit's outcome is delivered.
+                async with asyncio.timeout(5):
+                    while not committed:
+                        await asyncio.sleep(0)
             assert committed == ([f"night{attempt}"] if runs else [])
             # A rolled-back transaction runs none.
             with pytest.raises(RuntimeError):

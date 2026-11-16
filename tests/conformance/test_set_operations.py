@@ -12,6 +12,8 @@ from adorm import DatabaseError, Exists, NotSupportedError, OuterRef, Programmin
 from adorm.drivers import is_connection_error
 from adorm.query import Count
 from demo.models.clubs import Club, Member, Membership
+from tests.conformance.cases import COMPOUND_SLICES
+from tests.conformance.drivers import on_sqlite
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -59,7 +61,8 @@ def _require(driver, *names):
 # Concurrency
 
 
-async def test_concurrent_combined_reads_on_a_small_pool(make_router):
+async def test_concurrent_combined_reads_on_a_small_pool(driver, make_router):
+    _require(driver, "lookup.contains")  # a JSON array containing a value
     pool = make_router(max_connections=3, acquire_timeout=10).pools[0]
     for _ in REPEAT:
         reads = [_combined(n) for n in range(30)]
@@ -69,7 +72,8 @@ async def test_concurrent_combined_reads_on_a_small_pool(make_router):
     assert pool.in_use == 0
 
 
-async def test_combined_reads_in_tasks_of_one_transaction(make_router):
+async def test_combined_reads_in_tasks_of_one_transaction(driver, make_router):
+    _require(driver, "lookup.contains")  # a JSON array containing a value
     pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
     for _ in REPEAT:
         async with adorm.atomic():
@@ -83,7 +87,8 @@ async def test_combined_reads_in_tasks_of_one_transaction(make_router):
     assert (pool.size, pool.in_use) == (1, 0)
 
 
-async def test_a_failing_combined_read_inside_a_transaction_rolls_back_and_frees_the_slot(make_router):
+async def test_a_failing_combined_read_inside_a_transaction_rolls_back_and_frees_the_slot(driver, make_router):
+    _require(driver, "lookup.contains")  # a JSON array containing a value
     pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
 
     async def update_then_fail():
@@ -222,7 +227,8 @@ async def test_queries_of_different_models_combine_column_by_column(router):  # 
     assert await cities.union(names, all=True).count() == 7
 
 
-async def test_set_operations_nest_and_order_slice_and_count_the_combined_rows(router):  # noqa: ARG001
+async def test_set_operations_nest_and_order_slice_and_count_the_combined_rows(driver, router):  # noqa: ARG001
+    _require(driver, "lookup.contains")  # a JSON array containing a value
     beginners, intermediate, advanced = _levels(*LEVELS)
     coaches = Member.objects.filter(tags__contains=["coach"]).values_list("first_name", flat=True)
     nested = beginners.union(advanced).difference(coaches)
@@ -236,7 +242,8 @@ async def test_set_operations_nest_and_order_slice_and_count_the_combined_rows(r
     assert await ordered.first() == "Lara"
 
 
-async def test_model_rows_of_a_combination_are_instances(router):  # noqa: ARG001
+async def test_model_rows_of_a_combination_are_instances(driver, router):  # noqa: ARG001
+    _require(driver, "lookup.contains")  # a JSON array containing a value
     coaches = Member.objects.filter(tags__contains=["coach"])
     members = Member.objects.filter(level="advanced").intersection(coaches).order_by("first_name")
     found = [member async for member in members]
@@ -250,7 +257,7 @@ async def test_model_rows_of_a_combination_are_instances(router):  # noqa: ARG00
 
 
 async def test_a_combination_in_a_subquery(driver, router):  # noqa: ARG001
-    _require(driver, "expression.Subquery", "lookup.in")
+    _require(driver, "lookup.contains", "expression.Subquery", "lookup.in")
     advanced = Member.objects.filter(level="advanced").values("pk")
     juniors = Member.objects.filter(tags__contains=["junior"]).values("pk")
     members = Member.objects.filter(pk__in=advanced.union(juniors)).values_list("first_name", flat=True)
@@ -295,6 +302,10 @@ async def test_empty_slices_follow_the_rules_of_empty_queries(router):  # noqa: 
         beginners[0:0].union(advanced[:2]).order_by("first_name")
     with pytest.raises(TypeError, match="slice"):
         beginners.intersection(advanced[1:1]).order_by("first_name")
+    if on_sqlite():
+        with pytest.raises(NotSupportedError, match=COMPOUND_SLICES):
+            await _sorted(beginners.union(advanced[3:3])[:10])
+        return
     assert [name async for name in beginners.intersection(advanced[1:1])] == []
     assert await _sorted(beginners.union(advanced[3:3])[:10]) == ["Ana", "David", "Gaja", "Jana"]
     assert await _sorted(beginners.difference(advanced[3:3])) == ["Ana", "David", "Gaja", "Jana"]
@@ -303,6 +314,10 @@ async def test_empty_slices_follow_the_rules_of_empty_queries(router):  # noqa: 
 async def test_a_set_operation_of_one_sliced_query_keeps_its_clauses_apart(router):  # noqa: ARG001
     (beginners,) = _levels("beginner")
     first_two = beginners.order_by("first_name")[:2]
+    if on_sqlite():
+        with pytest.raises(NotSupportedError, match=COMPOUND_SLICES):
+            await _sorted(first_two.difference(Member.objects.none()))
+        return
     with pytest.raises(ProgrammingError, match="multiple ORDER BY clauses not allowed"):
         await _sorted(first_two.union(Member.objects.none()).order_by("-first_name"))
     with pytest.raises(ProgrammingError, match="multiple LIMIT clauses not allowed"):

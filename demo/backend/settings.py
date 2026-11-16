@@ -1,8 +1,8 @@
 """Django settings of the demo project.
 
-The database is the PostgreSQL URL in ``ADORM_DEMO_DATABASE_URL``, from the environment or the file ``.env`` in the
-repository root (default: database ``adorm_demo`` on ``postgres://postgres@127.0.0.1:5432``). Django owns the
-schema (``manage.py migrate``).
+The database is the PostgreSQL or SQLite URL in ``ADORM_DEMO_DATABASE_URL``, from the environment or the file
+``.env`` in the repository root (default: database ``adorm_demo`` on ``postgres://postgres@127.0.0.1:5432``). Django
+owns the schema (``manage.py migrate``).
 """
 
 import os

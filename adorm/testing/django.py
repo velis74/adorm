@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from adorm.drivers.django.driver import _transaction_failed, DjangoConnection, notice_event
+from adorm.drivers.django.vendors import PROGRESS_STEPS
 from adorm.drivers.sql import set_options_sql
 from adorm.events import NOTIFY
 from adorm.exceptions import NotSupportedError, OperationalError, TransactionManagementError, TransactionOverlapError
@@ -188,13 +189,20 @@ class SharedTestConnection:
                 self._condition.notify_all()
 
     def watch_backend(self) -> None:
-        """Have the test's DB-API connection (psycopg 3) report its notices to the connection that holds it."""
+        """Have the test's DB-API connection report its notices to the connection that holds it (psycopg 3), or stop a
+        statement of a cancelled call of that connection (SQLite's progress handler)."""
         raw = self.wrapper.connection
         if raw is None or raw is self._watched_raw:
             return
         self._watched_raw = raw
         if hasattr(raw, "add_notice_handler"):
             raw.add_notice_handler(self._on_notice)
+        elif self.wrapper.vendor == "sqlite":
+            raw.set_progress_handler(self._owner_cancelled, PROGRESS_STEPS)
+
+    def _owner_cancelled(self) -> bool:
+        owner = self.owner
+        return isinstance(owner, SharedConnectionMixin) and owner._cancelled()  # type: ignore[attr-defined]
 
     def _on_notice(self, diagnostic: Any) -> None:
         owner = self.owner
@@ -436,6 +444,10 @@ class SharedConnectionMixin:
     def _watch_backend(self) -> None:
         self._shared.watch_backend()
 
+    def is_cancellation(self, exc: BaseException) -> bool:
+        """Also the error of a cancelled wait for the shared connection (SQLSTATE `QUERY_CANCELED`)."""
+        return getattr(exc, "sqlstate", None) == QUERY_CANCELED or super().is_cancellation(exc)  # type: ignore[misc]
+
     def listen_sync(self, channel: str) -> None:  # noqa: ARG002 - the contract's signature
         driver = self.driver.name  # type: ignore[attr-defined]
         raise NotSupportedError(NO_NOTIFICATIONS, driver=driver, unsupported=[NOTIFY])
@@ -446,8 +458,6 @@ class SharedConnectionMixin:
         from django.db import connections
 
         db = self._shared.wrapper
-        if db.vendor != "postgresql":
-            raise NotSupportedError(f"the Django driver supports PostgreSQL databases, not {db.vendor!r}")
         profile = self.profile
         if profile.connect is not None or any(db.settings_dict.get(k) != v for k, v in profile.params.items()):
             raise NotSupportedError(
@@ -525,6 +535,8 @@ class SharedConnectionMixin:
                 return super().execute_sync(operation)  # type: ignore[misc]
             except BaseException:
                 needs_rollback = self.db.needs_rollback
+                if self._transaction_ended:  # type: ignore[attr-defined]
+                    raise
                 if self._innermost() and (needs_rollback or _transaction_failed(self.db)):
                     self._recover()
                     # What Django's flag would refuse until a rollback, this connection refuses.

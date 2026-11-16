@@ -68,7 +68,7 @@ database's catalogue and changes nothing.
 Each model is checked with one [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many)
 operation ([`table_check(model)`](#adorm-checks-table-check-model)) executed on the session: on a slot of its own
 outside a transaction, in the session's transaction inside one. The driver's
-[`check()`](/ref/drivers#check-operation-schema-hashes-none) compares the model's schema hash with its own first; a
+[`check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) compares the model's schema hash with its own first; a
 [`SchemaMismatchError`](/ref/exceptions#adorm-schemamismatcherror-message-none-model-none-expected-none-actual-none-driver-none-reason-none),
 and a model the driver's target does not have, become a `schema_hash` problem; the model's tables are then not
 compared. A model given twice is checked once. A problem of a table several models share (a proxy model and its

@@ -384,7 +384,7 @@ book.published         # datetime.datetime(2024, 3, 1, 12, 30, tzinfo=datetime.t
 ## Errors
 
 Errors become adorm's [exceptions](/ref/exceptions). Translation errors (an unknown field, an invalid value) go
-through [`map_django_error()`](/ref/drivers#adorm-drivers-django-map-django-error-exc) as on the Django driver;
+through [`map_django_error()`](/ref/drivers#adorm-drivers-django-map-django-error-exc-vendor-none) as on the Django driver;
 asyncpg's errors are mapped by SQLSTATE
 ([`wrap_driver_error()`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none)):
 

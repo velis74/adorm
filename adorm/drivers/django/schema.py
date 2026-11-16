@@ -34,15 +34,16 @@ def model_schema_hash(label: str) -> str:
 class _Tables:
     """Expected tables in the order they are first named, each with its columns in the order they are added."""
 
-    def __init__(self, connection: Any) -> None:
+    def __init__(self, connection: Any, check_types: bool) -> None:
         self.connection = connection
+        self.check_types = check_types
         self.columns: dict[str, dict[str, ExpectedColumn]] = {}
 
     def add(self, field: Any, name: str | None, *, check_type: bool = True) -> None:
         table = self.columns.setdefault(field.model._meta.db_table, {})
         if field.column not in table:
             nullable = bool(field.null) and not field.primary_key
-            db_type = field.db_type(self.connection) if check_type else None
+            db_type = field.db_type(self.connection) if check_type and self.check_types else None
             table[field.column] = ExpectedColumn(field.column, db_type, nullable, name)
 
     def tables(self) -> list[ExpectedTable]:
@@ -68,7 +69,7 @@ def _unknown(name: str, table: str | None = None) -> dict[str, Any]:
 
 
 def expected_tables(
-    operation: Any, connection: Any, driver: str | None = None
+    operation: Any, connection: Any, driver: str | None = None, *, check_types: bool = True
 ) -> tuple[list[ExpectedTable], list[dict[str, Any]]]:
     """The tables and columns the `adorm.operations.CheckTable` ``operation`` expects, with column types for the
     Django database wrapper ``connection`` (``field.db_type()``, which does not connect), and the ``unknown_field``
@@ -78,8 +79,9 @@ def expected_tables(
     A field's column belongs to the table of the model that declares it (a multi-table inheritance parent's table for
     an inherited field). A many-to-many relation, a reverse one named by its accessor name, adds its automatic link
     table with all its columns, the primary key without its type, which adorm neither reads nor writes; a link model
-    of its own is a model to check by itself. Raises `adorm.SchemaMismatchError` with ``actual`` ``None`` when no such
-    model is installed; ``driver`` names the driver in it."""
+    of its own is a model to check by itself. With ``check_types`` false no column has a type. Raises
+    `adorm.SchemaMismatchError` with ``actual`` ``None`` when no such model is installed; ``driver`` names the driver
+    in it."""
     try:
         opts = _model(operation.model)._meta
     except LookupError as exc:
@@ -89,7 +91,7 @@ def expected_tables(
             driver=driver,
             reason=str(exc),
         ) from None
-    tables = _Tables(connection)
+    tables = _Tables(connection, check_types)
     problems: list[dict[str, Any]] = []
     for name in operation.fields:
         try:

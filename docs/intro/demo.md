@@ -19,14 +19,17 @@ a read runs on any available driver its request names in the header `X-Adorm-Dri
 
 ## Running it
 
-The demo needs a PostgreSQL server. `ADORM_DEMO_DATABASE_URL` names the database (default
+The demo runs on a PostgreSQL server or a SQLite file. `ADORM_DEMO_DATABASE_URL` names the database (default
 `postgres://postgres@127.0.0.1:5432/adorm_demo`), set in the environment or in the file `.env` in the repository root
-(ignored by git); the environment takes precedence.
+(ignored by git); the environment takes precedence. A `sqlite:///path` URL (`sqlite:////absolute/path`) puts the
+demo in a SQLite file, which the setup creates; the asyncpg driver is not available there, and the Django driver runs
+with its [SQLite behaviour](/topics/django-driver#sqlite).
 
 ```bash
 uv sync
 cp .env.example .env    # ADORM_DEMO_DATABASE_URL=postgres://user:password@127.0.0.1:5432/adorm_demo
 uv run python demo.py
+ADORM_DEMO_DATABASE_URL=sqlite:///demo.sqlite3 uv run python demo.py   # on SQLite
 ```
 
 | Option | Effect |
@@ -88,7 +91,7 @@ endpoints do not query through Django: they use the adorm models.
 
 | App | Model | Constructs it exercises |
 |---|---|---|
-| `clubs` | `Club` | unique and slug fields, a JSON field, an array field (`disciplines`), many-to-many `members` through `Membership` |
+| `clubs` | `Club` | unique and slug fields, a JSON field, a list field (`disciplines`: `ArrayField` on PostgreSQL, JSON text on other databases, `demo.backend.clubs.fields.ListField`), many-to-many `members` through `Membership` |
 | `clubs` | `Member` | choices, nullable date, JSON list |
 | `clubs` | `Membership` | two foreign keys, a unique constraint, a decimal with a validator |
 | `activities` | `Tag` | the target of a plain many-to-many (`Activity.tags`) |

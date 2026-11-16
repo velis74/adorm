@@ -77,8 +77,9 @@ A driver declares the options it supports in [`Capabilities.connection_options`]
 - An operation with an option its driver does not declare raises `NotSupportedError` before it takes a slot, outside
   and inside a transaction; a transaction stays usable.
 - An option whose value is `None` is not sent and needs no declaration.
-- The Django and the native PostgreSQL drivers declare `statement_timeout`, `lock_timeout` and
-  `idle_in_transaction_session_timeout`.
+- The Django driver on PostgreSQL and the native PostgreSQL driver declare `statement_timeout`, `lock_timeout` and
+  `idle_in_transaction_session_timeout`; the Django driver on other databases declares none
+  ([databases](/topics/django-driver#databases)).
 
 ```python
 with adorm.connection_options(statement_timeout=5):

@@ -27,6 +27,7 @@ from typing import Any, cast, ClassVar, Literal, Protocol, runtime_checkable
 
 from adorm.events import BackendEvent, CONNECTION_LOST, Emit, Event, NOTIFY
 from adorm.exceptions import (
+    Error,
     InterfaceError,
     NotSupportedError,
     OperationalError,
@@ -198,12 +199,16 @@ def check_channel(channel: Any) -> str:
 def is_connection_error(exc: BaseException) -> bool:
     """Whether ``exc``, an adorm exception, leaves a PostgreSQL connection unusable.
 
-    True for `InterfaceError`, for `OperationalError` without a SQLSTATE or with a connection exception (class 08)
+    An `adorm.exceptions.Error` whose ``connection_lost`` a connection set gives that value. Otherwise true for
+    `InterfaceError`, for `OperationalError` without a SQLSTATE or with a connection exception (class 08)
     or shutdown SQLSTATE (57P01-57P03), and for exceptions that are not an `Exception` except
     ``asyncio.CancelledError``. It is the default of `DriverConnection.is_connection_lost`.
     """
     if isinstance(exc, asyncio.CancelledError):
         return False
+    judged = getattr(exc, "connection_lost", None) if isinstance(exc, Error) else None
+    if judged is not None:
+        return judged
     if not isinstance(exc, Exception) or isinstance(exc, InterfaceError):
         return True
     if isinstance(exc, OperationalError):
@@ -315,33 +320,40 @@ class DriverConnection(ABC):
         self._custom_sql = False
         self._listening: frozenset[str] = frozenset()
 
+    @property
+    def capabilities(self) -> Capabilities:
+        """What the connection supports: `Driver.capabilities_for()` of its ``profile`` attribute, the driver's
+        ``capabilities`` for a connection without one."""
+        profile = getattr(self, "profile", None)
+        return self.driver.capabilities if profile is None else self.driver.capabilities_for(profile)
+
     async def execute(self, operation: Operation) -> Any:
         """Execute ``operation``; return plain data: rows as dicts keyed by adorm field names, a scalar or a count.
 
-        `Driver.check()` runs first, so an unsupported operation never reaches ``_execute()``.
+        `Driver.check()` with `capabilities` runs first, so an unsupported operation never reaches ``_execute()``.
         """
-        self.driver.check(operation)
+        self.driver.check(operation, capabilities=self.capabilities)
         return await self._execute(operation)
 
     async def savepoint(self, name: str) -> None:
         """Create the savepoint ``name`` in the open transaction."""
-        self.driver.capabilities.check_savepoints(self.driver.name)
+        self.capabilities.check_savepoints(self.driver.name)
         await self._savepoint(name)
 
     async def release_savepoint(self, name: str) -> None:
         """Release the savepoint ``name``."""
-        self.driver.capabilities.check_savepoints(self.driver.name)
+        self.capabilities.check_savepoints(self.driver.name)
         await self._release_savepoint(name)
 
     async def rollback_to_savepoint(self, name: str) -> None:
         """Roll back to the savepoint ``name``."""
-        self.driver.capabilities.check_savepoints(self.driver.name)
+        self.capabilities.check_savepoints(self.driver.name)
         await self._rollback_to_savepoint(name)
 
     async def set_options(self, options: Mapping[str, Any], local: bool) -> None:
         """Set connection options; ``local`` limits them to the open transaction (``SET LOCAL``). A value of ``None``
         resets the option to its default."""
-        self.driver.capabilities.check_options(options, self.driver.name)
+        self.capabilities.check_options(options, self.driver.name)
         await self._set_options(dict(options), local)
 
     async def listen(self, channel: str) -> None:
@@ -349,8 +361,8 @@ class DriverConnection(ABC):
         emitted as ``BackendEvent(NOTIFY, channel, payload)``, also while no call runs. Raises `NotSupportedError`
         unless the driver declares the backend event `NOTIFY`. The channel counts in ``listening`` from the start of
         the call, and stays there when the call is cancelled."""
-        self.driver.capabilities.check_channel(channel)
-        self.driver.capabilities.check_backend_event(NOTIFY, self.driver.name)
+        self.capabilities.check_channel(channel)
+        self.capabilities.check_backend_event(NOTIFY, self.driver.name)
         listening = self._listening
         self._listening = listening | {channel}
         try:
@@ -365,7 +377,7 @@ class DriverConnection(ABC):
     async def unlisten(self, channel: str) -> None:
         """Stop listening on ``channel``; nothing happens for a channel the connection does not listen on. A
         notification already received may still be emitted afterwards."""
-        self.driver.capabilities.check_channel(channel)
+        self.capabilities.check_channel(channel)
         if channel not in self._listening:
             return
         await self._unlisten(channel)
@@ -503,6 +515,11 @@ class DriverConnection(ABC):
         """
         return is_connection_error(exc)
 
+    def is_cancellation(self, exc: BaseException) -> bool:
+        """Whether ``exc``, a mapped adorm exception, is the error of a statement the target cancelled. Defaults to
+        PostgreSQL's SQLSTATE ``57014`` (``query_canceled``)."""
+        return getattr(exc, "sqlstate", None) == _QUERY_CANCELED
+
 
 class Driver(ABC):
     """A driver: its ``name``, execution ``mode``, `Capabilities` and the factory of its connections."""
@@ -517,10 +534,22 @@ class Driver(ABC):
         if mode is not None and mode not in _MODES:
             raise TypeError(f"{cls.__name__}.mode must be one of {_MODES}, not {mode!r}")
 
-    def check(self, operation: Operation, *, schema_hashes: Mapping[str, str | None] | None = None) -> None:
+    def capabilities_for(self, profile: Profile) -> Capabilities:  # noqa: ARG002 - subclasses use it
+        """What the driver supports on connections for ``profile``: `capabilities` unless overridden, for a driver
+        whose support depends on the database a profile names. Does no I/O."""
+        return self.capabilities
+
+    def check(
+        self,
+        operation: Operation,
+        *,
+        schema_hashes: Mapping[str, str | None] | None = None,
+        capabilities: Capabilities | None = None,
+    ) -> None:
         """Raise `NotSupportedError` when this driver does not support ``operation``: its kind or a construct it uses
-        is missing from `capabilities`, or it is an `adorm.operations.Call` of a method the registered model does not
-        declare (`adorm.models.find_driver_method()`). Does no I/O.
+        is missing from ``capabilities`` (default `capabilities`; a pool passes those of its profile), or it is an
+        `adorm.operations.Call` of a method the registered model does not declare (`adorm.models.find_driver_method()`).
+        Does no I/O.
 
         When a construct is missing and a lookup of the operation's query does not resolve against the model registry
         (`adorm.query.check_lookups()`), raises that `adorm.FieldError` instead. Then compares the schema hash the
@@ -530,7 +559,7 @@ class Driver(ABC):
         process. A label it does not hold is not checked.
         """
         try:
-            self.capabilities.check(operation, self.name)
+            (self.capabilities if capabilities is None else capabilities).check(operation, self.name)
         except NotSupportedError:
             _check_keys(operation)
             raise
@@ -585,10 +614,10 @@ class Driver(ABC):
                     known[label] = (None, f"{type(exc).__name__}: {exc}")
             return known[label]
 
-    async def check_listen(self, profile: Profile) -> None:  # noqa: ARG002 - subclasses use it
+    async def check_listen(self, profile: Profile) -> None:
         """Raise `NotSupportedError` when a connection for ``profile`` cannot listen for notifications. Defaults to
-        checking that `capabilities` declares the backend event `NOTIFY`. Opens no connection."""
-        self.capabilities.check_backend_event(NOTIFY, self.name)
+        checking that `capabilities_for()` ``profile`` declares the backend event `NOTIFY`. Opens no connection."""
+        self.capabilities_for(profile).check_backend_event(NOTIFY, self.name)
 
     def is_refusal(self, exc: BaseException) -> bool:
         """Whether ``exc``, raised by `open_connection()`, means the database refuses more connections.
@@ -688,11 +717,13 @@ def _resolve(future: asyncio.Future, ok: bool, value: Any) -> None:
         future.set_exception(value)
 
 
-def _finished_uncancelled(future: asyncio.Future) -> bool:
-    """Whether the cancelled call behind ``future`` finished with a result, or an error other than its cancellation."""
+def _finished_uncancelled(future: asyncio.Future, connection: DriverConnection) -> bool:
+    """Whether the cancelled call behind ``future`` finished with a result, or an error other than its cancellation
+    (`DriverConnection.is_cancellation()`)."""
     if not future.done() or future.cancelled():
         return False
-    return getattr(future.exception(), "sqlstate", None) != _QUERY_CANCELED
+    error = future.exception()
+    return error is None or not connection.is_cancellation(error)
 
 
 def _consume(future: asyncio.Future) -> None:
@@ -988,8 +1019,8 @@ class ThreadedConnection(DriverConnection):
 
     async def _request(self, fn: Callable[..., Any], *args: Any) -> Any:
         """``_call()`` for a slot's request: a cancelled call that finished before the cancellation reached it
-        returns its result or raises its error; only one the target cancelled (SQLSTATE 57014) or one still running
-        after ``cancel_grace`` raises ``CancelledError``."""
+        returns its result or raises its error; only one the target cancelled (`is_cancellation()`) or one still
+        running after ``cancel_grace`` raises ``CancelledError``."""
         return await self._call(fn, *args, report_drained=True)
 
     async def _call(self, fn: Callable[..., Any], *args: Any, report_drained: bool = False) -> Any:
@@ -1010,7 +1041,7 @@ class ThreadedConnection(DriverConnection):
                     raise
             self._cancel_in_background(call)
             await self._drain(call)
-            if not (report_drained and _finished_uncancelled(call.future)):
+            if not (report_drained and _finished_uncancelled(call.future, self)):
                 raise
         return call.future.result()
 
@@ -1302,4 +1333,6 @@ class ThreadedConnection(DriverConnection):
             lost = True
         if lost:
             self._usable = False
+        if isinstance(mapped, Error) and mapped.connection_lost is None:
+            mapped.connection_lost = lost
         return mapped

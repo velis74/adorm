@@ -11,13 +11,19 @@ import sys
 import threading
 
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import replace
 from typing import Any
 
-from adorm.drivers.base import BackendActivity, Capabilities, DatabaseMonitor, ThreadedConnection, ThreadedDriver
+from adorm.drivers.base import (
+    BackendActivity,
+    Capabilities,
+    DatabaseMonitor,
+    is_refusal,
+    Profile,
+    ThreadedConnection,
+    ThreadedDriver,
+)
 from adorm.drivers.django.schema import expected_tables, model_schema_hash
 from adorm.drivers.django.translation import (
-    AGGREGATES,
     aggregation,
     bulk_create_options,
     check_bulk_create,
@@ -29,7 +35,6 @@ from adorm.drivers.django.translation import (
     column_fields,
     django_model,
     field_kwargs,
-    FUNCTIONS,
     instance_row,
     lookup_kwargs,
     model_queryset,
@@ -40,20 +45,29 @@ from adorm.drivers.django.translation import (
     translate,
     validation_error,
 )
+from adorm.drivers.django.vendors import (
+    CAPABILITIES,
+    engine_vendor,
+    is_refusal as vendor_is_refusal,
+    LOCK_WAIT_CANCELLED,
+    PostgreSQL,
+    PSYCOPG2_CAPABILITIES,
+    READ_CAPABILITIES,
+    TRANSACTION_ENDED,
+    Vendor,
+    vendor as vendor_named,
+)
 from adorm.drivers.postgresql import (
     activity_sql,
     backend_activity,
-    columns_sql,
-    integrity_details,
     listen_sql,
-    MAX_IDENTIFIER_LENGTH,
     notice_payload,
     references_key,
     table_problems,
     unlisten_sql,
 )
-from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
-from adorm.events import BackendEvent, CONNECTION_LOST, NOTICE, NOTIFY
+from adorm.drivers.sql import set_options_sql
+from adorm.events import BackendEvent, NOTICE, NOTIFY
 from adorm.exceptions import (
     FieldError,
     InterfaceError,
@@ -82,114 +96,55 @@ __all__ = [
     "map_django_error",
     "model_row",
     "notice_event",
+    "profile_vendor",
     "PSYCOPG2_CAPABILITIES",
+    "wrapper_vendor",
 ]
 
 logger = logging.getLogger("adorm.drivers.django")
 
-_LOOKUP_NAMES = (
-    "exact",
-    "iexact",
-    "gt",
-    "gte",
-    "lt",
-    "lte",
-    "in",
-    "range",
-    "isnull",
-    "contains",
-    "icontains",
-    "startswith",
-    "istartswith",
-    "endswith",
-    "iendswith",
-    "regex",
-    "iregex",
-    "overlap",
-)
-
-READ_CAPABILITIES = Capabilities(
-    operations={"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"},
-    constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
-    | {f"function.{name}" for name in FUNCTIONS}
-    | {f"aggregate.{name}" for name in AGGREGATES}
-    | {
-        "path.nested",
-        "clause.annotate",
-        "clause.alias",
-        "clause.group_by",
-        "clause.distinct",
-        "clause.distinct_on",
-        "clause.only",
-        "clause.defer",
-        "clause.select_related",
-        "clause.manager",
-        "clause.union",
-        "clause.intersection",
-        "clause.difference",
-        "function.Trunc",
-        "aggregate.distinct",
-        "aggregate.filter",
-        "expression.Case",
-        "expression.Subquery",
-        "expression.Exists",
-        "expression.OuterRef",
-        "expression.CombinedExpression",
-    },
-    cancellation=True,
-)
-"""The reads and constructs the Django query translation supports; the native PostgreSQL driver declares them too."""
-
-CAPABILITIES = Capabilities(
-    operations=READ_CAPABILITIES.operations
-    | {
-        "create",
-        "bulk_create",
-        "create_from_parent",
-        "save",
-        "update",
-        "delete",
-        "delete_instance",
-        "get_or_create",
-        "update_or_create",
-        "full_clean",
-        "check_table",
-    },
-    constructs=READ_CAPABILITIES.constructs
-    | {
-        "clause.select_for_update",
-        "clause.select_for_update.nowait",
-        "clause.select_for_update.skip_locked",
-        "clause.select_for_update.of",
-        "clause.select_for_update.no_key",
-        "clause.on_conflict.ignore",
-        "clause.on_conflict.update",
-    },
-    connection_options=POSTGRESQL_OPTIONS,
-    backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
-    max_channel_length=MAX_IDENTIFIER_LENGTH,
-    savepoints=True,
-    cancellation=True,
-)
-"""What `DjangoDriver` supports with psycopg 3: `READ_CAPABILITIES`, the writes, row locks, savepoints, the connection
-options of `adorm.drivers.sql.POSTGRESQL_OPTIONS` and the backend events `NOTIFY`, `NOTICE` and `CONNECTION_LOST`."""
-
-PSYCOPG2_CAPABILITIES = replace(CAPABILITIES, backend_events=frozenset())
-"""What `DjangoDriver` supports with psycopg 2: `CAPABILITIES` without backend events."""
-
-
-def _is_psycopg3() -> bool:
-    from django.db.backends.postgresql.psycopg_any import is_psycopg3
-
-    return is_psycopg3
-
 
 class _DjangoCapabilities:
-    """`CAPABILITIES` when Django uses psycopg 3, `PSYCOPG2_CAPABILITIES` with psycopg 2; on the class and on
-    instances."""
+    """`CAPABILITIES` when Django uses psycopg 3, `PSYCOPG2_CAPABILITIES` with psycopg 2: what the driver supports on
+    PostgreSQL; on the class and on instances."""
 
     def __get__(self, instance: Any, owner: Any = None) -> Capabilities:
-        return CAPABILITIES if _is_psycopg3() else PSYCOPG2_CAPABILITIES
+        return _POSTGRESQL.capabilities()
+
+
+_POSTGRESQL = PostgreSQL()
+
+
+def wrapper_vendor(db: Any) -> Vendor:
+    """The `adorm.drivers.django.vendors.Vendor` of Django's connection wrapper ``db``."""
+    return vendor_named(db.vendor, type(db.features))
+
+
+def _alias_entry(profile: Any) -> Any:
+    from django.db import connections
+
+    return connections.settings[profile.alias]
+
+
+def _profile_entry(profile: Any) -> dict[str, Any] | None:
+    """``profile``'s ``DATABASES`` entry with its ``params`` applied; ``None`` for an alias without one."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    try:
+        return {**_alias_entry(profile), **profile.params}
+    except (KeyError, ImproperlyConfigured):
+        return None
+
+
+def profile_vendor(profile: Any) -> Vendor | None:
+    """The `adorm.drivers.django.vendors.Vendor` of the database ``profile`` names, by the ``ENGINE`` of its alias's
+    ``DATABASES`` entry, read without connecting; ``None`` when the alias has no entry or its backend does not load."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    try:
+        return engine_vendor(_alias_entry(profile)["ENGINE"])
+    except (KeyError, ImportError, ImproperlyConfigured):
+        return None
 
 
 def notice_event(diagnostic: Any) -> BackendEvent:
@@ -206,12 +161,14 @@ def model_row(instance: Any) -> ModelRow:
     return ModelRow(instance._meta.label, instance_row(instance))
 
 
-def map_django_error(exc: BaseException) -> BaseException:
-    """The adorm exception for ``exc``, raised by Django or its database library; what has no Django-specific mapping
-    goes to `wrap_driver_error`, an `IntegrityError` with the violation PostgreSQL reports
-    (`adorm.drivers.postgresql.integrity_details()`), the label of the model whose table it names as ``model`` and
-    that model's adorm field names of the key's columns as ``fields``. The objects of Django's ``ProtectedError`` and
-    ``RestrictedError`` become `model_row()` values. The result carries ``exc`` as ``__cause__``."""
+def map_django_error(exc: BaseException, vendor: Vendor | None = None) -> BaseException:
+    """The adorm exception for ``exc``, raised by Django or its database library on a database of ``vendor``
+    (PostgreSQL by default); what has no Django-specific mapping goes to `wrap_driver_error`, by SQLSTATE where the
+    library reports one, else by the PEP 249 class of Django's exception. An `IntegrityError` carries the violation
+    ``vendor`` reports (`adorm.drivers.django.vendors.Vendor.integrity_details()`), the label of the model whose table
+    it names as ``model`` and that model's adorm field names of the key's columns as ``fields``. The objects of Django's
+    ``ProtectedError`` and ``RestrictedError`` become `model_row()` values. The result carries ``exc`` as
+    ``__cause__``."""
     from django.core import exceptions as django_exceptions
     from django.db import transaction
     from django.db.models import deletion
@@ -234,20 +191,21 @@ def map_django_error(exc: BaseException) -> BaseException:
     elif isinstance(exc, django_exceptions.SynchronousOnlyOperation):
         mapped = InterfaceError(str(exc), original=exc)
     else:
-        return wrap_driver_error(exc, details=_violation)
+        source = _POSTGRESQL if vendor is None else vendor
+        return wrap_driver_error(exc, details=lambda error: _violation(error, source))
     mapped.__cause__ = exc
     return mapped
 
 
-def _violation(exc: BaseException) -> dict[str, Any]:
-    details = integrity_details(exc)
+def _violation(exc: BaseException, vendor: Vendor) -> dict[str, Any]:
+    details = vendor.integrity_details(exc)
     table = details.get("table_name")
     model = None if table is None else table_model(table)
     if model is not None:
         details["model"] = model._meta.label
         # The key of a referenced row is the referenced table's, which PostgreSQL does not name.
-        if not references_key(details["detail"]):
-            details["fields"] = column_fields(model, details["columns"])
+        if not references_key(details.get("detail")):
+            details["fields"] = column_fields(model, details.get("columns", ()))
     return details
 
 
@@ -322,14 +280,13 @@ def _transaction_failed(db: Any) -> bool:
 
 
 def backend_pid(db: Any) -> int | None:
-    """The server process id of the DB-API connection of Django's wrapper ``db`` (psycopg 3 or 2); ``None`` while it
-    has none."""
+    """The server's id of the session of the DB-API connection of Django's wrapper ``db``
+    (`adorm.drivers.django.vendors.Vendor.backend_pid()`): PostgreSQL's process id, MySQL's connection id; ``None``
+    while it has none and for other databases."""
     connection = db.connection
     if connection is None:
         return None
-    info = getattr(connection, "info", None)
-    pid = getattr(info, "backend_pid", None) if info is not None else connection.get_backend_pid()
-    return int(pid) if pid else None
+    return wrapper_vendor(db).backend_pid(connection)
 
 
 def _slot_settings(settings_dict: Any, profile: Any) -> dict[str, Any]:
@@ -343,10 +300,11 @@ def _slot_settings(settings_dict: Any, profile: Any) -> dict[str, Any]:
 class DjangoConnection(ThreadedConnection):
     """A Django database connection, the thread's own ``connections[profile.alias]``.
 
-    The alias is a PostgreSQL database (``NotSupportedError`` otherwise). ``profile.params`` replace keys of the
-    alias's ``DATABASES`` entry for this connection; ``profile.connect``, when set, returns the DB-API connection that
-    Django's wrapper uses instead of opening one (for psycopg 3, opened with the wrapper's
-    ``get_connection_params()``), and Django configures it as its own (isolation level, time zone, role).
+    The alias is a database of any Django backend; ``vendor`` (`adorm.drivers.django.vendors.Vendor`) holds what
+    differs per database. ``profile.params`` replace keys of the alias's ``DATABASES`` entry for this connection;
+    ``profile.connect``, when set, returns the DB-API connection that Django's wrapper uses instead of opening one (for
+    psycopg 3, opened with the wrapper's ``get_connection_params()``), and Django configures it as its own (isolation
+    level, time zone, role).
     ``target`` (what profile hooks receive) is Django's connection wrapper. Every call sees Django's active language and
     time zone of the caller (`adopt_context_locals()`) and runs its ORM calls on the profile's alias.
 
@@ -364,10 +322,14 @@ class DjangoConnection(ThreadedConnection):
     and its own atomic blocks behave as in an atomic block of Django code. Inside Django's ``TestCase`` the driver uses
     a subclass that shares the test's connection (`adorm.testing.django`).
 
-    With psycopg 3, the connection emits the notices of its statements (`NOTICE`) and the notifications of the
-    channels it listens on (`NOTIFY`); while it listens and no call runs, its thread waits for the database
+    On PostgreSQL with psycopg 3, the connection emits the notices of its statements (`NOTICE`) and the notifications
+    of the channels it listens on (`NOTIFY`); while it listens and no call runs, its thread waits for the database
     connection's socket and reads notifications as they arrive, and a failure there emits `CONNECTION_LOST`. With
-    psycopg 2 it emits no backend events and ``listen()`` raises `NotSupportedError`.
+    psycopg 2 and on other databases it emits no backend events and ``listen()`` raises `NotSupportedError`.
+
+    On SQLite (`adorm.drivers.django.vendors.SQLite`) a transaction, and a write operation outside one, begins with
+    ``BEGIN IMMEDIATE``; the connection waits for the write lock in `waiting_for_write_lock` for as long as the busy
+    timeout, and a cancellation ends the wait.
     """
 
     driver: DjangoDriver
@@ -379,15 +341,26 @@ class DjangoConnection(ThreadedConnection):
     _backend_pid: int | None = None
     _watched_raw: Any = None
     _listen_channels: frozenset[str] = frozenset()
+    vendor: Vendor = _POSTGRESQL
+    _configured_raw: Any = None
+    _cancelled_call: Any = None
+    _waiting_for_write_lock = False
+    _transaction_ended = False
 
     @property
     def target(self) -> Any:
         return self.db
 
     @property
+    def waiting_for_write_lock(self) -> bool:
+        """Whether the running call waits for SQLite's write lock, which another connection holds. Callable from any
+        thread."""
+        return self._waiting_for_write_lock
+
+    @property
     def backend_pid(self) -> int | None:
-        """The server process id of the wrapper's connection, read on the connection's thread when it connects and
-        before each call."""
+        """`vendor.backend_pid()` of the wrapper's DB-API connection: PostgreSQL's process id, MySQL's connection id,
+        ``None`` elsewhere; read on the connection's thread when it connects and before each call."""
         return self._backend_pid
 
     @property
@@ -399,21 +372,34 @@ class DjangoConnection(ThreadedConnection):
         adopt_context_locals()
         db = getattr(self, "db", None)
         if db is not None:
-            self._backend_pid = backend_pid(db)
+            self._configure()
+            self._backend_pid = self._read_backend_pid()
             self._watch_backend()
 
     def connect_sync(self) -> None:
         from django.db import connections
 
         db = connections[self.profile.alias]
-        if db.vendor != "postgresql":
-            raise NotSupportedError(f"the Django driver supports PostgreSQL databases, not {db.vendor!r}")
-        if db.connection is not None and db.settings_dict.get("OPTIONS", {}).get("pool"):
-            # A direct driver's thread holds a connection of Django's pool: it goes back to that pool.
+        engine = self.profile.params.get("ENGINE", db.settings_dict["ENGINE"])
+        if engine != db.settings_dict["ENGINE"]:
+            raise NotSupportedError(f"profile {self.profile.name!r} sets params ENGINE, which only DATABASES sets")
+        vendor = wrapper_vendor(db)
+        settings = vendor.slot_settings(_slot_settings(db.settings_dict, self.profile))
+        vendor.check_settings(settings)
+        if (
+            db.connection is not None
+            and not db.in_atomic_block
+            and (
+                db.settings_dict.get("OPTIONS", {}).get("pool")
+                or settings.get("OPTIONS") != db.settings_dict.get("OPTIONS")
+            )
+        ):
+            # A direct driver's thread holds a connection of Django's pool (it goes back to that pool) or one opened
+            # with other options than a slot's.
             db.close()
         self._restore = (db.settings_dict, db.Database, db.health_check_enabled, db.close_at)
         # The slot's connection is opened directly, never taken from Django's pool, and lives until the slot closes.
-        db.settings_dict = _slot_settings(db.settings_dict, self.profile)
+        db.settings_dict = settings
         connect = self.profile.connect
         if connect is not None:
             db.Database = _HookDatabase(db.Database, lambda: connect(self.profile))
@@ -422,13 +408,30 @@ class DjangoConnection(ThreadedConnection):
         # Also for a connection the thread's wrapper already had open.
         db.health_check_enabled = False
         db.close_at = None
-        self._backend_pid = backend_pid(db)
+        self._configured_raw = False
+        self._configure()
+        self._backend_pid = self._read_backend_pid()
         self._watch_backend()
+
+    def _configure(self) -> None:
+        """Configure a DB-API connection the wrapper opened since the last call (`Vendor.connected()`); not the shared
+        connection of a ``TestCase``, which `connect_sync()` does not open."""
+        raw = self.db.connection
+        if self._configured_raw is None or raw is None or raw is self._configured_raw:
+            return
+        self.vendor.connected(self)
+        self._configured_raw = raw
+
+    def _read_backend_pid(self) -> int | None:
+        raw = self.db.connection
+        return None if raw is None else self.vendor.backend_pid(raw)
 
     def _adopt(self, db: Any) -> None:
         """Use Django's connection wrapper ``db``."""
         self.db = db
-        self._backend_pid = backend_pid(db)
+        self.vendor = wrapper_vendor(db)
+        self._lock_wake = threading.Event()
+        self._backend_pid = self._read_backend_pid()
         self._savepoints = []
         package = type(db).__module__.rpartition(".")[0]
         self._trusted = (*_ORM_SQL_MODULES, f"{package}.") if package else _ORM_SQL_MODULES
@@ -447,25 +450,98 @@ class DjangoConnection(ThreadedConnection):
     def execute_sync(self, operation: Any) -> Any:
         if operation.kind == "check_table":
             return self._check_table(operation)
-        with self.db.execute_wrapper(self._watch_sql):
-            return self._execute_operation(operation)
+        self._check_transaction_ended()
+        try:
+            with self.db.execute_wrapper(self._watch_sql):
+                if (
+                    operation.kind in _LOCKING_KINDS
+                    and self.vendor.writes_wait_for_lock
+                    and not self.db.in_atomic_block
+                ):
+                    return self._execute_locked(operation)
+                return self._execute_operation(operation)
+        except BaseException:
+            self._note_transaction_ended()
+            raise
+
+    @property
+    def transaction_ended(self) -> bool:
+        """Whether the database ended the open transaction on its own (SQLite after an interrupted write): every
+        further request of the transaction but its rollback raises `OperationalError` `TRANSACTION_ENDED`."""
+        return self._transaction_ended
+
+    def _note_transaction_ended(self) -> None:
+        raw = getattr(getattr(self, "db", None), "connection", None)
+        if self._atomic is not None and raw is not None and self.vendor.transaction_ended(raw):
+            self._transaction_ended = True
+
+    def _check_transaction_ended(self) -> None:
+        if self._atomic is not None and self._transaction_ended:
+            raise OperationalError(TRANSACTION_ENDED)
+
+    def _execute_locked(self, operation: Any) -> Any:
+        """Execute a write in a transaction of its own that holds the write lock from its start."""
+        from django.db import transaction
+
+        atomic = transaction.atomic(using=self.alias)
+        self._enter(atomic)
+        try:
+            result = self._execute_operation(operation)
+        except BaseException:
+            atomic.__exit__(*sys.exc_info())
+            raise
+        atomic.__exit__(None, None, None)
+        return result
+
+    def _enter(self, atomic: Any) -> None:
+        """Enter Django's outermost atomic block ``atomic``; on SQLite, waiting for the write lock."""
+        if self.vendor.writes_wait_for_lock:
+            self.vendor.take_write_lock(self, atomic)  # type: ignore[attr-defined]
+        else:
+            atomic.__enter__()
+
+    def _cancelled(self) -> bool:
+        """Whether the running call is cancelled (``cancel_sync()``); SQLite's progress handler."""
+        call = self._cancelled_call
+        return call is not None and call is self._current
+
+    def _cancel_lock_wait(self) -> None:
+        """Mark the running call cancelled and wake its wait for the write lock."""
+        self._cancelled_call = self._current
+        self._lock_wake.set()
+
+    def _wait_for_lock(self, delay: float) -> None:
+        """Wait ``delay`` seconds before the next attempt to take the write lock; raise `OperationalError`
+        `LOCK_WAIT_CANCELLED` once the call is cancelled."""
+        if not self._cancelled():
+            self._lock_wake.wait(delay)
+            self._lock_wake.clear()
+        if self._cancelled():
+            raise OperationalError(LOCK_WAIT_CANCELLED)
 
     def _check_table(self, operation: Any) -> list[dict[str, Any]]:
-        """The problems of a `CheckTable`, read from the catalogue; not custom SQL."""
-        tables, problems = expected_tables(operation, self.db, self.driver.name)
+        """The problems of a `CheckTable`, read from the catalogue; not custom SQL. Column types are compared where
+        the database reports them as Django declares them (PostgreSQL, SQLite)."""
+        check_types = self.vendor.check_types()
+        tables, problems = expected_tables(operation, self.db, self.driver.name, check_types=check_types)
         with self.db.cursor() as cursor:
             for table in tables:
-                cursor.execute(columns_sql("%s"), [table.regclass])
-                problems.extend(table_problems(table, cursor.fetchall()))
+                problems.extend(table_problems(table, self.vendor.columns(self.db, cursor, table)))
         return problems
 
     def _execute_operation(self, operation: Any) -> Any:
         from django.core.exceptions import ValidationError as DjangoValidationError
+        from django.db import DatabaseError, NotSupportedError as DjangoNotSupportedError
 
         try:
             return self._run_operation(operation)
         except DjangoValidationError as exc:
             raise validation_error(operation_model(operation), exc) from exc
+        except DatabaseError as exc:
+            # Django refuses what the database cannot run before sending SQL; a database library's error is the cause.
+            if exc.__cause__ is None and (isinstance(exc, DjangoNotSupportedError) or _COMPOUND_REFUSAL in str(exc)):
+                raise NotSupportedError(str(exc), driver=self.driver.name) from exc
+            raise
 
     def _run_operation(self, operation: Any) -> Any:
         kind = operation.kind
@@ -517,6 +593,7 @@ class DjangoConnection(ThreadedConnection):
     def _leave(self, atomic: Any, *, rollback: bool) -> None:
         """Leave the outermost atomic block ``atomic``: commit, or roll back with ``rollback``."""
         self._atomic = None
+        self._transaction_ended = False
         self._savepoints = []
         self.db.savepoint_ids = list(self._base_ids)
         if rollback:
@@ -532,14 +609,16 @@ class DjangoConnection(ThreadedConnection):
             # A direct connection on a thread inside Django's own atomic block.
             raise TransactionManagementError("the thread's Django connection is inside an atomic block")
         atomic = transaction.atomic(using=self.alias)
-        atomic.__enter__()
+        self._enter(atomic)
         self._atomic = atomic
+        self._transaction_ended = False
         self._savepoints = []
         # The savepoint ids of the enclosing blocks: none for an outermost block.
         self._base_ids = tuple(self.db.savepoint_ids)
 
     def savepoint_sync(self, name: str) -> None:
         self._require_transaction()
+        self._check_transaction_ended()
         if any(savepoint == name for savepoint, _ in self._savepoints):
             raise TransactionManagementError(f"the savepoint {name!r} is already open")
         sid = self.db.savepoint()
@@ -548,6 +627,7 @@ class DjangoConnection(ThreadedConnection):
 
     def release_savepoint_sync(self, name: str) -> None:
         index = self._savepoint_index(name)
+        self._check_transaction_ended()
         # Releasing a savepoint releases the savepoints opened after it.
         self.db.savepoint_commit(self._savepoints[index][1])
         del self._savepoints[index:]
@@ -555,6 +635,7 @@ class DjangoConnection(ThreadedConnection):
 
     def rollback_to_savepoint_sync(self, name: str) -> None:
         index = self._savepoint_index(name)
+        self._check_transaction_ended()
         # Django refuses every query of a transaction marked for rollback, ROLLBACK TO SAVEPOINT included.
         self.db.needs_rollback = False
         # Django drops the on_commit callbacks registered after the savepoint.
@@ -568,6 +649,9 @@ class DjangoConnection(ThreadedConnection):
         if db.closed_in_transaction:
             self._leave(atomic, rollback=True)
             raise InterfaceError("the connection was closed inside the transaction")
+        if self._transaction_ended:
+            self._leave(atomic, rollback=True)
+            raise OperationalError(TRANSACTION_ENDED)
         if db.needs_rollback or _transaction_failed(db):
             self._leave(atomic, rollback=True)
             raise TransactionManagementError("the transaction failed earlier, so it was rolled back")
@@ -669,8 +753,7 @@ class DjangoConnection(ThreadedConnection):
         connection = getattr(db, "connection", None)
         if connection is None:
             return
-        cancel = getattr(connection, "cancel_safe", None) or connection.cancel
-        cancel()
+        self.vendor.cancel(self, connection)
 
     def close_sync(self) -> None:
         db = getattr(self, "db", None)
@@ -694,8 +777,36 @@ class DjangoConnection(ThreadedConnection):
             db.settings_dict, db.Database, db.health_check_enabled, db.close_at = self._restore
 
     def map_error(self, exc: BaseException) -> BaseException:
-        return map_django_error(exc)
+        return map_django_error(exc, self.vendor)
 
+    def is_connection_lost(self, exc: BaseException) -> bool:
+        """`adorm.drivers.django.vendors.Vendor.is_connection_lost()` of the connection's database."""
+        return self.vendor.is_connection_lost(exc)
+
+    def is_cancellation(self, exc: BaseException) -> bool:
+        """`adorm.drivers.django.vendors.Vendor.is_cancellation()` of the connection's database."""
+        return self.vendor.is_cancellation(exc)
+
+
+_COMPOUND_REFUSAL = "not allowed in subqueries of compound statements"
+"""The end of the message of Django's refusal of ``LIMIT``, ``OFFSET`` or ``ORDER BY`` in a query of a set operation,
+on a database without ``supports_slicing_ordering_in_compound`` (SQLite)."""
+
+_LOCKING_KINDS = frozenset(
+    {
+        "create",
+        "bulk_create",
+        "create_from_parent",
+        "save",
+        "update",
+        "delete",
+        "delete_instance",
+        "get_or_create",
+        "update_or_create",
+        "call",
+    }
+)
+"""The operations that may write: on SQLite they take the write lock when they begin."""
 
 _ENTRIES = frozenset({DjangoConnection.execute_sync.__code__, DjangoConnection._run_on_commit.__code__})
 
@@ -895,21 +1006,17 @@ def clear_content_types_on_migrate() -> None:
 
 
 def database_key(profile: Any) -> Any:
-    """``("postgresql", host, port, name)`` of ``profile``'s ``DATABASES`` entry with its ``params`` applied; ``None``
-    for a profile with a ``connect`` hook, an alias without an entry or an entry that is not PostgreSQL."""
-    from django.core.exceptions import ImproperlyConfigured
-    from django.db import connections
-    from django.db.utils import load_backend
-
+    """The database of ``profile``'s ``DATABASES`` entry with its ``params`` applied
+    (`adorm.drivers.django.vendors.Vendor.database_key()`): ``(vendor, host, port, name)``, for SQLite
+    ``("sqlite", path)``; ``None`` for a profile with a ``connect`` hook, an alias without an entry or a backend that
+    does not load, and for an in-memory SQLite database."""
     if profile.connect is not None:
         return None
-    try:
-        entry = {**connections.settings[profile.alias], **profile.params}
-        if load_backend(entry["ENGINE"]).DatabaseWrapper.vendor != "postgresql":
-            return None
-    except (KeyError, ImportError, ImproperlyConfigured):
+    entry = _profile_entry(profile)
+    vendor = profile_vendor(profile)
+    if entry is None or vendor is None:
         return None
-    key = ("postgresql", str(entry.get("HOST") or ""), str(entry.get("PORT") or ""), entry.get("NAME"))
+    key = vendor.database_key(entry)
     try:
         hash(key)
     except TypeError:
@@ -959,7 +1066,7 @@ class DjangoMonitor(DatabaseMonitor):
             raise ProgrammingError(f"DATABASES has no entry {profile.alias!r} for profile {profile.name!r}") from None
         db = load_backend(settings["ENGINE"]).DatabaseWrapper(settings, profile.alias)
         if db.vendor != "postgresql":
-            raise NotSupportedError(f"the Django driver supports PostgreSQL databases, not {db.vendor!r}")
+            raise NotSupportedError(f"the Django driver monitors PostgreSQL databases only, not {db.vendor!r}")
         connect = profile.connect
         if connect is not None:
             db.Database = _HookDatabase(db.Database, lambda: connect(profile))
@@ -996,17 +1103,30 @@ class DjangoMonitor(DatabaseMonitor):
 
 
 class DjangoDriver(ThreadedDriver):
-    """Executes adorm reads and writes with Django's ORM.
+    """Executes adorm reads and writes with Django's ORM, on a database of any Django backend.
 
     Each connection runs on a thread of its own with that thread's Django connection for the profile's ``alias``;
     only synchronous ORM methods are called, in a copy of the caller's context (Django's active language included).
-    Django must be set up (``django.setup()``) before the first operation.
+    Django must be set up (``django.setup()``) before the first operation. ``capabilities`` are those on PostgreSQL;
+    `capabilities_for()` gives those of a profile's database.
     """
 
     name = "django"
     connection_class = DjangoConnection
 
     capabilities = _DjangoCapabilities()  # type: ignore[assignment]
+
+    def capabilities_for(self, profile: Profile) -> Capabilities:
+        """What the driver supports on the database of ``profile``'s alias
+        (`adorm.drivers.django.vendors.Vendor.capabilities()`); `capabilities` when the alias has no ``DATABASES``
+        entry or its backend does not load. Does not connect."""
+        vendor = profile_vendor(profile)
+        return self.capabilities if vendor is None else vendor.capabilities()
+
+    def is_refusal(self, exc: BaseException) -> bool:
+        """PostgreSQL's SQLSTATE class 53, MySQL's and Oracle's errors of too many connections
+        (`adorm.drivers.django.vendors.is_refusal()`)."""
+        return is_refusal(exc) or vendor_is_refusal(exc)
 
     async def check_listen(self, profile: Any) -> None:
         """Also raise `NotSupportedError` inside Django's ``TestCase``, whose shared connection receives no
@@ -1019,7 +1139,7 @@ class DjangoDriver(ThreadedDriver):
             raise NotSupportedError(NO_NOTIFICATIONS, driver=self.name, unsupported=[NOTIFY])
 
     def database_key(self, profile: Any) -> Any:
-        """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""
+        """The database of ``profile`` (`adorm.drivers.django.database_key()`)."""
         return database_key(profile)
 
     def schema_hash(self, label: str) -> str:
@@ -1038,7 +1158,10 @@ class DjangoDriver(ThreadedDriver):
         return connection
 
     async def open_monitor(self, profile: Any) -> DjangoMonitor:
-        """Open a `DjangoMonitor` for ``profile``."""
+        """Open a `DjangoMonitor` for ``profile``; `NotSupportedError` for a database other than PostgreSQL."""
+        vendor = profile_vendor(profile)
+        if vendor is not None and vendor.name != "postgresql":
+            raise NotSupportedError(f"the Django driver monitors PostgreSQL databases only, not {vendor.name!r}")
         monitor = DjangoMonitor(profile)
         await monitor.start()
         return monitor

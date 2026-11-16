@@ -1,6 +1,7 @@
 """Every driver reports the violated constraint on `IntegrityError` with the same values: a duplicate key, a key
 another transaction inserted while the write waited for it, and a deferred foreign key that fails at ``COMMIT``. The
-pool stays usable after each."""
+pool stays usable after each. On SQLite, which reports the table and the columns of a key only, the test of
+`tests.conformance.test_sqlite` replaces those that read PostgreSQL's catalogue."""
 
 import asyncio
 import contextlib
@@ -14,7 +15,7 @@ import adorm
 
 from adorm import IntegrityError
 from demo.models.clubs import Club, Membership
-from tests.conformance.drivers import WAITING
+from tests.conformance.drivers import on_sqlite, WAITING
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -28,7 +29,10 @@ def sql_only(driver):
 
 @pytest.fixture
 async def catalogue(demo_data):
-    """A connection of the test's own to the test database."""
+    """A connection of the test's own to the test database, which reads PostgreSQL's catalogue; the test is skipped on
+    SQLite."""
+    if on_sqlite():
+        pytest.skip("the test reads PostgreSQL's catalogue")
     conn = await asyncpg.connect(demo_data)
     try:
         yield conn
@@ -65,8 +69,12 @@ async def test_duplicate_primary_key(driver, pool):
         with pytest.raises(IntegrityError) as raised:
             await new_club(pk=existing.pk)
         exc = raised.value
+        assert (exc.columns, exc.model, exc.fields) == (("id",), "clubs.Club", ("id",))
+        assert (pool.size, pool.in_use) == (1, 0)
+        if on_sqlite():
+            assert (exc.sqlstate, exc.table_name, exc.key) == (None, "clubs_club", {})
+            continue
         assert exc.sqlstate == "23505"
-        assert exc.columns == ("id",)
         assert exc.key == {"id": str(existing.pk)}
         assert exc.detail == f"Key (id)=({existing.pk}) already exists."
         assert (exc.model, exc.fields) == ("clubs.Club", ("id",))
@@ -103,6 +111,14 @@ async def test_duplicate_composite_key(driver, pool):
             fee=decimal.Decimal(0),
         )
     exc = raised.value
+    assert (exc.model, exc.fields) == ("clubs.Membership", ("club_id", "member_id"))
+    if on_sqlite():
+        assert (exc.table_name, exc.columns, exc.constraint_name) == (
+            "clubs_membership",
+            ("club_id", "member_id"),
+            None,
+        )
+        return
     assert (exc.constraint_name, exc.table_name) == ("clubs_membership_unique", "clubs_membership")
     assert exc.key == {"club_id": str(existing.club_id), "member_id": str(existing.member_id)}
     assert (exc.model, exc.fields) == ("clubs.Membership", ("club_id", "member_id"))

@@ -173,6 +173,18 @@ except adorm.IntegrityError as exc:
 Base class of the database errors. Without `message`, the message is the text of `original`, or of its class name
 when the text is empty. With neither, the message is the exception's class name.
 
+`sqlstate` is the SQLSTATE the database reported, `None` for a database without SQLSTATEs (SQLite, and MySQL and
+Oracle through the Django driver, which report their own error numbers). `connection_lost` is set by the driver
+connection that raised the error: whether the error left that connection unusable
+([`DriverConnection.is_connection_lost()`](/ref/drivers#adorm-drivers-driverconnection)); `None` when no connection
+judged it.
+
+```python
+except adorm.OperationalError as exc:
+    if exc.connection_lost:
+        ...   # the slot leaves the pool; the next operation gets a new connection
+```
+
 ### `adorm.InterfaceError`
 
 An error of the database interface rather than of the database, such as using a closed connection. Not a
@@ -328,7 +340,7 @@ the driver reports the error without them.
 Raised by [`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) and
 [`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) before any
 operation runs, by every driver for a path it cannot resolve while building the statement, and by
-[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) in place of `NotSupportedError` for an operation
+[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) in place of `NotSupportedError` for an operation
 that also uses a construct the driver lacks. A `FieldError` without a SQLSTATE does not affect the
 [transaction](/topics/transactions#a-failed-operation) it is raised in.
 
@@ -345,7 +357,7 @@ except adorm.FieldError as exc:
 `NotSupportedError(message=None, *, driver=None, unsupported=(), original=None, sqlstate=None)`
 
 The database or the driver does not support the requested feature (SQLSTATE class `0A`). A driver's capability
-check ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none), [`Capabilities`](/ref/drivers#adorm-drivers-capabilities))
+check ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none), [`Capabilities`](/ref/drivers#adorm-drivers-capabilities))
 sets `driver` to the driver's name and `unsupported` to the tuple of names it lacks: an operation kind, construct
 names, connection option names or `"savepoints"`. The check raises before anything reaches the connection; a
 transaction it is raised in stays usable. Otherwise `driver` is `None` and `unsupported` is empty.
@@ -374,7 +386,7 @@ than the driver's target has.
 | `reason` | when `actual` is `None`, why: `"the target has no model clubs.Club"`, or the error's type and message |
 | `driver` | the driver's name |
 
-[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) raises it for an operation on the mismatched
+[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) raises it for an operation on the mismatched
 model or on any model the operation reaches ([`operation_models()`](/ref/drivers#adorm-drivers-operation-models-operation)),
 before the operation waits for a slot or reaches the connection. Other models keep working; a transaction it is
 raised in stays usable. A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) of a

@@ -9,6 +9,7 @@ with the reason. ``create()`` returns a driver instance over the seeded test dat
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import weakref
 
 from collections.abc import Awaitable, Callable
@@ -17,7 +18,9 @@ from typing import Any
 
 import asyncpg
 
+from adorm import ConnectionProfile
 from adorm.drivers import Driver
+from adorm.drivers.django import DjangoConnection, DjangoDriver
 from demo.api import drivers as demo_drivers, memory
 from demo.models import MODELS
 from demo.models.clubs import Club
@@ -34,6 +37,10 @@ class Blocker:
 
     lost_connections = False
     """Whether `terminate()` can end the server connection of a waiting operation."""
+
+    polls_for_lock = False
+    """Whether a waiting operation finds the hold released only at its next attempt, after a pause: once released,
+    `idle()` returns when it has taken what it waited for."""
 
     async def hold(self) -> None:
         raise NotImplementedError
@@ -192,6 +199,92 @@ class RowLock(Blocker):
         await self.release()
 
 
+class TrackedDjangoDriver(DjangoDriver):
+    """The Django driver, keeping a weak set of the connections it opened; ``capabilities`` are those of the test
+    database (`DjangoDriver.capabilities_for()` of the alias ``default``)."""
+
+    def __init__(self) -> None:
+        self.connections: weakref.WeakSet[DjangoConnection] = weakref.WeakSet()
+        self.capabilities = self.capabilities_for(ConnectionProfile("default", self))
+
+    async def open_connection(self, profile: Any, emit: Any) -> Any:
+        connection = await super().open_connection(profile, emit)
+        self.connections.add(connection)
+        return connection
+
+
+class SQLiteWriteLock(Blocker):
+    """The write lock of the SQLite test database, held by a ``BEGIN IMMEDIATE`` transaction on a ``sqlite3``
+    connection of its own; an update of clubs waits for it (`DjangoConnection.waiting_for_write_lock`)."""
+
+    polls_for_lock = True
+
+    def __init__(self, driver: TrackedDjangoDriver, url: str) -> None:
+        self.driver = driver
+        self.path = url.removeprefix("sqlite:///")
+        self.holder: sqlite3.Connection | None = None
+
+    async def hold(self) -> None:
+        def begin() -> None:
+            holder = sqlite3.connect(self.path, isolation_level=None, check_same_thread=False)
+            holder.execute("PRAGMA journal_mode=WAL")
+            holder.execute("BEGIN IMMEDIATE")
+            self.holder = holder
+
+        await in_thread(begin)
+
+    async def release(self) -> None:
+        holder, self.holder = self.holder, None
+        if holder is not None:
+
+            def end() -> None:
+                holder.rollback()
+                holder.close()
+
+            await in_thread(end)
+
+    def _waiters(self) -> list[DjangoConnection]:
+        return [connection for connection in list(self.driver.connections) if connection.waiting_for_write_lock]
+
+    async def _until(self, probe: Callable[[], Any], interval: float = 0.01) -> Any:
+        async with asyncio.timeout(10):
+            while True:
+                value = probe()
+                if value:
+                    return value
+                await asyncio.sleep(interval)
+
+    async def waiting(self) -> Any:
+        return (await self._until(self._waiters))[0]
+
+    async def idle(self) -> None:
+        # Checked on every loop iteration: the write that took the lock is still running when this returns, so a
+        # cancellation right after it can race the write's completion.
+        await self._until(lambda: not self._waiters(), interval=0)
+
+    def blocked(self, slug: str) -> Awaitable[Any]:
+        return Club.objects.filter(slug=slug).update(city="Blocked")
+
+    async def open_transactions(self) -> int:
+        connections = list(self.driver.connections)
+        return sum(1 for connection in connections if _in_transaction(connection))
+
+    async def close(self) -> None:
+        await self.release()
+
+
+def _in_transaction(connection: DjangoConnection) -> bool:
+    raw = getattr(getattr(connection, "db", None), "connection", None)
+    return raw is not None and connection.is_usable() and raw.in_transaction
+
+
+def on_sqlite() -> bool:
+    """Whether the test database is SQLite (``--ds=tests.djangoproject.settings_sqlite``)."""
+    from django.db import connection
+
+    return connection.vendor == "sqlite"
+
+
 class Notifier:
     """Sends notifications from outside the driver's pool."""
 
@@ -277,11 +370,25 @@ class ConformanceDriver:
     notifier: Callable[[Driver, str], Notifier]
 
     def unavailable_reason(self) -> str | None:
+        if self.name != "django" and on_sqlite():
+            return "the test database is SQLite, which the suite runs on the Django driver only"
         return demo_drivers.get(self.name).unavailable_reason()
 
 
 async def _sql_driver(name: str) -> Driver:
     return demo_drivers.get(name).driver_class()()
+
+
+async def _django_driver(_url: str) -> Driver:
+    return TrackedDjangoDriver() if on_sqlite() else await _sql_driver("django")
+
+
+def _django_blocker(driver: Driver, url: str) -> Blocker:
+    return SQLiteWriteLock(driver, url) if on_sqlite() else TableLock(url)  # type: ignore[arg-type]
+
+
+def _django_notifier(_driver: Driver, url: str) -> Notifier:
+    return Notifier() if on_sqlite() else PostgresNotifier(url)
 
 
 async def _memory_driver(_url: str) -> Driver:
@@ -290,13 +397,7 @@ async def _memory_driver(_url: str) -> Driver:
 
 
 DRIVERS: tuple[ConformanceDriver, ...] = (
-    ConformanceDriver(
-        "django",
-        lambda _url: _sql_driver("django"),
-        lambda _driver, url: TableLock(url),
-        "runs",
-        lambda _driver, url: PostgresNotifier(url),
-    ),
+    ConformanceDriver("django", _django_driver, _django_blocker, "runs", _django_notifier),
     ConformanceDriver(
         "asyncpg",
         lambda _url: _sql_driver("asyncpg"),

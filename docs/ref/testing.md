@@ -65,8 +65,9 @@ released or took its shared session again.
 | `RuntimeError` | `task` finishes first, for example because it did not wait at all; chained to the task's exception when it raised one |
 | `TimeoutError` | no selected operation waited for a lock within `timeout` seconds |
 
-The Django and native PostgreSQL drivers report sessions and monitor them on a connection of their own (`pg_stat_activity`),
-also inside Django's `TestCase`, where the monitor's connection is not the test's.
+The Django driver on PostgreSQL and the native PostgreSQL driver report sessions and monitor them on a connection of
+their own (`pg_stat_activity`), also inside Django's `TestCase`, where the monitor's connection is not the test's. On
+other databases the Django driver opens no monitor, and `wait_for_lock()` raises `NotSupportedError`.
 
 ```python
 async with adorm.atomic():
@@ -149,13 +150,13 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `test`, `wrapper` | the [`TestDatabase`](#adorm-testing-django-testdatabase) and its wrapper |
 | `owner` | the connection whose call holds the shared connection, `None` when free |
 | `transactions` | the connections with an open transaction, innermost last |
-| `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it (counted in the connection's `session_holds`); give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the threaded bridge reports as a cancellation |
+| `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it (counted in the connection's `session_holds`); give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the connection's `is_cancellation()` accepts on every database, so the threaded bridge reports it as a cancellation |
 | `hold(connection)` | a `with` block between `acquire()` and `release()` |
 | `cancel(connection, cancel)` | cancels `connection`'s running call: `cancel()` (the driver's statement cancel) while it holds the shared connection, else it ends its wait. The owner does not change meanwhile; a cancel never reaches another connection's statement |
 | `apply_options(desired)` | sets the connection options `desired` with `SET LOCAL` and resets the others set before (`SET LOCAL … TO DEFAULT`); only differences from what is known to be set are sent |
 | `forget_options()` | treats the options as unknown, after a rollback to a savepoint may have undone a `SET LOCAL`; the next `apply_options()` sets every option it ever set |
 | `unwind(connection, error)` | rolls back `connection`'s transaction and those opened after it; the later ones raise `error` on their next call |
-| `watch_backend()` | adds a notice handler to the test's psycopg 3 connection, once per DB-API connection, that emits each notice as [`NOTICE`](/ref/events#adorm-events-notice) from the connection that holds the shared connection (`owner`) |
+| `watch_backend()` | adds a notice handler to the test's psycopg 3 connection, once per DB-API connection, that emits each notice as [`NOTICE`](/ref/events#adorm-events-notice) from the connection that holds the shared connection (`owner`); on SQLite instead a progress handler that stops the statements of the owner's cancelled call |
 | `check_isolated(what)` | raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction is open that the caller's context is not inside (no `atomic()` block of it is active there) |
 | `attach()` / `detach()` | count the connections that use the shared connection. While one does, an execute wrapper, the wrapper's outermost, makes each statement that another thread runs through the wrapper (Django ORM code of the test or of the code under test) hold the shared connection, run without connection options and pass `check_isolated()` first |
 

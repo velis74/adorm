@@ -165,12 +165,11 @@ async def test_the_connect_hook_opens_the_connection_django_configures(library):
     assert set(levels) == {psycopg.IsolationLevel.SERIALIZABLE}
 
 
-async def test_a_database_other_than_postgresql_is_refused(library, monkeypatch):  # noqa: ARG001
-    monkeypatch.setattr(type(connections["default"]), "vendor", "sqlite")
+async def test_profile_params_cannot_change_the_backend(library):  # noqa: ARG001
     previous = set_runner(None)
-    pool, router = await open_pool()
+    pool, router = await open_pool(params={"ENGINE": "django.db.backends.sqlite3"})
     try:
-        with pytest.raises(NotSupportedError, match="supports PostgreSQL databases, not 'sqlite'"):
+        with pytest.raises(NotSupportedError, match="sets params ENGINE, which only DATABASES sets"):
             await Author.objects.count()
         assert (pool.size, pool.in_use) == (0, 0)
     finally:

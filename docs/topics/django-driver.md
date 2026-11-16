@@ -8,9 +8,11 @@ The Django driver executes:
 - writes (`create`, `bulk_create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`,
   `update_or_create`);
 - row locks (`select_for_update()`), transactions and savepoints;
-- the connection options of [`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options).
+- the connection options of [`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options) on PostgreSQL.
 
-Driver methods raise `NotSupportedError` before anything runs.
+It runs on PostgreSQL, SQLite, MySQL, MariaDB, Oracle and other Django backends; what a database cannot do is not
+declared ([databases](#databases)). The test suite runs on PostgreSQL and SQLite. Driver methods raise
+`NotSupportedError` before anything runs.
 :::
 
 [`DjangoDriver`](/ref/drivers#adorm-drivers-django-djangodriver) executes adorm operations with Django's ORM. It is
@@ -48,9 +50,6 @@ alias of `DATABASES` is a profile of the same name on this driver. Without the a
 
 ## Connections
 
-The driver supports PostgreSQL only. A profile whose alias uses another backend raises `NotSupportedError` when its
-first connection opens.
-
 A connection is `django.db.connections[profile.alias]` on the slot's thread: Django's connection wrapper for that
 `DATABASES` entry. It opens when the slot opens and closes when the slot leaves the pool
 ([slot lifecycle](/topics/pool#slot-lifecycle)).
@@ -62,7 +61,8 @@ A connection is `django.db.connections[profile.alias]` on the slot's thread: Dja
 - The profile's `params` replace keys of the `DATABASES` entry for that profile's connections. The shared `DATABASES`
   entry is unchanged. On a `direct` driver the event loop thread's wrapper gets its own settings back when the slot
   closes.
-- The `connect` hook, when set, returns the DB-API connection (a psycopg connection) the wrapper uses instead of
+- The `connect` hook, when set, returns the DB-API connection (on PostgreSQL a psycopg connection, on SQLite a
+  `sqlite3` connection) the wrapper uses instead of
   opening one. Django configures it as its own (`OPTIONS["isolation_level"]`, time zone, `assume_role`). A psycopg 3
   connection needs Django's connection parameters (cursor class, type adapters); the hook runs on the slot's thread
   and reads them from the thread's wrapper.
@@ -114,6 +114,89 @@ async with tenant.atomic():
 
 A `full_clean()` that a model's `save()` calls itself is not pinned; its queries go to the alias the project's
 routers choose.
+
+## Databases
+
+The driver runs on the database of any Django backend. What it supports on a profile's database is
+[`DjangoDriver.capabilities_for(profile)`](/ref/drivers#adorm-drivers-django-djangodriver), read from the backend of
+the alias's `ENGINE` without connecting; the pool checks every operation and connection option against it before it
+takes a slot, so what the database cannot do raises `NotSupportedError` before anything runs.
+`DjangoDriver.capabilities` are those on PostgreSQL.
+
+| | PostgreSQL | SQLite | MySQL, MariaDB | Oracle |
+|---|---|---|---|---|
+| capabilities | [`CAPABILITIES`](/ref/drivers#adorm-drivers-django-capabilities) | [`SQLITE_CAPABILITIES`](/ref/drivers#adorm-drivers-django-vendors-sqlite-capabilities) | [`MYSQL_CAPABILITIES`](/ref/drivers#adorm-drivers-django-vendors-mysql-capabilities) | [`ORACLE_CAPABILITIES`](/ref/drivers#adorm-drivers-django-vendors-oracle-capabilities) |
+| `select_for_update()` | with `nowait`, `skip_locked`, `of`, `no_key` | no | with `nowait`, `skip_locked` | with `nowait`, `skip_locked`, `of` |
+| `distinct(*fields)`, `overlap` | yes | no | no | no |
+| `contains`, `startswith`, `endswith` | yes | no: `LIKE` ignores the case of ASCII letters (the `i...` lookups remain) | yes | yes |
+| `intersection()`, `difference()` | yes | yes | no | yes |
+| `bulk_create(ignore_conflicts=...)` | yes | yes | yes | no |
+| `bulk_create(update_conflicts=...)` | yes | yes | no: `ON DUPLICATE KEY UPDATE` takes no `unique_fields` | no |
+| connection options (`statement_timeout` …) | yes | no | no | no |
+| `adorm.listen()`, notices | yes (psycopg 3) | no | no | no |
+| cancellation | psycopg's cancel request | `interrupt()` | `KILL QUERY` on one more connection | `cancel()` |
+| errors | SQLSTATE, constraint, columns, values | no SQLSTATE; table and columns | no SQLSTATE; MySQL's error number, key | no SQLSTATE; `ORA-` number, constraint |
+| [`wait_for_lock()`](/ref/testing#adorm-testing-wait-for-lock-task-none-session-none-timeout-10-0-interval-0-01), monitor | yes | no | no | no |
+| tested | yes | yes | no | no |
+
+A backend without a vendor of its own declares what its features class allows
+([`features_capabilities()`](/ref/drivers#adorm-drivers-django-vendors-features-capabilities-features)) and has no
+cancellation. MySQL and Oracle are not tested; capabilities that depend on the server version (`SKIP LOCKED` on
+MariaDB before 10.6, `INTERSECT` on MySQL before 8.0.31) are refused by Django when the query is compiled, before any
+SQL runs: adorm raises `NotSupportedError`, and an enclosing transaction goes on.
+
+```python
+pool = Pool(driver, ConnectionProfile("local", driver, alias="local"))   # DATABASES["local"] is SQLite
+pool.capabilities is SQLITE_CAPABILITIES                                  # True
+await Member.objects.select_for_update().get(pk=1)
+# NotSupportedError: 'get' operation needs unsupported clause.select_for_update (driver 'django')
+```
+
+Results follow the database: SQLite and MySQL sort `NULL` first in ascending order and last in descending order,
+PostgreSQL and Oracle the other way round; on SQLite `Lower()`, `Upper()` and the case-insensitive lookups fold ASCII
+letters only; on MySQL a case-insensitive collation makes `exact` case-insensitive; Oracle stores an empty string as
+`NULL`. Django refuses a sliced or ordered query inside a set operation on SQLite: adorm raises `NotSupportedError`
+when the query runs.
+
+### SQLite
+
+SQLite has one writer at a time beside any number of readers.
+
+- A slot's connection switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file): readers
+  run while a transaction writes and see the last committed state.
+- Every transaction begins with `BEGIN IMMEDIATE` (`OPTIONS["transaction_mode"]`, Django 5.1 and newer): it holds the
+  write lock from its start to its end, whether it writes or not. A write outside a transaction runs in a transaction
+  of its own that begins the same way.
+- A [driver method](/topics/managers#driver-methods) outside a transaction also runs in a transaction of its own
+  and holds the write lock from its start to its end, whether it writes or not.
+- A transaction or write that finds the lock taken waits for it in the slot, for as long as the busy timeout
+  (`OPTIONS["timeout"]`, 5 seconds by default), then raises `OperationalError` `database is locked`. The slot stays in
+  the pool. Cancelling the task ends the wait at once.
+- A cancelled `INSERT`, `UPDATE` or `DELETE` inside a transaction rolls back the whole transaction, savepoints
+  included: every further operation of the transaction and of its enclosing blocks raises
+  `TransactionManagementError` (`OperationalError` `TRANSACTION_ENDED` as the cause), and the outermost block rolls
+  back. A cancelled read rolls back nothing.
+- An in-memory database (`":memory:"`, `mode=memory`) raises `NotSupportedError`: a private one is visible to its own
+  connection only, and none has WAL.
+
+```python
+DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3",
+                         "OPTIONS": {"timeout": 20}}}   # a write waits up to 20 s for the write lock
+```
+
+What this means for the pool:
+
+- Transactions on several slots run one after another: a slot inside a transaction holds the write lock, and the
+  slots whose transactions or writes wait for it stay acquired meanwhile. Keep transactions short; a transaction that
+  awaits other work holds the lock for that long.
+- A write of another session that a task runs while its own transaction holds the lock (two sessions of one task)
+  waits for the lock the same task holds; adorm's [deadlock detection](/topics/pool#deadlocks) does not see it, and the
+  write raises `OperationalError` `database is locked` after the busy timeout.
+- Reads outside transactions never wait for the lock, so `max_connections` above the number of concurrent writers
+  serves readers; more slots do not add write throughput.
+- With `max_connections=0`, the default, the pool has no limit on SQLite: SQLite refuses no connection, and every
+  write or transaction that waits for the lock holds a slot, its thread and its connection. A burst of N writers opens
+  N slots. Give a SQLite profile's pool an explicit `max_connections`.
 
 ## The caller's context
 
@@ -345,14 +428,14 @@ async with adorm.atomic():
 block raises `TransactionManagementError`.
 
 A commit the database refuses raises its error and rolls the transaction back. Example: a deferred foreign key
-(Django creates foreign keys on PostgreSQL as deferred, checked at `COMMIT`) raises `IntegrityError` with SQLSTATE
-`23503`. A transaction that failed on the driver side without the core seeing the error (Django marked it for
+(Django creates foreign keys on PostgreSQL and SQLite as deferred, checked at `COMMIT`) raises `IntegrityError`, on
+PostgreSQL with SQLSTATE `23503`, on SQLite with the detail `FOREIGN KEY constraint failed` and no table. A transaction that failed on the driver side without the core seeing the error (Django marked it for
 rollback, or PostgreSQL aborted it) is rolled back by `commit()`, which raises `TransactionManagementError`.
 
 ### Row locks
 
 `select_for_update()` becomes Django's `select_for_update()` with `nowait`, `skip_locked`, `of` (adorm paths,
-`"self"`) and `no_key`. Reading rows with `select_for_update()` outside a transaction raises
+`"self"`) and `no_key` (PostgreSQL only); SQLite has no row locks ([databases](#databases)). Reading rows with `select_for_update()` outside a transaction raises
 `TransactionManagementError` in the core, as in Django:
 
 ```python
@@ -365,7 +448,7 @@ async with adorm.atomic():
     free = [job async for job in Job.objects.select_for_update(skip_locked=True).filter(state="new")[:10]]
 ```
 
-`nowait` on a locked row raises `OperationalError` with SQLSTATE `55P03`. Django's `update_or_create()` locks the row
+`nowait` on a locked row raises `OperationalError`, on PostgreSQL with SQLSTATE `55P03`. Django's `update_or_create()` locks the row
 it updates the same way. `get_or_create()` retries its read after a concurrent insert of the same unique key, so two
 flows creating the same row create it once.
 
@@ -404,7 +487,7 @@ instances, so `pre_init` and `post_init` fire only for writes.
 ## Errors
 
 The driver raises adorm's [exceptions](/ref/exceptions)
-([`map_django_error()`](/ref/drivers#adorm-drivers-django-map-django-error-exc)):
+([`map_django_error()`](/ref/drivers#adorm-drivers-django-map-django-error-exc-vendor-none)):
 
 | Django | adorm |
 |---|---|
@@ -414,11 +497,22 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | `ValidationError` (a value Django rejects, such as an invalid UUID; a model's `save()` that calls `full_clean()`) | `ValidationError` with each error's message, `code` and `params`, keyed by the operation model's adorm field names |
 | `TransactionManagementError` | `TransactionManagementError` |
 | `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |
-| `django.db` errors | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01`; an [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs) carries the constraint, table, columns and values from the psycopg error's `diag`, the model of the table and its adorm field names of the columns |
+| `django.db` errors on PostgreSQL | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01`; an [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs) carries the constraint, table, columns and values from the psycopg error's `diag`, the model of the table and its adorm field names of the columns |
+| `django.db` errors on other databases | by the PEP 249 class of Django's exception, `sqlstate` `None`: on SQLite `IntegrityError` with the table, columns, model and fields of a `UNIQUE` or `NOT NULL` violation and the name of a `CHECK` constraint, no values; a lock held past the busy timeout `OperationalError` `database is locked`. MySQL and Oracle: the key, constraint and columns their messages name ([vendors](/ref/drivers#adorm-drivers-django-vendors)) |
+| a sliced or ordered query in a set operation on SQLite, which Django refuses before sending it | `NotSupportedError` |
 | anything else (Django's `ValueError` for a value of the wrong type) | `DatabaseError` with the original exception in `original` |
 
 An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is dropped
-by its slot; the next request gets a new one. Other errors leave the connection in the pool.
+by its slot; the next request gets a new one. Other errors leave the connection in the pool. What counts as a lost
+connection follows the database: on SQLite only an `InterfaceError` (a closed connection), on MySQL the errors 2006,
+2013 and 2055, on Oracle `ORA-03113` and its kin; the error's `connection_lost` tells.
+
+```python
+try:
+    await Club.objects.create(name="Veslaški klub Koper", slug="koper-sailing", ...)
+except adorm.IntegrityError as exc:   # on SQLite
+    exc.sqlstate, exc.table_name, exc.fields   # None, 'clubs_club', ('slug',)
+```
 
 ## Custom SQL
 
@@ -471,8 +565,10 @@ Not detected:
 
 The driver's [`schema_hash()`](/ref/drivers#schema-hash-label) is the hash of the installed Django model. An
 operation on a generated model that is out of date with it raises `SchemaMismatchError` before it runs. The driver
-executes `check_table` for [`adorm.check_schema()`](/topics/schema-checks) with one catalogue query per table, with
-the columns' types from Django's `db_type()` for the alias. `check_table` reads the catalogue through a cursor of the
+executes `check_table` for [`adorm.check_schema()`](/topics/schema-checks) with one catalogue query per table on
+PostgreSQL and Django's introspection (`get_table_description()`) on other databases. It compares the columns' types
+with Django's `db_type()` for the alias on PostgreSQL and SQLite, and only columns and nullability on the others,
+whose catalogues report types in their own terms. `check_table` reads the catalogue through a cursor of the
 thread's connection outside the execute wrappers; it is not custom SQL.
 
 ```python
@@ -481,8 +577,9 @@ await adorm.check_schema([Club, Member])   # () while the tables match the model
 
 ## Connection options
 
-The driver declares the [connection options](/topics/options) `statement_timeout`, `lock_timeout` and
-`idle_in_transaction_session_timeout`, in seconds. It sets them with
+On PostgreSQL the driver declares the [connection options](/topics/options) `statement_timeout`, `lock_timeout` and
+`idle_in_transaction_session_timeout`, in seconds; on other databases none, and a profile, session or block that sets
+one raises `NotSupportedError` (a profile's options when its pool is created). It sets them with
 [`set_options_sql()`](/ref/drivers#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the thread's
 connection: `SET` / `RESET` outside a transaction, `SET LOCAL` inside one.
 
@@ -493,9 +590,16 @@ with adorm.connection_options(lock_timeout=2):
 
 ## Cancellation
 
-Cancelling the task that awaits an operation cancels the running statement. The driver calls psycopg's
-`cancel_safe()` (`cancel()` on psycopg 2) from another thread; the statement ends with `57014`, the task gets
+Cancelling the task that awaits an operation cancels the running statement from another thread; the task gets
 `asyncio.CancelledError`, and the connection stays in the pool.
+
+| Database | The driver | The statement ends with |
+|---|---|---|
+| PostgreSQL | psycopg's `cancel_safe()` (`cancel()` on psycopg 2) | SQLSTATE `57014` |
+| SQLite | `interrupt()`; a progress handler stops a statement the call starts after it; a wait for the write lock ends | `SQLITE_INTERRUPT`, or `LOCK_WAIT_CANCELLED` |
+| MySQL, MariaDB | `KILL QUERY` on a connection opened for each cancellation (with the profile's `connect` hook when it has one); the database may refuse it when it is at `max_connections` | error 1317 |
+| Oracle | the driver's `cancel()` | `ORA-01013` |
+| another backend | nothing: the call runs on, and after the driver's `cancel_grace` seconds the slot gives up its connection | |
 
 - A statement the database cancelled: the `CancelledError` carries `CancellationOutcome.UNKNOWN`.
 - A statement that completed on the connection's thread before the cancellation reached the database: the task gets
@@ -511,13 +615,17 @@ task.cancel()          # the database stops the statement
 
 A cancelled write inside a transaction, such as one waiting for a row lock, rolls the transaction back, including the
 writes before it; the slot returns to the pool. Inside a nested `adorm.atomic()` only that savepoint is rolled back
-and the enclosing block continues. A write outside a transaction that completes just before the cancellation arrives
+and the enclosing block continues, except on SQLite, which rolls back the whole transaction ([SQLite](#sqlite)). A write outside a transaction that completes just before the cancellation arrives
 stays written.
 
 ## In Django's tests
 
 Inside Django's `TestCase` the slots share the test's connection, and a transaction is a savepoint in the test's
 transaction. Inside `TransactionTestCase` they open their own connections. See [Testing](/topics/testing).
+
+On SQLite a `TransactionTestCase` needs a test database file (`DATABASES[alias]["TEST"]["NAME"]`): Django's default
+test database is in memory, which the driver refuses ([SQLite](#sqlite)). Inside a `TestCase` on SQLite, a cancelled
+write rolls back the test's transaction, with the test data of `setUpTestData()`.
 
 ```python
 class MemberTests(TestCase):
@@ -535,7 +643,7 @@ class MemberTests(TestCase):
   request. Django's signals and `on_commit()` callbacks produce no event.
 - The driver consumes no events.
 
-With psycopg 3 each connection emits three [backend events](/topics/events#backend-events) from handlers it adds to
+On PostgreSQL with psycopg 3 each connection emits three [backend events](/topics/events#backend-events) from handlers it adds to
 the psycopg connection. A connection that does not listen detects that the server ended it only when its next call
 fails:
 

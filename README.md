@@ -10,6 +10,7 @@ The package is pre-release; the API reference on the documentation site lists wh
 
 - Python 3.11 or newer
 - PostgreSQL for the test suite
+- the conformance run on SQLite needs no database server (Python's `sqlite3`, Django 5.1 or newer)
 
 ## Development
 
@@ -43,6 +44,13 @@ root (ignored by git; `.env.example` lists them). Variables set in the environme
 ```bash
 cp .env.example .env    # then fill in the user and password
 uv run pytest
+```
+
+The conformance suite also runs the Django driver on SQLite, in a database file in a temporary directory, without
+PostgreSQL:
+
+```bash
+uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
 ```
 
 ## Demo
