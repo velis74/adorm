@@ -1,6 +1,7 @@
 """Managers in `adorm generate`: specs, rendering, Django introspection and the generated classes."""
 
 import datetime
+import importlib
 import subprocess
 import sys
 import textwrap
@@ -8,12 +9,14 @@ import warnings
 
 from pathlib import Path
 
+import pydantic
 import pytest
 
 from django.db import models
 from django.test import override_settings
 
 from adorm import client_base, expose, Manager, QuerySet
+from adorm.cli import main
 from adorm.codegen import (
     AppSpec,
     CodegenError,
@@ -27,9 +30,10 @@ from adorm.codegen import (
     plan,
     QuerySetSpec,
     render_module,
+    ThirdPartyMethodsWarning,
     TypeSpec,
 )
-from adorm.codegen.django import exposed_methods, manager_specs, model_spec
+from adorm.codegen.django import exposed_methods, is_installed, manager_specs, model_spec, PROTOCOL_METHODS
 from adorm.models import DriverMethod, get_managers, model_schema
 from adorm.operations import Call, ModelRow
 from adorm.porting import CLIENT_BASE_ATTRIBUTE, get_client_base, is_exposed
@@ -557,6 +561,244 @@ def test_objects_stands_for_a_bound_default_manager(temporary):  # noqa: ARG001
     assert [str(w.message) for w in caught] == [
         "library.Shadowing.model_fields: the manager would hide an attribute of adorm.Model (not generated)"
     ]
+
+
+VENDORED = """
+from django.db import models
+
+
+class SubclassQuerySetMixin:
+    def select_subclasses(self, *names):
+        return self
+
+    def get_subclass(self, **kwargs):
+        return self.get(**kwargs)
+
+
+class SubclassQuerySet(SubclassQuerySetMixin, models.QuerySet):
+    def instance_of(self, *classes):
+        return self
+
+
+class SubclassManagerMixin:
+    _queryset_class = SubclassQuerySet
+
+    def get_queryset(self):
+        return super().get_queryset().select_subclasses()
+
+    def select_subclasses(self, *names):
+        return self.get_queryset().select_subclasses(*names)
+
+    def get_by_natural_key(self, slug):
+        return self.get(slug=slug)
+
+
+class SubclassManager(SubclassManagerMixin, models.Manager.from_queryset(SubclassQuerySet)):
+    pass
+
+
+class NaturalKeyManager(models.Manager):
+    def get_by_natural_key(self, slug):
+        return self.get(slug=slug)
+
+    def ensure(self, slug):
+        return self.get_or_create(slug=slug)[0]
+
+
+def archive(self, *names):
+    return self
+
+
+class AssignedManager(models.Manager):
+    archive = archive
+"""
+
+BASES = """
+from adorm import Manager
+
+
+class GadgetManagerBase(Manager):
+    def select_subclasses(self, *names):
+        return self.all()
+"""
+
+
+@pytest.fixture
+def vendored(tmp_path, monkeypatch):
+    """The module ``vendored_managers.managers`` in a ``site-packages`` directory, as an installed distribution, and
+    the project module ``gadget_bases`` with a client base."""
+    package = tmp_path / "venv" / "lib" / "site-packages" / "vendored_managers"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "managers.py").write_text(VENDORED, encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "gadget_bases.py").write_text(BASES, encoding="utf-8")
+    monkeypatch.syspath_prepend(str(package.parent))
+    monkeypatch.syspath_prepend(str(project))
+    yield importlib.import_module("vendored_managers.managers")
+    for name in ("vendored_managers", "vendored_managers.managers", "gadget_bases"):
+        sys.modules.pop(name, None)
+
+
+def caught_warnings(build):
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", CodegenWarning)
+        result = build()
+    return result, [(w.category, str(w.message)) for w in caught]
+
+
+def test_is_installed_tells_installed_code_from_project_code(vendored):
+    def wrapper(*args):
+        return vendored.SubclassQuerySet.instance_of(*args)
+
+    wrapper.__wrapped__ = vendored.SubclassQuerySet.instance_of
+    assert is_installed(vendored.SubclassQuerySet.instance_of)
+    assert is_installed(pydantic.TypeAdapter.validate_python)
+    assert is_installed(wrapper), "a wrapper counts where the wrapped function is defined"
+    assert not is_installed(test_is_installed_tells_installed_code_from_project_code)
+    assert not is_installed(len), "no code object"
+    assert not is_installed(importlib.import_module("gadget_bases").GadgetManagerBase.select_subclasses)
+
+
+def test_methods_of_installed_packages_are_listed_once_per_manager(temporary, vendored):  # noqa: ARG001
+    class FilteringManager(vendored.SubclassManager):
+        def filter_subclasses(self, *names):
+            return self.select_subclasses(*names)
+
+    class Gadget(models.Model):
+        objects = FilteringManager()
+        everything = vendored.SubclassManager()
+
+        class Meta:
+            app_label = "library"
+
+    specs, caught = caught_warnings(lambda: manager_specs(Gadget))
+    assert [(s.name, s.orm_name) for s in specs] == [("objects", "objects"), ("everything", "everything")]
+    listing = (
+        "4 methods of installed packages not generated: "
+        "vendored_managers.managers.SubclassManagerMixin (select_subclasses), "
+        "vendored_managers.managers.SubclassQuerySet (instance_of), "
+        "vendored_managers.managers.SubclassQuerySetMixin (get_subclass, select_subclasses); "
+        "expose or port the ones the application calls"
+    )
+    assert caught == [
+        (
+            CodegenWarning,
+            "library.Gadget.objects.filter_subclasses: not generated; expose it or port it to a client base",
+        ),
+        (ThirdPartyMethodsWarning, f"library.Gadget.objects: {listing}"),
+        (ThirdPartyMethodsWarning, f"library.Gadget.everything: {listing}"),
+    ]
+
+
+def test_installed_methods_are_grouped_by_the_class_holding_them(temporary, vendored):  # noqa: ARG001
+    def wrapped(self, *classes):  # noqa: ARG001
+        return self
+
+    wrapped.__wrapped__ = vendored.SubclassQuerySet.instance_of
+    vendored.AssignedManager.instance_of = wrapped
+
+    class Widget(models.Model):
+        objects = vendored.AssignedManager()
+
+        class Meta:
+            app_label = "library"
+
+    _, caught = caught_warnings(lambda: manager_specs(Widget))
+    assert caught == [
+        (
+            ThirdPartyMethodsWarning,
+            "library.Widget.objects: 2 methods of installed packages not generated: "
+            "vendored_managers.managers.AssignedManager (archive, instance_of); "
+            "expose or port the ones the application calls",
+        )
+    ]
+
+
+def test_exposed_and_ported_methods_of_installed_packages_are_not_listed(temporary, vendored):  # noqa: ARG001
+    @client_base("gadget_bases:GadgetManagerBase")
+    class PortedManager(vendored.SubclassManager):
+        pass
+
+    class Widget(models.Model):
+        objects = PortedManager()
+        keyed = vendored.NaturalKeyManager()
+
+        class Meta:
+            app_label = "library"
+
+    exposed = {"library.Widget.objects": {"instance_of", "get_subclass"}}
+    (objects, keyed), caught = caught_warnings(lambda: manager_specs(Widget, exposed=exposed))
+    assert [m.name for m in objects.queryset.methods] == ["instance_of", "get_subclass"]
+    assert objects.base == "gadget_bases:GadgetManagerBase"
+    assert keyed.name == "keyed"
+    assert caught == [
+        (
+            ThirdPartyMethodsWarning,
+            "library.Widget.objects: 1 method of installed packages not generated: "
+            "vendored_managers.managers.SubclassQuerySetMixin (select_subclasses); "
+            "expose or port the ones the application calls",
+        ),
+        (
+            ThirdPartyMethodsWarning,
+            "library.Widget.keyed: 1 method of installed packages not generated: "
+            "vendored_managers.managers.NaturalKeyManager (ensure); expose or port the ones the application calls",
+        ),
+    ]
+
+
+def test_protocol_methods_are_never_reported(temporary):  # noqa: ARG001
+    class Keyed(models.Manager):
+        def get_by_natural_key(self, slug):
+            return self.get(slug=slug)
+
+    class Slugged(models.Model):
+        objects = Keyed()
+
+        class Meta:
+            app_label = "library"
+
+    assert "get_by_natural_key" in PROTOCOL_METHODS
+    specs, caught = caught_warnings(lambda: manager_specs(Slugged))
+    assert (specs, caught) == ((), [])
+    exposed = {"library.Slugged.objects": {"get_by_natural_key"}}
+    (objects,), caught = caught_warnings(lambda: manager_specs(Slugged, exposed=exposed))
+    assert [m.name for m in objects.methods] == ["get_by_natural_key"], "an exposed protocol method is generated"
+    assert caught == []
+
+
+def test_objects_standing_for_the_default_manager_lists_once(temporary, vendored):  # noqa: ARG001
+    class Gizmo(models.Model):
+        gizmos = vendored.SubclassManager()
+
+        class Meta:
+            app_label = "library"
+
+    specs, caught = caught_warnings(lambda: model_spec(Gizmo, included={"library.Gizmo"}))
+    assert [m.name for m in specs.managers] == ["objects", "gizmos"]
+    assert [c for c, _ in caught] == [ThirdPartyMethodsWarning]
+
+
+@pytest.mark.parametrize("ignore", [False, True])
+def test_ignore_third_party_silences_only_methods_of_installed_packages(temporary, vendored, tmp_path, capsys, ignore):  # noqa: ARG001
+    class LocalManager(vendored.SubclassManager):
+        def mine(self):
+            return 1
+
+    class Doohickey(models.Model):
+        objects = LocalManager()
+
+        class Meta:
+            app_label = "library"
+
+    options = ["--ignore-third-party"] if ignore else []
+    for _ in range(2):
+        assert main(["generate", *options, "-o", str(tmp_path / "models"), "library"]) == 0
+        err = capsys.readouterr().err
+        assert "warning: library.Doohickey.objects.mine: not generated" in err
+        assert "warning: library.Book.reviews: GenericRelation is not generated" in err
+        assert err.count("methods of installed packages") == (0 if ignore else 1)
 
 
 @pytest.mark.filterwarnings("ignore::adorm.codegen.CodegenWarning")

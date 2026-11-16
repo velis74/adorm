@@ -311,4 +311,5 @@ await Loan.objects.overdue(today).archive("late")   # overdue() in the client, a
 
 A method of the client base that the Django class overrides, such as `get_queryset()`, replaces the Django one: the
 generator does not route the manager through the ORM manager for it. A public Django method that is neither
-exposed nor ported is not generated and is reported as a warning.
+exposed nor ported is not generated and is reported as a warning; the methods of installed packages are listed
+together, once per manager, and `adorm generate --ignore-third-party` leaves that list out.

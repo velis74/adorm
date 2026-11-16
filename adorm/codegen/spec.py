@@ -33,6 +33,7 @@ __all__ = [
     "ParameterSpec",
     "QuerySetSpec",
     "RelationSpec",
+    "ThirdPartyMethodsWarning",
     "TypeSpec",
     "compute_schema_hash",
     "python_name",
@@ -48,6 +49,10 @@ class CodegenError(Exception):
 
 class CodegenWarning(UserWarning):
     """A construct of an ORM model that is not generated, or generated with a looser type."""
+
+
+class ThirdPartyMethodsWarning(CodegenWarning):
+    """The manager and query set methods of installed packages that a manager does not generate, one per manager."""
 
 
 class _NoDefault:

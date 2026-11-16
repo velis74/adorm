@@ -13,7 +13,7 @@ from pathlib import Path
 from types import ModuleType
 
 from adorm.codegen.files import check, plan, write
-from adorm.codegen.spec import CodegenError, CodegenWarning
+from adorm.codegen.spec import CodegenError, CodegenWarning, ThirdPartyMethodsWarning
 
 __all__ = ["main"]
 
@@ -47,6 +47,11 @@ def _parser() -> argparse.ArgumentParser:
         "-e", "--exclude", action="append", default=[], metavar="LABEL", help="app or model label to leave out"
     )
     generate.add_argument("--check", action="store_true", help="exit with status 1 when the files are not up to date")
+    generate.add_argument(
+        "--ignore-third-party",
+        action="store_true",
+        help="do not warn about manager and query set methods of installed packages",
+    )
     generate.add_argument("--line-length", type=int, default=88, help="longest line before splitting (default: 88)")
     return parser
 
@@ -76,6 +81,8 @@ def _generate(args: argparse.Namespace) -> int:
     source = _source(args.settings, args.pythonpath)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", CodegenWarning)
+        if args.ignore_third_party:
+            warnings.simplefilter("ignore", ThirdPartyMethodsWarning)
         apps = source.introspect(args.app_labels or None, exclude=args.exclude)
     for warning in caught:
         if issubclass(warning.category, CodegenWarning):

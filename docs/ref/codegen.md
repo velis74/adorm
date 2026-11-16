@@ -16,14 +16,15 @@ from adorm.porting import client_base, expose
 
 ```text
 adorm generate [-h] -o OUTPUT [--settings SETTINGS] [--pythonpath PYTHONPATH] [-e LABEL] [--check]
-               [--line-length LINE_LENGTH] [app_label ...]
+               [--ignore-third-party] [--line-length LINE_LENGTH] [app_label ...]
 ```
 
 Writes one module per Django app and a package `__init__.py` into `OUTPUT`; with `--check`, writes nothing and
 reports the differences. `python -m adorm generate` is the same command. Before Django is set up, the current
 directory and then each `--pythonpath` directory, as absolute paths, are put at the front of `sys.path`; entries that
 name the same directories further back are moved there. Warnings (constructs that are not generated, forward
-relations to models that are not generated) go to standard error as `warning: <message>`.
+relations to models that are not generated) go to standard error as `warning: <message>`; `--ignore-third-party`
+leaves out the `ThirdPartyMethodsWarning` lines.
 
 | Exit status | Meaning |
 |---|---|
@@ -193,9 +194,25 @@ that the generator did not write, no settings module.
 
 A `UserWarning` for a construct that is not generated (a generic relation, a relation that references a
 field other than the target's primary key, a manager that would hide an attribute of `adorm.Model`, an exposed method
-that is a coroutine function, returns a query set or has a default that is not a literal) or is generated as `Any`
+that is a coroutine function, returns a query set or has a default that is not a literal, a public manager or query
+set method that is neither exposed nor ported, those of installed packages as one
+[`ThirdPartyMethodsWarning`](#adorm-codegen-thirdpartymethodswarning) per manager) or is generated as `Any`
 (an unknown field type, a method annotation it cannot write), for a validator pattern pydantic cannot compile and for a
 forward relation to a model that is not generated.
+
+### `adorm.codegen.ThirdPartyMethodsWarning`
+
+A `CodegenWarning`, one per manager, that lists the manager and query set methods of installed packages it does not
+generate, grouped by the class that defines them. `adorm generate --ignore-third-party` leaves it out; in Python, a
+warnings filter does:
+
+```python
+import warnings
+
+from adorm.codegen import ThirdPartyMethodsWarning
+
+warnings.simplefilter("ignore", ThirdPartyMethodsWarning)
+```
 
 ## Rendering
 
@@ -286,7 +303,10 @@ The `ManagerSpec` of every manager of a Django model class, in declaration order
 `ADORM_EXPOSE` methods, by default `exposed_methods()`. A client base that does not import or is not a subclass of
 `adorm.Manager` or `adorm.QuerySet`, and an `ADORM_EXPOSE` method the manager does not have, raise `CodegenError`. A
 public method outside Django's own modules that is neither exposed, nor a method of Django's `Manager` or `QuerySet`,
-nor defined by the client base is not generated and is reported as `CodegenWarning`.
+nor one of `PROTOCOL_METHODS`, nor defined by the client base is not generated. Each such method of the project's
+code is reported as a `CodegenWarning` of its own. The methods of installed packages (`is_installed()`) are reported
+together as one `ThirdPartyMethodsWarning` per manager, grouped by the class of the manager's or query set's MRO that
+holds them.
 
 ```python
 manager_specs(apps.get_model("library.Loan"))
@@ -301,6 +321,24 @@ its operations through the Django manager: `get_queryset`, `all`, `filter`, `exc
 `select_for_update`, `get`, `first`, `last`, `count`, `exists`, `iterator`, `create`, `get_or_create`,
 `update_or_create`, `update`, `delete`, `bulk_create`, `bulk_update` and `in_bulk`. An override of any other method
 (`contribute_to_class`, `deconstruct`, `check` …) does not.
+
+### `adorm.codegen.django.PROTOCOL_METHODS`
+
+The manager methods Django calls itself and the client does not: `get_by_natural_key` (the deserialisers and the
+authentication backend). One that is not generated is not reported; an exposed one is generated.
+
+### `adorm.codegen.django.is_installed(func)`
+
+Whether the function `func`, after `inspect.unwrap()`, is defined in a file under a `site-packages` or
+`dist-packages` directory, the code of an installed distribution. Code whose file path has no `site-packages` or
+`dist-packages` directory, such as the project's own modules, an editable install or a package vendored into the
+project's source tree, is not installed; packages in a virtualenv inside the project are.
+
+```python
+from model_utils.managers import InheritanceManager
+
+is_installed(InheritanceManager.select_subclasses)  # True
+```
 
 ### `adorm.codegen.django.exposed_methods()`
 

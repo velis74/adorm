@@ -167,7 +167,9 @@
   driver methods marked with `adorm.expose` or listed in the `ADORM_EXPOSE` setting; `adorm.client_base` names a
   hand-written base class for client-side methods. Only overrides of `adorm.codegen.django.ROUTED_METHODS` that the
   client base does not define give a generated manager its ORM name; a public method that is neither exposed nor
-  ported is reported as `CodegenWarning`. The schema hash covers managers with an ORM name.
+  ported is reported as `CodegenWarning`; the methods of installed packages (`adorm.codegen.django.is_installed()`)
+  are listed in one `ThirdPartyMethodsWarning` per manager, which `adorm generate --ignore-third-party` leaves out,
+  and `get_by_natural_key` (`PROTOCOL_METHODS`) is not reported. The schema hash covers managers with an ORM name.
 - Demo application (`demo.py`, `demo/`): a Django project with clubs, members, activities (with a multi-table
   inheritance child) and billing (with a generic foreign key) on PostgreSQL, the adorm models generated from it by
   `adorm generate` into `demo/models` (setup checks them with `--check` and compares them with the Django models with

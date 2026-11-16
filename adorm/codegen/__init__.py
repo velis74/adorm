@@ -21,6 +21,7 @@ from adorm.codegen.spec import (
     python_name,
     QuerySetSpec,
     RelationSpec,
+    ThirdPartyMethodsWarning,
     TypeSpec,
 )
 
@@ -39,6 +40,7 @@ __all__ = [
     "QuerySetSpec",
     "RelationSpec",
     "SyncResult",
+    "ThirdPartyMethodsWarning",
     "TypeSpec",
     "check",
     "compute_schema_hash",

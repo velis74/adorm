@@ -48,6 +48,7 @@ schemas = {model._meta.label: model.model_json_schema() for model in MODELS}
 | `--pythonpath DIR` | a directory put on the import path after the current directory (repeatable) |
 | `-e`, `--exclude LABEL` | an app label (`billing`) or model label (`billing.Payment`) to leave out (repeatable) |
 | `--check` | write nothing; exit with status 1 when a file is missing, stale, obsolete or not generated |
+| `--ignore-third-party` | do not warn about manager and query set methods of installed packages |
 | `--line-length N` | the longest line before a statement is split (default 88) |
 
 ## Check the modules in CI
@@ -259,7 +260,9 @@ The generator writes the managers of every model; the [managers topic](/topics/m
 - `@client_base("package.module:ClassName")` on a Django manager or query set class makes its generated class derive
   from that hand-written adorm class, where methods ported by hand live.
 - A public method that is neither exposed, nor a method of Django's `Manager` or `QuerySet`, nor defined by the
-  client base is not generated and is reported as a warning, unless it comes from Django's own modules.
+  client base is not generated and is reported as a warning, unless it comes from Django's own modules or is
+  `get_by_natural_key`, which only Django calls. Methods of installed packages are listed in one warning per manager
+  ([below](#methods-of-installed-packages)).
 - A multi-table child or proxy declares only its own managers; it inherits the parent's from the parent's class.
 
 ```python
@@ -328,6 +331,41 @@ since arguments are plain values (pass the primary key). A method is not generat
 coroutine function, returns a query set (a query-building method belongs to the client base) or has a default the
 generator cannot write as a literal. A manager whose name would hide an attribute of `adorm.Model` is not generated
 either.
+
+### Methods of installed packages
+
+A manager or query set class of an installed package (a file under `site-packages` or `dist-packages`, such as
+django-model-utils or django-allauth) brings methods the application rarely calls through adorm. The generator
+reports them as one warning per manager, grouped by the class that defines them, while each method of the project's
+own classes keeps a warning of its own:
+
+```python
+from model_utils.managers import InheritanceManager
+
+
+class FilteringInheritanceManager(InheritanceManager):
+    def filter_subclasses(self, *subclasses): ...
+
+
+class Asset(models.Model):
+    objects = FilteringInheritanceManager()
+```
+
+```text
+warning: assets.Asset.objects.filter_subclasses: not generated; expose it or port it to a client base
+warning: assets.Asset.objects: 6 methods of installed packages not generated: model_utils.managers.InheritanceManagerMixin (get_subclass, instance_of, select_subclasses), model_utils.managers.InheritanceQuerySet (instance_of), model_utils.managers.InheritanceQuerySetMixin (get_subclass, select_subclasses); expose or port the ones the application calls
+```
+
+A method listed in `ADORM_EXPOSE` or ported to the client base drops out of the list. `--ignore-third-party` leaves
+the list out and keeps every other warning:
+
+```sh
+adorm generate --ignore-third-party --settings myproject.settings --output myproject/adorm_models
+```
+
+Code whose file path has no `site-packages` or `dist-packages` directory, such as the project's own modules, an
+editable install or a package vendored into the project's source tree, is not installed; packages in a virtualenv
+inside the project are.
 
 ## Name clashes
 

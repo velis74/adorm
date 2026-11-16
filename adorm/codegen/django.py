@@ -5,7 +5,9 @@ many-to-many through models are not (a `ManyToMany` names them by label). Manage
 manager whose class or query set class overrides a method the driver calls on the ORM manager (`ROUTED_METHODS`:
 ``get_queryset``, ``create``, ``delete`` …) gets its ORM name, unless its client base defines the same method; the
 methods marked with `adorm.expose` or listed in the ``ADORM_EXPOSE`` setting (``"app_label.Model.manager.method"``)
-become driver methods, which run on the manager (``method_manager``) without routing its other operations.
+become driver methods, which run on the manager (``method_manager``) without routing its other operations. Methods
+that are neither exposed nor ported are reported as `CodegenWarning`, one per method; those of installed packages
+(`is_installed`) as one `ThirdPartyMethodsWarning` per manager, and `PROTOCOL_METHODS` not at all.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ import warnings
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Any
 
 import django
@@ -50,6 +53,7 @@ from adorm.codegen.spec import (
     python_name,
     QuerySetSpec,
     RelationSpec,
+    ThirdPartyMethodsWarning,
     TypeSpec,
 )
 from adorm.models.base import Model as AdormModelBase
@@ -57,7 +61,16 @@ from adorm.models.managers import Manager as AdormManager
 from adorm.porting import get_client_base, is_exposed
 from adorm.query.queryset import QuerySet as AdormQuerySet
 
-__all__ = ["exposed_methods", "field_spec", "introspect", "manager_specs", "model_spec", "schema_hash", "setup"]
+__all__ = [
+    "exposed_methods",
+    "field_spec",
+    "introspect",
+    "is_installed",
+    "manager_specs",
+    "model_spec",
+    "schema_hash",
+    "setup",
+]
 
 _INT = TypeSpec("int")
 _STR = TypeSpec("str")
@@ -101,8 +114,8 @@ _SLUG_PATTERNS = {False: r"^[-a-zA-Z0-9_]+$", True: r"^[-\w]+$"}
 _END_OF_TEXT = re.compile(r"(?<!\\)((?:\\\\)*)\\Z")
 
 
-def _warn(message: str) -> None:
-    warnings.warn(message, CodegenWarning, stacklevel=3)
+def _warn(message: str, category: type[CodegenWarning] = CodegenWarning) -> None:
+    warnings.warn(message, category, stacklevel=3)
 
 
 def _where(field: Any) -> str:
@@ -427,6 +440,9 @@ ROUTED_METHODS = frozenset(
 )  # fmt: skip
 """The Django manager and query set methods whose override makes a manager run its operations through the ORM
 manager (``orm_name``)."""
+PROTOCOL_METHODS = frozenset({"get_by_natural_key"})
+"""Manager methods Django itself calls (deserialisation, authentication backends), never reported when not
+generated."""
 _SCALARS = frozenset({bool, int, float, str, bytes})
 _CONTAINERS = frozenset({list, tuple, set, frozenset, dict})
 _DOTTED_MODULES = frozenset({"datetime", "decimal", "uuid"})
@@ -441,9 +457,22 @@ def _user_classes(cls: type) -> list[type]:
     return [klass for klass in cls.__mro__ if klass.__module__ not in _CORE_MODULES]
 
 
-def _own_functions(cls: type, queryset_class: type | None = None) -> dict[str, Any]:
+_PACKAGE_DIRECTORIES = frozenset({"site-packages", "dist-packages"})
+
+
+def is_installed(func: Any) -> bool:
+    """Whether the function ``func`` (unwrapped) is defined in a ``site-packages`` or ``dist-packages`` directory,
+    the code of an installed distribution; an editable install and a package vendored into the project's source tree
+    are not."""
+    code = getattr(inspect.unwrap(func), "__code__", None)
+    return code is not None and not _PACKAGE_DIRECTORIES.isdisjoint(Path(code.co_filename).parts)
+
+
+def _own_functions(
+    cls: type, queryset_class: type | None = None, owners: dict[str, type] | None = None
+) -> dict[str, Any]:
     """Public functions and ``get_queryset`` the user classes of ``cls`` define, nearest first; a manager method
-    Django copied from ``queryset_class`` is left out."""
+    Django copied from ``queryset_class`` is left out. ``owners`` receives the class each function is found on."""
     copied = _own_functions(queryset_class) if queryset_class is not None else {}
     found: dict[str, Any] = {}
     for klass in _user_classes(cls):
@@ -455,6 +484,8 @@ def _own_functions(cls: type, queryset_class: type | None = None) -> dict[str, A
             if name in copied and getattr(value, "__wrapped__", None) is copied[name]:
                 continue
             found[name] = value
+            if owners is not None:
+                owners[name] = klass
     return found
 
 
@@ -616,8 +647,10 @@ def _manager_spec(
     label = model._meta.label
     where = f"{label}.{manager.name}"
     queryset_class = manager._queryset_class
-    manager_functions = _own_functions(type(manager), queryset_class)
-    queryset_functions = _own_functions(queryset_class)
+    manager_owners: dict[str, type] = {}
+    queryset_owners: dict[str, type] = {}
+    manager_functions = _own_functions(type(manager), queryset_class, manager_owners)
+    queryset_functions = _own_functions(queryset_class, owners=queryset_owners)
     listed = set(exposed.get(where, ()))
     unknown = sorted(n for n in listed if n not in manager_functions and not hasattr(queryset_class, n))
     unknown += sorted(
@@ -644,9 +677,10 @@ def _manager_spec(
         name in ROUTED_METHODS and not _ported(queryset_client, name) for name in queryset_functions
     )
     exposed_names = {m.name for m in manager_methods} | {m.name for m in queryset_methods}
-    for functions, client, owner in (
-        (manager_functions, manager_client, where),
-        (queryset_functions, queryset_client, f"{where}.{queryset_class.__name__}"),
+    installed: dict[str, set[str]] = {}
+    for functions, owners, client, owner in (
+        (manager_functions, manager_owners, manager_client, where),
+        (queryset_functions, queryset_owners, queryset_client, f"{where}.{queryset_class.__name__}"),
     ):
         for name, func in functions.items():
             if (
@@ -655,11 +689,24 @@ def _manager_spec(
                 or name in listed
                 or name in _MANAGER_NAMES
                 or name in _QUERYSET_NAMES
+                or name in PROTOCOL_METHODS
                 or _ported(client, name)
                 or func.__module__.startswith("django.")
             ):
                 continue
+            if is_installed(func):
+                klass = owners[name]
+                installed.setdefault(f"{klass.__module__}.{klass.__qualname__}", set()).add(name)
+                continue
             _warn(f"{owner}.{name}: not generated; expose it or port it to a client base")
+    if installed:
+        count = sum(map(len, installed.values()))
+        listing = ", ".join(f"{owner} ({', '.join(sorted(names))})" for owner, names in sorted(installed.items()))
+        _warn(
+            f"{where}: {count} method{'s' if count > 1 else ''} of installed packages not generated: {listing}; "
+            "expose or port the ones the application calls",
+            ThirdPartyMethodsWarning,
+        )
     orm_name = manager.name if overrides else None
     method_manager = manager.name if not overrides and (manager_methods or queryset_methods) else None
     queryset = None
