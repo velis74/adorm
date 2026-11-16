@@ -50,6 +50,21 @@ async def monitor(test_database_url):
         await conn.close()
 
 
+async def until_statement_runs(url, query):
+    """Return once a session of the test database runs ``query``."""
+    conn = await asyncpg.connect(url)
+    try:
+        async with asyncio.timeout(10):
+            while not await conn.fetchval(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND state = 'active' AND query = $1",
+                query,
+            ):
+                await asyncio.sleep(0.01)
+    finally:
+        await conn.close()
+
+
 @pytest.fixture
 async def runner(make_pool):
     routers = []
@@ -149,7 +164,12 @@ async def test_an_abandoned_transaction_is_rolled_back_by_the_slot(runner, monit
 
 
 @pytest.mark.parametrize("attempt", range(3))
-async def test_cancelling_a_block_during_a_long_statement_rolls_back_and_frees_the_slot(runner, monitor, attempt):  # noqa: ARG001
+async def test_cancelling_a_block_during_a_long_statement_rolls_back_and_frees_the_slot(
+    runner,
+    monitor,
+    test_database_url,
+    attempt,  # noqa: ARG001
+):
     router = runner(max_connections=1)
     s = session()
     started = asyncio.Event()
@@ -162,7 +182,7 @@ async def test_cancelling_a_block_during_a_long_statement_rolls_back_and_frees_t
 
     task = asyncio.create_task(block())
     await started.wait()
-    await asyncio.sleep(0.05)
+    await until_statement_runs(test_database_url, "SELECT pg_sleep(30)")
     task.cancel()
     async with asyncio.timeout(10):
         with pytest.raises(asyncio.CancelledError):
