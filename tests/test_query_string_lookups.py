@@ -201,6 +201,7 @@ def test_a_field_named_like_a_lookup():
         ("name__a__b", r"club\.Member\.name is neither a relation nor a JSON field; 'a__b' cannot follow"),
         ("club__name__exact__exact", r"'exact' cannot follow"),
         ("club_id__name", r"unsupported lookup 'name' for club\.Member\.club_id"),
+        ("name__overlap", r"^unsupported lookup 'overlap' for club\.Member\.name$"),
     ],
 )
 def test_unresolvable_keys_raise_field_error(key, message):
@@ -349,11 +350,39 @@ def test_resolve_lookup_takes_a_model_a_label_or_a_query(target):
         ("token__startswith", str),
         ("age__regex", str),
         ("tags__contains", list[str]),
+        ("tags__overlap", str),
         ("joined__lte", datetime.datetime),
     ],
 )
 def test_value_type(key, value_type):
     assert resolve(key).value_type == value_type
+
+
+@pytest.mark.parametrize(
+    ("key", "message"),
+    [
+        ("payload__overlap", r"^unsupported lookup 'overlap' for club\.Event\.payload$"),
+        ("json___overlap", r"^unsupported lookup 'overlap' for club\.Event\.json_$"),
+        ("json___a__overlap", r"^unsupported lookup 'overlap' for club\.Event\.json___a$"),
+        ("settings__theme__overlap", r"^unsupported lookup 'overlap' for club\.Event\.settings__theme$"),
+        ("starts__overlap", r"^unsupported lookup 'overlap' for club\.Event\.starts$"),
+    ],
+)
+def test_overlap_applies_only_to_an_array_field(key, message):
+    with pytest.raises(FieldError, match=message) as raised:
+        resolve(key, "club.Event", EVENTS)
+    assert (raised.value.model, raised.value.key) == ("club.Event", key)
+    with pytest.raises(FieldError, match=message):
+        check_lookups("club.Event", Q((key, ["x"])) | Q(range=1), source=EVENTS)
+
+
+def test_overlap_on_an_annotation():
+    assert resolve("n__overlap", annotations=["n"]).value_type is None
+    assert resolve("n__overlap", annotations={"n": list[int] | None}).value_type is int
+    for annotations in ({"n": typing.Any}, {"n": int}, ["n"]):
+        key = "n__overlap" if annotations != ["n"] else "n__a__overlap"
+        with pytest.raises(FieldError, match="unsupported lookup 'overlap' for the annotation"):
+            resolve(key, annotations=annotations)
 
 
 def test_value_type_of_a_registered_lookup():

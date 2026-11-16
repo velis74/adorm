@@ -48,7 +48,7 @@ that types the same positions: decoding a typed value without its type raises `V
 | a node | `{"node": <node name>, <attribute>: <encoded attribute>, ...}` for every attribute in the node's `_fields` |
 | a typed value | `{"value": <JSON>}` |
 | an untyped value | `{"type": <type name>, "value": <JSON>}` |
-| the values of `in` and `range` | `{"items": [<node or value>, ...]}` |
+| the values of `in`, `range` and `overlap` | `{"items": [<node or value>, ...]}` |
 | field values of a write | `{<field name>: <node or value>, ...}` |
 
 Node attributes that are not values are strings, integers, booleans, `null`, nested nodes or lists of them. An
@@ -68,7 +68,9 @@ A value is typed by:
   the lookup's [`rhs_type()`](./lookups#adorm-query-lookup-lhs-rhs): `isnull` takes a `bool`; `regex`, `iregex` and
   the text pattern lookups (`iexact`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`) a
   string, except `contains` on a container field (the field's type) or a record field (untyped); the others the
-  field's type; each value of `in` and `range` has that type;
+  field's type; each value of `in` and `range` has that type, each value of `overlap` the item type of the array
+  field (`str` for `list[str]`); an expression in place of the values (`disciplines__overlap=Value(["Lead"])`) has the type of
+  the expression on the left;
 - a field value of `Create`, `Save`, `Update` and the defaults of `GetOrCreate` and `UpdateOrCreate`: the field's type; the primary key of
   `Save` and `DeleteInstance`: the primary key's type;
 - `Value(value, output_type=...)`: the `output_type`;

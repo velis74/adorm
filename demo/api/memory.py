@@ -109,6 +109,12 @@ def _contains(value: Any, rhs: Any) -> bool:
     return _text(rhs) in _text(value)
 
 
+def _overlap(value: Any, rhs: Any) -> bool:
+    if not isinstance(value, list | tuple) or not isinstance(rhs, list | tuple):
+        raise TypeError(f"the overlap lookup compares arrays, not {type(value).__name__} and {type(rhs).__name__}")
+    return any(item in value for item in rhs if item is not None)
+
+
 LOOKUPS: Mapping[str, Callable[[Any, Any], bool]] = types.MappingProxyType(
     {
         "exact": operator.eq,
@@ -127,6 +133,7 @@ LOOKUPS: Mapping[str, Callable[[Any, Any], bool]] = types.MappingProxyType(
         "iendswith": lambda value, rhs: _text(value).casefold().endswith(_text(rhs).casefold()),
         "regex": lambda value, rhs: re.search(rhs, _text(value)) is not None,
         "iregex": lambda value, rhs: re.search(rhs, _text(value), re.IGNORECASE) is not None,
+        "overlap": _overlap,
     }
 )
 """The lookups the driver evaluates, by name; ``isnull`` is evaluated separately. A NULL field value makes every
@@ -328,7 +335,7 @@ class _Rows:
                 result = True if True in results else None if None in results else False
             return (None if result is None else not result) if node.negated else result
         if isinstance(node, Lookup):
-            self.check_relation_lookup(node)
+            self.check_lookup(node)
             value = self.value(node.lhs, row)
             if node.lookup_name == "isnull":
                 return (value is None) is node.rhs
@@ -346,10 +353,11 @@ class _Rows:
                 raise _incomparable(exc) from exc
         raise NotSupportedError(f"the memory driver does not evaluate {type(node).__name__} conditions")
 
-    def check_relation_lookup(self, node: Lookup) -> None:
-        """Raise `FieldError` for a lookup on a relation that does not apply to relations."""
+    def check_lookup(self, node: Lookup) -> None:
+        """Raise `FieldError` for a lookup on a field path that does not apply to it (`resolve_lookup`): a lookup on a
+        relation that does not apply to relations, ``overlap`` on a field that is not an array."""
         lhs = node.lhs
-        if not node.on_relations and type(lhs) is F and lhs.name in self.model.__adorm_relations__:
+        if type(lhs) is F:
             resolve_lookup(self.label, f"{lhs.name}__{node.lookup_name}")
 
     def matches(self, query: Query, row: Mapping[str, Any]) -> bool:

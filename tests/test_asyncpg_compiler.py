@@ -68,6 +68,11 @@ def queries():
         "json_key": Book.objects.filter(extra__author__name="Ana").order_by("isbn"),
         "json_contains": Book.objects.filter(extra__contains={"tags": ["x"]}).order_by("isbn"),
         "array_contains": Book.objects.filter(keywords__contains=["war"]).order_by("isbn"),
+        "array_overlap": Book.objects.filter(keywords__overlap=["peace", "x", "y"]).order_by("isbn"),
+        "array_overlap_empty": Book.objects.filter(keywords__overlap=[]).order_by("isbn"),
+        "array_overlap_subquery": Book.objects.filter(
+            keywords__overlap=Book.objects.filter(genre="poetry").values_list("title")
+        ).order_by("isbn"),
         "aggregate": Book.objects.values("genre").annotate(n=Count("authors"), p=Sum("pages")).order_by("genre"),
         "value_in_select": Book.objects.annotate(one=Value(1), yes=Value(True)).values("isbn", "one", "yes"),
         "datetime_in_select": Book.objects.annotate(at=Value(PUBLISHED)).values("isbn", "at").order_by("isbn"),

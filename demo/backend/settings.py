@@ -16,6 +16,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
+    "django.contrib.postgres",
     "demo.backend.clubs",
     "demo.backend.activities",
     "demo.backend.billing",

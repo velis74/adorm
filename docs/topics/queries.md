@@ -49,7 +49,7 @@ cache = {adults: "adults"}
 assert cache[Query("club.Member").filter(active=True).filter(age__gte=18)] == "adults"
 ```
 
-Setting an attribute of a node raises `AttributeError`. Iterables passed to `in` and `range` are copied into tuples,
+Setting an attribute of a node raises `AttributeError`. Iterables passed to `in`, `range` and `overlap` are copied into tuples,
 so changing the original list afterwards does not change the query.
 
 ## Field lookups
@@ -67,6 +67,7 @@ Query("club.Member").filter(code__regex=r"^[A-Z]{3}-\d+$")
 Query("club.Member").filter(pk__in=[1, 2, 3])
 Query("club.Member").filter(joined__range=(start, end))
 Query("club.Member").filter(club__isnull=True)
+Query("club.Club").filter(disciplines__overlap=["Lead", "Dinghy"])   # an array field sharing an item
 ```
 
 `name=None` and `name__iexact=None` become `name__isnull=True`; any other lookup with `None` raises `ValueError`.
@@ -95,13 +96,14 @@ Query("club.Club").filter(member__age__lt=18).filter(member__guest=True)  # a mi
 
 ### Queries as subqueries
 
-`in` takes a query instead of a list; the query becomes a subquery. It selects one column with `values()`, or the
-primary key when it selects none:
+`in` and `overlap` take a query instead of a list; the query becomes a subquery. It selects one column with
+`values()`, or the primary key when it selects none:
 
 ```python
 active_clubs = Query("club.Club").filter(active=True)
 Query("club.Member").filter(club__in=active_clubs)                       # club in (select id ...)
 Query("club.Member").filter(email__in=Query("club.Invite").values("email"))
+Query("club.Club").filter(disciplines__overlap=Query("club.Event").values("discipline"))   # && array(select ...)
 ```
 
 A query passed to any other lookup also becomes a `Subquery`; it must return a single row.

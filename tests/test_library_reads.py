@@ -30,7 +30,7 @@ from adorm import (
 )
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Call, Count as CountOperation, Select
-from adorm.query import Aggregate as AggregateExpression, Func, Query, Subquery, Value
+from adorm.query import Aggregate as AggregateExpression, Exists, Func, OuterRef, Query, Subquery, Value
 from adorm.query.lookups import Exact, IStartsWith
 from demo.models.contenttypes import ContentType
 from tests.djangoproject.library import models as dj
@@ -183,6 +183,51 @@ async def test_lookups_and_relation_paths_select_what_django_selects(library, po
 )
 async def test_lookups_on_fields_django_types_and_renamed_names(library, pool, lookups, expected):  # noqa: ARG001
     assert [book.isbn async for book in Book.objects.filter(**lookups).order_by("isbn")] == expected
+
+
+async def test_overlap_on_an_array_field(library, pool):  # noqa: ARG001
+    async def isbns(**lookups):
+        return [book.isbn async for book in Book.objects.filter(**lookups).order_by("isbn")]
+
+    assert await isbns(keywords__overlap=["spice", "war"]) == [DUNE]
+    assert await isbns(keywords__overlap={"none", "sand"}) == [DUNE]
+    assert await isbns(keywords__overlap=["Spice"]) == []
+    assert await isbns(keywords__overlap=[None]) == []
+    assert await isbns(keywords__overlap=["spice", F("title")]) == [DUNE]
+    assert await isbns(keywords__overlap=F("keywords")) == [DUNE]
+    assert await isbns(keywords__overlap=Value(["spice", "worm"])) == [DUNE]
+    assert [book.isbn async for book in Book.objects.annotate(k=F("keywords")).filter(k__overlap=["sand"])] == [DUNE]
+    # Books sharing a keyword with another book: the right-hand side is the outer row's array.
+    await Book.objects.filter(isbn=DUNE_2).update(keywords=["worm", "spice"])
+    others = Book.objects.exclude(pk=OuterRef("pk")).filter(keywords__overlap=OuterRef("keywords"))
+    assert [book.isbn async for book in Book.objects.filter(Exists(others)).order_by("isbn")] == sorted([DUNE, DUNE_2])
+    await Book.objects.filter(isbn=DUNE_2).update(keywords=[])
+    assert [book.isbn async for book in Book.objects.exclude(keywords__overlap=["sand"]).order_by("isbn")] == sorted(
+        [DUNE_2, PHYSICS, POEMS]
+    )
+    # Books whose keywords name an author: a query of one column, then one of model rows (its primary key).
+    await Book.objects.filter(isbn=POEMS).update(keywords=["Ann", "Zed"])
+    assert await isbns(keywords__overlap=Author.objects.values("name")) == [POEMS]
+    assert await isbns(keywords__overlap=Book.objects.filter(isbn=DUNE)) == []
+    await Book.objects.filter(isbn=PHYSICS).update(keywords=[DUNE])
+    assert await isbns(keywords__overlap=Book.objects.filter(title="Dune")) == [PHYSICS]
+
+
+async def test_overlap_on_a_field_that_is_no_array_is_a_field_error(library, pool):  # noqa: ARG001
+    # On a JSON field Django would read "overlap" as a key and compare the key's value.
+    for key in ("extra__overlap", "extra__series__overlap"):
+        with pytest.raises(FieldError, match=r"unsupported lookup 'overlap' for library\.Book\.extra") as raised:
+            await Book.objects.filter(**{key: ["dune"]}).count()
+        assert (raised.value.model, raised.value.key) == ("library.Book", key)
+    with pytest.raises(FieldError, match="overlap"):
+        await Book.objects.filter(title__overlap=["Dune"]).count()
+    # An annotation that is the JSON field, also through another annotation.
+    for annotated in (Book.objects.annotate(e=F("extra")), Book.objects.annotate(x=F("extra"), e=F("x"))):
+        with pytest.raises(FieldError, match=r"unsupported lookup 'overlap' for library\.Book\.extra") as raised:
+            await annotated.filter(e__overlap=["dune"]).count()
+        assert raised.value.key == "e__overlap"
+    assert await Book.objects.filter(extra__series="dune").count() == 1
+    assert await Book.objects.filter(extra__contains={"series": "dune"}).count() == 1
 
 
 async def test_renamed_relation_and_field_on_the_other_side(library, pool):  # noqa: ARG001

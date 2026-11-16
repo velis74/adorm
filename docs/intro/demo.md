@@ -85,7 +85,7 @@ endpoints do not query through Django: they use the adorm models.
 
 | App | Model | Constructs it exercises |
 |---|---|---|
-| `clubs` | `Club` | unique and slug fields, a JSON field, many-to-many `members` through `Membership` |
+| `clubs` | `Club` | unique and slug fields, a JSON field, an array field (`disciplines`), many-to-many `members` through `Membership` |
 | `clubs` | `Member` | choices, nullable date, JSON list |
 | `clubs` | `Membership` | two foreign keys, a unique constraint, a decimal with a validator |
 | `activities` | `Tag` | the target of a plain many-to-many (`Activity.tags`) |
@@ -579,7 +579,8 @@ and checks the row again, and a wait that would close a cycle raises `Operationa
 before the slice applies. A locking read outside a transaction raises `TransactionManagementError`. Rolling back to a savepoint releases the locks taken after
 it. A NULL value makes a condition unknown, as in SQL, except under a negation: there a lookup on a NULL field is
 false, so `exclude()` and `~Q()` keep the row, as in Django. A lookup, arithmetic or ordering on values that do not
-compare (a date with a datetime, text with a number) raises `ProgrammingError` with SQLSTATE `42883`.
+compare (a date with a datetime, text with a number, `overlap` with an expression that is not a list) raises
+`ProgrammingError` with SQLSTATE `42883`.
 
 The driver records each call in the list of the enclosing `tracing()` block, from tasks created inside it too; the
 profile hooks `on_acquire` and `on_release` record the slot's assignment to a session:

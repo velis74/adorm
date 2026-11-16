@@ -134,7 +134,8 @@ The driver turns an adorm [`Query`](/ref/query) into a Django query set
 | each `filter()` / `exclude()` call | one Django `filter()` call with a Django `Q`; `exclude()` is a negated `Q`, with Django's NULL handling |
 | `Q`, `&`, `|`, `~` on conditions | Django `Q`, `&`, `|`, `~` |
 | `qs1 & qs2`, `qs1 \| qs2` | the filters of both / one filter with both queries' conditions joined with OR |
-| lookups (`exact` … `iregex`) | the lookup of the same name on the field, so `contains` on an `ArrayField` or `JSONField` is Django's containment |
+| lookups (`exact` … `iregex`, `overlap`) | the lookup of the same name on the field, so `contains` on an `ArrayField` or `JSONField` is Django's containment and `overlap` is the `ArrayField` lookup; a lookup that a `JSONField` or `HStoreField` does not have (`overlap`) raises `FieldError` on the field, on a key inside it and on an annotation that refers to the field (`annotate(e=F("extra"))`), where Django would read the name as a key |
+| the values of `overlap` (`disciplines__overlap=["Lead", "Dinghy"]`) | a list, also when empty |
 | a lookup on an expression (`Exact(Lower("name"), "ann")`) | the expression as an `alias()` and the lookup on it |
 | `F`, `Value`, `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc…` | the Django class of the same name; a `Value` with `output_type` gets the Django field for it (`int` → `IntegerField` …); `Trunc(x, "date")` / `"time"` is `TruncDate` / `TruncTime` |
 | `Count`, `Sum`, `Avg`, `Min`, `Max` with `distinct`, `filter`, `default` | the Django aggregate with the same options; `Count("*")` counts rows |
@@ -143,6 +144,7 @@ The driver turns an adorm [`Query`](/ref/query) into a Django query set
 | `values("x").annotate(n=Count(...))` (`Query.group_by`) | `annotate()` of the annotations without an aggregate, `values("x")`, `annotate()` of the aggregates: Django's `GROUP BY` |
 | a model instance as a value | its primary key, or the value of the field a foreign key's `to_field` names |
 | a query in `in` (`pk__in=qs`, `pk__in=qs.values("x")`) | a Django query set in `__in` (one SQL statement) |
+| a query in `overlap` (`disciplines__overlap=qs.values("x")`) | a Django query set of that one column in `__overlap` (`ARRAY(subquery)`); a query without selected columns selects the primary key |
 | `Subquery(query)`, `Exists(query)`, `~Exists(query)` | `Subquery(queryset)`, `Exists(queryset)`, `~Exists(queryset)` |
 | `OuterRef("pk")` in a subquery | `OuterRef("pk")`, the path translated on the enclosing query's model |
 | `order_by()` with `asc(nulls_first=True)` … | `order_by()` with `asc()` / `desc()` and the same NULL placement |

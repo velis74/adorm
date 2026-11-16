@@ -35,9 +35,9 @@ def tables() -> dict[str, list[dict]]:
     return {
         "clubs.Club": [
             {"id": 1, "name": "Rowing", "slug": "rowing", "founded": datetime.date(1921, 5, 3), "city": "Ljubljana",
-             "address": {"street": "Veslaška pot 1"}},
+             "address": {"street": "Veslaška pot 1"}, "disciplines": ["Sculling", "Fitness"]},
             {"id": 2, "name": "Sailing", "slug": "sailing", "founded": datetime.date(2004, 4, 1), "city": "Koper",
-             "address": {}},
+             "address": {}, "disciplines": ["Dinghy"]},
         ],
         "clubs.Member": [
             member(1, "Ana", "Novak", "beginner", datetime.date(2001, 1, 10), ["junior"]),

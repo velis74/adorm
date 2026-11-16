@@ -129,15 +129,24 @@ async def test_refusals_and_reads_racing_in_one_transaction(driver, pool):
 
 # Lookup keys built at run time
 
-UNRESOLVED = ["frist_name__icontains", "nickname", "first_name__nope", "birth_date__year", "memberships__regex"]
-"""Keys a dynamic filter may build that the model does not resolve: a misspelled field, an unknown field, an unknown
-lookup name, a transform after a scalar field and a lookup a relation does not take; every driver reports them as
-`FieldError`."""
+UNRESOLVED = {
+    "frist_name__icontains": "x",
+    "nickname": "x",
+    "first_name__nope": "x",
+    "birth_date__year": "x",
+    "memberships__regex": "x",
+    "first_name__overlap": ["x"],
+    "tags__overlap": ["x"],
+}
+"""Keys a dynamic filter may build that the model does not resolve, with a value: a misspelled field, an unknown
+field, an unknown lookup name, a transform after a scalar field, a lookup a relation does not take, and an array lookup
+on a text field and on a JSON field; every driver reports them as `FieldError`."""
 
 
 def unresolved(n):
     """An unresolvable dynamic filter."""
-    return Member.objects.filter(**{UNRESOLVED[n % len(UNRESOLVED)]: "x"})
+    key = list(UNRESOLVED)[n % len(UNRESOLVED)]
+    return Member.objects.filter(**{key: UNRESOLVED[key]})
 
 
 async def test_an_unresolvable_key_raises_field_error_and_keeps_the_slot(make_router):
@@ -192,11 +201,11 @@ async def test_checking_keys_first_needs_no_slot(make_router):
     holder = asyncio.create_task(hold_the_only_slot())
     try:
         await holding.wait()
-        for key in UNRESOLVED:
+        for key, value in UNRESOLVED.items():
             with pytest.raises(FieldError):
                 resolve_lookup(Member, key)
             with pytest.raises(FieldError):
-                check_lookups(Member.objects.all(), Q((key, "x")) | Q(level="advanced"))
+                check_lookups(Member.objects.all(), Q((key, value)) | Q(level="advanced"))
         assert pool.waiting == 0
     finally:
         done.set()

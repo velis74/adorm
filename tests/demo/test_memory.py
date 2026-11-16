@@ -114,6 +114,34 @@ async def test_filters_with_lookups_q_and_negation(db):  # noqa: ARG001
     assert await names(Member.objects.filter(tags__contains=["junior"])) == ["Ana"]
 
 
+async def test_overlap_matches_a_shared_item(db):  # noqa: ARG001
+    async def slugs(queryset):
+        return [club.slug async for club in queryset.order_by("id")]
+
+    assert await slugs(Club.objects.filter(disciplines__overlap=["Fitness", "Dinghy"])) == ["rowing", "sailing"]
+    assert await slugs(Club.objects.filter(disciplines__overlap={"Dinghy"})) == ["sailing"]
+    assert await slugs(Club.objects.filter(disciplines__overlap=["fitness"])) == []
+    assert await slugs(Club.objects.filter(disciplines__overlap=[])) == []
+    assert await slugs(Club.objects.filter(disciplines__overlap=F("disciplines"))) == ["rowing", "sailing"]
+    assert await slugs(Club.objects.filter(disciplines__overlap=["x", F("name")])) == []
+    assert await slugs(Club.objects.exclude(disciplines__overlap=["Sculling"])) == ["sailing"]
+    # A NULL item matches nothing; exclude() keeps a NULL array, as Django does.
+    await Club.objects.filter(slug="rowing").update(disciplines=[None, "Fitness"])
+    await Club.objects.filter(slug="sailing").update(disciplines=None)
+    assert await slugs(Club.objects.filter(disciplines__overlap=["Fitness"])) == ["rowing"]
+    assert await slugs(Club.objects.filter(disciplines__overlap=F("disciplines"))) == ["rowing"]
+    assert await slugs(Club.objects.filter(~Q(~Q(disciplines__overlap=["Fitness"])))) == ["rowing"]
+    assert await slugs(Club.objects.exclude(disciplines__overlap=["Fitness"])) == ["sailing"]
+
+
+async def test_overlap_with_a_value_that_is_no_array_raises_a_programming_error(db):  # noqa: ARG001
+    with pytest.raises(adorm.ProgrammingError, match="operator does not exist") as raised:
+        await Club.objects.filter(disciplines__overlap=F("name")).count()
+    assert raised.value.sqlstate == "42883"
+    with pytest.raises(adorm.FieldError, match="unsupported lookup 'overlap'"):
+        await Club.objects.filter(name__overlap=["Rowing"]).count()
+
+
 async def test_a_negation_keeps_rows_whose_field_is_null_as_django_does(db):  # noqa: ARG001
     born_before = Member.objects.filter(birth_date__lt=datetime.date(2000, 1, 1))
     assert await names(born_before) == ["Cvetka"]

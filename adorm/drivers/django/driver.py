@@ -80,6 +80,7 @@ _LOOKUP_NAMES = (
     "iendswith",
     "regex",
     "iregex",
+    "overlap",
 )
 
 READ_CAPABILITIES = Capabilities(

@@ -14,10 +14,25 @@ from demo.backend.clubs.models import Club, Member, Membership
 
 UTC = datetime.UTC
 
+# (name, slug, founded, city, address, disciplines)
 CLUBS = [
-    ("Ljubljana Rowing Club", "ljubljana-rowing", datetime.date(1921, 5, 3), "Ljubljana", {"street": "Veslaška pot 1"}),
-    ("Maribor Climbing Club", "maribor-climbing", datetime.date(1987, 9, 14), "Maribor", {"street": "Stenska ulica 4"}),
-    ("Koper Sailing Club", "koper-sailing", datetime.date(2004, 4, 1), "Koper", {}),
+    (
+        "Ljubljana Rowing Club",
+        "ljubljana-rowing",
+        datetime.date(1921, 5, 3),
+        "Ljubljana",
+        {"street": "Veslaška pot 1"},
+        ["Sculling", "Coxed eights", "Fitness"],
+    ),
+    (
+        "Maribor Climbing Club",
+        "maribor-climbing",
+        datetime.date(1987, 9, 14),
+        "Maribor",
+        {"street": "Stenska ulica 4"},
+        ["Bouldering", "Lead", "Fitness"],
+    ),
+    ("Koper Sailing Club", "koper-sailing", datetime.date(2004, 4, 1), "Koper", {}, ["Dinghy", "Keelboat"]),
 ]
 MEMBERS = [
     ("Ana", "Novak", "beginner", ["junior"]),
@@ -114,8 +129,10 @@ class Command(BaseCommand):
 
     def seed(self) -> None:
         clubs = [
-            Club.objects.create(name=name, slug=slug, founded=founded, city=city, address=address)
-            for name, slug, founded, city, address in CLUBS
+            Club.objects.create(
+                name=name, slug=slug, founded=founded, city=city, address=address, disciplines=disciplines
+            )
+            for name, slug, founded, city, address, disciplines in CLUBS
         ]
         members = [
             Member.objects.create(

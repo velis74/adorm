@@ -102,6 +102,7 @@ for:
 | `first_name__icontain` | `unsupported lookup 'icontain' for clubs.Member.first_name; perhaps you meant 'icontains'` |
 | `joined__year__gte` | `clubs.Member.joined is neither a relation nor a JSON field; 'year' cannot follow` |
 | `memberships__club__icontains` | `unsupported lookup 'icontains' for the relation clubs.Membership.club; a relation takes exact, gt, gte, lt, lte, in, isnull` |
+| `first_name__overlap`, `tags__overlap` | `unsupported lookup 'overlap' for clubs.Member.first_name` (`.tags`): a lookup whose `applies_to()` refuses the field |
 
 A path that ends at a relation compares the target's primary key, so it takes only the lookups whose `on_relations`
 is true: `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`, `memberships__isnull`). The operation
@@ -156,7 +157,7 @@ A frozen dataclass, the result of `resolve_lookup()`:
 | `field` | that field or relation (`pk` resolved to the primary key's name), `None` likewise |
 | `field_type` | the type of the compared values: the field's type hint, the target's primary key type for a relation, an annotation's given type; `None` when unknown, always when `keys` is not empty |
 | `keys` | the segments after a JSON or record field, `()` otherwise |
-| `value_type` | a property: the type of a right-hand side value (of each value for `in` and `range`), `lookup.rhs_type(field_type)` |
+| `value_type` | a property: the type of a right-hand side value (of each value for `in`, `range` and `overlap`), `lookup.rhs_type(field_type)` |
 
 ```python
 resolve_lookup(Member, "pk__in")
@@ -164,6 +165,7 @@ resolve_lookup(Member, "pk__in")
 #                field_type=int | None, keys=())
 resolve_lookup(Member, "birth_date__isnull").value_type    # bool
 resolve_lookup(Member, "joined__startswith").value_type    # str: a text pattern
+resolve_lookup(Club, "disciplines__overlap").value_type    # str: an item of the list[str] field
 ```
 
 ### `adorm.query.check_lookups(target, condition, *, annotations=(), source=None)`
@@ -205,6 +207,7 @@ members = Member.objects.filter(condition)
 | `icontains` | `IContains` | contains, ignoring case | any value |
 | `regex` | `Regex` | matches the regular expression (the database's syntax) | a string or an expression |
 | `iregex` | `IRegex` | matches the regular expression, ignoring case | a string or an expression |
+| `overlap` | `Overlap` | an array with at least one item in common | an iterable (stored as a tuple without `None`), a query or an array expression |
 
 Except for `isnull`, `regex` and `iregex`, a right-hand side may also be an expression (`F("other")`,
 `Lower("name")` …) or a query (a [`Query`](./query) or an object whose `query` attribute is one), which becomes a
@@ -224,8 +227,9 @@ Two class members tell the [operation codec](./encoding) how to type the right-h
 
 | Member | Meaning |
 |---|---|
-| `rhs_is_sequence` | `True` when `rhs` is a tuple of values, each typed on its own (`in`, `range`) |
-| `rhs_type(field_type)` | the type of a right-hand side value for a field of `field_type` (which may be `None`); `field_type` itself by default, `bool` for `isnull`, `str` for `regex`, `iregex` and the text pattern lookups (`None` for them when `field_type` is `None`); see `Contains` for its exceptions |
+| `rhs_is_sequence` | `True` when `rhs` is a tuple of values, each typed on its own (`in`, `range`, `overlap`) |
+| `applies_to(field_type, keys)` | whether the lookup applies to a field of `field_type` (`None` when unknown) or to the keys `keys` inside a JSON or record field; `True` by default, for `overlap` only an array field or a field of unknown type; `resolve_lookup()` and `check_lookups()` raise `FieldError` when it is false |
+| `rhs_type(field_type)` | the type of a right-hand side value for a field of `field_type` (which may be `None`); `field_type` itself by default, `bool` for `isnull`, `str` for `regex`, `iregex` and the text pattern lookups (`None` for them when `field_type` is `None`), the item type for `overlap`; see `Contains` and `Overlap` for their exceptions |
 
 The class attribute `on_relations` tells whether the lookup applies to a path that ends at a relation (compared by the
 target's primary key): `True` for `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull`, `False` by default.
@@ -312,6 +316,44 @@ A right-hand side that is neither a string nor an expression raises `TypeError`.
 ```python
 Query("club.Member").filter(code__regex=r"^[A-Z]{3}-\d+$")
 ```
+
+### `adorm.query.Overlap(lhs, rhs)`
+
+An array field (Django's `ArrayField`, a `list[...]` field of a generated model) that has at least one item in
+common with `rhs`; PostgreSQL's `&&`. `rhs` is one of:
+
+| Right-hand side | Compared with |
+|---|---|
+| an iterable of values or expressions | the array of those values; an empty iterable matches no row |
+| a query selecting one column (no column selected means the primary key) | the array of the column's values |
+| an expression that is not a condition (`F("other_array")`, `OuterRef`, `Value`) | the expression's array |
+
+A string, bytes, a mapping or a condition (`Q`, a lookup, `Exists`) raises `TypeError`, and so does `None`. The
+values are stored as a tuple as for [`In`](#adorm-query-in-lhs-rhs): `None` is left out, since a NULL item matches
+nothing, and a set is sorted when its values are orderable. Items compare by equality, so text is case-sensitive.
+
+The [operation codec](./encoding) encodes each value as an item of the field's type: `rhs_type()` returns `X` for a
+`list[X]`, `set[X]`, `frozenset[X]` or `tuple[X, ...]` field (also inside `Optional` or `Annotated`), else `None`.
+
+```python
+Club.objects.filter(disciplines__overlap=["Lead", "Keelboat"])
+Club.objects.filter(disciplines__overlap={"Fitness"})
+Club.objects.exclude(disciplines__overlap=["Fitness"])          # clubs without Fitness
+Club.objects.filter(disciplines__overlap=Competition.objects.values("discipline"))
+Book.objects.filter(keywords__overlap=["spice", F("title")])   # a value may be an expression
+Book.objects.filter(keywords__overlap=Value(["spice", "worm"]))
+```
+
+`exclude()` keeps a row whose array is NULL, as in Django. A `Value` with `output_type=list` is sent to PostgreSQL as
+`jsonb`, which is not an array; a `Value` without `output_type` is sent as an array.
+
+`overlap` applies only to a field whose type is a list, set, frozenset or `tuple[X, ...]` (also inside `Optional` or
+`Annotated`), or whose type is unknown. On another field, a JSON field (typed `Any`) or a key inside one,
+`resolve_lookup()` and `check_lookups()` raise
+[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
+(`extra__overlap`: `unsupported lookup 'overlap' for library.Book.extra`), so every driver refuses the key before it
+takes a slot. The Django and the native PostgreSQL drivers also refuse it on an annotation that refers to a JSON field
+(`annotate(e=F("extra"))`), where Django would read the name as a key.
 
 ## Registry
 

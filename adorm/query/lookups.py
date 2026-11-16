@@ -40,6 +40,7 @@ __all__ = [
     "LessThan",
     "LessThanOrEqual",
     "Lookup",
+    "Overlap",
     "Range",
     "Regex",
     "ResolvedLookup",
@@ -102,6 +103,12 @@ class Lookup(Expression):
         ``field_type``; ``None`` when unknown. Defaults to ``field_type``."""
         return field_type
 
+    @classmethod
+    def applies_to(cls, field_type: Any, keys: tuple[str, ...]) -> bool:  # noqa: ARG003 - any field by default
+        """Whether the lookup applies to a field of ``field_type`` (``None`` when unknown), or to the key path
+        ``keys`` inside a JSON or record field; ``True`` by default."""
+        return True
+
     def _check_decoded(self) -> None:
         if self.lookup_name is None:
             raise ValueError(f"{type(self).__name__} is a base class")
@@ -151,6 +158,23 @@ def _container_kind(tp: Any) -> str | None:
     if is_typeddict(tp) or (isinstance(tp, type) and hasattr(tp, "model_fields")):
         return "record"
     return "container" if tp is Any or tp in (list, tuple, set, frozenset, dict) else None
+
+
+def _item_type(tp: Any) -> Any:
+    """The item type of a list, tuple (``tuple[X, ...]``), set or frozenset type, else ``None``; ``Optional`` and
+    ``Annotated`` are unwrapped."""
+    origin = get_origin(tp)
+    if origin is Annotated:
+        return _item_type(get_args(tp)[0])
+    if origin in (Union, UnionType):
+        found = [_item_type(arg) for arg in get_args(tp) if arg is not type(None)]
+        return found[0] if len(found) == 1 else None
+    args = get_args(tp)
+    if origin in (list, set, frozenset) and len(args) == 1:
+        return args[0]
+    if origin is tuple and len(args) == 2 and args[1] is Ellipsis:
+        return args[0]
+    return None
 
 
 class _PatternLookup(Lookup):
@@ -208,26 +232,17 @@ class LessThanOrEqual(Lookup):
     on_relations = True
 
 
-@register_lookup
-class In(Lookup):
-    """One of the values in ``rhs``: an iterable of values or a query selecting one column.
+class _ValuesLookup(Lookup):
+    """A lookup whose right-hand side is a tuple of values, built from an iterable."""
 
-    The values are stored as a tuple without ``None`` (which never matches); a set is sorted when its values are
-    orderable. Each value is prepared as a single right-hand side: a query becomes a `Subquery`, and a condition or
-    another non-expression node raises ``TypeError``.
-    """
-
-    lookup_name = "in"
-    on_relations = True
     rhs_is_sequence = True
 
-    def prepare_rhs(self, value: Any) -> Any:
-        if isinstance(value, Subquery) and not getattr(value, "conditional", False):
-            return value
-        if as_query(value) is not None:
-            return Subquery(value)
+    def _values(self, value: Any, accepted: str) -> tuple[Any, ...]:
+        """The values of the iterable ``value`` as a tuple without ``None``, a set sorted when its values are
+        orderable, each prepared as a single right-hand side. ``accepted`` names what else the lookup takes, for the
+        ``TypeError`` raised for a string, bytes, a mapping, a node or a non-iterable."""
         if isinstance(value, str | bytes | Mapping | Node) or not isinstance(value, Iterable):
-            raise TypeError(f"the in lookup takes an iterable of values or a query, not {type(value).__name__}")
+            raise TypeError(f"the {self.lookup_name} lookup takes {accepted}, not {type(value).__name__}")
         values = [v for v in value if v is not None]
         if isinstance(value, Set):
             try:
@@ -238,8 +253,28 @@ class In(Lookup):
 
     def _prepare_item(self, value: Any) -> Any:
         if isinstance(value, Expression) and value.conditional:
-            raise TypeError(f"{type(value).__name__} is not a value for the in lookup")
+            raise TypeError(f"{type(value).__name__} is not a value for the {self.lookup_name} lookup")
         return Lookup.prepare_rhs(self, value)
+
+
+@register_lookup
+class In(_ValuesLookup):
+    """One of the values in ``rhs``: an iterable of values or a query selecting one column.
+
+    The values are stored as a tuple without ``None`` (which never matches); a set is sorted when its values are
+    orderable. Each value is prepared as a single right-hand side: a query becomes a `Subquery`, and a condition or
+    another non-expression node raises ``TypeError``.
+    """
+
+    lookup_name = "in"
+    on_relations = True
+
+    def prepare_rhs(self, value: Any) -> Any:
+        if isinstance(value, Subquery) and not getattr(value, "conditional", False):
+            return value
+        if as_query(value) is not None:
+            return Subquery(value)
+        return self._values(value, "an iterable of values or a query")
 
 
 @register_lookup
@@ -334,6 +369,34 @@ class IContains(_PatternLookup):
     lookup_name = "icontains"
 
 
+@register_lookup
+class Overlap(_ValuesLookup):
+    """Has at least one item in common with ``rhs``: an iterable of values, a query selecting one column, or an
+    expression whose value is an array.
+
+    The values are stored as a tuple without ``None`` (which never matches); a set is sorted when its values are
+    orderable. Each value is prepared as a single right-hand side, as for `In`.
+    """
+
+    lookup_name = "overlap"
+
+    def prepare_rhs(self, value: Any) -> Any:
+        if isinstance(value, Expression) and not value.conditional:
+            return value
+        if as_query(value) is not None:
+            return Subquery(value)
+        return self._values(value, "an iterable of values, a query or an expression")
+
+    @classmethod
+    def rhs_type(cls, field_type: Any) -> Any:
+        return _item_type(field_type)
+
+    @classmethod
+    def applies_to(cls, field_type: Any, keys: tuple[str, ...]) -> bool:
+        """An array field or a field of unknown type; never a key inside a JSON field."""
+        return not keys and (field_type is None or _item_type(field_type) is not None)
+
+
 class _RegexLookup(Lookup):
     @classmethod
     def rhs_type(cls, field_type: Any) -> Any:  # noqa: ARG003 - the pattern is a string for any field
@@ -402,7 +465,7 @@ class ResolvedLookup:
 
     @property
     def value_type(self) -> Any:
-        """The type of a right-hand side value (of each value for ``in`` and ``range``):
+        """The type of a right-hand side value (of each value for ``in``, ``range`` and ``overlap``):
         ``lookup.rhs_type(field_type)``."""
         return self.lookup.rhs_type(self.field_type)
 
@@ -468,12 +531,18 @@ def _resolve(
     segments = tuple(split_field_path(path))
     if segments[0] in annotations:
         field_type = annotations[segments[0]] if len(segments) == 1 else None
+        if not lookup.applies_to(field_type, segments[1:]):
+            message = f"unsupported lookup {lookup.lookup_name!r} for the annotation {path!r}"
+            raise FieldError(message, key=key)
         return ResolvedLookup(key, segments, lookup, None, None, field_type, segments[1:])
     end = _walk(source, label, segments, key, lookup_hint=not explicit)
     if end.relation and not lookup.on_relations:
         allowed = ", ".join(name for name, cls in _LOOKUPS.items() if cls.on_relations)
         message = f"unsupported lookup {lookup.lookup_name!r} for the relation {end.model}.{end.field}"
         raise FieldError(f"{message}; a relation takes {allowed}", model=end.model, key=key)
+    if not end.relation and not lookup.applies_to(end.field_type, end.keys):
+        target = f"{end.model}.{'__'.join((end.field, *end.keys))}"
+        raise FieldError(f"unsupported lookup {lookup.lookup_name!r} for {target}", model=end.model, key=key)
     return ResolvedLookup(key, segments, lookup, end.model, end.field, end.field_type, end.keys)
 
 
@@ -516,7 +585,8 @@ def resolve_lookup(
     Raises `adorm.FieldError` for a segment that is neither a field nor a relation, and for segments after a field
     that is neither a relation nor a JSON field (``first_name__icontain``, an unknown lookup name). A path that ends at
     a relation takes only the lookups whose ``on_relations`` is true (``exact``, ``in``, ``gt``, ``gte``, ``lt``,
-    ``lte``, ``isnull``); another raises `adorm.FieldError` too. A model ``source``
+    ``lte``, ``isnull``); another raises `adorm.FieldError` too, as does a lookup whose ``applies_to()`` refuses the
+    field's type or the keys (``overlap`` on a field that is not an array). A model ``source``
     does not know ends the check: the rest of the path is not resolved. A key that is not a lookup key raises
     ``ValueError``.
     """

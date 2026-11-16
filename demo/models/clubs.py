@@ -12,13 +12,14 @@ __all__ = ["Club", "Member", "Membership"]
 
 
 class Club(Model):
-    _meta = ModelMeta("clubs.Club", schema_hash="d75bb2d62669e21f")
+    _meta = ModelMeta("clubs.Club", schema_hash="e8c2eed312ab7b68")
     id: int | None = None
     name: str = Field(max_length=100)
     slug: str = Field(max_length=100, pattern="^[-a-zA-Z0-9_]+$")
     founded: datetime.date
     city: str = Field(max_length=100)
     address: Any = Field(default_factory=dict)
+    disciplines: list[str] = Field(default_factory=list)
     members = ManyToMany("clubs.Member", through="clubs.Membership", source_column="club_id", target_column="member_id")
     memberships = ReverseForeignKey("clubs.Membership", column="club_id")
     activities = ReverseForeignKey("activities.Activity", column="club_id")

@@ -312,6 +312,68 @@ async def lookup_iregex():
     return await first_names(Member.objects.filter(first_name__iregex="^[a-c]"))
 
 
+async def club_slugs(queryset) -> list[str]:
+    return sorted([club.slug async for club in queryset])
+
+
+@case(
+    "select",
+    "lookup.overlap",
+    expected=(
+        SLUGS,
+        ["koper-sailing", "maribor-climbing"],
+        ["ljubljana-rowing"],
+        [],
+        [],
+        ["koper-sailing"],
+        ["Dinghy", "Keelboat"],
+    ),
+)
+async def lookup_overlap_on_an_array_field():
+    (koper,) = await rows(Club.objects.filter(disciplines__overlap=("Keelboat", "Rowing", None)))
+    return (
+        await club_slugs(Club.objects.filter(disciplines__overlap=["Fitness", "Dinghy"])),
+        await club_slugs(Club.objects.filter(disciplines__overlap=["Lead", "Keelboat"])),
+        await club_slugs(Club.objects.filter(disciplines__overlap={"Coxed eights", "Sculling"})),
+        await club_slugs(Club.objects.filter(disciplines__overlap=[])),
+        await club_slugs(Club.objects.filter(disciplines__overlap=["fitness"])),
+        await club_slugs(Club.objects.exclude(disciplines__overlap=["Fitness"])),
+        koper.disciplines,
+    )
+
+
+@case(
+    "select",
+    "lookup.overlap",
+    expected=(SLUGS, ["koper-sailing", "maribor-climbing"], ["koper-sailing"], []),
+)
+async def lookup_overlap_with_expressions():
+    return (
+        await club_slugs(Club.objects.filter(disciplines__overlap=F("disciplines"))),
+        await club_slugs(Club.objects.filter(disciplines__overlap=Value(["Lead", "Dinghy"]))),
+        await club_slugs(Club.objects.filter(disciplines__overlap=[F("city"), "Dinghy"])),
+        await club_slugs(Club.objects.filter(disciplines__overlap=["x", F("city")])),
+    )
+
+
+@case(
+    "select",
+    "lookup.overlap",
+    "lookup.exact",
+    "expression.Exists",
+    "expression.OuterRef",
+    expected=["ljubljana-rowing", "maribor-climbing"],
+)
+async def lookup_overlap_with_the_outer_row():
+    others = Club.objects.exclude(pk=OuterRef("pk")).filter(disciplines__overlap=OuterRef("disciplines"))
+    return await club_slugs(Club.objects.filter(Exists(others)))
+
+
+@case("select", "lookup.overlap", "expression.Subquery", expected=["ljubljana-rowing", "maribor-climbing"])
+async def lookup_overlap_with_a_query():
+    return await club_slugs(Club.objects.filter(disciplines__overlap=Competition.objects.values("discipline")))
+
+
 # Conditions
 
 

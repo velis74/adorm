@@ -7,7 +7,7 @@ The encoded forms:
   ``TypeAdapter`` of that type;
 - a value whose position the schema does not type: ``{"type": <type name>, "value": <JSON>}``, the type inferred
   from the value (`TYPES`, or a container of encoded values);
-- the values of ``in`` and ``range``: ``{"items": [<node or value>, ...]}``.
+- the values of ``in``, ``range`` and ``overlap``: ``{"items": [<node or value>, ...]}``.
 
 A position is typed by the field a value is compared with or written to (see `adorm.schema`), or by a `Value`'s
 ``output_type``. Decoding resolves the same positions, so it needs the schema the data was encoded with.
@@ -405,6 +405,8 @@ class Encoder(_Codec):
         if isinstance(node, Value) and name == "value":
             return encode_value(value, node.output_type or hint)
         if isinstance(node, Lookup) and name == "rhs":
+            if node.rhs_is_sequence and isinstance(value, Node):
+                return self.node(value, self.expression_type(node.lhs))  # one node in place of the values
             rhs_hint = self.lookup_value_type(type(node), node.lhs)
             return self.operand(value, rhs_hint, sequence=node.rhs_is_sequence)
         return self._plain(value, self.child_hint(type(node), getattr(node, "output_type", None), name, hint))
@@ -501,6 +503,8 @@ class Decoder(_Codec):
             lhs = values.get("lhs")
             if not isinstance(lhs, Expression):
                 raise ValueError(f"the lhs of a lookup is an expression, not {type(lhs).__name__}")
+            if cls.rhs_is_sequence and isinstance(raw, Mapping) and "node" in raw:
+                return self.node(raw, self.expression_type(lhs))
             rhs_hint = self.lookup_value_type(cls, lhs)
             return self.operand(raw, rhs_hint, sequence=cls.rhs_is_sequence)
         return self._plain(raw, self.child_hint(cls, values.get("output_type"), name, hint))

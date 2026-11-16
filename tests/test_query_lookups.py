@@ -1,5 +1,7 @@
 import datetime
 
+from typing import Annotated, Any
+
 import pytest
 
 from adorm.query import (
@@ -24,6 +26,7 @@ from adorm.query import (
     LOOKUPS,
     Lower,
     OuterRef,
+    Overlap,
     Q,
     Query,
     Range,
@@ -54,6 +57,7 @@ BUILT_IN = {
     "icontains": IContains,
     "regex": Regex,
     "iregex": IRegex,
+    "overlap": Overlap,
 }
 
 
@@ -227,6 +231,83 @@ def test_in_subquery_with_several_columns_is_refused():
 def test_in_refuses_exists():
     with pytest.raises(TypeError):
         In("club", Exists(Query("club.Club")))
+
+
+# overlap
+
+
+@pytest.mark.parametrize("values", [["a", "b"], ("a", "b"), (v for v in ("a", "b")), {"a": 1, "b": 2}.keys()])
+def test_overlap_takes_iterables(values):
+    lookup = build_lookup("tags__overlap", values)
+    assert (type(lookup), lookup.lhs, lookup.rhs) == (Overlap, F("tags"), ("a", "b"))
+    assert set(lookup.constructs()) == {"lookup.overlap"}
+
+
+def test_overlap_drops_none_and_sorts_sets():
+    assert Overlap("tags", ["a", None, "b"]).rhs == ("a", "b")
+    assert Overlap("tags", [None]).rhs == ()
+    assert Overlap("tags", []).rhs == ()
+    assert Overlap("tags", {"z", "x", "y"}) == Overlap("tags", {"y", "z", "x"})
+    assert Overlap("tags", {"z", "x"}).rhs == ("x", "z")
+
+
+def test_overlap_copies_the_values():
+    values = ["a"]
+    lookup = Overlap("tags", values)
+    values.append("b")
+    assert lookup.rhs == ("a",)
+
+
+def test_overlap_takes_an_array_expression():
+    assert Overlap("tags", F("labels")).rhs == F("labels")
+    assert Overlap("tags", Value(["a"], output_type=list)).rhs == Value(["a"], output_type=list)
+    assert Overlap("tags", OuterRef("labels")).rhs == OuterRef("labels")
+
+
+def test_overlap_prepares_each_value():
+    lookup = Overlap("tags", ["a", F("name"), Lower("name")])
+    assert lookup.rhs == ("a", F("name"), Lower("name"))
+    for bad in (Q(b=1), Exact("b", 1), F("a").asc(), Exists(MEMBERS)):
+        with pytest.raises(TypeError):
+            Overlap("tags", [bad])
+
+
+def test_overlap_subquery():
+    names = Query("club.Club").values("name")
+    lookup = build_lookup("tags__overlap", names)
+    assert lookup.rhs == Subquery(names)
+    assert set(lookup.constructs()) == {"lookup.overlap", "expression.Subquery"}
+    assert Overlap("tags", Subquery(names)).rhs == Subquery(names)
+    assert Overlap("tags", Query("club.Club")).rhs == Subquery(Query("club.Club"))
+    with pytest.raises(ValueError, match="one column"):
+        Overlap("tags", Query("club.Club").values("id", "name"))
+
+
+@pytest.mark.parametrize("value", ["abc", b"abc", 1, None, {"a": 1}, Q(a=1), Exact("a", 1), Exists(MEMBERS)])
+def test_overlap_refuses_what_is_no_array(value):
+    with pytest.raises(TypeError, match="iterable of values, a query or an expression"):
+        Overlap("tags", value)
+
+
+@pytest.mark.parametrize(
+    ("field_type", "item_type"),
+    [
+        (list[str], str),
+        (list[int] | None, int),
+        (Annotated[list[datetime.date], "x"], datetime.date),
+        (tuple[int, ...], int),
+        (set[str], str),
+        (frozenset[str], str),
+        (tuple[int, str], None),
+        (list, None),
+        (str, None),
+        (Any, None),
+        (None, None),
+        (list[int] | list[str], None),
+    ],
+)
+def test_overlap_types_each_value_as_an_item_of_the_field(field_type, item_type):
+    assert Overlap.rhs_type(field_type) == item_type
 
 
 # range

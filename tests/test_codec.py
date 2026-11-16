@@ -371,6 +371,11 @@ def test_a_path_past_a_scalar_field_is_refused():
         (Q(fee__range=(1, F("age"))), {"items": [{"value": "1"}, {"node": "F", "name": "age"}]}),
         (Q(tags__contains=("a",)), {"value": ["a"]}),
         (Q(tags__contains=["a"]), {"value": ["a"]}),
+        (Q(tags__overlap=["b", None, "a"]), {"items": [{"value": "b"}, {"value": "a"}]}),
+        (Q(tags__overlap={"b", "a"}), {"items": [{"value": "a"}, {"value": "b"}]}),
+        (Q(tags__overlap=[]), {"items": []}),
+        (Q(tags__overlap=["a", F("name")]), {"items": [{"value": "a"}, {"node": "F", "name": "name"}]}),
+        (Q(tags__overlap=F("tags")), {"node": "F", "name": "tags"}),
         (Q(club__address__contains={"city": "b"}), {"type": "dict", "value": {"city": {"type": "str", "value": "b"}}}),
         (Q(age__icontains="1a"), {"value": "1a"}),
         (Q(club__founded__startswith="2024"), {"value": "2024"}),
@@ -386,6 +391,37 @@ def test_lookup_values(condition, rhs):
     assert data["filters"][0]["children"][0]["rhs"] == rhs
     restored = Query.from_dict(roundtrip(data), SCHEMA)
     assert restored.to_dict(SCHEMA) == data
+
+
+def test_overlap_types_each_value_as_an_item_of_the_array_field():
+    from adorm.schema import ModelSchema, Schema
+
+    schema = Schema([ModelSchema("club.Event", "id", {"id": int, "days": list[datetime.date] | None}, {})])
+    query = Query("club.Event").filter(days__overlap=[datetime.date(2026, 1, 2), "2026-01-03"])
+    data = query.to_dict(schema)
+    assert data["filters"][0]["children"][0]["rhs"] == {"items": [{"value": "2026-01-02"}, {"value": "2026-01-03"}]}
+    restored = Query.from_dict(roundtrip(data), schema)
+    assert restored.where.children[0].rhs == (datetime.date(2026, 1, 2), datetime.date(2026, 1, 3))
+    with pytest.raises(ValueError, match="date"):
+        Query("club.Event").filter(days__overlap=["soon"]).to_dict(schema)
+
+
+def test_overlap_types_an_array_value_by_the_field():
+    query = MEMBERS.filter(tags__overlap=Value(["a", "b"]))
+    data = query.to_dict(SCHEMA)
+    assert data["filters"][0]["children"][0]["rhs"] == {
+        "node": "Value",
+        "value": {"value": ["a", "b"]},
+        "output_type": None,
+    }
+    assert Query.from_dict(roundtrip(data), SCHEMA) == query
+
+
+def test_overlap_with_a_query_encodes_the_query():
+    query = MEMBERS.filter(tags__overlap=Query("club.Club").values("name"))
+    data = query.to_dict(SCHEMA)
+    assert data["filters"][0]["children"][0]["rhs"]["node"] == "Subquery"
+    assert Query.from_dict(roundtrip(data), SCHEMA) == query
 
 
 def test_invalid_lookup_value_for_its_field():

@@ -440,3 +440,11 @@
   `parse_key_detail()` and `references_key()`. The memory driver fills `model`, `fields`, `columns` and, for a
   duplicate primary key, `values` and `detail`. Encoded errors carry them, and `decode_error()` rejects malformed
   ones.
+- Lookup `overlap` (`adorm.query.Overlap`, construct `lookup.overlap`): an array field with at least one item in
+  common with an iterable of values, a query of one column or an array expression; each value is encoded as an item
+  of the field's type. The Django and the native PostgreSQL drivers run it as Django's `ArrayField` `overlap`
+  (PostgreSQL's `&&`), the memory driver on lists. `Lookup.applies_to()` tells whether a lookup applies to a field's
+  type; `resolve_lookup()` and `check_lookups()` raise `FieldError` for `overlap` on a field that is not an array or a
+  key inside a JSON field. A lookup that a JSON or hstore field does not have raises `FieldError` on both SQL drivers,
+  also on an annotation that refers to such a field, instead of reading the name as a key. The demo's `Club` has the
+  array field `disciplines`.

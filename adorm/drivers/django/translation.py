@@ -207,6 +207,25 @@ def _path_field(model: type[dj.Model], path: str) -> Any:
     return field
 
 
+def _check_key_lookup(model: type[dj.Model], path: str, lookup_name: str, key: str) -> None:
+    """Raise `FieldError` when the Django query path ``path`` on ``model`` ends at or inside a JSON or hstore field
+    that has no lookup ``lookup_name``: Django would read the name as one more key."""
+    current: type[dj.Model] | None = model
+    for name in path.split("__"):
+        if current is None:
+            return
+        field = _field(current, name)
+        if _internal_type(field) in ("JSONField", "HStoreField"):
+            if field.get_lookup(lookup_name) is None:
+                adorm = _adorm_model(current)
+                label = current._meta.label if adorm is None else adorm._meta.label
+                field_name = field.name if adorm is None else _adorm_name(adorm, field.name)
+                message = f"unsupported lookup {lookup_name!r} for {label}.{field_name}"
+                raise FieldError(message, model=label, key=key)
+            return
+        current = field.related_model if _follows(field, name) else None
+
+
 def _adorm_name(adorm: Any, orm_name: str) -> str:
     """The adorm field name of the target ORM's field ``orm_name`` on the adorm model ``adorm``."""
     for name, orm in adorm._meta.orm_names.items():
@@ -363,6 +382,20 @@ class _Translator:
     def path(self, name: str) -> str:
         return orm_path(self.model, name, self.annotation_names)
 
+    def field_path(self, name: str) -> str | None:
+        """The Django field path of the adorm path ``name``, following annotations that are plain field references;
+        ``None`` when it starts at another annotation."""
+        annotations = dict(self.query.annotations)
+        segments = split_field_path(name)
+        seen: set[str] = set()
+        while segments[0] in annotations:
+            value = annotations[segments[0]]
+            if type(value) is not ax.F or segments[0] in seen:
+                return None
+            seen.add(segments[0])
+            segments = [*split_field_path(value.name), *segments[1:]]
+        return self.path("__".join(segments))
+
     def subquery(self, query: Query) -> Any:
         """The Django query set of ``query`` inside this one; its `OuterRef` refers to this query."""
         translator = _Translator(query, self)
@@ -459,12 +492,19 @@ class _Translator:
         if isinstance(lhs, ax.F) and not isinstance(lhs, ax.OuterRef):
             key = self.path(lhs.name)
             field = _path_field(self.model, key)
+            field_path = self.field_path(lhs.name)
+            if field_path is not None:
+                _check_key_lookup(self.model, field_path, node.lookup_name, f"{lhs.name}__{node.lookup_name}")
         else:
             key = f"_adorm{next(self._alias_numbers)}"
             self.aliases[key] = self.expression(lhs)
         rhs = node.rhs
-        if isinstance(rhs, ax.Subquery) and not isinstance(rhs, ax.Exists) and node.lookup_name == "in":
+        if isinstance(rhs, ax.Subquery) and not isinstance(rhs, ax.Exists) and node.lookup_name in ("in", "overlap"):
             value: Any = self.subquery(rhs.query)
+            if node.lookup_name == "overlap" and (rhs.query.row_format == "model" or not rhs.query.select):
+                value = value.values_list("pk")  # ARRAY(subquery) takes one column
+        elif isinstance(rhs, tuple) and node.lookup_name == "overlap":
+            value = [self.operand(item, field) for item in rhs]  # an empty tuple is no array literal
         elif isinstance(rhs, tuple):
             value = tuple(self.operand(item, field) for item in rhs)
         else:

@@ -430,6 +430,7 @@ class Club(Model):
     founded: datetime.datetime
     city: str = Field(max_length=50)
     address: dict
+    disciplines: list[str]
     nickname: str
     owner = ForeignKey("clubs.Member", column="city")
     memberships = Relation("clubs.Member")
