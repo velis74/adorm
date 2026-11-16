@@ -252,7 +252,8 @@ off, set with any of:
 - [`adorm.executor.set_debug()`](/ref/transactions#adorm-executor-set-debug-value).
 
 `None`, the default, follows asyncio's debug mode (`asyncio.run(..., debug=True)` or `PYTHONASYNCIODEBUG=1`). An
-`adorm.configure()` call without `debug`, and an `ADORM` setting without the key, set the switch to `None`.
+`adorm.configure()` call without `debug` that does not raise, and an `ADORM` setting without the key, set the switch
+to `None`.
 
 ## Cancellation
 
