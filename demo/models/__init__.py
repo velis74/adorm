@@ -3,19 +3,14 @@
 
 from adorm import Model
 
-from . import activities, billing, clubs, contenttypes
+from . import library
 
 MODELS: tuple[type[Model], ...] = (
-    contenttypes.ContentType,
-    clubs.Club,
-    clubs.Member,
-    clubs.Membership,
-    activities.Tag,
-    activities.Activity,
-    activities.Competition,
-    activities.Attendance,
-    billing.Invoice,
-    billing.InvoiceLine,
-    billing.Payment,
+    library.Author,
+    library.Tag,
+    library.Book,
+    library.Edition,
+    library.Reader,
+    library.Loan,
 )
 """Every generated model class."""

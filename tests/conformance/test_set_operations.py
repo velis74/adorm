@@ -11,7 +11,7 @@ import adorm
 from adorm import DatabaseError, Exists, NotSupportedError, OuterRef, ProgrammingError
 from adorm.drivers import is_connection_error
 from adorm.query import Count
-from demo.models.clubs import Club, Member, Membership
+from tests.clubmodels.clubs import Club, Member, Membership
 from tests.conformance.cases import COMPOUND_SLICES
 from tests.conformance.drivers import on_sqlite
 

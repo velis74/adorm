@@ -13,7 +13,7 @@ import adorm
 from adorm import DeadlockError, InterfaceError
 from adorm.events import BackendEvent, CONNECTION_LOST, NOTICE, NOTIFY
 from adorm.executor import CloseReason
-from demo.models.clubs import Club
+from tests.clubmodels.clubs import Club
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -178,11 +178,11 @@ async def test_a_connection_lost_while_not_listening_is_reported_at_most_once(dr
 
 
 @pytest.fixture
-async def raising_trigger(driver, demo_data):
+async def raising_trigger(driver, club_data):
     """A trigger on clubs that sends a NOTICE and a WARNING with detail and hint for every updating statement; the
     test is skipped for a driver that does not declare `NOTICE`."""
     declares(driver, NOTICE)
-    conn = await asyncpg.connect(demo_data)
+    conn = await asyncpg.connect(club_data)
     await conn.execute(
         """
         CREATE FUNCTION adorm_test_notices() RETURNS trigger LANGUAGE plpgsql AS $$

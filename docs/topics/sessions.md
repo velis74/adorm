@@ -88,8 +88,7 @@ assert [m.model_dump() for m in on_django.result()] == [m.model_dump() for m in 
 ```
 
 Each profile has its own pool; a full pool of one profile does not delay operations on another. The
-[demo](/intro/demo#choosing-the-driver-of-a-read) selects the profile of a read from a request header and compares a
-page read on every driver.
+[demo](/intro/demo) runs every example on a profile per driver.
 
 ## Bound models
 

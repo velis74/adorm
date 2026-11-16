@@ -1,840 +1,204 @@
 # Demo application
 
-The repository contains a demo application: a Django project with a small club domain, the adorm models
-[generated](/howto/generating-models) from it, a FastAPI app using them, PostgreSQL, and the launcher `demo.py`. The
-API has two groups of endpoints:
+The repository contains a demo application: a library (authors, books, editions, tags, readers, loans) in a Django
+project, the adorm models [generated](/howto/generating-models) from it, a FastAPI API, a Vue frontend and the
+launcher `demo.py`. It runs every example and scenario on every available driver, the
+[Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver), side by side:
 
-- `/api/operations/...` build adorm operations and answer them encoded, together with what each available driver does
-  not support; nothing is executed;
-- `/api/data/...` read and write through [sessions](/topics/sessions) and [transactions](/topics/transactions) on the
-  executor, and answer the calls the driver received.
-
-The active driver (`--driver`, or the first available one) is reported by `/api/health` and `/api/drivers`. The
-[Django driver](/topics/django-driver) (the first available one), the
-[native PostgreSQL driver](/topics/postgresql-driver) (`--driver asyncpg`) and the demo's
-[in-memory driver](#memory-driver) (`--driver memory`) execute the reads and the writes. The writes run on the active
-driver;
-a read runs on any available driver its request names in the header `X-Adorm-Driver`
-(see [Choosing the driver of a read](#choosing-the-driver-of-a-read)).
+- **Examples**: a query or a write, its adorm code, and per driver the SQL the driver sent, the result and the time;
+- **Concurrency**: flows in concurrent tasks, each in a session of its own, with what every flow saw and when, the SQL
+  of every flow and each flow's outcome.
 
 ## Running it
 
-The demo runs on a PostgreSQL server or a SQLite file. `ADORM_DEMO_DATABASE_URL` names the database (default
-`postgres://postgres@127.0.0.1:5432/adorm_demo`), set in the environment or in the file `.env` in the repository root
-(ignored by git); the environment takes precedence. A `sqlite:///path` URL (`sqlite:////absolute/path`) puts the
-demo in a SQLite file, which the setup creates; the asyncpg driver is not available there, and the Django driver runs
-with its [SQLite behaviour](/topics/django-driver#sqlite).
+The demo needs PostgreSQL and a dedicated database user with `CREATEDB`, not a superuser. `ADORM_DEMO_DATABASE_URL`
+names the user and the demo database; it is read from the environment or from `.env` in the repository root (ignored
+by git), the environment taking precedence.
+
+```sql
+CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
+```
 
 ```bash
 uv sync
-cp .env.example .env    # ADORM_DEMO_DATABASE_URL=postgres://user:password@127.0.0.1:5432/adorm_demo
-uv run python demo.py
-ADORM_DEMO_DATABASE_URL=sqlite:///demo.sqlite3 uv run python demo.py   # on SQLite
+npm install
+cp .env.example .env    # ADORM_DEMO_DATABASE_URL=postgres://adorm:password@127.0.0.1:5432/adorm_demo
+uv run python demo.py   # http://127.0.0.1:5173/
 ```
 
 | Option | Effect |
 |---|---|
-| `--driver NAME` | make that driver active (`django`, `asyncpg`, `memory`): the writes and the reads without `X-Adorm-Driver` run on it; default: the first available |
-| `--list-drivers` | list the drivers, their classes and whether each is available (with the reason when not), then exit |
-| `--reset` | replace the demo data with the fixed data set |
-| `--setup-only` | set up the database, then exit |
-| `--no-setup` | skip the database setup |
-| `--host`, `--port` | where the API listens (default `127.0.0.1:8000`) |
+| `--frontend dev` | start the Vite dev server (`npm run demo:dev`) on `--frontend-port` (default 5173); the default |
+| `--frontend built` | serve `demo/frontend/dist` from the API at `/`; builds it with `npm run demo:build` when it is missing |
+| `--frontend none` | the API only |
+| `--host`, `--port` | where the API listens (default `127.0.0.1:8000`); its documentation is at `/docs` and `/redoc` |
+| `--database NAME` | use the database `NAME` on the server of `ADORM_DEMO_DATABASE_URL` |
+| `--reset` | replace the library data with the fixed data set |
+| `--setup-only`, `--no-setup` | set up the database and exit; skip the setup |
+| `--drop` | drop the demo database and exit |
+| `--list-drivers` | list the drivers and whether each is available, then exit |
 
-```text
-$ uv run python demo.py --list-drivers
-django     adorm.drivers.django:DjangoDriver        available
-asyncpg    adorm.drivers.asyncpg:AsyncpgDriver      available
-memory     demo.api.memory:MemoryDriver             available
-```
+Setup, before serving:
 
-Before serving, `demo.py` sets up the database:
-
-1. creates the database when the server lacks it;
-2. applies the Django migrations (`manage.py migrate`);
-3. fills the database with the fixed data set when it has no clubs (`manage.py seed_demo`; `--reset` replaces the
-   data);
-4. checks that the generated models in `demo/models` are up to date (`adorm generate --check`, see
-   [Generated models](#generated-models));
-5. compares the adorm models with the Django models (`manage.py check_adorm_models`, exit status 1 on a difference):
-   the primary key name; each concrete field's presence, Python type, nullability, choices (against a `Literal`),
-   `max_length`, `max_digits` and `decimal_places`; fields Django lacks; `Meta.ordering`, which adorm models cannot
-   express; each relation's kind, target and join columns, and the through model of a many-to-many relation; Django
-   foreign keys and many-to-many fields the adorm model lacks. Defaults, validators and the generic foreign key are
-   not compared.
-
-The API documentation is served at `http://127.0.0.1:8000/docs` (Swagger UI) and `/redoc`.
+1. refuses a superuser, and a demo database owned by another role;
+2. creates the database when the server lacks it; the user of the URL owns it;
+3. applies the Django migrations and fills an empty database with the data set (`manage.py seed_library`);
+4. checks that `demo/models` is up to date (`adorm generate --check`) and that the tables match the models
+   (`adorm check-schema`).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
-| `demo.py` | launcher: database setup, then uvicorn serving `demo.api.main:app` |
-| `demo/database.py` | database URL helpers, creating and dropping the database |
-| `demo/backend/` | Django project: `settings.py`, `manage.py` and the apps `clubs`, `activities` and `billing` |
-| `demo/backend/model_check.py` | comparison of an adorm model with the Django model of the same label |
-| `demo/models/` | adorm models generated by `adorm generate`, one module per Django app (`clubs.py` …) and `MODELS` in `__init__.py` |
-| `demo/api/schemas.py` | request bodies and parameter types shared by the endpoints |
-| `demo/api/operations.py` | functions building the operation of each `/api/operations` endpoint from its parameters |
-| `demo/api/data.py` | the `/api/data` endpoints of sessions and transactions, and `/api/executor` |
-| `demo/api/aggregates.py` | the `/api/data` endpoints of annotations, aggregates and grouping |
-| `demo/api/instances.py` | the `/api/data` endpoints of prefetching, `in_bulk()`, generic foreign keys and `full_clean()` |
-| `demo/api/memory.py` | the in-memory driver |
-| `demo/api/drivers.py` | the drivers the demo runs against and the active driver |
+| `demo.py` | launcher: database setup, the dev server, uvicorn serving `demo.api.main:app` |
+| `demo/database.py` | the database URL, the role and owner checks, creating and dropping the database |
+| `demo/backend/` | Django project: `settings.py`, `manage.py` and the app `library` |
+| `demo/models/` | adorm models generated by `adorm generate` |
+| `demo/api/examples.py` | the examples: coroutine functions on the generated models |
+| `demo/api/scenarios.py` | the concurrency scenarios: the flows and the functions that steer them |
+| `demo/api/capture.py` | recording of the SQL each driver sends, attributed to sessions |
+| `demo/api/drivers.py` | the drivers and their connection profiles |
 | `demo/api/main.py` | the FastAPI app |
-| `tests/demo/` | in-process tests of the API and the memory driver, and the end-to-end test of `demo.py` |
+| `demo/frontend/` | Vite, Vue 3, Vuetify, `@dynamicforms/vue-grid` and `@dynamicforms/vuetify-inputs` (npm workspace `adorm-demo-frontend`) |
+| `demo/e2e/` | Playwright tests of the frontend (npm workspace `adorm-demo-e2e`) |
+| `tests/demo/` | the API on every available driver, through `demo.py` |
 
-Django runs the migrations, the seed command, the model check and the memory driver's loading of the rows. The API's
-endpoints do not query through Django: they use the adorm models.
-
-## Domain
-
-| App | Model | Constructs it exercises |
-|---|---|---|
-| `clubs` | `Club` | unique and slug fields, a JSON field, a list field (`disciplines`: `ArrayField` on PostgreSQL, JSON text on other databases, `demo.backend.clubs.fields.ListField`), many-to-many `members` through `Membership` |
-| `clubs` | `Member` | choices, nullable date, JSON list |
-| `clubs` | `Membership` | two foreign keys, a unique constraint, a decimal with a validator |
-| `activities` | `Tag` | the target of a plain many-to-many (`Activity.tags`) |
-| `activities` | `Activity` | a nullable foreign key (`coach`, `SET_NULL`), a duration, many-to-many through `Attendance` |
-| `activities` | `Competition` | multi-table inheritance from `Activity` (primary key `activity_ptr_id`); one row is added to an existing activity |
-| `activities` | `Attendance` | a nullable datetime, a unique constraint |
-| `billing` | `Invoice` | `PROTECT` foreign key, `clean()` comparing two dates (`full_clean`) |
-| `billing` | `InvoiceLine` | a generic foreign key `item` to a `Membership` or an `Activity`, through `contenttypes.ContentType` |
-| `billing` | `Payment` | a UUID primary key (`code`) |
-
-The Django models have no default ordering (`Meta.ordering`): adorm models cannot express it, so it would apply on
-one driver only.
-
-### Generated models
-
-The adorm models in `demo/models` are generated from the Django project and checked in. After a change to a Django
-model, regenerate them:
+After a change to `demo/backend/library/models.py`:
 
 ```bash
+uv run python -m demo.backend.manage makemigrations library
 uv run adorm generate --settings demo.backend.settings -o demo/models --line-length 120
 ```
 
-The generator writes one module per Django app and reports what it leaves out (nothing for the demo):
+## Drivers and profiles
 
-```text
-wrote demo/models/__init__.py
-...
-5 written, 0 removed, 0 unchanged.
-```
+Each available driver has two [connection profiles](/topics/profiles): `<driver>` with a pool of six slots and
+`<driver>-small` with two slots and `acquire_timeout=1`. An example runs in the session `(<driver>, "example")`, a flow
+of a scenario in `(<driver>, <flow>)`. One run, of an example or a scenario, executes at a time.
 
-`demo.py` runs the same command with `--check` before serving; it stops when a file is missing or stale.
+The SQL is recorded on the connections: an execute wrapper on every Django connection (`BEGIN`, `COMMIT` and
+`ROLLBACK` from psycopg's transaction control included), a query logger on every asyncpg connection, opened by the
+asyncpg profiles' `connect` hook. The profiles' `on_acquire` and `on_release` hooks record which session holds a
+connection; a statement belongs to the session that held its connection when it started. A statement outside a lease
+(the setup of a new connection, connection options the slot sets before `on_acquire`) belongs to the session whose
+lease of the connection follows, and has no session when no lease follows. The monitor connections of
+`wait_for_lock()` are left out.
 
-A generated model declares the Django model's concrete fields (foreign keys by their column, `club_id`) as pydantic
-fields with the Django field's constraints, choices as a `Literal`, its foreign keys as `ForeignKey` descriptors,
-reverse foreign keys as `ReverseForeignKey`, reverse one-to-one relations as `ReverseOneToOne` and many-to-many
-relations as `ManyToMany` with their join columns. Query paths traverse all of them (`memberships__club__slug`). An
-MTI child is a subclass of the parent's adorm model with its own label and primary key. The generic foreign key
-`InvoiceLine.item` is a `GenericForeignKey` descriptor over the fields `content_type_id` and `object_id`
-(`await line.item` returns the `Membership` or `Activity`). `schema_hash` is the hash of the Django model the module
-was generated from.
+## Examples
 
-```python
-class Membership(Model):
-    _meta = ModelMeta("clubs.Membership", schema_hash="0bb4fdf0e793ce70")
-    id: int | None = None
-    club_id: int
-    member_id: int
-    role: Literal["member", "coach", "board"] = "member"
-    since: datetime.date
-    fee: decimal.Decimal = Field(ge=0, max_digits=8, decimal_places=2)
-    active: bool = True
-    club = ForeignKey("clubs.Club")
-    member = ForeignKey("clubs.Member")
-
-
-class Competition(Activity):
-    """An activity with results: a multi-table inheritance child of `Activity`."""
-
-    _meta = ModelMeta("activities.Competition", pk="activity_ptr_id", schema_hash="ee19dd5905415214")
-    activity_ptr_id: int | None = None
-    discipline: str = Field(max_length=60)
-    entry_deadline: datetime.date | None = None
-    activity_ptr = ForeignKey("activities.Activity")
-```
-
-The application imports them from their modules; importing `demo.models` registers all of them:
+An example is a coroutine function on the generated models; the page shows its source:
 
 ```python
-from demo.models import MODELS
-from demo.models.clubs import Club, Member, Membership
+async def lend(isbn: str, reader: str) -> dict:
+    async with adorm.atomic():
+        edition = await Edition.objects.select_for_update().get(isbn=isbn)
+        if edition.available == 0:
+            raise LookupError(f"no copy of {isbn} on the shelf")
+        borrower = await Reader.objects.get(email=reader)
+        loan = await Loan.objects.create(
+            edition_id=edition.id, reader_id=borrower.id, borrowed=TODAY, due=TODAY + datetime.timedelta(days=21)
+        )
+        await Edition.objects.filter(pk=edition.pk).update(available=F("available") - 1)
+    return {"loan": loan.id, "isbn": isbn, "available_before": edition.available}
 ```
 
-## Operation endpoints
-
-Every endpoint under `/api/operations/` answers an `OperationPlan` (`POST /api/operations/invoices/{pk}/payments`
-answers a list of two):
-
-| Field | Contents |
+| Example | Shows |
 |---|---|
-| `operation` | the operation as [`Operation.to_dict()`](/ref/encoding) encodes it with the models' types |
-| `constructs` | the construct names the operation uses, sorted, without repeats |
-| `unsupported` | per available driver: the operation kind and the constructs that driver does not support |
+| `search_books` | `Q` with `\|`, a condition across a many-to-many relation, `distinct()`, ordering, a slice |
+| `edition_details` | `get()` with `select_related()`, awaiting a relation, a many-to-many and a reverse relation as query sets |
+| `authors_with_books` | `prefetch_related()` |
+| `stock` | `aggregate()` |
+| `busiest_authors` | `annotate()` with `Count(distinct=True)` across relations |
+| `loans_per_month` | `values()` and `annotate()` grouping, `TruncMonth`, `Count(filter=...)` |
+| `books_on_the_shelf` | `Exists()` and `Subquery()` with `OuterRef` |
+| `overdue_loans` | `select_related()` over two foreign keys |
+| `dashboard` | three queries at once with `asyncio.gather()` |
+| `lend` | a transaction with `select_for_update()` and an `F()` update |
+| `ensure_tag` | `get_or_create()` |
+| `enrol_readers` | `bulk_create()` |
 
-| Method and path | Operation | Constructs shown |
+The writing examples commit; after each driver's run the demo reverts the writes with the example's `undo` coroutine,
+outside the recording.
+
+## Concurrency scenarios
+
+Every scenario runs on each driver in turn. A flow is a coroutine function that takes `log` (records what it saw) and
+its arguments; the scenario starts the flows in tasks and lets them on at fixed points, observing the database with
+[`wait_for_lock()`](/ref/testing) and the pool's counters, so each run takes the same course. The data the scenarios
+change is restored after each run.
+
+| Scenario | Flows | Outcome |
 |---|---|---|
-| `GET /api/operations/members` | `Select` | `Q` with `\|`, lookups across relations, `distinct()`, ordering, slicing |
-| `GET /api/operations/clubs/{slug}/report` | `Get` | `Count` with `filter`, `Sum` and `Count` in grouped subqueries with `Coalesce`, `Exists`, `Subquery`, `Case` / `When` |
-| `GET /api/operations/activities` | `Select` | `select_related()`, filtered `Count`, `F` arithmetic, `TruncMonth` |
-| `GET /api/operations/invoices/outstanding` | `Select` | `values()` followed by `annotate()` (grouping) |
-| `POST /api/operations/members` | `Create` | request body validated by the adorm model `Member` |
-| `PATCH /api/operations/members/{pk}` | `Save` | `update_fields` from the fields in the body; `null` only for `birth_date` |
-| `POST /api/operations/activities/{pk}/attendances` | `GetOrCreate` | lookups and defaults |
-| `POST /api/operations/attendances/{pk}/cancel` | `Update` | `exclude()` |
-| `POST /api/operations/invoices/{pk}/payments` | `Create`, `Update` | two operations, answered as a list |
-| `DELETE /api/operations/clubs/{slug}/draft-invoices` | `Delete` | a filter across a relation |
-| `POST /api/operations/decode` | any | decoding an encoded operation; invalid data answers 422 |
+| `race` | A and B lend the last copy of an edition with `select_for_update()`; A keeps the lock until B waits for it | A lends the copy; B gets the row after A's commit, finds no copy and raises `LookupError` |
+| `lock_timeout` | A holds the row lock; B reads it with `select_for_update()` under `connection_options(lock_timeout=0.5)` | B raises `OperationalError` with SQLSTATE `55P03` after 0.5 s; A commits |
+| `cancel` | A holds the row lock; B waits for it; the demo cancels B's task | B's statement is cancelled in the database, `cancellation_outcome()` is `unknown`, B's slot returns to the pool; A commits |
+| `deadlock` | A locks War and Peace's edition, B Anna Karenina's, then each asks for the other's row | PostgreSQL aborts one transaction with SQLSTATE `40P01` after `deadlock_timeout`; the other commits |
+| `slot_deadlock` | on `<driver>-small`: A and B each hold a slot in a transaction, then each reads in a second session (`A2`, `B2`), which needs another slot | B raises `DeadlockError` at once, `held_sessions` names `B`; A gets B's slot and commits |
+| `pool_exhaustion` | on `<driver>-small`: A and B hold both slots in open transactions; C asks for a slot; after A commits, D asks for one | C raises `SessionTimeout` after 1 s; D gets a slot at once |
 
-Every 422 answer has FastAPI's validation error body (`detail`: a list of errors with `type`, `loc` and `msg`), also
-for the checks an endpoint makes after request validation: unknown fields of a new member, a change without fields or
-with `null` for a field other than `birth_date`, and an operation `Operation.from_dict()` rejects.
+```python
+async def lock_with_timeout(log, isbn: str) -> str:
+    with adorm.connection_options(lock_timeout=0.5):
+        async with adorm.atomic():
+            log("select_for_update() with lock_timeout=0.5")
+            await Edition.objects.select_for_update().get(isbn=isbn)
+            log("has the row lock", "ok")
+    return "locked"
+```
+
+## API
 
 | Method and path | Answer |
 |---|---|
-| `GET /api/health` | `status`, `adorm_version` and the active `driver` |
-| `GET /api/drivers` | every driver the demo knows: availability, whether it is active, its mode and operation kinds |
-| `GET /api/models` | the JSON schema of every adorm model by label |
-| `GET /api/executor` | the active driver and, per connection profile used so far, its pool: `limit`, `size`, `idle`, `in_use`, `waiting` |
+| `GET /api/health` | `status`, `adorm_version` and `drivers`, the drivers runs execute on |
+| `GET /api/drivers` | every driver of the demo: `name`, `description`, `available`, `reason` when it is not, `mode` |
+| `GET /api/examples` | the examples: `id`, `title`, `description`, `code`, `params` (with `minimum` and `maximum` of an `int`), `writes` |
+| `POST /api/examples/{id}/run` | body `{"params": {...}}`; per driver `ms`, `result` or `error`, `statements` |
+| `GET /api/scenarios` | the scenarios: `id`, `title`, `description`, `code` of the flows, `choreography` |
+| `POST /api/scenarios/{id}/run` | per driver `ms`, `flows`, `outcomes`, `events` (`at_ms`, `flow`, `kind`, `text`), `statements` |
+
+An unknown id answers 404, a parameter that is unknown or does not fit 422, and no available driver 503. A statement
+is `session`, `sql`, `params`, `at_ms`, `duration_ms` and `error`. A flow's outcome is `{"status": "ok", "result"}`,
+`{"status": "error", "error", "sqlstate", "message", "held_sessions"}` or `{"status": "cancelled", "statement"}`.
 
 ```bash
-curl 'http://127.0.0.1:8000/api/operations/members?club=ljubljana-rowing&search=nov&limit=5'
-```
-
-Abbreviated (`…` marks omitted keys):
-
-```json
-{
-  "operation": {
-    "operation": "select",
-    "query": {
-      "node": "Query",
-      "model": "clubs.Member",
-      "filters": [
-        {
-          "node": "Q",
-          "children": [
-            {"node": "lookup.exact", "lhs": {"node": "F", "name": "memberships__active"}, "rhs": {"value": true}},
-            {"node": "lookup.exact", "lhs": {"node": "F", "name": "memberships__club__slug"},
-             "rhs": {"value": "ljubljana-rowing"}}
-          ],
-          "connector": "AND",
-          "negated": false
-        },
-        {"node": "Q", "children": ["…two lookup.icontains nodes…"], "connector": "OR", "negated": false}
-      ],
-      "…": "…"
-    }
-  },
-  "constructs": ["clause.distinct", "lookup.exact", "lookup.icontains"],
-  "unsupported": {}
-}
-```
-
-The operation behind an endpoint is a function of its parameters:
-
-```python
-from adorm.models import registry
-
-from demo.api import operations
-
-operation = operations.club_report("koper-sailing")     # a Get of clubs.Club with annotations
-operation.to_dict(registry)                              # what the endpoint answers under "operation"
-```
-
-## Data endpoints
-
-The endpoints under `/api/data/` run the generated models on the executor. At startup the API registers the active
-driver as the connection profile `default` and every available driver as a profile named after it (`django`,
-`asyncpg`, `memory`); each profile has its own pool (`max_connections=4`, `acquire_timeout=5`). Without an active
-driver they answer 503. Each request runs in the session `(<using>, <name>)`: `using` is `default`, or for a read the
-profile of the driver named by the header `X-Adorm-Driver`; the name comes from the header `X-Adorm-Session`
-(default `default`; letters, digits, `_` and `-`, at most 40). The answer is `Traced`:
-
-| Field | Contents |
-|---|---|
-| `result` | what the endpoint read or wrote, as the generated models serialise it |
-| `session` | `using/session_name` of the session |
-| `driver` | the name of the driver that executed the operations |
-| `calls` | the calls the driver received, in order: `slot` (number of the slot's connection), `session` and `call` (`acquire`, `begin`, `select clubs.Member`, `savepoint adorm_sp_1`, `commit`, `release` …); only the memory driver records them |
-
-| Method and path | What runs | Shows |
-|---|---|---|
-| `GET /api/data/members` | one `select` on a slot of its own | a query set with `Q`, ordering and a slice, iterated with `async for` |
-| `GET /api/data/members/{pk}` | `get` | the model's `DoesNotExist` (404) |
-| `PATCH /api/data/members/{pk}` | `get`, `save` in a transaction | `save(update_fields=...)` |
-| `POST /api/data/clubs/{slug}/members` | `get`, two `create` in a transaction | `tx.on_commit()`: a welcome message is queued only after the commit |
-| `GET /api/data/invoices/{pk}` | `get`, `select` | the reverse relation `invoice.payments` |
-| `POST /api/data/invoices/{pk}/payments` | `exists`, `create`, `update` in a transaction | an exception in the block rolls the payment back (409 for an invoice that is not open) |
-| `POST /api/data/activities/{pk}/registrations` | a transaction that reads the activity with `select_for_update()`, a savepoint per member | a nested `atomic()` rolled back to its savepoint when the activity is full; concurrent registrations for one activity run one after another; `nowait`, `lock_timeout` and `timeout` (see [Locks, timeouts and cancellation](#locks-timeouts-and-cancellation)) |
-| `POST /api/data/invoices/settlements` | a transaction that reads open invoices with `select_for_update(skip_locked=True)`, then a `create` and a `save` per invoice | concurrent settlements settle different invoices and never wait for each other; `limit` (1–20, default 5) and `timeout` |
-| `GET /api/data/clubs/{slug}/summary` | three `count` in an `asyncio.TaskGroup` | tasks inherit the session; with `atomic=true` also the transaction and its slot |
-| `GET /api/data/compare/members` | one `select` per available driver, in concurrent tasks | the same query set on several profiles at once (see [below](#choosing-the-driver-of-a-read)) |
-| `GET /api/data/outbox` | nothing | the messages the `on_commit` callbacks queued |
-| `GET /api/data/schema` | one `check_table` per demo model | [`adorm.check_schema()`](/topics/schema-checks): every model's schema hash against the driver's and its tables and columns against the database; `result` is `models` (the labels checked) and `problems` (each with `model`, `kind`, `table`, `column`, `field`, `expected`, `actual` and `message`), empty when they match; 501 on the memory driver |
-
-Errors of the executor and the database answer an `ExecutorError` body (`detail`, `error`, `session`,
-`held_sessions`, `sqlstate`, `phase`, `operation`, `outcome`), declared on every endpoint above that executes
-operations; the `55P03` case of 409, 504 and 501 are declared only on `POST /api/data/activities/{pk}/registrations`
-and `POST /api/data/invoices/settlements`, and 501 also on `GET /api/data/schema` and the endpoints that need what the
-memory driver refuses (see [Aggregates](#aggregates) and
-[Related objects and validation](#related-objects-and-validation)):
-
-| Status | Error | When |
-|---|---|---|
-| 503 | `SessionTimeout` | no slot became free within the pool's `acquire_timeout` |
-| 503 | `DeadlockError` | as `SessionTimeout`, while the flow held slots; `held_sessions` names their sessions |
-| 409 | `OperationalError` | the database detected a deadlock (SQLSTATE `40P01`), or a row lock was not available to `nowait` or within `lock_timeout` (SQLSTATE `55P03`); the transaction is rolled back, retry it |
-| 504 | `OperationTimeout` | the request's `timeout` expired; the transaction is rolled back, unless `operation` is `commit`: then `outcome` tells whether the commit took effect (`succeeded`, `unknown`) |
-| 501 | `NotSupportedError` | the driver does not support what the request needs (the memory driver and `lock_timeout`, `check_table`, annotations, aggregates, grouping, `in_bulk()` by slug or `full_clean()`) |
-
-```json
-{
-  "detail": "no slot became free for session Session('default', 'late') within 5 s",
-  "error": "SessionTimeout",
-  "session": "default/late",
-  "held_sessions": [],
-  "sqlstate": null,
-  "phase": null,
-  "operation": null,
-  "outcome": null
-}
-```
-
-A transaction is an `async with adorm.atomic()` block on the current session; the session is made current for the
-request:
-
-```python
-session = adorm.create_session("default", session_name)
-with session.activate():
-    async with adorm.atomic() as tx:
-        club = await Club.objects.get(slug=slug)
-        member = await Member.objects.create(first_name="Eva", last_name="Kos", email="eva@example.com", joined=now)
-        membership = await Membership.objects.create(club_id=club.id, member_id=member.id, since=today, fee=fee)
-        tx.on_commit(lambda: OUTBOX.append(...))
-```
-
-A registration is a savepoint inside the transaction; an exception leaving the inner block rolls back only its writes:
-
-```python
-async with adorm.atomic():
-    activity = await Activity.objects.get(pk=pk)
-    for member_id in member_ids:
-        try:
-            async with adorm.atomic():
-                attendance, created = await Attendance.objects.get_or_create(activity_id=activity.id, member_id=member_id)
-                taken = await Attendance.objects.filter(activity_id=activity.id).exclude(status="cancelled").count()
-                if taken > activity.capacity:
-                    raise Full
-        except Full:
-            skipped[member_id] = "full"
-```
-
-Tasks created inside the transaction run their operations on its slot:
-
-```python
-async with adorm.atomic():
-    async with asyncio.TaskGroup() as group:
-        members = group.create_task(Membership.objects.filter(club_id=club.id, active=True).count())
-        activities = group.create_task(Activity.objects.filter(club_id=club.id).count())
-```
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/data/invoices/1/payments -H 'X-Adorm-Session: alice' \
-     -H 'Content-Type: application/json' -d '{"amount": "120.00", "paid_at": "2026-02-01T12:00:00Z"}'
+curl -X POST http://127.0.0.1:8000/api/examples/search_books/run \
+     -H 'Content-Type: application/json' -d '{"params": {"search": "karamazov"}}'
 ```
 
 ```json
 {
-  "result": {"code": "70bab290-…", "invoice_id": 1, "amount": "120.00", "paid_at": "2026-02-01T12:00:00Z",
-             "reference": ""},
-  "session": "default/alice",
-  "calls": [
-    {"slot": 1, "session": "default/alice", "call": "acquire"},
-    {"slot": 1, "session": "default/alice", "call": "begin"},
-    {"slot": 1, "session": "default/alice", "call": "exists billing.Invoice"},
-    {"slot": 1, "session": "default/alice", "call": "create billing.Payment"},
-    {"slot": 1, "session": "default/alice", "call": "update billing.Invoice"},
-    {"slot": 1, "session": "default/alice", "call": "commit"},
-    {"slot": 1, "session": "default/alice", "call": "release"}
-  ]
-}
-```
-
-The same request again answers 409: the update matches no open invoice, the block raises and the payment is rolled
-back. Two concurrent payments of one open invoice store one payment: the second transaction's update waits for the
-first one's row lock and then finds the invoice paid.
-
-### Aggregates
-
-`demo/api/aggregates.py` runs the queries of the [aggregation](/topics/aggregation) topic. They are reads: the header
-`X-Adorm-Driver` chooses the driver, and the answer is `Traced`. Four of them (the two club reports, the schedule and
-the outstanding invoices) execute the query sets the operation endpoints encode: `demo/api/operations.py` builds each
-one on a `Query` for `/api/operations/...` and on a `QuerySet` for `/api/data/...` (`club_report_rows()`,
-`activity_schedule_rows()`, `outstanding_rows()`). The memory driver refuses every one of them with 501.
-
-| Method and path | What runs | Shows |
-|---|---|---|
-| `GET /api/data/clubs/reports` | one `select` | per-row aggregates: `Count` with `filter`, `Sum` and `Count` in grouped subqueries with `Coalesce`, `Exists`, `Subquery`, `Case` / `When` over an annotation; `min_active_members` is a condition on an aggregate (SQL `HAVING`); largest club first |
-| `GET /api/data/clubs/{slug}/report` | `get` | the same annotations on one club; 404 for a missing one |
-| `GET /api/data/memberships/fees` | `aggregate` | `aggregate()` over the active memberships (of the club `club`, or of all): `Count('*')`, `Count` with `distinct` and with `filter`, `Sum` with `default`, `Avg`, `Min`, `Max` and `Max - Min`; over no rows the counts are `0`, `total` `0` and the rest `null` |
-| `GET /api/data/activities/schedule` | one `select` | `select_related()`, a filtered `Count`, `F` arithmetic on an annotation and `TruncMonth`; `club`, `kind` and `starts_after` filter |
-| `GET /api/data/invoices/outstanding` | one `select` | grouping across a relation: `values('club__name')` followed by `annotate()`; `today` is required |
-| `GET /api/data/invoices/months` | one `select` | grouping by a computed value: `annotate(month=TruncMonth('issued'))`, `values('month')`, then `Count` and `Sum`, plain and filtered |
-
-The annotations of a model row are extra values of the instance; the endpoints answer them next to the instance,
-which `without_extras()` copies without them:
-
-```python
-with run(target, session_name) as calls:
-    clubs = operations.club_report_rows(Club.objects.all())
-    if min_active_members:
-        clubs = clubs.filter(active_members__gte=min_active_members)       # HAVING
-    result = [club_report(club) async for club in clubs.order_by("-active_members", "slug")]
-```
-
-```python
-values = await Membership.objects.filter(active=True).aggregate(
-    memberships=Count("*"),
-    clubs=Count("club", distinct=True),
-    paying=Count("pk", filter=Q(fee__gt=0)),
-    total=Sum("fee", default=Decimal(0)),
-    average=Avg("fee"),
-    spread=Max("fee") - Min("fee"),
-)
-```
-
-```bash
-curl 'http://127.0.0.1:8000/api/data/invoices/months' -H 'X-Adorm-Driver: asyncpg'
-```
-
-```json
-{
-  "result": [
-    {"month": "2026-01-01", "invoices": 10, "billed": "1102.00", "open": 3, "paid": "736.50"},
-    {"month": "2026-03-01", "invoices": 9, "billed": "165.00", "open": 9, "paid": "0"}
-  ],
-  "session": "asyncpg/default",
-  "driver": "asyncpg",
-  "calls": []
-}
-```
-
-A query set is bound to the session that is current when it is built, so each endpoint builds its query sets inside
-`run()`, which makes the request's session current.
-
-### Related objects and validation
-
-`demo/api/instances.py` reads instances with their related objects, by key and through the generic foreign key of
-invoice lines, and validates instances with `full_clean()`. The reads take `X-Adorm-Driver`; the line and the
-validations run on the active driver.
-
-| Method and path | What runs | Shows |
-|---|---|---|
-| `GET /api/data/clubs/{slug}/roster` | `get`, then five `select` | [`prefetch_related()`](/topics/queries#prefetching-related-objects): a `Prefetch` with a query set and `to_attr` (the active memberships), a lookup continuing from `to_attr` (their members), a reverse foreign key (the activities) and a many-to-many relation through attendances (their participants, two operations); reading them afterwards runs no operation; with `atomic=true` every operation runs on the transaction's slot, otherwise each takes a slot of its own |
-| `GET /api/data/members/in-bulk` | `in_bulk` | [`in_bulk()`](/topics/queries#rows-by-key) by primary key (`id`, repeated, 1–100): `found` by key, `missing` in request order |
-| `GET /api/data/clubs/in-bulk` | `in_bulk` | `in_bulk(field_name="slug")` on a unique field (`slug`, repeated); 501 on the memory driver |
-| `GET /api/data/invoices/{pk}/lines` | `exists`, `select`, then the prefetch | the [generic foreign key](/topics/models#generic-foreign-keys) `item` (a membership or an activity) prefetched with `Prefetch('item', to_attr='billed')` and `billed__club`: one `select` for the content types `adorm.content_types` has not cached, then one per item model for the items and one per item model for their clubs; `prefetch=false` awaits `line.item` and `item.club` instead, one `get` each |
-| `POST /api/data/invoices/{pk}/lines` | a transaction: `get` with `select_for_update()`, `get`, `create`, `save` | assigning an instance to a generic foreign key; `create()` sets `content_type_id` through `adorm.content_types` (read once, then cached); the invoice's total is raised under its row lock, so concurrent lines all add up; 404 for a missing invoice or item, 409 for an invoice that is neither a draft nor open or whose total would exceed 99999999.99, and nothing is stored |
-| `POST /api/data/invoices/{pk}/validation` | `get`, `full_clean` | [`full_clean()`](/topics/models#validating) of the invoice with the body's values: Django's field validation, the model's `clean()` (due date not before the issue date) and the unique number; `exclude` (repeated) leaves fields out; nothing is stored; 501 on the memory driver |
-| `POST /api/data/memberships/validation` | `full_clean` | `full_clean()` of a membership that is not stored: the fee's minimum and digits, and the constraint that a member joins a club once (`unique_together` under `__all__`); 501 on the memory driver |
-
-```python
-active = Membership.objects.filter(active=True).order_by("since", "id")
-club = await Club.objects.filter(slug=slug).prefetch_related(
-    Prefetch("memberships", queryset=active, to_attr="active_memberships"),
-    "active_memberships__member",
-    Prefetch("activities", queryset=Activity.objects.order_by("starts_at", "id")),
-    Prefetch("activities__participants", queryset=Member.objects.order_by("last_name", "first_name", "id")),
-).get()
-members = [await membership.member for membership in club.active_memberships]    # no operation
-async for activity in club.activities:                                            # no operation
-    names = [member.last_name async for member in activity.participants]          # no operation
-```
-
-```python
-lines = InvoiceLine.objects.filter(invoice_id=pk).prefetch_related(Prefetch("item", to_attr="billed"), "billed__club")
-async for line in lines:
-    item, club = line.billed, await line.billed.club        # a Membership or an Activity, and its club
-
-async with adorm.atomic():
-    invoice = await Invoice.objects.select_for_update().get(pk=pk)
-    item = await Activity.objects.get(pk=activity_id)
-    line = await InvoiceLine.objects.create(invoice_id=invoice.id, item=item, description="Extra", unit_price=price)
-    invoice.total += line.quantity * line.unit_price
-    await invoice.save(update_fields=("total",))
-```
-
-A validation answers `Validation`: `valid`, `errors` by adorm field name (`__all__` for the whole instance), each
-with Django's `message`, `code` and `params` (as JSON), and `instance`, the instance validated. A name in `exclude`
-that names no field or relation answers 422.
-
-```python
-invoice = await Invoice.objects.get(pk=pk)
-invoice.due = datetime.date(2000, 1, 1)
-try:
-    await invoice.full_clean(exclude=exclude)
-except adorm.ValidationError as exc:
-    exc.error_dict            # {"due": [ValidationError(['The due date cannot be before the issue date.'])]}
-```
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/data/memberships/validation -H 'Content-Type: application/json' \
-     -d '{"club_id": 1, "member_id": 1, "since": "2026-01-01", "fee": "-1"}'
-```
-
-```json
-{
-  "result": {
-    "valid": false,
-    "errors": {
-      "fee": [{"message": "Ensure this value is greater than or equal to 0.", "code": "min_value",
-               "params": {"limit_value": 0, "show_value": -1, "value": -1}}],
-      "__all__": [{"message": "Membership with this Club and Member already exists.", "code": "unique_together",
-                   "params": {"model": "clubs.Membership", "model_class": "clubs.Membership",
-                              "model_name": "Membership", "unique_check": ["club", "member"],
-                              "field_labels": "Club and Member"}}]
+  "example": "search_books",
+  "params": {"search": "karamazov", "genre": ""},
+  "runs": [
+    {
+      "driver": "django",
+      "ms": 5.1,
+      "result": [{"id": 10, "title": "The Brothers Karamazov", "genre": "novel", "year": 1880}],
+      "error": null,
+      "statements": [
+        {"session": "example", "sql": "SELECT DISTINCT \"library_book\".\"id\" AS \"id\", …", "params": ["%karamazov%", "%karamazov%"],
+         "at_ms": 2.4, "duration_ms": 1.95, "error": null}
+      ]
     },
-    "instance": {"id": null, "club_id": 1, "member_id": 1, "role": "member", "since": "2026-01-01", "fee": "-1",
-                 "active": true}
-  },
-  "session": "default/default",
-  "driver": "django",
-  "calls": []
-}
-```
-
-### Locks, timeouts and cancellation
-
-A registration reads the activity with `select_for_update()` inside its transaction. The row stays locked until the
-transaction ends, so concurrent registrations for one activity run one after another and the capacity check of each
-sees the registrations of the ones before it:
-
-```python
-async with adorm.atomic():
-    activity = await Activity.objects.select_for_update(nowait=nowait).get(pk=pk)
-    for member_id in member_ids:
-        ...                                     # a savepoint per member, as above
-```
-
-Three query parameters limit how long a registration waits for that lock, and one more case ends it early:
-
-| Parameter or event | Mechanism | Answer |
-|---|---|---|
-| `nowait=true` | `select_for_update(nowait=True)`: the database refuses a locked row at once | 409, `sqlstate` `55P03` |
-| `lock_timeout=<seconds>` | `adorm.connection_options(lock_timeout=...)`: the database gives up waiting for the lock (`SET LOCAL lock_timeout` inside the transaction) | 409, `sqlstate` `55P03`; 501 on the memory driver, which declares no connection options |
-| `timeout=<seconds>` | `adorm.timeout(...)` around the whole request, waiting for a slot included: the task is cancelled, the waiting statement is cancelled in the database | 504 with `phase`, `operation` and `outcome` |
-| the client goes away | the server cancels the request's task: the waiting statement is cancelled in the database | none |
-
-In every case that ends the request before its commit, the transaction rolls back, also the registrations whose
-savepoints were already released, and the slot returns to the pool or leaves it. A `timeout` that expires during the
-commit answers 504 with `operation` `commit`; its `outcome` tells whether the registrations were stored. The settlement endpoint takes `timeout` too.
-
-```python
-@asynccontextmanager
-async def limits(timeout: float | None, lock_timeout: float | None):
-    options = {} if lock_timeout is None else {"lock_timeout": lock_timeout}
-    with adorm.connection_options(**options):
-        async with adorm.timeout(timeout):          # None: no limit
-            yield
-
-
-async with limits(timeout, lock_timeout), adorm.atomic():
-    activity = await Activity.objects.select_for_update(nowait=nowait).get(pk=pk)
-```
-
-To see it, hold the activity's lock in `psql` and register while it is held:
-
-```sql
-BEGIN;
-SELECT id FROM activities_activity WHERE id = 1 FOR UPDATE;
--- ROLLBACK; once done
-```
-
-```bash
-curl -X POST 'http://127.0.0.1:8000/api/data/activities/1/registrations?timeout=1' \
-     -H 'X-Adorm-Session: late' -H 'Content-Type: application/json' -d '{"member_ids": [5]}'
-```
-
-```json
-{
-  "detail": "operation timed out after 1 s while executing on Session('default', 'late'): Get(...)",
-  "error": "OperationTimeout",
-  "session": "default/late",
-  "held_sessions": [],
-  "sqlstate": null,
-  "phase": "executing",
-  "operation": "get activities.Activity",
-  "outcome": "unknown"
-}
-```
-
-`phase` is `waiting_for_slot` when every slot of the pool was taken (`operation` is then `begin`, `outcome`
-`not_started`); `outcome` is [`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) of the interrupted
-operation. With `nowait=true` the same request answers at once:
-
-```json
-{
-  "detail": "could not obtain lock on row in relation \"activities_activity\"",
-  "error": "OperationalError",
-  "session": null,
-  "held_sessions": [],
-  "sqlstate": "55P03",
-  "phase": null,
-  "operation": null,
-  "outcome": null
-}
-```
-
-A settlement pays the earliest due open invoices in full. It reads them with `skip_locked`, so an invoice whose row
-lock another transaction holds (another settlement, or a payment once it has marked the invoice paid) is left out
-instead of waited for; concurrent
-settlements take disjoint invoices and none is paid twice:
-
-```python
-async with adorm.atomic():
-    due = Invoice.objects.select_for_update(skip_locked=True).filter(status="open").order_by("due", "id")
-    async for invoice in due[:limit]:
-        payments.append(await Payment.objects.create(invoice_id=invoice.id, amount=invoice.total, ...))
-        invoice.status = "paid"
-        await invoice.save(update_fields=("status",))
-```
-
-```bash
-curl -X POST 'http://127.0.0.1:8000/api/data/invoices/settlements?limit=2' -H 'X-Adorm-Session: billing'
-```
-
-```json
-{
-  "result": {
-    "payments": [
-      {"code": "…", "invoice_id": 1, "amount": "120.00", "paid_at": "…", "reference": "settled by billing"},
-      {"code": "…", "invoice_id": 4, "amount": "95.50", "paid_at": "…", "reference": "settled by billing"}
-    ]
-  },
-  "session": "default/billing",
-  "driver": "django",
-  "calls": []
-}
-```
-
-### Choosing the driver of a read
-
-The read endpoints (`GET /api/data/members`, `/members/{pk}`, `/invoices/{pk}`, `/clubs/{slug}/summary` and `/schema`) take the
-header `X-Adorm-Driver`: the name of an available driver, as `GET /api/drivers` lists it. The request then runs in
-the session `(<driver>, <session name>)` on that driver's profile and pool; without the header it runs on `default`.
-A name that is not an available driver answers 422 with the header in `loc`. The writing endpoints ignore the header
-and run on the active driver.
-
-```bash
-curl http://127.0.0.1:8000/api/data/members/3 -H 'X-Adorm-Driver: asyncpg' -H 'X-Adorm-Session: alice'
-```
-
-```json
-{
-  "result": {"id": 3, "first_name": "…", "last_name": "…", "…": "…"},
-  "session": "asyncpg/alice",
-  "driver": "asyncpg",
-  "calls": []
-}
-```
-
-The endpoint binds nothing to a driver: it makes the session of the chosen profile current, and the models' operations
-run on it.
-
-```python
-def read_target(request: Request, driver: DriverName = None) -> Target:
-    if driver is None:
-        return write_target(request)          # "default"; 503 without an active driver
-    if driver not in request.app.state.drivers:
-        raise RequestValidationError([...])          # 422
-    return Target(driver, driver)
-
-
-@router.get("/members/{pk}")
-async def get_member(pk: Id, target: ReadTarget, session_name: SessionName = "default") -> Traced[Member]:
-    with adorm.create_session(target.using, session_name).activate():
-        member = await Member.objects.get(pk=pk)
-    ...
-```
-
-`GET /api/data/compare/members` takes the parameters of `GET /api/data/members` and reads that page on every
-available driver at once: a task per driver in an `asyncio.TaskGroup`, each in the session `(<driver>, <session
-name>)`. The answer is a `Comparison`: `same` is true when every read succeeded and all answered the same members;
-`reads` has one `DriverRead` per driver (`driver`, `session`, `result`, and `error`, which is
-`<adorm exception class>: <message>` when that read raised an adorm error, such as `SessionTimeout` when its pool had
-no free slot in time; the other reads still run).
-
-```python
-async def read(name: str) -> DriverRead:
-    with adorm.create_session(name, session_name).activate():
-        try:
-            members = [member async for member in member_page(level, search, ordering, offset, limit)]
-        except adorm.AdormError as exc:
-            return DriverRead(driver=name, session=..., result=None, error=f"{type(exc).__name__}: {exc}")
-    return DriverRead(driver=name, session=..., result=members, error=None)
-
-async with asyncio.TaskGroup() as group:
-    tasks = [group.create_task(read(name)) for name in request.app.state.drivers]
-```
-
-```bash
-curl 'http://127.0.0.1:8000/api/data/compare/members?search=nov'
-```
-
-```json
-{
-  "same": true,
-  "reads": [
-    {"driver": "django", "session": "django/default", "result": ["…"], "error": null},
-    {"driver": "asyncpg", "session": "asyncpg/default", "result": ["…"], "error": null},
-    {"driver": "memory", "session": "memory/default", "result": ["…"], "error": null}
+    {"driver": "asyncpg", "…": "…"}
   ]
 }
-```
-
-The memory driver keeps its writes in memory, so after a write on it (`--driver memory`) its reads differ from those
-of the Django and asyncpg drivers, and `same` is false.
-
-## Memory driver
-
-`demo/api/memory.py` is the demo's in-memory driver (`MemoryDriver`, mode `async`). It runs every data endpoint on
-the executor, the writing ones included. Its setup reads the rows of every generated model from the demo database
-through Django, once; writes stay in memory and are gone when the API stops.
-
-| Supported | Not supported (raises `NotSupportedError`) |
-|---|---|
-| `select`, `get`, `first`, `last`, `count`, `exists`, `in_bulk` by primary key, `create`, `bulk_create` (every row or none: in a transaction of its own, or a savepoint of the open one; `batch_size` has no effect), `save`, `update`, `delete`, `delete_instance` (as `delete` of the row), `get_or_create`, `update_or_create`; `prefetch_related()` and generic foreign keys, which run `select` and `get` | `aggregate`, `call`, `create_from_parent` and `full_clean` operations, `in_bulk` by another field, `bulk_create()` with `ignore_conflicts` or `update_conflicts` (constructs `clause.on_conflict.*`), connection options |
-| conditions with `Q` and `~` and every lookup, on the model's own fields and on foreign keys by name (`club=1`, `club=club`) or column | field paths across relations (`club__slug`, construct `path.nested`), conditions on a reverse or many-to-many relation name (`clubs=club`), subqueries |
-| `F` and arithmetic, ordering by fields (NULLs as in PostgreSQL), `distinct()`, slices, `values()`, `values_list()`, `union()`, `intersection()` and `difference()` (rows compared column by column) | annotations, `alias()`, grouping with `values().annotate()`, functions, aggregates, `only()`, `defer()`, `select_related()` |
-| transactions, savepoints, cancellation, `select_for_update()` with `nowait` and `skip_locked` | `select_for_update()` with `of` or `no_key`, inserting or deleting a row of an MTI child, deleting a row a foreign key references |
-
-The constructs it does not support are refused before execution; a condition on a reverse or many-to-many relation
-name, which reports no construct of its own, is refused while executing. Each model is its own table: an update of a row
-copies the values to the row with the same primary key of its MTI parent or child; unique constraints other than the
-primary key are not enforced. A delete checks every row before it deletes any, so a refused delete deletes nothing.
-The `IntegrityError` of a duplicate primary key or a missing value names the model (`model`) and the field
-(`fields`, also `columns`, with `values` and `detail` in PostgreSQL's format for a duplicate key); with no tables, it
-has no `constraint_name`, `table_name` or `schema_name`.
-
-A transaction reads the committed rows and its own writes. A write locks its row until the transaction ends, and so
-does a read with `select_for_update()`; a conflicting write or locking read of another connection waits for the lock
-and checks the row again, and a wait that would close a cycle raises `OperationalError` with SQLSTATE `40P01`. With
-`nowait` a locked row raises `OperationalError` with SQLSTATE `55P03`; with `skip_locked` locked rows are left out
-before the slice applies. A locking read outside a transaction raises `TransactionManagementError`. Rolling back to a savepoint releases the locks taken after
-it. A connection's `backend_pid` is its number; `open_monitor()` returns a `MemoryMonitor`, which reports a connection
-waiting for a row lock with `wait_event_type` `"Lock"` and the holder's number in `blocking_pids`, so
-[`wait_for_lock()`](/ref/testing#waiting-for-the-database) works on the driver. A NULL value makes a condition unknown, as in SQL, except under a negation: there a lookup on a NULL field is
-false, so `exclude()` and `~Q()` keep the row, as in Django. A lookup, arithmetic or ordering on values that do not
-compare (a date with a datetime, text with a number, `overlap` with an expression that is not a list) raises
-`ProgrammingError` with SQLSTATE `42883`.
-
-A connection listens for notifications ([`adorm.listen()`](/topics/events#listening-for-notifications) works on the
-driver; it declares the backend event `notify` and no channel length limit). `MemoryDatabase.notify(channel,
-payload="")` emits `BackendEvent("notify", channel, payload)` at once from every connection listening on `channel` and
-returns how many there are; nothing is delivered on commit, as the driver has no `NOTIFY` statement.
-
-```python
-memory.DATABASE.notify("orders", "42")     # 1 while one adorm.listen("orders") block runs
-```
-
-The driver records each call in the list of the enclosing `tracing()` block, from tasks created inside it too; the
-profile hooks `on_acquire` and `on_release` record the slot's assignment to a session:
-
-```python
-from demo.api import memory
-
-with memory.tracing() as calls:
-    await Member.objects.count()
-[entry.call for entry in calls]     # ['acquire', 'count clubs.Member', 'release']
-```
-
-## Drivers
-
-`demo/api/drivers.py` lists the drivers by import path. A driver is available when its module imports. It is not
-available when the module does not exist or needs a package that is not installed; any other import error stops the
-demo. The active driver comes from `--driver` (environment variable `ADORM_DEMO_DRIVER`), else it is the first
-available one. At startup the API runs the setup of every available driver on a worker thread, in the order of
-`DRIVERS` (for the Django and asyncpg drivers, `django.setup()` with the demo settings; for the memory driver, also
-loading the rows); a setup that fails stops the startup. It instantiates each driver and registers it as the
-connection profile named after it with the driver's profile hooks; the active driver's instance is also the profile
-`default`, so `default` and the active driver's own profile share the driver but not the pool. At shutdown the pools
-close and the profiles are removed. For every operation endpoint the API reports what each available driver does not
-support, read from the driver's `capabilities`.
-
-```python
-loaded = {name: await asyncio.to_thread(drivers.get(name).load) for name in drivers.available()}
-profiles = {"default": drivers.get(active).profile(loaded[active])}
-profiles.update({name: drivers.get(name).profile(driver, name) for name, driver in loaded.items()})
-adorm.configure(profiles=profiles, pool=POOL)
-```
-
-```python
-DRIVERS = (
-    DemoDriver("django", "adorm.drivers.django:DjangoDriver", setup_django),
-    DemoDriver("asyncpg", "adorm.drivers.asyncpg:AsyncpgDriver", setup_django),
-    DemoDriver(
-        "memory",
-        "demo.api.memory:MemoryDriver",
-        setup_memory,
-        on_acquire=memory.on_acquire,
-        on_release=memory.on_release,
-    ),
-)
 ```
 
 ## Tests
 
-`tests/demo/test_api.py` calls every operation endpoint in process and checks the operation it answers against the
-builder in `demo/api/operations.py`, the round trip through `/api/operations/decode`, the rejection of invalid input and
-the driver matrix with a fake driver. `tests/demo/test_data.py` calls every data endpoint in process on the memory
-driver with a small data set: the calls each one makes, rollback on an error, savepoints, `on_commit`, sessions,
-concurrent payments of one invoice and concurrent registrations for one activity, `nowait`, `timeout` while waiting for
-a lock and while waiting for a slot, `lock_timeout` refused with 501, a registration cancelled while it waits and after
-its writes, settlements in due order, skipping a locked invoice and running concurrently without paying an invoice
-twice, requests queueing for the pool, the 503 and 409 error answers, and that no slot or lock is left behind; with a
-second memory driver over a database of its own, the choice of a read's driver, the comparison (a difference, a failing
-read, a slot timeout of one driver), its two reads running at once, a cancelled comparison returning both slots, and
-concurrent reads on three profiles. `tests/demo/test_related_data.py` runs the aggregation endpoints and those of
-`demo/api/instances.py` in process on the memory driver with invoice lines in the data set: 501 for annotations,
-aggregates, `in_bulk()` by slug and `full_clean()`, the operations of each prefetch and the slots they take (one per
-operation, or the transaction's), the operations without a prefetch, every operation in the request's session, rosters
-queueing for a one-slot pool, the content type read once, a line whose item is gone, a refused line storing nothing,
-concurrent lines of one invoice adding up and a line cancelled while it waits for the invoice's lock storing nothing;
-each concurrency test runs five times. `tests/demo/test_reads_on_two_drivers.py` runs the read endpoints, those of
-aggregates and related objects included, in process on the Django and asyncpg drivers over the demo's data set in the
-test database: the same answers on both drivers and the database's values (aggregates, groups, prefetched rows and
-generic foreign keys compared with SQL, a line whose item is gone), every read running only on the profile its header
-names, a roster cancelled while a prefetch waits for a table lock (with and without a transaction) freeing its slot, the
-comparison with both reads waiting for a table lock at once, a full pool of one driver answering 503 while the other
-driver serves, cancellation of a read waiting for a lock cancelling its statement and freeing the slot, and concurrent
-reads and transactions on three profiles leaving no slot in use; each concurrency test runs three times.
-`tests/demo/test_writes_on_two_drivers.py` runs the write flows in process with the Django driver and then the asyncpg
-driver active: registrations with a savepoint rolled back when the activity is full, concurrent registrations never
-overfilling it, `nowait` and `lock_timeout` answering 409 while a connection of the test holds the activity's lock,
-`timeout` answering 504 with the waiting statement cancelled in the database (and in the phase `waiting_for_slot` when
-the pool's only slot is taken), the client going away while the registration waits for the lock or for another
-transaction's uncommitted insert (nothing stored), settlements in due order, skipping a locked invoice and running
-concurrently without paying an invoice twice, invoice lines (the content type stored, a missing item or a total beyond
-its digits storing nothing, concurrent lines adding up and never beyond those digits, a line waiting for the invoice's
-lock cancelled with its statement), `full_clean()` of invoice changes and of a membership with Django's errors, and no
-slot left in use; each concurrency test runs three times. `tests/demo/test_memory.py` tests the memory driver on the
-executor: lookups and NULL logic, ordering, writes, transactions, waiting for row locks (also by an insert of a taken
-primary key and after a rollback to a savepoint), deadlock detection, cancellation of a wait and the trace; each
-concurrency test runs five times. `tests/demo/test_smoke.py` runs `demo.py` against the database `adorm_test_demo`: the
-setup, its repetition and `--reset`, the generated models check and a stale copy failing it, the club report's
-aggregates on the seeded data, the model check and the `check_adorm_models` exit status, then the server once per
-available driver (once without a driver when none is available), driven over HTTP, with the reading data endpoints on
-every driver, the member list once more on every available driver through `X-Adorm-Driver` and through the comparison,
-the aggregation endpoints, `in_bulk()` by slug and `full_clean()` (checked against the database on the Django and
-asyncpg drivers, 501 on the memory driver), a roster, members by key and invoice lines with and without the prefetch,
-and the writing ones on every driver that supports `create`: an invoice line, enrolment, payment, registrations with a
-full activity, a settlement, and, on the Django and asyncpg drivers, a registration with `nowait`, `lock_timeout` and
-`timeout` while the test holds the activity's lock in the database. On the memory driver the database stays unchanged;
-on another driver the writes land in it and `--reset` restores the data afterwards. `ADORM_DEMO_REQUIRED_DRIVERS`
-(comma-separated driver names) makes the suite fail when one of those drivers is not available; CI sets it to
-`django,asyncpg,memory`, so the smoke test runs on both real drivers. Both run in `uv run pytest`, and so in CI. The
-[driver conformance suite](/topics/conformance) runs every demo driver over the demo's schema and seeded data.
+`tests/demo` runs `demo.py` against the database `adorm_test_demo` on the server of `ADORM_TEST_DATABASE_URL` and
+drops it afterwards: the setup and its repetition, every example on every available driver with the same result,
+reverted writes, parameters and errors, each scenario three times per driver, and a scenario whose steering raises
+while a flow holds a lock. They skip when the user of `ADORM_TEST_DATABASE_URL` is a superuser.
+`ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated names) fails the suite when a listed driver is not available. A test
+checks that the demo's drivers include every driver class of `adorm.drivers`.
+
+The Playwright tests build the frontend and run `demo.py --frontend built` on the database `adorm_demo_e2e`, which
+they set up and drop:
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```

@@ -1,14 +1,15 @@
 """The drivers the conformance suite runs, and how each one blocks an operation for the failure tests.
 
-Every driver of the demo (`demo.api.drivers.DRIVERS`) has an entry here; a driver that is not available is skipped
-with the reason. ``create()`` returns a driver instance over the seeded test database. ``blocker()`` returns a
-`Blocker`: while it holds, the operation ``blocked()`` builds waits in the database until it is released.
-``notifier()`` returns a `Notifier` that sends notifications from outside the pool.
+Every driver class of adorm's bundled drivers and the test suite's memory driver have an entry here; a driver that is
+not available is skipped with the reason. ``create()`` returns a driver instance over the seeded test database.
+``blocker()`` returns a `Blocker`: while it holds, the operation ``blocked()`` builds waits in the database until it
+is released. ``notifier()`` returns a `Notifier` that sends notifications from outside the pool.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import sqlite3
 import weakref
 
@@ -21,9 +22,10 @@ import asyncpg
 from adorm import ConnectionProfile
 from adorm.drivers import Driver
 from adorm.drivers.django import DjangoConnection, DjangoDriver
-from demo.api import drivers as demo_drivers, memory
-from demo.models import MODELS
-from demo.models.clubs import Club
+from adorm.settings import import_object
+from tests import memory_driver as memory
+from tests.clubmodels import MODELS
+from tests.clubmodels.clubs import Club
 from tests.library_data import in_thread
 
 WAITING = (
@@ -359,11 +361,12 @@ refuse a write that would call an override or handler, or run none of it."""
 
 @dataclass(frozen=True)
 class ConformanceDriver:
-    """A driver under test: ``create(url)`` returns an instance over the seeded test database at ``url``;
-    ``blocker(driver, url)`` returns its `Blocker`; ``driver_code`` is one of `DRIVER_CODE`; ``notifier(driver, url)``
-    returns a `Notifier` that reaches its listeners."""
+    """A driver under test: ``target`` is its class as ``"module:Name"``; ``create(url)`` returns an instance over the
+    seeded test database at ``url``; ``blocker(driver, url)`` returns its `Blocker`; ``driver_code`` is one of
+    `DRIVER_CODE`; ``notifier(driver, url)`` returns a `Notifier` that reaches its listeners."""
 
     name: str
+    target: str
     create: Callable[[str], Awaitable[Driver]]
     blocker: Callable[[Driver, str], Blocker]
     driver_code: str
@@ -372,11 +375,21 @@ class ConformanceDriver:
     def unavailable_reason(self) -> str | None:
         if self.name != "django" and on_sqlite():
             return "the test database is SQLite, which the suite runs on the Django driver only"
-        return demo_drivers.get(self.name).unavailable_reason()
+        module = self.target.partition(":")[0]
+        try:
+            importlib.import_module(module)
+        except ModuleNotFoundError as exc:
+            if exc.name and exc.name.partition(".")[0] not in ("adorm", "tests"):
+                return f"{module} needs {exc.name}, which is not installed"
+            raise
+        return None
+
+    def driver_class(self) -> type[Driver]:
+        return import_object(self.target, "driver class")
 
 
 async def _sql_driver(name: str) -> Driver:
-    return demo_drivers.get(name).driver_class()()
+    return get(name).driver_class()()
 
 
 async def _django_driver(_url: str) -> Driver:
@@ -397,9 +410,12 @@ async def _memory_driver(_url: str) -> Driver:
 
 
 DRIVERS: tuple[ConformanceDriver, ...] = (
-    ConformanceDriver("django", _django_driver, _django_blocker, "runs", _django_notifier),
+    ConformanceDriver(
+        "django", "adorm.drivers.django:DjangoDriver", _django_driver, _django_blocker, "runs", _django_notifier
+    ),
     ConformanceDriver(
         "asyncpg",
+        "adorm.drivers.asyncpg:AsyncpgDriver",
         lambda _url: _sql_driver("asyncpg"),
         lambda _driver, url: TableLock(url),
         "refused",
@@ -407,9 +423,18 @@ DRIVERS: tuple[ConformanceDriver, ...] = (
     ),
     ConformanceDriver(
         "memory",
+        "tests.memory_driver:MemoryDriver",
         _memory_driver,
         lambda driver, _url: RowLock(driver),  # type: ignore[arg-type]
         "not run",
         lambda driver, _url: MemoryNotifier(driver),  # type: ignore[arg-type]
     ),
 )
+
+
+def get(name: str) -> ConformanceDriver:
+    """The entry of the driver called ``name``."""
+    for driver in DRIVERS:
+        if driver.name == name:
+            return driver
+    raise LookupError(f"the conformance suite has no driver {name!r}")

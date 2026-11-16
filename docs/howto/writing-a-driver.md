@@ -427,25 +427,42 @@ Reading the catalogue is SQL the driver generates and does not call `mark_custom
 
 ## 7. Run the conformance suite
 
-The repository's [driver conformance suite](/topics/conformance) runs every bundled driver over the demo's schema and
-data. A driver joins it with an entry in `tests/conformance/drivers.py`: a factory that returns an instance over the
-seeded PostgreSQL test database, and a `Blocker` that makes one of its operations wait in the database. A driver
-over that database uses `TableLock`:
+The repository's [driver conformance suite](/topics/conformance) runs every bundled driver over the test suite's club
+schema and data. A driver joins it with a `ConformanceDriver` entry in `tests/conformance/drivers.py`, whose fields
+are:
+
+| Field | Value |
+|---|---|
+| `name` | the name `pytest -k` selects |
+| `target` | the driver class as `"module:Name"` |
+| `create(url)` | a coroutine returning an instance over the seeded test database at `url` |
+| `blocker(driver, url)` | a `Blocker` that makes one of the driver's operations wait in the database |
+| `driver_code` | what the driver does with Python code of the target ORM that a write would call: `"runs"` it, `"refused"` (a write that would call an override or handler raises), `"not run"` |
+| `notifier(driver, url)` | a `Notifier` that sends notifications to the driver's listeners from outside the pool |
+
+A driver over the PostgreSQL test database uses `TableLock` and `PostgresNotifier`:
 
 ```python
 DRIVERS = (
     ...,
-    ConformanceDriver("psycopg", lambda _url: _sql_driver("psycopg"), lambda _driver, url: TableLock(url)),
+    ConformanceDriver(
+        "psycopg",
+        "mypackage.drivers:PsycopgDriver",
+        lambda _url: _sql_driver("psycopg"),
+        lambda _driver, url: TableLock(url),
+        "refused",
+        lambda _driver, url: PostgresNotifier(url),
+    ),
 )
 ```
 
 A driver over another store loads the seeded data into it in its factory, as the memory driver does, and has its
 own `Blocker` subclass.
 
-The driver must also be in the demo's drivers (`demo.api.drivers.DRIVERS`); a test checks this. Every case of the
-catalogue runs on it: a case whose operation kinds and constructs the driver declares must return the catalogue's
-result, any other case must raise `NotSupportedError` naming only names the driver lacks. A declared construct the
-driver executes wrongly fails the case; an undeclared one does not reach its code.
+A test checks that every driver class in the modules under `adorm.drivers` has an entry, and another that the demo runs
+it. Every case of the catalogue runs on it: a case whose operation kinds and constructs the driver declares must return
+the catalogue's result, any other case must raise `NotSupportedError` naming only names the driver lacks. A declared
+construct the driver executes wrongly fails the case; an undeclared one does not reach its code.
 
 ```console
 $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycopg

@@ -1,4 +1,4 @@
-"""Fixtures of the driver conformance suite: the demo's data set in the test database and every driver over it."""
+"""Fixtures of the driver conformance suite: the club data set in the test database and every driver over it."""
 
 from __future__ import annotations
 
@@ -20,9 +20,9 @@ def conformance_driver(request):
 
 
 @pytest.fixture
-async def driver(conformance_driver, demo_data):
-    """An instance of the driver under test over the demo's data set."""
-    return await conformance_driver.create(demo_data)
+async def driver(conformance_driver, club_data):
+    """An instance of the driver under test over the club data set."""
+    return await conformance_driver.create(club_data)
 
 
 @pytest.fixture
@@ -72,9 +72,9 @@ def recorded(monkeypatch):
 
 
 @pytest.fixture
-async def blocker(conformance_driver, driver, demo_data):
+async def blocker(conformance_driver, driver, club_data):
     """The driver's `Blocker`, released and closed afterwards."""
-    blocker = conformance_driver.blocker(driver, demo_data)
+    blocker = conformance_driver.blocker(driver, club_data)
     try:
         yield blocker
     finally:
@@ -82,9 +82,9 @@ async def blocker(conformance_driver, driver, demo_data):
 
 
 @pytest.fixture
-async def notifier(conformance_driver, driver, demo_data):
+async def notifier(conformance_driver, driver, club_data):
     """The driver's `Notifier`, closed afterwards."""
-    notifier = conformance_driver.notifier(driver, demo_data)
+    notifier = conformance_driver.notifier(driver, club_data)
     try:
         yield notifier
     finally:

@@ -1,4 +1,4 @@
-"""The conformance catalogue: operations over the demo's data set (``manage.py seed_demo``) and their results.
+"""The conformance catalogue: operations over the club data set (``manage.py seed_clubs``) and their results.
 
 Each `Case` names in ``uses`` every operation kind and construct name its operations report when they all run. A
 driver that declares all of them must return ``expected``; a driver that lacks one must refuse with
@@ -55,9 +55,9 @@ from adorm.query import (
     Upper,
     When,
 )
-from demo.models.activities import Activity, Attendance, Competition, Tag
-from demo.models.billing import Invoice, InvoiceLine, Payment
-from demo.models.clubs import Club, Member, Membership
+from tests.clubmodels.activities import Activity, Attendance, Competition, Tag
+from tests.clubmodels.billing import Invoice, InvoiceLine, Payment
+from tests.clubmodels.clubs import Club, Member, Membership
 
 UTC = datetime.UTC
 START = datetime.datetime(2026, 3, 2, 7, 0, tzinfo=UTC)
@@ -571,7 +571,7 @@ async def distinct_on():
 
 
 def _django_union_of_values_lists():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     advanced = DjangoMember.objects.filter(level="advanced").values_list("level", flat=True)
     beginners = DjangoMember.objects.filter(level="beginner").values_list("level", flat=True)
@@ -593,7 +593,7 @@ async def union_of_values_lists():
 
 
 def _django_union_of_model_rows():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     juniors = DjangoMember.objects.filter(tags__contains=["junior"])
     query = DjangoMember.objects.filter(level="advanced").union(juniors).order_by("-first_name")[:3]
@@ -614,7 +614,7 @@ async def union_of_model_rows():
 
 
 def _django_intersection():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     query = DjangoMember.objects.filter(level="advanced").intersection(
         DjangoMember.objects.filter(tags__contains=["coach"])
@@ -637,7 +637,7 @@ async def intersection():
 
 
 def _django_difference_then_values_list():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     board = DjangoMember.objects.filter(tags__contains=["board"])
     query = DjangoMember.objects.filter(level="advanced").difference(board)
@@ -658,7 +658,7 @@ async def difference_then_values_list():
 
 
 def _django_union_reduced_to_one_query():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     levels = DjangoMember.objects.order_by("level").values_list("level", flat=True)
     union = levels[:6].union(DjangoMember.objects.none()).order_by("-level")
@@ -688,7 +688,7 @@ async def union_reduced_to_one_query():
 
 
 def _django_set_operations_of_one_query():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     levels = DjangoMember.objects.values_list("level", flat=True)
     return (
@@ -901,7 +901,7 @@ async def a_query_as_an_in_subquery():
 def _django_a_correlated_subquery():
     from django.db.models import OuterRef as DjangoOuterRef, Subquery as DjangoSubquery
 
-    from demo.backend.clubs.models import Member as DjangoMember, Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Member as DjangoMember, Membership as DjangoMembership
 
     coach = DjangoMembership.objects.filter(member_id=DjangoOuterRef("pk"), role="coach").values("member_id")
     return sorted(DjangoMember.objects.filter(pk__in=DjangoSubquery(coach)).values_list("first_name", flat=True))
@@ -924,7 +924,7 @@ async def a_correlated_subquery():
 def _django_exists_subquery():
     from django.db.models import Exists as DjangoExists, OuterRef as DjangoOuterRef
 
-    from demo.backend.clubs.models import Member as DjangoMember, Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Member as DjangoMember, Membership as DjangoMembership
 
     board = DjangoMembership.objects.filter(member_id=DjangoOuterRef("pk"), role="board")
     return sorted(DjangoMember.objects.filter(DjangoExists(board)).values_list("first_name", flat=True))
@@ -977,7 +977,7 @@ def _django_function_coalesce():
     from django.db.models.functions import Coalesce as DjangoCoalesce
     from django.db.models.lookups import Exact as DjangoExact
 
-    from demo.backend.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
 
     condition = DjangoExact(DjangoCoalesce("coach_id", DjangoValue(0)), 0)
     return sorted(DjangoActivity.objects.filter(condition).values_list("name", flat=True))
@@ -993,7 +993,7 @@ def _django_function_concat():
     from django.db.models.functions import Concat as DjangoConcat
     from django.db.models.lookups import Exact as DjangoExact
 
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     condition = DjangoExact(DjangoConcat("first_name", DjangoValue(" "), "last_name"), "Ana Novak")
     return sorted(DjangoMember.objects.filter(condition).values_list("first_name", flat=True))
@@ -1008,7 +1008,7 @@ def _django_function_length():
     from django.db.models.functions import Length as DjangoLength
     from django.db.models.lookups import Exact as DjangoExact
 
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     condition = DjangoExact(DjangoLength("first_name"), 3)
     return sorted(DjangoMember.objects.filter(condition).values_list("first_name", flat=True))
@@ -1024,7 +1024,7 @@ def _django_function_now():
     from django.db.models.functions import Now as DjangoNow
     from django.db.models.lookups import GreaterThan as DjangoGreaterThan
 
-    from demo.backend.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
 
     return DjangoActivity.objects.filter(DjangoGreaterThan(DjangoF("starts_at"), DjangoNow())).count()
 
@@ -1046,7 +1046,7 @@ def _django_truncated(name, kind, value):
         from django.db.models import functions
         from django.db.models.lookups import Exact as DjangoExact
 
-        from demo.backend.activities.models import Activity as DjangoActivity
+        from tests.djangoproject.activities.models import Activity as DjangoActivity
 
         function = getattr(functions, name)
         truncated = function("starts_at", kind) if kind else function("starts_at")
@@ -1078,7 +1078,7 @@ for name, kind, function, value, matching in TRUNCATIONS:
 def _django_case_when():
     from django.db.models import Case as DjangoCase, Value as DjangoValue, When as DjangoWhen
 
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     senior = DjangoCase(
         DjangoWhen(birth_date__lt=datetime.date(1980, 1, 1), then=DjangoValue(True)), default=DjangoValue(False)
@@ -1104,7 +1104,7 @@ async def case_when():
 
 
 def _django_by_slug(aggregate) -> list[tuple[str, Any]]:
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     return list(DjangoClub.objects.annotate(value=aggregate).order_by("slug").values_list("slug", "value"))
 
@@ -1155,7 +1155,7 @@ async def aggregate_sum():
 def _django_aggregate_avg():
     from django.db.models import Avg as DjangoAvg
 
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     query = DjangoClub.objects.annotate(value=DjangoAvg("memberships__fee")).filter(slug="koper-sailing")
     return [float(value) for value in query.values_list("value", flat=True)]
@@ -1248,7 +1248,7 @@ FEES = Decimal("1102.00")
 def _django_aggregate_operation():
     from django.db.models import Count as DjangoCount, Q as DjangoQ, Sum as DjangoSum
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     return DjangoMembership.objects.aggregate(
         DjangoSum("fee"),
@@ -1280,7 +1280,7 @@ async def aggregate_operation():
 def _django_aggregate_without_rows():
     from django.db.models import Count as DjangoCount, Max as DjangoMax, Sum as DjangoSum
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     return DjangoMembership.objects.filter(role="treasurer").aggregate(
         n=DjangoCount("*"), total=DjangoSum("fee"), zero=DjangoSum("fee", default=0), top=DjangoMax("fee")
@@ -1305,7 +1305,7 @@ async def aggregate_without_rows():
 def _django_aggregate_over_a_slice_and_annotations():
     from django.db.models import Avg as DjangoAvg, Count as DjangoCount, Max as DjangoMax
 
-    from demo.backend.clubs.models import Club as DjangoClub, Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Club as DjangoClub, Membership as DjangoMembership
 
     top = DjangoMembership.objects.order_by("-fee", "pk")[:3].aggregate(DjangoMax("fee"), n=DjangoCount("*"))
     clubs = DjangoClub.objects.annotate(headcount=DjangoCount("memberships")).aggregate(DjangoAvg("headcount"))
@@ -1330,7 +1330,7 @@ async def aggregate_over_a_slice_and_annotations():
 def _django_values_annotate_groups_rows():
     from django.db.models import Count as DjangoCount, Sum as DjangoSum
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     groups = DjangoMembership.objects.values("role").annotate(n=DjangoCount("*"), fees=DjangoSum("fee"))
     return list(groups.order_by("role"))
@@ -1358,7 +1358,7 @@ def _django_grouping_by_a_truncated_month():
     from django.db.models import Count as DjangoCount, Sum as DjangoSum
     from django.db.models.functions import TruncMonth as DjangoTruncMonth
 
-    from demo.backend.billing.models import Invoice as DjangoInvoice
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice
 
     months = DjangoInvoice.objects.annotate(month=DjangoTruncMonth("issued")).values("month")
     return list(
@@ -1391,7 +1391,7 @@ async def grouping_by_a_truncated_month():
 def _django_aggregate_over_groups():
     from django.db.models import Count as DjangoCount, Max as DjangoMax
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     groups = DjangoMembership.objects.values("club_id").annotate(n=DjangoCount("*"))
     return groups.aggregate(largest=DjangoMax("n"), groups=DjangoCount("club_id"))
@@ -1414,7 +1414,7 @@ async def aggregate_over_groups():
 def _django_alias_filters_without_selecting():
     from django.db.models import Count as DjangoCount
 
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     query = DjangoClub.objects.alias(headcount=DjangoCount("memberships")).filter(headcount__gt=3).order_by("slug")
     return [(club.slug, hasattr(club, "headcount")) for club in query]
@@ -1437,7 +1437,7 @@ def _django_annotations_of_functions_and_cases():
     from django.db.models import Case as DjangoCase, Value as DjangoValue, When as DjangoWhen
     from django.db.models.functions import Coalesce as DjangoCoalesce, Concat as DjangoConcat
 
-    from demo.backend.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
 
     query = DjangoActivity.objects.annotate(
         label=DjangoConcat("name", DjangoValue(" ("), "kind", DjangoValue(")")),
@@ -1482,8 +1482,8 @@ async def annotations_of_functions_and_cases():
 def _django_a_subquery_of_grouped_sums():
     from django.db.models import OuterRef as DjangoOuterRef, Subquery as DjangoSubquery, Sum as DjangoSum
 
-    from demo.backend.billing.models import Invoice as DjangoInvoice
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     billed = (
         DjangoInvoice.objects.filter(member_id=DjangoOuterRef("pk"))
@@ -1521,7 +1521,7 @@ async def a_subquery_of_grouped_sums():
 def _django_filter_then_annotate_counts_the_matched_rows():
     from django.db.models import Count as DjangoCount
 
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     query = DjangoClub.objects.filter(memberships__role="member").annotate(n=DjangoCount("memberships"))
     return list(query.order_by("slug").values_list("slug", "n"))
@@ -1544,7 +1544,7 @@ async def filter_then_annotate_counts_the_matched_rows():
 def _django_annotate_then_filter_joins_again():
     from django.db.models import Count as DjangoCount
 
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     query = DjangoClub.objects.annotate(n=DjangoCount("memberships")).filter(memberships__role="member")
     return list(query.order_by("slug").values_list("slug", "n"))
@@ -1567,7 +1567,7 @@ async def annotate_then_filter_joins_again():
 def _django_filter_then_grouped_count():
     from django.db.models import Count as DjangoCount
 
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     query = DjangoClub.objects.filter(memberships__active=True).values("slug").annotate(n=DjangoCount("memberships"))
     return list(query.order_by("slug").values_list("slug", "n"))
@@ -1591,7 +1591,7 @@ async def filter_then_grouped_count():
 def _django_annotation_after_grouping_joins_the_group():
     from django.db.models import Count as DjangoCount, F as DjangoF
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     query = DjangoMembership.objects.values("role").annotate(n=DjangoCount("*")).annotate(c=DjangoF("club__slug"))
     return list(query.order_by("role", "c").values_list("role", "c", "n"))
@@ -1622,7 +1622,7 @@ async def annotation_after_grouping_joins_the_group():
 def _django_grouped_count_exists_and_get():
     from django.db.models import Count as DjangoCount
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     groups = DjangoMembership.objects.values("role").annotate(n=DjangoCount("*"))
     large = groups.filter(n__gte=3)
@@ -1662,7 +1662,7 @@ async def grouped_count_exists_and_get():
 def _django_first_and_last_of_ordered_groups():
     from django.db.models import Count as DjangoCount
 
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     groups = DjangoMembership.objects.values("club__slug").annotate(n=DjangoCount("*")).order_by("n", "club__slug")
     return groups.first(), groups.last()
@@ -1686,8 +1686,8 @@ async def first_and_last_of_ordered_groups():
 def _django_a_nested_outer_ref():
     from django.db.models import Exists as DjangoExists, OuterRef as DjangoOuterRef
 
-    from demo.backend.billing.models import Invoice as DjangoInvoice
-    from demo.backend.clubs.models import Club as DjangoClub, Membership as DjangoMembership
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice
+    from tests.djangoproject.clubs.models import Club as DjangoClub, Membership as DjangoMembership
 
     invoiced = DjangoInvoice.objects.filter(
         member_id=DjangoOuterRef("member_id"), club_id=DjangoOuterRef(DjangoOuterRef("pk")), status="open"
@@ -1715,7 +1715,7 @@ async def a_nested_outer_ref():
 
 
 def _django_select_for_update():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     query = DjangoMember.objects.select_for_update().filter(first_name="Ana")
     return sorted(member.first_name for member in query)
@@ -1728,7 +1728,7 @@ async def select_for_update():
 
 
 def _django_select_for_update_options():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     query = DjangoMember.objects.select_for_update(nowait=True, of=["self"], no_key=True).filter(first_name="Ana")
     return sorted(member.first_name for member in query)
@@ -1751,7 +1751,7 @@ async def select_for_update_options():
 
 
 def _django_select_for_update_skip_locked():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     query = DjangoMember.objects.select_for_update(skip_locked=True).filter(first_name="Ana")
     return sorted(member.first_name for member in query)
@@ -1774,7 +1774,7 @@ async def select_for_update_skip_locked():
 
 
 def _django_create():
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     tag = DjangoTag.objects.create(name="night")
     stored = list(DjangoTag.objects.filter(pk=tag.pk).values_list("name", flat=True))
@@ -1789,7 +1789,7 @@ async def create():
 
 
 def _django_create_fills_defaults_and_a_generated_primary_key():
-    from demo.backend.billing.models import Invoice as DjangoInvoice, Payment as DjangoPayment
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice, Payment as DjangoPayment
 
     invoice = DjangoInvoice.objects.get(number="2026-0003")
     payment = DjangoPayment.objects.create(invoice_id=invoice.pk, amount=Decimal("5.00"), paid_at=START)
@@ -1812,7 +1812,7 @@ async def create_fills_defaults_and_a_generated_primary_key():
 
 
 def _django_save_updates_the_loaded_fields():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     ana = DjangoMember.objects.only("first_name", "level").get(first_name="Ana")
     ana.level = "advanced"
@@ -1838,7 +1838,7 @@ async def save_updates_the_loaded_fields():
 
 
 def _django_save_with_update_fields_writes_only_those():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     ana = DjangoMember.objects.get(first_name="Ana")
     ana.level = "advanced"
@@ -1869,7 +1869,7 @@ async def save_with_update_fields_writes_only_those():
 
 
 def _django_save_inserts_a_new_instance():
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     tag = DjangoTag(name="dawn")
     tag.save()
@@ -1884,7 +1884,7 @@ async def save_inserts_a_new_instance():
 
 
 def _django_update():
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     changed = DjangoMembership.objects.filter(active=False).update(active=True)
     unchanged = DjangoMembership.objects.filter(role="nobody").update(active=False)
@@ -1901,7 +1901,7 @@ async def update():
 def _django_update_with_arithmetic():
     from django.db.models import F as DjangoF
 
-    from demo.backend.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
 
     changed = DjangoActivity.objects.filter(name="Crag day").update(capacity=DjangoF("capacity") + 5)
     return changed, DjangoActivity.objects.get(name="Crag day").capacity
@@ -1921,7 +1921,7 @@ async def update_with_arithmetic():
 
 
 def _django_delete():
-    from demo.backend.billing.models import Payment as DjangoPayment
+    from tests.djangoproject.billing.models import Payment as DjangoPayment
 
     deleted = DjangoPayment.objects.filter(reference="SI00 0001").delete()
     return deleted, DjangoPayment.objects.count()
@@ -1934,7 +1934,7 @@ async def delete():
 
 
 def _django_delete_cascades():
-    from demo.backend.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
 
     deleted = DjangoInvoice.objects.filter(number="2026-0001").delete()
     return deleted, DjangoInvoice.objects.count(), DjangoInvoiceLine.objects.count()
@@ -1954,7 +1954,7 @@ async def delete_cascades():
 
 
 def _django_get_or_create():
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     found, created = DjangoTag.objects.get_or_create(name="indoor")
     new, created_new = DjangoTag.objects.get_or_create(name="night")
@@ -1976,7 +1976,7 @@ async def get_or_create():
 
 
 def _django_update_or_create():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     ana, created = DjangoMember.objects.update_or_create(email="ana.0@example.com", defaults={"level": "advanced"})
     new, created_new = DjangoMember.objects.update_or_create(
@@ -2007,7 +2007,7 @@ async def update_or_create():
 
 
 def _django_delete_an_instance():
-    from demo.backend.billing.models import Payment as DjangoPayment
+    from tests.djangoproject.billing.models import Payment as DjangoPayment
 
     payment = DjangoPayment.objects.get(reference="SI00 0001")
     deleted = payment.delete()
@@ -2031,8 +2031,8 @@ async def delete_an_instance():
 def _django_delete_protected():
     from django.db.models import ProtectedError as DjangoProtectedError
 
-    from demo.backend.billing.models import Invoice as DjangoInvoice
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     try:
         DjangoMember.objects.filter(first_name="Ana").delete()
@@ -2063,7 +2063,7 @@ def _django_catch_a_protected_error_inside_a_transaction():
     from django.db import transaction
     from django.db.models import ProtectedError as DjangoProtectedError
 
-    from demo.backend.clubs.models import Club as DjangoClub, Member as DjangoMember
+    from tests.djangoproject.clubs.models import Club as DjangoClub, Member as DjangoMember
 
     refused = False
     with transaction.atomic():
@@ -2098,7 +2098,7 @@ async def catch_a_protected_error_inside_a_transaction():
 def _django_save_with_arithmetic():
     from django.db.models import F as DjangoF
 
-    from demo.backend.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
 
     crag = DjangoActivity.objects.get(name="Crag day")
     crag.capacity = DjangoF("capacity") + 1
@@ -2122,7 +2122,7 @@ async def save_with_arithmetic():
 
 
 def _django_update_a_parent_row_of_a_multi_table_child():
-    from demo.backend.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
+    from tests.djangoproject.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
 
     changed = DjangoActivity.objects.filter(name="Spring regatta").update(capacity=99)
     return changed, DjangoCompetition.objects.get(name="Spring regatta").capacity
@@ -2141,7 +2141,7 @@ async def update_a_parent_row_of_a_multi_table_child():
 
 
 def _django_update_a_multi_table_child():
-    from demo.backend.activities.models import Competition as DjangoCompetition
+    from tests.djangoproject.activities.models import Competition as DjangoCompetition
 
     changed = DjangoCompetition.objects.filter(name="Spring regatta").update(discipline="Rowing")
     regatta = DjangoCompetition.objects.get(name="Spring regatta")
@@ -2162,8 +2162,8 @@ async def update_a_multi_table_child():
 
 
 def _django_create_a_multi_table_child():
-    from demo.backend.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
-    from demo.backend.clubs.models import Club as DjangoClub
+    from tests.djangoproject.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
+    from tests.djangoproject.clubs.models import Club as DjangoClub
 
     koper = DjangoClub.objects.get(slug="koper-sailing")
     DjangoCompetition.objects.create(
@@ -2202,7 +2202,7 @@ async def create_a_multi_table_child():
 
 
 def _django_bulk_create():
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     tags = DjangoTag.objects.bulk_create([DjangoTag(name="night"), DjangoTag(name="dawn")])
     stored = sorted(DjangoTag.objects.filter(pk__in=[tag.pk for tag in tags]).values_list("name", flat=True))
@@ -2225,7 +2225,7 @@ async def bulk_create():
 
 
 def _django_bulk_create_fills_defaults_and_generated_primary_keys():
-    from demo.backend.billing.models import Invoice as DjangoInvoice, Payment as DjangoPayment
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice, Payment as DjangoPayment
 
     invoice = DjangoInvoice.objects.get(number="2026-0003")
     given = uuid.UUID("00000000-0000-4000-8000-000000000063")
@@ -2270,7 +2270,7 @@ async def bulk_create_fills_defaults_and_generated_primary_keys():
 def _django_bulk_create_in_batches_inserts_all_rows_or_none():
     from django.db import IntegrityError as DjangoIntegrityError, transaction
 
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     existing = DjangoTag.objects.get(name="indoor")
     DjangoTag.objects.bulk_create([DjangoTag(name=f"batch {n}") for n in range(5)], batch_size=2)
@@ -2312,7 +2312,7 @@ async def bulk_create_in_batches_inserts_all_rows_or_none():
 
 
 def _django_bulk_create_ignoring_conflicts():
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     tags = DjangoTag.objects.bulk_create([DjangoTag(name="indoor"), DjangoTag(name="night")], ignore_conflicts=True)
     return [tag.pk for tag in tags], DjangoTag.objects.filter(name__in=["indoor", "night"]).count()
@@ -2332,7 +2332,7 @@ async def bulk_create_ignoring_conflicts():
 
 
 def _django_bulk_create_updating_conflicts():
-    from demo.backend.clubs.models import Member as DjangoMember
+    from tests.djangoproject.clubs.models import Member as DjangoMember
 
     ana = DjangoMember.objects.get(email="ana.0@example.com")
     members = DjangoMember.objects.bulk_create(
@@ -2372,7 +2372,7 @@ async def bulk_create_updating_conflicts():
 
 
 def _django_bulk_create_ignores_conflict_fields_without_update_conflicts():
-    from demo.backend.activities.models import Tag as DjangoTag
+    from tests.djangoproject.activities.models import Tag as DjangoTag
 
     tags = DjangoTag.objects.bulk_create(
         [DjangoTag(name="upsert off")], update_conflicts=False, update_fields=["name"], unique_fields=["name"]
@@ -2460,7 +2460,7 @@ async def generic_foreign_key_object():
 
 @case("get", "lookup.exact", expected=("Membership", True, "membership", "Membership"))
 async def content_type_of_a_model_cached():
-    import demo.models.contenttypes  # noqa: F401 - registers the content type model
+    import tests.clubmodels.contenttypes  # noqa: F401 - registers the content type model
 
     content_type = await adorm.content_types.get_id(Membership)
     row = await adorm.content_types.get_for_model(Membership)
@@ -2469,9 +2469,9 @@ async def content_type_of_a_model_cached():
 
 
 def _django_generic_foreign_key_assignment():
-    from demo.backend.activities.models import Activity as DjangoActivity
-    from demo.backend.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     invoice = DjangoInvoice.objects.get(number="2026-0003")
     membership = DjangoMembership.objects.order_by("id").first()
@@ -2512,9 +2512,9 @@ async def generic_foreign_key_assignment():
 
 
 def _django_generic_foreign_key_in_defaults():
-    from demo.backend.activities.models import Activity as DjangoActivity
-    from demo.backend.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
-    from demo.backend.clubs.models import Membership as DjangoMembership
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
+    from tests.djangoproject.billing.models import Invoice as DjangoInvoice, InvoiceLine as DjangoInvoiceLine
+    from tests.djangoproject.clubs.models import Membership as DjangoMembership
 
     invoice = DjangoInvoice.objects.get(number="2026-0003")
     membership = DjangoMembership.objects.order_by("id").first()
@@ -2598,7 +2598,7 @@ async def in_bulk_by_a_unique_field():
 
 
 def _django_create_a_multi_table_child_of_an_existing_parent():
-    from demo.backend.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
+    from tests.djangoproject.activities.models import Activity as DjangoActivity, Competition as DjangoCompetition
 
     crag = DjangoActivity.objects.get(name="Crag day")
     DjangoCompetition(activity_ptr=crag, discipline="Climbing").save_base(raw=True)
@@ -2667,7 +2667,7 @@ async def full_clean_runs_the_model_clean_and_constraints():
 
 
 @case("check_table", expected=((), ()))
-async def check_table_finds_the_demo_tables_as_the_models_expect():
+async def check_table_finds_the_club_tables_as_the_models_expect():
     from adorm.checks import table_check
 
     club = await adorm.create_session().execute(table_check(Club))

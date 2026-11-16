@@ -14,7 +14,7 @@ import adorm
 
 from adorm import ConnectionProfile, GenericPrefetch, Prefetch, prefetch_related_objects, ValidationError
 from adorm.executor import Pool, Router, set_runner
-from demo.models.contenttypes import ContentType
+from tests.clubmodels.contenttypes import ContentType
 from tests.djangoproject.library import models as dj
 from tests.generated.library import Author, Book, Edition, Loan, Note, Reader, Reservation, Tag, Tagging
 from tests.library_data import DUNE, DUNE_2, in_thread, NOTE, PHYSICS, POEMS

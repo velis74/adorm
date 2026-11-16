@@ -290,25 +290,36 @@ def test_import_path_moves_entries_naming_the_front_directories(tmp_path, monkey
     assert sys.path == [str(project), str(project / "sub"), "elsewhere", "/opt/site"]
 
 
-def test_generated_demo_models_match_the_demo_django_models(tmp_path):
-    """The generator against the demo's independently written comparison (``demo.backend.model_check``)."""
-    output = tmp_path / "gendemo"
-    result = run("generate", "--settings", "demo.backend.settings", "-o", str(output))
+def test_module_entry_point_checks_the_checked_in_club_models():
+    result = run(
+        "generate", "--settings", "tests.djangoproject.settings_clubs", "--check", "-o", "tests/clubmodels",
+        "--line-length", "120",
+    )  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    assert "5 generated files are up to date." in result.stdout
+
+
+def test_generated_club_models_match_the_club_django_models(tmp_path):
+    """The generator against the independently written comparison of ``tests.djangoproject.model_check``."""
+    output = tmp_path / "genclubs"
+    result = run("generate", "--settings", "tests.djangoproject.settings_clubs", "-o", str(output))
     assert result.returncode == 0, result.stderr
     script = textwrap.dedent(
         """
         import django
 
         django.setup()
-        import gendemo
-        from demo.backend.model_check import compare
+        import genclubs
+        from tests.djangoproject.model_check import compare
 
-        problems = [problem for model in gendemo.MODELS for problem in compare(model)]
-        print(len(gendemo.MODELS), problems)
+        problems = [problem for model in genclubs.MODELS for problem in compare(model)]
+        print(len(genclubs.MODELS), problems)
         """
     )
     environ = {key: value for key, value in os.environ.items() if key != "DJANGO_SETTINGS_MODULE"}
-    environ.update(DJANGO_SETTINGS_MODULE="demo.backend.settings", PYTHONPATH=f"{ROOT}{os.pathsep}{tmp_path}")
+    environ.update(
+        DJANGO_SETTINGS_MODULE="tests.djangoproject.settings_clubs", PYTHONPATH=f"{ROOT}{os.pathsep}{tmp_path}"
+    )
     checked = subprocess.run(  # noqa: S603 - the interpreter running the suite
         [sys.executable, "-c", script], capture_output=True, text=True, cwd=tmp_path, env=environ, check=False
     )

@@ -79,11 +79,10 @@ With `raise_on_problems` it raises [`SchemaCheckError`](/ref/exceptions#adorm-sc
 with the problems instead of returning them; without problems it returns `()`.
 
 A label without a registered model raises `LookupError`, a class that is not a model with `_meta` `TypeError`, a
-driver that does not declare `check_table` (the demo's memory driver) `NotSupportedError`. Slot and database errors
-pass through.
+driver that does not declare `check_table` `NotSupportedError`. Slot and database errors pass through.
 
 ```python
-from demo.models import MODELS
+from myproject.models import MODELS
 
 problems = await adorm.check_schema(MODELS)
 for problem in problems:

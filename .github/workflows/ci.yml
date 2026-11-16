@@ -7,7 +7,7 @@ on:
 
 env:
   ADORM_TEST_DATABASE_URL: postgres://adorm:adorm@localhost:5432/adorm_test
-  ADORM_DEMO_REQUIRED_DRIVERS: django,asyncpg,memory
+  ADORM_DEMO_REQUIRED_DRIVERS: django,asyncpg
 
 jobs:
   python:
@@ -55,6 +55,39 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run docs:build
+
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ADORM_DEMO_DATABASE_URL: postgres://adorm:adorm@localhost:5432/adorm_demo
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Create the demo database user
+        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB PASSWORD 'adorm'"
+      - run: uv sync --locked
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
 
   coverage:
     runs-on: ubuntu-latest

@@ -10,7 +10,7 @@ import adorm
 
 from adorm import ConnectionProfile, TransactionOutcome
 from adorm.testing import running_operations, wait_for_lock, wait_for_operation
-from demo.models.clubs import Member
+from tests.clubmodels.clubs import Member
 from tests.conformance.drivers import on_sqlite
 
 pytestmark = pytest.mark.django_db(transaction=True)

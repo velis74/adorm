@@ -33,7 +33,7 @@ from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Call, Count as CountOperation, Select
 from adorm.query import Aggregate as AggregateExpression, Exists, Func, OuterRef, Query, Subquery, Value
 from adorm.query.lookups import Exact, IStartsWith
-from demo.models.contenttypes import ContentType
+from tests.clubmodels.contenttypes import ContentType
 from tests.djangoproject.library import models as dj
 from tests.generated.library import Author, Book, BookProxy, Edition, Loan, Note, Placement, Reader, Shelf, Tagging
 from tests.library_data import (

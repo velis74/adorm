@@ -14,8 +14,8 @@ import adorm
 from adorm import check_schema, Model, ModelMeta, NotSupportedError, SchemaMismatchError, SchemaProblem
 from adorm.models.registry import registry
 from adorm.operations import CheckTable
-from demo.models import MODELS
-from demo.models.clubs import Club, Member, Membership
+from tests.clubmodels import MODELS
+from tests.clubmodels.clubs import Club, Member, Membership
 from tests.conformance.drivers import on_sqlite
 from tests.generated import MODELS as GENERATED
 from tests.generated.library import Author, Book, Edition

@@ -1,65 +1,47 @@
-"""The demo end to end: ``demo.py`` sets up a PostgreSQL database and serves the API, once per available driver."""
+"""The demo end to end: ``demo.py`` sets up the database ``adorm_test_demo`` on the test server, then serves the API in
+a child process, and every endpoint runs on every available driver.
 
+The database is dropped afterwards. ``ADORM_DEMO_REQUIRED_DRIVERS`` (comma-separated names) fails the suite when a
+listed driver is not available.
+"""
+
+import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
 import time
 
-from decimal import Decimal
 from pathlib import Path
 
 import httpx
-import psycopg
 import pytest
 
-from demo.api import drivers
 from demo.database import drop_database, with_database
+from tests.djangoproject.settings import TEST_DATABASE_URL
 
-ROOT = Path(__file__).parent.parent.parent
+ROOT = Path(__file__).parents[2]
 DATABASE = "adorm_test_demo"
-STARTUP_SECONDS = 30
-REQUIRED_DRIVERS_ENV = "ADORM_DEMO_REQUIRED_DRIVERS"
+URL = with_database(TEST_DATABASE_URL, DATABASE)
+REQUIRED = [name.strip() for name in os.environ.get("ADORM_DEMO_REQUIRED_DRIVERS", "").split(",") if name.strip()]
+REPEATS = 3
+"""Runs of each scenario per test: a choreography that only sometimes takes its course fails one of them."""
 
 
-def driver_matrix() -> list[str | None]:
-    """Every available driver; ``None`` (no active driver) when there is none."""
-    return drivers.available() or [None]
+def demo(*args: str, **kwargs) -> subprocess.CompletedProcess:
+    environ = {**os.environ, "ADORM_DEMO_DATABASE_URL": URL}
+    environ.pop("DJANGO_SETTINGS_MODULE", None)
+    return subprocess.run(  # noqa: S603 - the interpreter running the suite
+        [sys.executable, "demo.py", *args], cwd=ROOT, env=environ, capture_output=True, text=True, check=False, **kwargs
+    )
 
 
-REQUIRED = [name.strip() for name in os.environ.get(REQUIRED_DRIVERS_ENV, "").split(",") if name.strip()]
-"""``ADORM_DEMO_REQUIRED_DRIVERS`` (comma-separated names): drivers whose absence fails the suite."""
-
-
-def test_required_drivers_are_available():
-    reasons = {name: drivers.get(name).unavailable_reason() for name in REQUIRED}
-    assert {name: reason for name, reason in reasons.items() if reason is not None} == {}
-
-
-class Environment(dict):
-    """Environment variables of the demo processes; its repr hides the values (the database password)."""
-
-    def __repr__(self) -> str:
-        return f"<demo environment, {len(self)} variables>"
-
-
-@pytest.fixture(scope="module")
-def demo_env(database_url):
-    url = with_database(database_url, DATABASE)
-    drop_database(url)
-    env = Environment(os.environ, ADORM_DEMO_DATABASE_URL=url)
-    env.pop(drivers.DRIVER_ENV, None)
-    env.pop("DJANGO_SETTINGS_MODULE", None)
-    try:
-        yield env
-    finally:
-        drop_database(url)
-
-
-def run_demo(env, *args, timeout=120):
-    return subprocess.run(  # noqa: S603 - fixed command
-        [sys.executable, "demo.py", *args], cwd=ROOT, env=env, capture_output=True, text=True, timeout=timeout
+def demo_module(module: str, url: str) -> subprocess.CompletedProcess:
+    """Run ``python -m module`` on the demo database ``url``."""
+    environ = {**os.environ, "ADORM_DEMO_DATABASE_URL": url}
+    environ.pop("DJANGO_SETTINGS_MODULE", None)
+    return subprocess.run(  # noqa: S603 - the interpreter running the suite
+        [sys.executable, "-m", module], cwd=ROOT, env=environ, capture_output=True, text=True, check=False, timeout=120
     )
 
 
@@ -70,559 +52,263 @@ def free_port() -> int:
 
 
 @pytest.fixture(scope="module")
-def database(demo_env):
-    """The demo database after ``demo.py --setup-only``."""
-    result = run_demo(demo_env, "--setup-only")
+def database(demo_role):  # noqa: ARG001 - skips for a superuser
+    drop_database(URL)
+    result = demo("--setup-only")
     assert result.returncode == 0, result.stderr
     assert "Created the demo database." in result.stdout
-    assert "Demo data created." in result.stdout
-    assert "5 generated files are up to date." in result.stdout
-    assert "11 adorm models match the Django models." in result.stdout
-    with psycopg.connect(demo_env["ADORM_DEMO_DATABASE_URL"]) as conn:
-        yield conn
+    yield URL
+    drop_database(URL)
 
 
-def count(conn, table):
-    return conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-
-
-def test_setup_seeds_the_domain(database):
-    assert count(database, "clubs_club") == 3
-    assert count(database, "clubs_member") == 12
-    assert count(database, "clubs_membership") == 13
-    assert count(database, "activities_activity") == 7
-    competitions = database.execute(
-        "SELECT a.name, c.discipline FROM activities_competition c"
-        " JOIN activities_activity a ON a.id = c.activity_ptr_id ORDER BY a.id"
-    ).fetchall()
-    assert competitions == [("Spring regatta", "Coxed eights"), ("Regional bouldering cup", "Bouldering")]
-    assert count(database, "activities_activity_tags") > 0
-    assert count(database, "billing_invoice") == count(database, "billing_invoiceline")
-    generic = database.execute(
-        "SELECT DISTINCT ct.model FROM billing_invoiceline l JOIN django_content_type ct ON ct.id = l.content_type_id"
-    ).fetchall()
-    assert sorted(row[0] for row in generic) == ["activity", "membership"]
-
-
-def test_setup_again_keeps_the_data(demo_env, database):
-    before = count(database, "billing_invoice")
-    result = run_demo(demo_env, "--setup-only")
-    assert result.returncode == 0, result.stderr
-    assert "Demo data already present." in result.stdout
-    assert count(database, "billing_invoice") == before
-
-
-def test_reset_replaces_the_data_with_the_same_set(demo_env, database):
-    tables = ("clubs_member", "activities_attendance", "activities_competition", "billing_invoice", "billing_payment")
-    before = {table: count(database, table) for table in tables}
-    result = run_demo(demo_env, "--setup-only", "--reset")
-    assert result.returncode == 0, result.stderr
-    assert "Demo data created." in result.stdout
-    assert {table: count(database, table) for table in tables} == before
-    assert database.execute("SELECT min(number) FROM billing_invoice").fetchone()[0] == "2026-0001"
-
-
-CLUB_REPORT = """
-import os
-os.environ["DJANGO_SETTINGS_MODULE"] = "demo.backend.settings"
-import django
-django.setup()
-from decimal import Decimal
-from django.db.models import Count, OuterRef, Q, Subquery, Sum, Value
-from django.db.models.functions import Coalesce
-from demo.backend.billing.models import Invoice
-from demo.backend.clubs.models import Club, Membership
-
-fees = Membership.objects.filter(club=OuterRef("pk"), active=True).values("club").annotate(total=Sum("fee"))
-invoices = Invoice.objects.filter(club=OuterRef("pk"), status="open").values("club").annotate(number=Count("pk"))
-rows = Club.objects.annotate(
-    active_members=Count("memberships", filter=Q(memberships__active=True)),
-    fees=Coalesce(Subquery(fees.values("total")), Value(Decimal(0))),
-    open_invoices=Coalesce(Subquery(invoices.values("number")), Value(0)),
-).order_by("slug")
-for row in rows:
-    print(row.slug, row.active_members, row.fees, row.open_invoices)
-"""
-
-
-def test_club_report_aggregates_match_the_data(demo_env, database):
-    """The club report's aggregate shape, run through Django on the seeded data, gives the per-club totals."""
-    result = subprocess.run(  # noqa: S603 - fixed command
-        [sys.executable, "-c", CLUB_REPORT], cwd=ROOT, env=demo_env, capture_output=True, text=True, timeout=60
-    )
-    assert result.returncode == 0, result.stderr
-    expected = database.execute(
-        "SELECT c.slug,"
-        " (SELECT count(*) FROM clubs_membership m WHERE m.club_id = c.id AND m.active),"
-        " (SELECT coalesce(sum(fee), 0) FROM clubs_membership m WHERE m.club_id = c.id AND m.active),"
-        " (SELECT count(*) FROM billing_invoice i WHERE i.club_id = c.id AND i.status = 'open')"
-        " FROM clubs_club c ORDER BY c.slug"
-    ).fetchall()
-    assert result.stdout.splitlines() == [" ".join(str(value) for value in row) for row in expected]
-    assert [row[2] for row in expected] == [Decimal("300.00"), Decimal("300.00"), Decimal("382.00")]
-
-
-def test_list_drivers(demo_env):
-    result = run_demo(demo_env, "--list-drivers")
-    assert result.returncode == 0, result.stderr
-    lines = result.stdout.splitlines()
-    assert [line.split()[0] for line in lines] == [d.name for d in drivers.DRIVERS]
-    available = set(drivers.available())
-    for line in lines:
-        name = line.split()[0]
-        assert ("not available" not in line) == (name in available)
-
-
-def test_an_unavailable_driver_is_refused(demo_env):
-    missing = [d.name for d in drivers.DRIVERS if not d.is_available()]
-    if not missing:
-        pytest.skip("every driver is available")
-    result = run_demo(demo_env, "--driver", missing[0], "--no-setup")
-    assert result.returncode == 2
-    assert "is not available" in result.stderr
-
-
-@pytest.fixture(params=driver_matrix(), ids=lambda name: name or "no-driver")
-def server(request, demo_env, database):  # noqa: ARG001 - needs the database set up
+@pytest.fixture(scope="module")
+def client(database):
     port = free_port()
-    args = [sys.executable, "demo.py", "--no-setup", "--port", str(port)]
-    if request.param is not None:
-        args += ["--driver", request.param]
-    process = subprocess.Popen(  # noqa: S603 - fixed command
-        args, cwd=ROOT, env=demo_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-    )
-    base = f"http://127.0.0.1:{port}"
-    try:
-        deadline = time.monotonic() + STARTUP_SECONDS
-        while True:
-            if process.poll() is not None:
-                pytest.fail(f"demo.py exited with {process.returncode}:\n{process.stdout.read()}")
-            try:
-                if httpx.get(f"{base}/api/health", timeout=1).status_code == 200:
-                    break
-            except httpx.TransportError:
-                pass
-            if time.monotonic() > deadline:
-                pytest.fail("demo.py did not start")
-            time.sleep(0.1)
-        yield request.param, base
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
-        process.stdout.close()
-
-
-def test_api_serves_operations(server):
-    driver, base = server
-    with httpx.Client(base_url=base, timeout=10) as http:
-        assert http.get("/api/health").json()["driver"] == driver
-        listed = {d["name"]: d for d in http.get("/api/drivers").json()}
-        if driver is not None:
-            assert listed[driver]["active"]
-        reads = [
-            ("/api/operations/members", {"club": "ljubljana-rowing", "search": "nov"}),
-            ("/api/operations/clubs/ljubljana-rowing/report", {}),
-            ("/api/operations/activities", {"kind": "training"}),
-            ("/api/operations/invoices/outstanding", {"today": "2026-03-01"}),
-        ]
-        for path, params in reads:
-            response = http.get(path, params=params)
-            assert response.status_code == 200, (path, response.text)
-            body = response.json()
-            assert sorted(body["unsupported"]) == sorted(drivers.available())
-            decoded = http.post("/api/operations/decode", json=body["operation"])
-            assert decoded.json() == body
-        member = {"first_name": "Mia", "last_name": "Kos", "email": "mia@example.com", "joined": "2026-01-01T09:00:00Z"}
-        assert http.post("/api/operations/members", json=member).status_code == 201
-        assert http.post("/api/operations/members", json={**member, "level": "expert"}).status_code == 422
-        assert http.patch("/api/operations/members/1", json={"level": "advanced"}).status_code == 200
-        assert http.patch("/api/operations/members/1", json={"level": None}).status_code == 422
-        assert http.post("/api/operations/activities/1/attendances", json={"member_id": 2}).status_code == 200
-        assert http.post("/api/operations/attendances/1/cancel").status_code == 200
-        payment = {"amount": "120.00", "paid_at": "2026-02-01T12:00:00Z"}
-        assert len(http.post("/api/operations/invoices/1/payments", json=payment).json()) == 2
-        assert http.delete("/api/operations/clubs/koper-sailing/draft-invoices").status_code == 200
-        assert len(http.get("/api/models").json()) == 11
-        assert http.get("/openapi.json").status_code == 200
-
-
-def test_api_executes_the_data_endpoints(server, demo_env, database):
-    """The data endpoints on every driver; those that write only on a driver that supports ``create``. The memory
-    driver loads the seeded database and keeps its writes in memory; on another driver the writes land in the
-    database, which is reset afterwards."""
-    driver, base = server
-    if driver is None:
-        pytest.skip("no driver is available")
-    try:
-        _check_data_endpoints(driver, base, database, demo_env["ADORM_DEMO_DATABASE_URL"])
-    finally:
-        if driver != "memory":
-            database.rollback()
-            result = run_demo(demo_env, "--setup-only", "--reset")
-            assert result.returncode == 0, result.stderr
-
-
-def _check_data_endpoints(driver, base, database, url):
-    members_before = count(database, "clubs_member")
-    payments_before = count(database, "billing_payment")
-    invoice = database.execute("SELECT min(id) FROM billing_invoice WHERE status = 'open'").fetchone()[0]
-    with httpx.Client(base_url=base, timeout=10) as http:
-        operations = {d["name"]: d["operations"] for d in http.get("/api/drivers").json()}[driver]
-        members = http.get("/api/data/members", params={"limit": 100}).json()
-        assert len(members["result"]) == members_before
-        assert (members["session"], members["driver"]) == ("default/default", driver)
-        if driver == "memory":
-            assert [call["call"] for call in members["calls"]] == ["acquire", "select clubs.Member", "release"]
-        available = [d["name"] for d in http.get("/api/drivers").json() if d["available"]]
-        assert set(REQUIRED) <= set(available)
-        for other in available:
-            switched = http.get("/api/data/members", params={"limit": 100}, headers={"X-Adorm-Driver": other}).json()
-            assert (switched["session"], switched["driver"]) == (f"{other}/default", other)
-            assert switched["result"] == members["result"]
-        comparison = http.get("/api/data/compare/members", params={"limit": 100}).json()
-        assert [(read["driver"], read["error"]) for read in comparison["reads"]] == [(name, None) for name in available]
-        assert comparison["same"] is True
-        first = members["result"][0]
-        assert http.get(f"/api/data/members/{first['id']}").json()["result"] == first
-        assert http.get("/api/data/members/999999").status_code == 404
-
-        summary = http.get("/api/data/clubs/ljubljana-rowing/summary", params={"atomic": True}).json()["result"]
-        expected = database.execute(
-            "SELECT (SELECT count(*) FROM clubs_membership m WHERE m.club_id = c.id AND m.active),"
-            " (SELECT count(*) FROM activities_activity a WHERE a.club_id = c.id),"
-            " (SELECT count(*) FROM billing_invoice i WHERE i.club_id = c.id AND i.status = 'open')"
-            " FROM clubs_club c WHERE c.slug = 'ljubljana-rowing'"
-        ).fetchone()
-        assert (summary["active_memberships"], summary["activities"], summary["open_invoices"]) == expected
-        detail = http.get(f"/api/data/invoices/{invoice}").json()["result"]
-        assert detail["invoice"]["status"] == "open"
-        payments = database.execute("SELECT count(*) FROM billing_payment WHERE invoice_id = %s", (invoice,)).fetchone()
-        assert len(detail["payments"]) == payments[0]
-
-        _check_aggregates_and_instances(driver, http, database)
-
-        writes = "create" in operations
-        if writes:
-            _check_invoice_lines(driver, http, database)
-            enrolment = {"first_name": "Mia", "last_name": "Kos", "email": "mia@example.com", "fee": "50.00"}
-            enrolled = http.post("/api/data/clubs/koper-sailing/members", json=enrolment)
-            assert enrolled.status_code == 201, enrolled.text
-            member_id = enrolled.json()["result"]["member"]["id"]
-            assert http.get(f"/api/data/members/{member_id}").json()["result"]["first_name"] == "Mia"
-            assert [message["text"] for message in http.get("/api/data/outbox").json()] == [
-                "Welcome to Koper Sailing Club, Mia!"
-            ]
-
-            payment = {"amount": "120.00", "paid_at": "2026-02-01T12:00:00Z"}
-            assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 201
-            assert http.post(f"/api/data/invoices/{invoice}/payments", json=payment).status_code == 409
-            assert http.get(f"/api/data/invoices/{invoice}").json()["result"]["invoice"]["status"] == "paid"
-            _check_registrations(driver, http, database, url)
-            settled = http.post("/api/data/invoices/settlements", params={"limit": 2})
-            assert settled.status_code == 200, settled.text
-            payments = settled.json()["result"]["payments"]
-            assert [payment["reference"] for payment in payments] == ["settled by default"] * 2
-            for payment in payments:
-                paid = http.get(f"/api/data/invoices/{payment['invoice_id']}").json()["result"]
-                assert paid["invoice"]["status"] == "paid"
-                assert payment["amount"] == paid["invoice"]["total"]
-
-        state = http.get("/api/executor").json()
-        assert state["driver"] == driver
-        assert {pool["using"] for pool in state["pools"]} == {"default", *available}
-        assert [pool["in_use"] for pool in state["pools"]] == [0] * len(state["pools"])
-    database.rollback()
-    status = database.execute("SELECT status FROM billing_invoice WHERE id = %s", (invoice,)).fetchone()
-    if driver == "memory" or not writes:
-        assert count(database, "clubs_member") == members_before
-        assert count(database, "billing_payment") == payments_before
-        assert status == ("open",)
-    else:
-        assert count(database, "clubs_member") == members_before + 1
-        assert count(database, "billing_payment") == payments_before + 3
-        assert status == ("paid",)
-
-
-AGGREGATE_READS = [
-    ("/api/data/clubs/reports", {"min_active_members": 1}),
-    ("/api/data/clubs/koper-sailing/report", {}),
-    ("/api/data/memberships/fees", {}),
-    ("/api/data/activities/schedule", {"kind": "training"}),
-    ("/api/data/invoices/outstanding", {"today": "2026-03-01"}),
-    ("/api/data/invoices/months", {}),
-]
-
-
-def _check_aggregates_and_instances(driver, http, database):
-    """The aggregation endpoints, prefetching, rows by key and generic foreign keys; the memory driver refuses
-    annotations, aggregates, ``in_bulk()`` by slug and ``full_clean()`` with 501."""
-    refused = [*AGGREGATE_READS, ("/api/data/clubs/in-bulk", {"slug": ["koper-sailing", "nowhere"]})]
-    first, member = database.execute("SELECT min(i.id), min(m.id) FROM billing_invoice i, clubs_member m").fetchone()
-    if driver == "memory":
-        for path, params in refused:
-            response = http.get(path, params=params)
-            assert (response.status_code, response.json()["error"]) == (501, "NotSupportedError"), path
-        response = http.post(f"/api/data/invoices/{first}/validation", json={})
-        assert (response.status_code, response.json()["error"]) == (501, "NotSupportedError")
-        club = database.execute("SELECT min(id) FROM clubs_club").fetchone()[0]
-        body = {"club_id": club, "member_id": member, "since": "2026-01-01", "fee": "1.00"}
-        response = http.post("/api/data/memberships/validation", json=body)
-        assert (response.status_code, response.json()["error"]) == (501, "NotSupportedError")
-    else:
-        answers = {}
-        for path, params in refused:
-            response = http.get(path, params=params)
-            assert response.status_code == 200, (path, response.text)
-            answers[path] = response.json()["result"]
-        expected = database.execute(
-            "SELECT c.slug, (SELECT count(*) FROM clubs_membership m WHERE m.club_id = c.id AND m.active) AS n"
-            " FROM clubs_club c ORDER BY n DESC, c.slug"
-        ).fetchall()
-        assert [(r["club"]["slug"], r["active_members"]) for r in answers["/api/data/clubs/reports"]] == expected
-        fees = database.execute("SELECT count(*), sum(fee) FROM clubs_membership WHERE active").fetchone()
-        totals = answers["/api/data/memberships/fees"]
-        assert (totals["memberships"], Decimal(totals["total"])) == fees
-        invoices = database.execute("SELECT count(*) FROM billing_invoice").fetchone()[0]
-        assert sum(month["invoices"] for month in answers["/api/data/invoices/months"]) == invoices
-        assert answers["/api/data/clubs/in-bulk"]["missing"] == ["nowhere"]
-        number = database.execute("SELECT number FROM billing_invoice ORDER BY id LIMIT 1 OFFSET 1").fetchone()[0]
-        checked = http.post(f"/api/data/invoices/{first}/validation", json={"number": number, "due": "2000-01-01"})
-        assert checked.status_code == 200, checked.text
-        assert sorted(checked.json()["result"]["errors"]) == ["due", "number"]
-        membership = database.execute("SELECT club_id, member_id FROM clubs_membership LIMIT 1").fetchone()
-        body = {"club_id": membership[0], "member_id": membership[1], "since": "2026-01-01", "fee": "1.00"}
-        checked = http.post("/api/data/memberships/validation", json=body).json()["result"]
-        assert [error["code"] for error in checked["errors"]["__all__"]] == ["unique_together"]
-
-    roster = http.get("/api/data/clubs/ljubljana-rowing/roster", params={"atomic": True}).json()["result"]
-    active = database.execute(
-        "SELECT count(*) FROM clubs_membership m JOIN clubs_club c ON c.id = m.club_id"
-        " WHERE c.slug = 'ljubljana-rowing' AND m.active"
-    ).fetchone()[0]
-    assert len(roster["members"]) == active
-    assert http.get("/api/data/clubs/ljubljana-rowing/roster").json()["result"] == roster
-    found = http.get("/api/data/members/in-bulk", params={"id": [member, 999999]}).json()["result"]
-    assert (list(found["found"]), found["missing"]) == ([str(member)], [999999])
-    invoice = database.execute("SELECT min(invoice_id) FROM billing_invoiceline").fetchone()[0]
-    lines = http.get(f"/api/data/invoices/{invoice}/lines").json()["result"]
-    assert lines == http.get(f"/api/data/invoices/{invoice}/lines", params={"prefetch": False}).json()["result"]
-    stored = database.execute(
-        "SELECT ct.app_label || '.' || ct.model FROM billing_invoiceline l"
-        " JOIN django_content_type ct ON ct.id = l.content_type_id WHERE l.invoice_id = %s ORDER BY l.id",
-        (invoice,),
-    ).fetchall()
-    assert [line["model"].lower() for line in lines] == [row[0] for row in stored]
-    database.rollback()
-
-
-def _check_invoice_lines(driver, http, database):
-    """A line billing an activity added to the last open invoice: its content type and the invoice's new total."""
-    invoice, total = database.execute(
-        "SELECT id, total FROM billing_invoice WHERE status = 'open' ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    database.rollback()
-    activity = database.execute("SELECT min(id) FROM activities_activity").fetchone()[0]
-    line = {"item": {"model": "activities.Activity", "id": activity}, "description": "Extra", "unit_price": "7.50"}
-    response = http.post(f"/api/data/invoices/{invoice}/lines", json=line)
-    assert response.status_code == 201, response.text
-    result = response.json()["result"]
-    assert Decimal(result["invoice"]["total"]) == total + Decimal("7.50")
-    content_type = database.execute(
-        "SELECT id FROM django_content_type WHERE app_label = 'activities' AND model = 'activity'"
-    ).fetchone()[0]
-    assert result["line"]["content_type_id"] == content_type
-    lines = http.get(f"/api/data/invoices/{invoice}/lines").json()["result"]
-    assert (lines[-1]["model"], lines[-1]["item"]["id"]) == ("activities.Activity", activity)
-    stored = database.execute("SELECT total FROM billing_invoice WHERE id = %s", (invoice,)).fetchone()[0]
-    database.rollback()
-    assert stored == (total if driver == "memory" else total + Decimal("7.50"))
-
-
-def _check_registrations(driver, http, database, url):
-    """Register every member for the first activity: the free places fill, the rest is skipped. On a driver over
-    the database, a connection of the test then holds the activity's row lock: ``nowait``, ``lock_timeout`` and
-    ``timeout`` give up waiting for it; the memory driver refuses ``lock_timeout``."""
-    activity = database.execute("SELECT min(id) FROM activities_activity").fetchone()[0]
-    capacity, taken, existing = database.execute(
-        "SELECT capacity, (SELECT count(*) FROM activities_attendance t WHERE t.activity_id = a.id"
-        " AND t.status <> 'cancelled'), (SELECT count(*) FROM activities_attendance t WHERE t.activity_id = a.id)"
-        " FROM activities_activity a WHERE a.id = %s",
-        (activity,),
-    ).fetchone()
-    database.rollback()
-    members = [m["id"] for m in http.get("/api/data/members", params={"limit": 100}).json()["result"]]
-    response = http.post(f"/api/data/activities/{activity}/registrations", json={"member_ids": members})
-    assert response.status_code == 200, response.text
-    result = response.json()["result"]
-    assert len(result["registered"]) == min(capacity - taken, len(members) - existing)
-    assert len(result["registered"]) + len(result["skipped"]) == len(members)
-    assert set(result["skipped"].values()) <= {"already registered", "full"}
-    late = [members[0]]
-    if driver == "memory":
-        refused = http.post(f"/api/data/activities/{activity}/registrations?lock_timeout=1", json={"member_ids": late})
-        assert refused.status_code == 501
-        assert refused.json()["error"] == "NotSupportedError"
-        return
-    with psycopg.connect(url) as holder:
-        holder.execute("SELECT id FROM activities_activity WHERE id = %s FOR UPDATE", (activity,))
-        path = f"/api/data/activities/{activity}/registrations"
-        nowait = http.post(path, params={"nowait": True}, json={"member_ids": late})
-        assert (nowait.status_code, nowait.json()["sqlstate"]) == (409, "55P03")
-        waited = http.post(path, params={"lock_timeout": 0.2}, json={"member_ids": late})
-        assert (waited.status_code, waited.json()["sqlstate"]) == (409, "55P03")
-        timed_out = http.post(path, params={"timeout": 1}, json={"member_ids": late})
-        assert timed_out.status_code == 504
-        body = timed_out.json()
-        assert (body["error"], body["phase"], body["operation"]) == (
-            "OperationTimeout",
-            "executing",
-            "get activities.Activity",
-        )
-        holder.rollback()
-    again = http.post(
-        f"/api/data/activities/{activity}/registrations", params={"nowait": True}, json={"member_ids": late}
-    )
-    assert again.status_code == 200, again.text
-
-
-def test_stale_generated_models_fail_the_check(demo_env, tmp_path):
-    shutil.copytree(ROOT / "demo" / "models", tmp_path / "models")
-    clubs = tmp_path / "models" / "clubs.py"
-    clubs.write_text(clubs.read_text().replace("max_length=100", "max_length=99"))
-    command = ["-m", "adorm", "generate", "--settings", "demo.backend.settings", "--line-length", "120", "--check"]
-    result = subprocess.run(  # noqa: S603 - fixed command
-        [sys.executable, *command, "-o", str(tmp_path / "models")],
+    environ = {**os.environ, "ADORM_DEMO_DATABASE_URL": database}
+    environ.pop("DJANGO_SETTINGS_MODULE", None)
+    server = subprocess.Popen(  # noqa: S603 - the interpreter running the suite
+        [sys.executable, "demo.py", "--no-setup", "--frontend", "none", "--port", str(port)],
         cwd=ROOT,
-        env=demo_env,
+        env=environ,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=60) as client:
+            deadline = time.monotonic() + 120
+            while True:
+                if server.poll() is not None:
+                    pytest.fail(f"demo.py exited: {server.stdout.read()}")
+                try:
+                    if client.get("/api/health").status_code == 200:
+                        break
+                except httpx.TransportError:
+                    pass
+                assert time.monotonic() < deadline, "the demo API did not start within 120 s"
+                time.sleep(0.1)  # readiness poll of a child process
+            yield client
+    finally:
+        server.terminate()
+        server.wait(timeout=30)
+
+
+@pytest.fixture(scope="module")
+def drivers(client):
+    names = client.get("/api/health").json()["drivers"]
+    missing = [name for name in REQUIRED if name not in names]
+    assert not missing, f"required demo drivers are not available: {missing}"
+    return names
+
+
+@pytest.mark.usefixtures("database")
+def test_setup_runs_again_without_changes():
+    result = demo("--setup-only")
+    assert result.returncode == 0, result.stderr
+    assert "Created the demo database." not in result.stdout
+    assert "Library data already present." in result.stdout
+    assert "6 models checked, no problems found." in result.stdout
+
+
+def test_setup_refuses_a_url_without_a_database():
+    environ_url = with_database(TEST_DATABASE_URL, "postgres")
+    result = subprocess.run(  # noqa: S603 - the interpreter running the suite
+        [sys.executable, "demo.py", "--setup-only"],
+        cwd=ROOT,
+        env={**os.environ, "ADORM_DEMO_DATABASE_URL": environ_url},
         capture_output=True,
         text=True,
-        timeout=60,
+        check=False,
     )
-    assert result.returncode == 1
-    assert "clubs.py" in result.stdout + result.stderr
+    assert result.returncode == 2
+    assert "names no demo database" in result.stderr
 
 
-MISMATCH = """
-import os, datetime, decimal
-os.environ["DJANGO_SETTINGS_MODULE"] = "demo.backend.settings"
-import django
-django.setup()
-from typing import Literal
-from django.apps import apps
-from pydantic import Field
-from adorm import ForeignKey, ManyToMany, Model, ModelMeta, ReverseForeignKey
-from adorm.models import Relation
-from demo.backend.model_check import compare
-
-apps.get_model("clubs.Club")._meta.ordering = ["name"]
+def test_drivers_endpoint_lists_both_real_drivers(client, drivers):
+    listed = {driver["name"]: driver for driver in client.get("/api/drivers").json()}
+    assert set(listed) == {"django", "asyncpg"}
+    assert [name for name, driver in listed.items() if driver["available"]] == drivers
+    assert {listed[name]["mode"] for name in drivers} <= {"threaded", "async"}
 
 
-class Club(Model):
-    _meta = ModelMeta("clubs.Club", pk="name")
-    id: int | None = None
-    name: str | None = None
-    founded: datetime.datetime
-    city: str = Field(max_length=50)
-    address: dict
-    disciplines: list[str]
-    nickname: str
-    owner = ForeignKey("clubs.Member", column="city")
-    memberships = Relation("clubs.Member")
-    sponsors = Relation("clubs.Member")
-    activities = ReverseForeignKey("activities.Activity", column="coach_id")
-    invoices = ManyToMany("billing.Invoice", through="billing.Invoice", source_column="club_id", target_column="id")
+def test_every_example_runs_on_every_driver_with_the_same_result(client, drivers):
+    examples = client.get("/api/examples").json()
+    assert len(examples) >= 10
+    for example in examples:
+        assert example["code"].startswith("async def ")
+        answer = client.post(f"/api/examples/{example['id']}/run", json={})
+        assert answer.status_code == 200, answer.text
+        runs = answer.json()["runs"]
+        assert [run["driver"] for run in runs] == drivers
+        for run in runs:
+            assert run["error"] is None, (example["id"], run)
+            assert run["statements"], (example["id"], run["driver"])
+            assert {statement["session"] for statement in run["statements"]} == {"example"}
+            assert run["ms"] > 0
+        if not example["writes"]:
+            assert len({repr(run["result"]) for run in runs}) == 1, example["id"]
 
 
-class Membership(Model):
-    _meta = ModelMeta("clubs.Membership")
-    id: int | None = None
-    club_id: str
-    member_id: int
-    role: Literal["member", "coach"] = "member"
-    since: datetime.date
-    fee: decimal.Decimal = Field(max_digits=6, decimal_places=2)
-    active: bool = True
-    member = ForeignKey("clubs.Member")
+def test_write_examples_are_reverted(client, drivers):
+    before = client.post("/api/examples/stock/run").json()["runs"][0]["result"]
+    for _ in range(2):
+        runs = client.post("/api/examples/lend/run", json={"params": {"reader": "eva@example.com"}}).json()["runs"]
+        assert [run["result"]["available_before"] for run in runs] == [3] * len(drivers)
+        for run in runs:
+            sql = [statement["sql"] for statement in run["statements"]]
+            assert sql[0] == "BEGIN"
+            assert sql[-1] == "COMMIT"
+            assert any("FOR UPDATE" in statement for statement in sql)
+    assert client.post("/api/examples/stock/run").json()["runs"][0]["result"] == before
 
 
-class Activity(Model):
-    _meta = ModelMeta("activities.Activity")
-    id: int | None = None
-    club_id: int
-    coach_id: int | None = None
-    name: str = Field(max_length=100)
-    kind: Literal["training", "competition", "social"] = "training"
-    starts_at: datetime.datetime
-    duration: datetime.timedelta
-    capacity: int
-    price: decimal.Decimal = Field(max_digits=8, decimal_places=2)
-    club = ForeignKey("clubs.Club")
-    coach = ForeignKey("clubs.Member")
-    tags = ManyToMany(
-        "activities.Tag", through="activities.Activity_tags", source_column="tag_id", target_column="activity_id"
-    )
-    participants = ManyToMany(
-        "clubs.Member", through="activities.Attendance", source_column="activity_id", target_column="member_id"
-    )
+def test_example_parameters(client):
+    runs = client.post("/api/examples/search_books/run", json={"params": {"search": "karamazov"}}).json()["runs"]
+    for run in runs:
+        assert [book["title"] for book in run["result"]] == ["The Brothers Karamazov"]
+        assert "%karamazov%" in run["statements"][0]["params"]
+    failed = client.post("/api/examples/edition_details/run", json={"params": {"isbn": "0000000000000"}})
+    assert {run["error"]["error"] for run in failed.json()["runs"]} == {"DoesNotExist"}
 
 
-for model in (Club, Membership, Activity):
-    print("\\n".join(compare(model)))
-"""
+@pytest.mark.parametrize(
+    ("path", "body", "status"),
+    [
+        ("/api/examples/missing/run", {}, 404),
+        ("/api/scenarios/missing/run", None, 404),
+        ("/api/examples/search_books/run", {"params": {"colour": "red"}}, 422),
+        ("/api/examples/search_books/run", {"params": {"genre": "comic"}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": "many"}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": 0}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": 21}}, 422),
+    ],
+)
+def test_errors(client, path, body, status):
+    assert client.post(path, json=body).status_code == status
 
 
-MEMBERSHIP_PROBLEMS = [
-    "clubs.Membership.club_id: Django type int, the adorm field is <class 'str'>",
-    "clubs.Membership.role: choices ['board', 'coach', 'member'], the adorm Literal has ['coach', 'member']",
-    "clubs.Membership.fee: max_digits=8, the adorm field has 6",
-    "clubs.Membership.club: the Django relation is missing",
-]
-
-
-def test_model_check_reports_every_difference(demo_env):
-    result = subprocess.run(  # noqa: S603 - fixed command
-        [sys.executable, "-c", MISMATCH], cwd=ROOT, env=demo_env, capture_output=True, text=True, timeout=60
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.splitlines() == [
-        "clubs.Club: primary key 'name', Django has 'id'",
-        "clubs.Club: Meta.ordering ['name'], which adorm models cannot express",
-        "clubs.Club.name: null=False, the adorm field disagrees",
-        "clubs.Club.name: max_length=100, the adorm field has None",
-        "clubs.Club.slug is missing",
-        "clubs.Club.founded: Django type date, the adorm field is <class 'datetime.datetime'>",
-        "clubs.Club.city: max_length=100, the adorm field has 50",
-        "clubs.Club.nickname is not a Django field",
-        "clubs.Club.owner is not a Django relation",
-        "clubs.Club.memberships targets clubs.Member, Django clubs.Membership",
-        "clubs.Club.memberships is a bare Relation without join columns",
-        "clubs.Club.sponsors is not a Django relation",
-        "clubs.Club.activities is a ReverseForeignKey on 'coach_id', Django disagrees",
-        "clubs.Club.invoices is a ManyToMany, Django disagrees",
-        "clubs.Club.members: the Django relation is missing",
-        *MEMBERSHIP_PROBLEMS,
-        "activities.Activity.tags is a ManyToMany through ('activities.Activity_tags', 'tag_id', 'activity_id'), Django"
-        " through ('activities.Activity_tags', 'activity_id', 'tag_id')",
+def test_scenarios_endpoint(client):
+    scenarios = client.get("/api/scenarios").json()
+    assert [scenario["id"] for scenario in scenarios] == [
+        "race",
+        "lock_timeout",
+        "cancel",
+        "deadlock",
+        "slot_deadlock",
+        "pool_exhaustion",
     ]
+    for scenario in scenarios:
+        assert set(scenario) == {"id", "title", "description", "code", "choreography"}
+        assert scenario["code"].startswith("async def ")
+        assert scenario["choreography"].startswith(f"async def {scenario['id']}(run: Run)")
 
 
-def test_check_adorm_models_command_exits_1_on_a_difference(demo_env):
-    script = MISMATCH.split("for model in")[0] + (
-        "from adorm.models import registry\n"
-        "for model in (Club, Membership, Activity):\n"
-        "    registry.unregister(model._meta.label)\n"
-        "import demo.backend.clubs.management.commands.check_adorm_models as command\n"
-        "from django.core.management import call_command\n"
-        "command.MODELS = (Membership,)\n"
-        "call_command('check_adorm_models')\n"
-    )
-    result = subprocess.run(  # noqa: S603 - fixed command
-        [sys.executable, "-c", script], cwd=ROOT, env=demo_env, capture_output=True, text=True, timeout=60
-    )
-    assert result.returncode == 1
-    assert result.stderr.splitlines() == MEMBERSHIP_PROBLEMS
-    assert result.stdout == ""
+def scenario(client, drivers, name):
+    """The runs of scenario ``name``, after checking what every run has."""
+    answer = client.post(f"/api/scenarios/{name}/run")
+    assert answer.status_code == 200, answer.text
+    runs = answer.json()["runs"]
+    assert [run["driver"] for run in runs] == drivers
+    for run in runs:
+        times = [event["at_ms"] for event in run["events"]]
+        assert times == sorted(times)
+        sessions = set(run["flows"]) | {f"{flow}2" for flow in run["flows"]}
+        assert {statement["session"] for statement in run["statements"]} <= sessions
+    return runs
+
+
+def events(run, flow):
+    return [event["text"] for event in run["events"] if event["flow"] == flow]
+
+
+@pytest.mark.parametrize("repeat", range(REPEATS))
+def test_race_for_one_row(client, drivers, repeat):  # noqa: ARG001 - repeated
+    for run in scenario(client, drivers, "race"):
+        assert run["outcomes"]["A"] == {"status": "ok", "result": "lent"}
+        assert run["outcomes"]["B"]["error"] == "LookupError"
+        assert events(run, "A")[1] == "has the row lock; 1 available"
+        assert events(run, "B")[1] == "has the row lock; 0 available"
+        assert events(run, "demo")[0].startswith("B waits for a lock held by database session")
+        sessions = [statement["session"] for statement in run["statements"] if "FOR UPDATE" in statement["sql"]]
+        assert sessions == ["A", "B"]
+        commit = next(s for s in run["statements"] if s["session"] == "A" and s["sql"] == "COMMIT")
+        assert commit["at_ms"] <= next(e["at_ms"] for e in run["events"] if e["text"].endswith("0 available"))
+
+
+@pytest.mark.parametrize("repeat", range(REPEATS))
+def test_lock_wait_with_timeout(client, drivers, repeat):  # noqa: ARG001 - repeated
+    for run in scenario(client, drivers, "lock_timeout"):
+        assert run["outcomes"]["A"]["status"] == "ok"
+        assert run["outcomes"]["B"]["sqlstate"] == "55P03"
+        assert run["outcomes"]["B"]["error"] == "OperationalError"
+        assert any(s["session"] == "B" and s["sql"] == "SET lock_timeout = 500" for s in run["statements"])
+        assert run["ms"] >= 500
+
+
+@pytest.mark.parametrize("repeat", range(REPEATS))
+def test_cancellation_of_a_running_statement(client, drivers, repeat):  # noqa: ARG001 - repeated
+    for run in scenario(client, drivers, "cancel"):
+        assert run["outcomes"]["A"]["status"] == "ok"
+        assert run["outcomes"]["B"] == {"status": "cancelled", "statement": "unknown"}
+        assert events(run, "demo")[-1].startswith("1 slot in use")
+        waiting = next(s for s in run["statements"] if s["session"] == "B" and "FOR UPDATE" in s["sql"])
+        assert waiting["error"] is not None
+
+
+@pytest.mark.parametrize("repeat", range(REPEATS))
+def test_detected_deadlock(client, drivers, repeat):  # noqa: ARG001 - repeated
+    for run in scenario(client, drivers, "deadlock"):
+        outcomes = run["outcomes"]
+        failed = [flow for flow, outcome in outcomes.items() if outcome["status"] == "error"]
+        assert len(failed) == 1, outcomes
+        assert outcomes[failed[0]]["sqlstate"] == "40P01"
+        (other,) = set(outcomes) - set(failed)
+        assert outcomes[other] == {"status": "ok", "result": "locked both"}
+
+
+@pytest.mark.parametrize("repeat", range(REPEATS))
+def test_deadlock_on_the_slots(client, drivers, repeat):  # noqa: ARG001 - repeated
+    for run in scenario(client, drivers, "slot_deadlock"):
+        outcomes = run["outcomes"]
+        assert outcomes["A"] == {"status": "ok", "result": 24}
+        assert outcomes["B"]["error"] == "DeadlockError"
+        assert outcomes["B"]["held_sessions"] == ["B"]
+        asked = next(e["at_ms"] for e in run["events"] if e["flow"] == "B" and "asks for a second slot" in e["text"])
+        failed = next(e["at_ms"] for e in run["events"] if e["flow"] == "B" and e["kind"] == "error")
+        assert failed - asked < 500, "DeadlockError comes at once, not after acquire_timeout"
+        assert [e["text"] for e in run["events"] if e["flow"] == "demo"][1] == "A waits for a slot B holds"
+        assert any(statement["session"] == "A2" for statement in run["statements"])
+        assert not [statement for statement in run["statements"] if statement["session"] == "B2"]
+
+
+@pytest.mark.parametrize("repeat", range(REPEATS))
+def test_pool_exhaustion(client, drivers, repeat):  # noqa: ARG001 - repeated
+    for run in scenario(client, drivers, "pool_exhaustion"):
+        outcomes = run["outcomes"]
+        assert outcomes["C"]["error"] == "SessionTimeout"
+        assert [outcomes[flow]["status"] for flow in "ABD"] == ["ok", "ok", "ok"]
+        assert outcomes["D"]["result"] == 24
+        assert events(run, "demo")[:2] == [
+            "2 of 2 slots in use",
+            "C waits for a slot (1 waiting, acquire_timeout 1 s)",
+        ]
+        assert not [statement for statement in run["statements"] if statement["session"] == "C"]
+
+
+def test_scenarios_restore_the_data(client):
+    before = client.post("/api/examples/stock/run").json()["runs"][0]["result"]
+    for name in ("race", "deadlock", "slot_deadlock"):
+        client.post(f"/api/scenarios/{name}/run")
+    assert client.post("/api/examples/stock/run").json()["runs"][0]["result"] == before
+
+
+def test_a_failing_choreography_releases_its_flows(database):
+    result = demo_module("tests.demo.failing_choreography", database)
+    assert result.returncode == 0, result.stderr
+    runs = [json.loads(line) for line in result.stdout.splitlines()]
+    assert runs
+    for run in runs:
+        assert run["error"] == "RuntimeError"
+        assert run["failed_ms"] < 5000
+        assert run["flows_left"] == []
+        assert run["race"] == {"A": "ok", "B": "error"}

@@ -230,8 +230,7 @@ Django and native PostgreSQL drivers read `pg_stat_activity`.
   connection the test opened itself.
 - A statement waiting for the shared connection while another slot's statement holds it has not reached the database;
   neither helper reports it until it holds the connection.
-- Both helpers work on the demo's memory driver. `wait_for_operation()` needs no database access and works on every
-  driver.
+- `wait_for_operation()` needs no database access and works on every driver.
 
 ## pytest
 

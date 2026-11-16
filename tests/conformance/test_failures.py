@@ -24,7 +24,7 @@ from adorm import (
 )
 from adorm.drivers import is_connection_error
 from adorm.query import check_lookups, Count, Func, Length, Q, resolve_lookup
-from demo.models.clubs import Club, Member, Membership
+from tests.clubmodels.clubs import Club, Member, Membership
 
 pytestmark = pytest.mark.django_db(transaction=True)
 

@@ -1,5 +1,5 @@
 """Content type lookups by model and by id (`adorm.content_types`) and assigning instances to generic foreign keys:
-validation without a database, and the cache and the writes on the executor with the demo's memory driver (concurrent
+validation without a database, and the cache and the writes on the executor with the memory driver (concurrent
 lookups, cancellation, a cache cleared mid-lookup, transactions on one slot, several databases)."""
 
 import asyncio
@@ -19,13 +19,13 @@ from adorm.exceptions import ObjectDoesNotExist
 from adorm.models import Model, ModelMeta, natural_key
 from adorm.operations import FullClean, Get, Save
 from adorm.settings import default_router
-from demo.api import memory
-from demo.models.activities import Activity
-from demo.models.billing import InvoiceLine
-from demo.models.clubs import Membership
-from demo.models.contenttypes import ContentType
-from tests.demo.memory_data import executor, tables, until
+from tests import memory_driver as memory
+from tests.clubmodels.activities import Activity
+from tests.clubmodels.billing import InvoiceLine
+from tests.clubmodels.clubs import Membership
+from tests.clubmodels.contenttypes import ContentType
 from tests.generated.library import Book, BookProxy, Edition, Note
+from tests.memory_data import executor, tables, until
 
 REPEAT = range(5)
 CONTENT_TYPES = "contenttypes.ContentType"

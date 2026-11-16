@@ -14,7 +14,7 @@ import pytest
 import adorm
 
 from adorm import IntegrityError
-from demo.models.clubs import Club, Membership
+from tests.clubmodels.clubs import Club, Membership
 from tests.conformance.drivers import on_sqlite, WAITING
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -28,12 +28,12 @@ def sql_only(driver):
 
 
 @pytest.fixture
-async def catalogue(demo_data):
+async def catalogue(club_data):
     """A connection of the test's own to the test database, which reads PostgreSQL's catalogue; the test is skipped on
     SQLite."""
     if on_sqlite():
         pytest.skip("the test reads PostgreSQL's catalogue")
-    conn = await asyncpg.connect(demo_data)
+    conn = await asyncpg.connect(club_data)
     try:
         yield conn
     finally:

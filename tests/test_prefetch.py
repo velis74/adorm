@@ -1,5 +1,5 @@
 """Prefetch lookups, generic foreign keys, in_bulk(), children of existing parents and full_clean(): building, encoding
-and validation without a database, and prefetching on the executor with the demo's memory driver (concurrent tasks,
+and validation without a database, and prefetching on the executor with the memory driver (concurrent tasks,
 transactions, cancellation)."""
 
 import asyncio
@@ -19,11 +19,11 @@ from adorm.models.prefetch import normalize_lookups
 from adorm.operations import CreateFromParent, FullClean, Get, InBulk, Operation, Select
 from adorm.query import Query
 from adorm.settings import default_router
-from demo.api import memory
-from demo.models.activities import Activity, Attendance, Competition
-from demo.models.billing import InvoiceLine
-from demo.models.clubs import Club, Member, Membership
-from tests.demo.memory_data import executor, tables, until
+from tests import memory_driver as memory
+from tests.clubmodels.activities import Activity, Attendance, Competition
+from tests.clubmodels.billing import InvoiceLine
+from tests.clubmodels.clubs import Club, Member, Membership
+from tests.memory_data import executor, tables, until
 
 REPEAT = range(5)
 

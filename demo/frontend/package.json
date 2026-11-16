@@ -1,0 +1,27 @@
+{
+  "name": "adorm-demo-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "description": "The demo's frontend. Nothing here is part of adorm.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@dynamicforms/vue-forms": "^3.0.0-alpha.4",
+    "@dynamicforms/vue-grid": "^0.9.0",
+    "@dynamicforms/vuetify-inputs": "^0.16.0",
+    "@mdi/font": "^7.4.47",
+    "vue": "^3.5.22",
+    "vuetify": "^3.13.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vue/tsconfig": "^0.7.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vue-tsc": "^3.1.1"
+  }
+}

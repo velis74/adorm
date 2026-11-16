@@ -1,298 +1,404 @@
-"""The demo API: FastAPI endpoints on the generated adorm models of ``demo.models``.
-
-Every ``/api/operations/...`` endpoint builds an operation without executing it and answers an `OperationPlan`
-(``POST .../payments`` answers a list of two): the operation, encoded as JSON with the models' types, the construct
-names it uses and, for every available driver, the names that driver does not support. The ``/api/data/...``
-endpoints (`demo.api.data`) execute operations through sessions and transactions: the writes on the active driver,
-the reads on the active driver or on the available driver a request names.
+"""The demo API: the examples and the concurrency scenarios, run on every available driver.
 
     uv run python demo.py
+
+At startup Django is set up (the drivers read ``DATABASES``), every available driver is loaded with its two
+connection profiles (`demo.api.drivers`), and each profile's pool opens a connection. One run, of an example or a
+scenario, executes at a time; the SQL the drivers send is recorded during the run (`demo.api.capture`). With
+``ADORM_DEMO_FRONTEND`` naming a directory, the built frontend is served from it at ``/``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import datetime
+import os
+import time
 
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from fastapi import Body, FastAPI, Query, Request
-from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, Field
+from fastapi import Body, FastAPI, HTTPException, Path
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic_core import to_jsonable_python
 
 import adorm
 
-from adorm import FieldError, PoolSettings
-from adorm.drivers import Driver
-from adorm.models import registry
-from adorm.operations import Operation
 from adorm.settings import close_pools
-from demo.api import aggregates, data, drivers, instances, operations
-from demo.api.schemas import AttendanceIn, Id, Kind, Level, MemberChanges, PaymentIn, Slug
-from demo.models import MODELS
-from demo.models.clubs import Member
+from demo.api import drivers
+from demo.api.capture import CAPTURE
+from demo.api.examples import Example, EXAMPLES
+from demo.api.scenarios import describe, run_scenario, SCENARIOS
+from demo.models.library import Book
 
+FRONTEND_ENV = "ADORM_DEMO_FRONTEND"
 
-class OperationPlan(BaseModel):
-    """An adorm operation built by an endpoint."""
+EXAMPLE_RUNS = {
+    "example": "search_books",
+    "params": {"search": "karamazov", "genre": ""},
+    "runs": [
+        {
+            "driver": "django",
+            "ms": 5.1,
+            "result": [{"id": 10, "title": "The Brothers Karamazov", "genre": "novel", "year": 1880}],
+            "error": None,
+            "statements": [
+                {
+                    "session": "example",
+                    "sql": 'SELECT DISTINCT "library_book"."id" AS "id", ...',
+                    "params": ["%karamazov%", "%karamazov%"],
+                    "at_ms": 2.4,
+                    "duration_ms": 1.95,
+                    "error": None,
+                }
+            ],
+        }
+    ],
+}
+SCENARIO_RUNS = {
+    "scenario": "lock_timeout",
+    "runs": [
+        {
+            "id": "lock_timeout",
+            "driver": "asyncpg",
+            "ms": 512.3,
+            "flows": ["A", "B"],
+            "outcomes": {
+                "A": {"status": "ok", "result": "held"},
+                "B": {
+                    "status": "error",
+                    "error": "OperationalError",
+                    "sqlstate": "55P03",
+                    "message": "canceling statement due to lock timeout",
+                    "held_sessions": None,
+                },
+            },
+            "events": [
+                {"at_ms": 1.2, "flow": "A", "kind": "info", "text": "has the row lock"},
+                {"at_ms": 510.8, "flow": "B", "kind": "error", "text": "OperationalError (SQLSTATE 55P03): ..."},
+            ],
+            "statements": [
+                {
+                    "session": "B",
+                    "sql": "SET lock_timeout = 500",
+                    "params": [],
+                    "at_ms": 3.0,
+                    "duration_ms": 0.2,
+                    "error": None,
+                }
+            ],
+        }
+    ],
+}
+"""Response examples of the run endpoints."""
 
-    operation: dict[str, Any] = Field(description="The operation as `Operation.to_dict()` encodes it.")
-    constructs: list[str] = Field(description="Construct names the operation uses, sorted, without repeats.")
-    unsupported: dict[str, list[str]] = Field(
-        description="Per available driver: the operation kind and constructs that driver does not support."
-    )
-
-
-class DriverInfo(BaseModel):
-    """A driver the demo knows."""
-
-    name: str = Field(description="Driver name, the value of `demo.py --driver`.")
-    target: str = Field(description="Import path of the driver class.")
-    available: bool = Field(description="Whether the driver's module imports.")
-    active: bool = Field(description="Whether the API runs on this driver.")
-    mode: str | None = Field(None, description="`threaded` or `async`; `null` for a driver that is not available.")
-    operations: list[str] | None = Field(None, description="Operation kinds the driver supports.")
+RUN_LOCK = asyncio.Lock()
+"""Held for the duration of one run, so that the statements recorded belong to it."""
 
 
 class Health(BaseModel):
     """State of the demo API."""
 
-    status: str = Field(description="`ok` once the API has started.")
+    status: Literal["ok"] = Field(description="`ok` once the API has started.")
     adorm_version: str = Field(description="Version of the adorm package.")
-    driver: str | None = Field(description="The active driver; `null` when no driver is available.")
+    drivers: list[str] = Field(description="The drivers the examples and scenarios run on, in this order.")
 
 
-def invalid(msg: str, loc: tuple[str | int, ...] = ("body",), value: Any = None) -> RequestValidationError:
-    """A 422 answer in FastAPI's validation error shape."""
-    return RequestValidationError([{"type": "value_error", "loc": loc, "msg": msg, "input": value}])
+class DriverInfo(BaseModel):
+    """A driver the demo knows."""
+
+    name: str = Field(description="The driver's name and the name of its connection profile.")
+    description: str = Field(description="How the driver executes operations.")
+    available: bool = Field(description="Whether the driver's module imports.")
+    reason: str | None = Field(None, description="Why the driver is not available; `null` when it is.")
+    mode: Literal["threaded", "async"] | None = Field(None, description="The driver's execution mode.")
 
 
-def unprocessable(description: str) -> dict[str, Any]:
-    """``openapi_extra`` describing when an endpoint answers 422 besides failed request validation."""
-    return {
-        "responses": {"422": {"description": f"Validation error: the request does not validate, or {description}."}}
-    }
+class ParamInfo(BaseModel):
+    """A parameter of an example."""
+
+    name: str = Field(description="The key in the `params` of a run.")
+    label: str = Field(description="What the parameter means.")
+    kind: Literal["text", "int", "choice"] = Field(description="The value's type; `choice` takes one of `choices`.")
+    default: Any = Field(description="The value when a run does not give one.")
+    choices: list[Any] = Field(description="The values a `choice` parameter takes; empty for the other kinds.")
+    minimum: int | None = Field(description="The smallest value of an `int` parameter; `null` when unbounded.")
+    maximum: int | None = Field(description="The largest value of an `int` parameter; `null` when unbounded.")
 
 
-POOL = PoolSettings(max_connections=4, acquire_timeout=5.0)
-"""The pool settings of every demo connection profile; each profile has a pool of its own."""
+class ExampleInfo(BaseModel):
+    """An example the demo runs on every driver."""
+
+    id: str = Field(description="The example's id.")
+    title: str = Field(description="The example's title.")
+    description: str = Field(description="What the example shows.")
+    code: str = Field(description="The example's source: a coroutine function on the generated models.")
+    params: list[ParamInfo] = Field(description="The example's parameters, in the order of its arguments.")
+    writes: bool = Field(description="Whether the example writes; the demo reverts the writes after each run.")
+
+
+class StatementOut(BaseModel):
+    """An SQL statement a driver sent to PostgreSQL."""
+
+    session: str | None = Field(description="The session that held the connection; `null` outside a lease.")
+    sql: str = Field(description="The statement as the database received it, with its placeholders.")
+    params: list[Any] = Field(description="The statement's parameters.")
+    at_ms: float = Field(description="When it started, in milliseconds since the run started.")
+    duration_ms: float = Field(description="How long it took, in milliseconds.")
+    error: str | None = Field(description="The error it raised, `null` when it succeeded.")
+
+
+class ErrorOut(BaseModel):
+    """An exception a run or a flow raised."""
+
+    status: Literal["error"] = Field("error", description="Always `error`.")
+    error: str = Field(description="The exception's class name.")
+    sqlstate: str | None = Field(description="The SQLSTATE of a database error; `null` for other errors.")
+    message: str = Field(description="The first line of the exception's message.")
+    held_sessions: list[str] | None = Field(
+        description="The names of the sessions whose slots the flow held, for a `DeadlockError`; `null` otherwise."
+    )
+
+
+class FlowOk(BaseModel):
+    """A flow that returned."""
+
+    status: Literal["ok"] = Field(description="Always `ok`.")
+    result: Any = Field(description="What the flow returned, as JSON.")
+
+
+class FlowCancelled(BaseModel):
+    """A flow whose task was cancelled."""
+
+    status: Literal["cancelled"] = Field(description="Always `cancelled`.")
+    statement: str = Field(
+        description="The `adorm.CancellationOutcome` of the statement the flow ran when it was cancelled."
+    )
+
+
+FlowOutcome = Annotated[FlowOk | ErrorOut | FlowCancelled, Field(discriminator="status")]
+
+
+class ExampleRun(BaseModel):
+    """An example's run on one driver."""
+
+    driver: str = Field(description="The driver the example ran on.")
+    ms: float = Field(description="Wall time of the example's coroutine, in milliseconds.")
+    result: Any = Field(description="What the example returned, as JSON; `null` when it raised.")
+    error: ErrorOut | None = Field(description="What it raised; `null` when it returned.")
+    statements: list[StatementOut] = Field(description="The SQL the example sent, in the order it started.")
+
+
+class ExampleRuns(BaseModel):
+    """An example's runs, one per available driver, in the order of `/api/drivers`."""
+
+    model_config = ConfigDict(json_schema_extra={"examples": [EXAMPLE_RUNS]})
+
+    example: str = Field(description="The example's id.")
+    params: dict[str, Any] = Field(description="The arguments the example ran with.")
+    runs: list[ExampleRun] = Field(description="One run per available driver.")
+
+
+class RunRequest(BaseModel):
+    """The arguments of an example run; a parameter left out takes its default."""
+
+    params: dict[str, Any] = Field(default_factory=dict, examples=[{"search": "war", "genre": "novel"}])
+
+
+class ScenarioInfo(BaseModel):
+    """A concurrency scenario."""
+
+    id: str = Field(description="The scenario's id.")
+    title: str = Field(description="The scenario's title.")
+    description: str = Field(description="What the flows do and how they end.")
+    code: str = Field(description="The source of the flows the scenario runs.")
+    choreography: str = Field(description="The source of the function that starts and steers the flows.")
+
+
+class FlowEvent(BaseModel):
+    """Something a flow saw, or the observer (`demo`) noted."""
+
+    at_ms: float = Field(description="Milliseconds since the run started.")
+    flow: str = Field(description="The flow (`A`, `B` …), or `demo` for an observation.")
+    kind: Literal["info", "ok", "error", "observe"] = Field(
+        description="`info` for a step, `ok` for a flow's last step, `error` for what a flow raised, `observe` for "
+        "an observation."
+    )
+    text: str = Field(description="What the flow saw or the observer noted.")
+
+
+class ScenarioRun(BaseModel):
+    """A scenario's run on one driver."""
+
+    id: str = Field(description="The scenario's id.")
+    driver: str = Field(description="The driver the scenario ran on.")
+    ms: float = Field(description="Wall time of the run, in milliseconds.")
+    flows: list[str] = Field(description="The flows, sorted by name.")
+    outcomes: dict[str, FlowOutcome] = Field(description="Each flow's outcome, by flow.")
+    events: list[FlowEvent] = Field(description="What every flow saw, in the order it happened.")
+    statements: list[StatementOut] = Field(description="The SQL of all flows, in the order it started.")
+
+
+class ScenarioRuns(BaseModel):
+    """A scenario's runs, one per available driver."""
+
+    model_config = ConfigDict(json_schema_extra={"examples": [SCENARIO_RUNS]})
+
+    scenario: str = Field(description="The scenario's id.")
+    runs: list[ScenarioRun] = Field(description="One run per available driver.")
+
+
+async def warm_up(names: list[str]) -> None:
+    """Open a connection in every profile's pool."""
+    for name in names:
+        with adorm.create_session(name, "warm-up").activate():
+            await Book.objects.count()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Selects the active driver and loads every available driver (each one's ``setup`` runs on a worker thread, in
-    the order of `drivers.DRIVERS`). The active driver becomes adorm's connection profile ``default``, and every
-    loaded driver also a profile named after it, which the read endpoints run on when a request names that driver. At
-    shutdown the pools close and the profiles are removed."""
-    active = drivers.selected()
-    app.state.driver = active
-    loaded: dict[str, Driver] = {}
-    for name in drivers.available():
-        loaded[name] = await asyncio.to_thread(drivers.get(name).load)
-    app.state.drivers = loaded
-    if active is not None:
-        profiles = {"default": drivers.get(active).profile(loaded[active])}
-        profiles.update({name: drivers.get(name).profile(driver, name) for name, driver in loaded.items()})
-        adorm.configure(profiles=profiles, pool=POOL)
+    """Sets Django up, loads the available drivers and registers their profiles; closes the pools at shutdown."""
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "demo.backend.settings")
+    import django
+
+    await asyncio.to_thread(django.setup)
+    CAPTURE.watch_django()
+    loaded = {driver.name: await asyncio.to_thread(driver.load) for driver in drivers.available()}
+    app.state.drivers = list(loaded)
+    profiles = {}
+    for driver in drivers.available():
+        profiles.update(driver.profiles(loaded[driver.name]))
+    adorm.configure(profiles=profiles)
     try:
+        await warm_up(list(profiles))
         yield
     finally:
-        if active is not None:
-            await close_pools()
-            adorm.configure()
+        await close_pools()
+        adorm.configure()
 
 
 app = FastAPI(
     title="adorm demo",
     version=adorm.__version__,
-    description="Clubs, members, activities and billing on adorm models.",
+    description="A library's books, editions and loans on adorm: examples and concurrency scenarios, each run on "
+    "every available driver with the SQL it produced.",
     lifespan=lifespan,
 )
-app.include_router(aggregates.router)
-app.include_router(instances.router)
-app.include_router(data.router)
-app.include_router(data.executor_router)
-data.install_error_handlers(app)
+
+NOT_FOUND = {404: {"description": "No example or scenario has this id."}}
 
 
-def loaded_drivers(request: Request) -> dict[str, Driver]:
-    """The available drivers by name, loaded."""
-    return request.app.state.drivers
+def available_drivers() -> list[str]:
+    names = app.state.drivers
+    if not names:
+        raise HTTPException(503, "no driver is available")
+    return names
 
 
-def plan(request: Request, operation: Operation) -> OperationPlan:
-    return OperationPlan(
-        operation=operation.to_dict(registry),
-        constructs=sorted(set(operation.constructs())),
-        unsupported={
-            name: driver.capabilities.unsupported(operation) for name, driver in loaded_drivers(request).items()
-        },
-    )
+@app.get("/api/health", tags=["demo"], summary="State of the API")
+async def health() -> Health:
+    """The adorm version and the drivers the examples and scenarios run on."""
+    return Health(status="ok", adorm_version=adorm.__version__, drivers=app.state.drivers)
 
 
-@app.get("/api/health", tags=["demo"], summary="API state")
-async def health(request: Request) -> Health:
-    """Whether the API runs, the adorm version and the active driver."""
-    return Health(status="ok", adorm_version=adorm.__version__, driver=request.app.state.driver)
-
-
-@app.get("/api/drivers", tags=["demo"], summary="Drivers the demo knows")
-async def driver_list(request: Request) -> list[DriverInfo]:
-    """Every driver the demo can run on, whether it is available and which one is active."""
-    result = []
-    loaded = loaded_drivers(request)
-    for demo_driver in drivers.DRIVERS:
-        driver = loaded.get(demo_driver.name)
-        result.append(
+@app.get("/api/drivers", tags=["demo"], summary="The drivers the demo knows")
+async def list_drivers() -> list[DriverInfo]:
+    """Every driver of the demo, with whether it is available; the examples and scenarios run on the available ones."""
+    out = []
+    for driver in drivers.DRIVERS:
+        reason = driver.unavailable_reason()
+        mode = None if reason is not None else driver.load().mode
+        out.append(
             DriverInfo(
-                name=demo_driver.name,
-                target=demo_driver.target,
-                available=driver is not None,
-                active=demo_driver.name == request.app.state.driver,
-                mode=None if driver is None else driver.mode,
-                operations=None if driver is None else sorted(driver.capabilities.operations),
+                name=driver.name, description=driver.description, available=reason is None, reason=reason, mode=mode
             )
         )
-    return result
+    return out
 
 
-@app.get("/api/models", tags=["demo"], summary="JSON schemas of the adorm models")
-async def model_schemas() -> dict[str, dict[str, Any]]:
-    """The JSON schema of every demo model by label; relations are not part of it."""
-    return {model._meta.label: model.model_json_schema() for model in MODELS}
+@app.get("/api/examples", tags=["examples"], summary="The examples")
+async def list_examples() -> list[ExampleInfo]:
+    """Every example with its source and parameters."""
+    return [ExampleInfo(**example.as_dict()) for example in EXAMPLES.values()]
 
 
-@app.get("/api/operations/members", tags=["reads"], summary="Search members")
-async def search_members(
-    request: Request,
-    club: Annotated[str | None, Query(description="Slug of a club the member actively belongs to.")] = None,
-    level: Annotated[Level | None, Query(description="Skill level.")] = None,
-    search: Annotated[str | None, Query(description="Fragment of the first or last name, any case.")] = None,
-    joined_after: Annotated[datetime.date | None, Query(description="Joined on or after this date (UTC).")] = None,
-    ordering: Annotated[operations.MemberOrdering, Query(description="Sort order; `-` reverses.")] = "name",
-    offset: Annotated[int, Query(ge=0, description="Rows to skip.")] = 0,
-    limit: Annotated[int, Query(ge=1, le=100, description="Page size.")] = 20,
-) -> OperationPlan:
-    """A `Select` of members: filters with `Q` objects across relations, `distinct()`, ordering and a slice."""
-    return plan(
-        request,
-        operations.member_search(
-            club=club,
-            level=level,
-            search=search,
-            joined_after=joined_after,
-            ordering=ordering,
-            offset=offset,
-            limit=limit,
-        ),
+async def run_example(example: Example, driver: str, arguments: dict[str, Any]) -> ExampleRun:
+    """Run ``example`` on ``driver``'s profile in the session ``(driver, "example")``, then its ``undo``."""
+    with adorm.create_session(driver, "example").activate():
+        CAPTURE.start()
+        started = time.monotonic()
+        result = error = None
+        try:
+            result = await example.function(**arguments)
+        except Exception as exc:
+            error = ErrorOut(**describe(exc))
+        elapsed = time.monotonic() - started
+        statements = await CAPTURE.stop()
+        if example.undo is not None and error is None:
+            await example.undo(result)
+    return ExampleRun(
+        driver=driver,
+        ms=round(elapsed * 1000, 1),
+        result=to_jsonable_python(result),
+        error=error,
+        statements=[StatementOut(**statement.as_dict()) for statement in statements],
     )
 
 
-@app.get("/api/operations/clubs/{slug}/report", tags=["reads"], summary="Club report")
-async def club_report(request: Request, slug: Slug) -> OperationPlan:
-    """A `Get` of one club with a filtered `Count`, `Subquery` aggregates over its memberships and invoices, `Exists`
-    and `Case` annotations."""
-    return plan(request, operations.club_report(slug))
-
-
-@app.get("/api/operations/activities", tags=["reads"], summary="Activity schedule")
-async def activity_schedule(
-    request: Request,
-    club: Annotated[str | None, Query(description="Slug of the club running the activity.")] = None,
-    kind: Annotated[Kind | None, Query(description="Kind of activity.")] = None,
-    starts_after: Annotated[
-        datetime.datetime | None, Query(description="Activities starting at or after this time.")
-    ] = None,
-) -> OperationPlan:
-    """A `Select` of activities with `select_related()`, a filtered `Count`, `F` arithmetic and `TruncMonth`."""
-    return plan(request, operations.activity_schedule(club=club, kind=kind, starts_after=starts_after))
-
-
-@app.get("/api/operations/invoices/outstanding", tags=["reads"], summary="Outstanding invoices by club")
-async def outstanding_invoices(
-    request: Request,
-    today: Annotated[datetime.date, Query(description="Invoices due before this date are overdue.")],
-) -> OperationPlan:
-    """A grouped `Select`: `values()` followed by `annotate()` with `Sum` and `Count`."""
-    return plan(request, operations.outstanding_by_club(today))
-
-
 @app.post(
-    "/api/operations/members",
-    tags=["writes"],
-    summary="Create a member",
-    status_code=201,
-    openapi_extra=unprocessable("the body has fields `Member` does not declare"),
+    "/api/examples/{example_id}/run",
+    tags=["examples"],
+    summary="Run an example on every driver",
+    responses={
+        **NOT_FOUND,
+        422: {"description": "A parameter is unknown or its value does not fit."},
+        503: {"description": "No driver is available."},
+    },
 )
-async def create_member(request: Request, member: Member) -> OperationPlan:
-    """A `Create` of a member. The request body is validated by the adorm model `Member` itself."""
-    if member.model_extra:
-        raise RequestValidationError(
-            [
-                {
-                    "type": "extra_forbidden",
-                    "loc": ("body", name),
-                    "msg": "Extra inputs are not permitted",
-                    "input": value,
-                }
-                for name, value in sorted(member.model_extra.items())
-            ]
-        )
-    return plan(request, operations.create_member(member))
-
-
-@app.patch(
-    "/api/operations/members/{pk}",
-    tags=["writes"],
-    summary="Change a member",
-    openapi_extra=unprocessable("the body has no fields, or `null` for a field other than `birth_date`"),
-)
-async def change_member(request: Request, pk: Id, changes: MemberChanges) -> OperationPlan:
-    """A `Save` with `update_fields`: only the fields in the request body are written."""
-    return plan(request, operations.update_member(pk, changes.model_dump(exclude_unset=True)))
-
-
-@app.post("/api/operations/activities/{pk}/attendances", tags=["writes"], summary="Register for an activity")
-async def register_attendance(request: Request, pk: Id, attendance: AttendanceIn) -> OperationPlan:
-    """A `GetOrCreate` of the member's attendance."""
-    return plan(request, operations.register_attendance(pk, attendance.member_id))
-
-
-@app.post("/api/operations/attendances/{pk}/cancel", tags=["writes"], summary="Cancel an attendance")
-async def cancel_attendance(request: Request, pk: Id) -> OperationPlan:
-    """An `Update` of one attendance, excluding one the member already attended."""
-    return plan(request, operations.cancel_attendance(pk))
-
-
-@app.post("/api/operations/invoices/{pk}/payments", tags=["writes"], summary="Pay an invoice")
-async def pay_invoice(request: Request, pk: Id, payment: PaymentIn) -> list[OperationPlan]:
-    """A `Create` of the payment, then an `Update` marking the invoice paid."""
-    built = operations.pay_invoice(pk, payment.amount, payment.reference, payment.paid_at)
-    return [plan(request, operation) for operation in built]
-
-
-@app.delete("/api/operations/clubs/{slug}/draft-invoices", tags=["writes"], summary="Delete draft invoices")
-async def delete_draft_invoices(request: Request, slug: Slug) -> OperationPlan:
-    """A `Delete` of the club's draft invoices."""
-    return plan(request, operations.delete_draft_invoices(slug))
-
-
-@app.post(
-    "/api/operations/decode",
-    tags=["demo"],
-    summary="Decode an operation",
-    openapi_extra=unprocessable(
-        "`Operation.from_dict()` rejects the body (the message is its `ValueError` or `FieldError`)"
-    ),
-)
-async def decode_operation(
-    request: Request,
-    data: Annotated[dict[str, Any], Body(description="An operation as `Operation.to_dict()` encodes it.")],
-) -> OperationPlan:
-    """Decode an encoded operation with the models' schema and encode it again; invalid data answers 422."""
+async def post_example_run(
+    example_id: Annotated[str, Path(description="The example's id, from `/api/examples`.")],
+    request: Annotated[RunRequest | None, Body()] = None,
+) -> ExampleRuns:
+    """Runs the example on each available driver in turn and answers, per driver, what it returned or raised, the
+    SQL it sent and the time it took. Writes are reverted after each driver's run."""
+    example = EXAMPLES.get(example_id)
+    if example is None:
+        raise HTTPException(404, f"no example {example_id!r}")
     try:
-        operation = Operation.from_dict(data, registry)
-    except (ValueError, FieldError) as exc:
-        raise invalid(str(exc), value=data) from None
-    return plan(request, operation)
+        arguments = example.arguments(request.params if request is not None else {})
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    names = available_drivers()
+    async with RUN_LOCK:
+        runs = [await run_example(example, name, arguments) for name in names]
+    return ExampleRuns(example=example.id, params=to_jsonable_python(arguments), runs=runs)
+
+
+@app.get("/api/scenarios", tags=["scenarios"], summary="The concurrency scenarios")
+async def list_scenarios() -> list[ScenarioInfo]:
+    """Every concurrency scenario with the source of its flows and of the function that steers them."""
+    return [ScenarioInfo(**scenario.as_dict()) for scenario in SCENARIOS.values()]
+
+
+@app.post(
+    "/api/scenarios/{scenario_id}/run",
+    tags=["scenarios"],
+    summary="Run a scenario on every driver",
+    responses={**NOT_FOUND, 503: {"description": "No driver is available."}},
+)
+async def post_scenario_run(
+    scenario_id: Annotated[str, Path(description="The scenario's id, from `/api/scenarios`.")],
+) -> ScenarioRuns:
+    """Runs the scenario on each available driver in turn and answers, per driver, what every flow saw and when, the
+    SQL of every flow and each flow's outcome. The data set is restored after each run."""
+    scenario = SCENARIOS.get(scenario_id)
+    if scenario is None:
+        raise HTTPException(404, f"no scenario {scenario_id!r}")
+    names = available_drivers()
+    async with RUN_LOCK:
+        runs = [ScenarioRun(**await run_scenario(scenario, name)) for name in names]
+    return ScenarioRuns(scenario=scenario.id, runs=runs)
+
+
+if os.environ.get(FRONTEND_ENV):
+    app.mount("/", StaticFiles(directory=os.environ[FRONTEND_ENV], html=True), name="frontend")

@@ -8,14 +8,14 @@ import adorm
 from adorm import ConnectionProfile, IntegrityError, NotSupportedError
 from adorm.operations import Count
 from adorm.query import Query
-from demo.models.clubs import Club
+from tests.clubmodels.clubs import Club
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 REPEAT = range(3)
 
 OPTIONS: dict[str, object] = {"statement_timeout": 5, "lock_timeout": 2, "idle_in_transaction_session_timeout": 60}
-"""A value for every connection option a demo driver declares; `test_set_options` sets each one."""
+"""A value for every connection option a driver of the suite declares; `test_set_options` sets each one."""
 
 UNDECLARED_OPTION = ("work_mem", "1MB")
 
@@ -109,7 +109,7 @@ async def test_an_undeclared_connection_option_is_refused(driver):
 
 
 def test_every_declared_connection_option_has_a_value():
-    from demo.api.drivers import DRIVERS
+    from tests.conformance.drivers import DRIVERS
 
     declared = set().union(*(driver.driver_class().capabilities.connection_options for driver in DRIVERS))
     assert declared <= set(OPTIONS)

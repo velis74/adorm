@@ -16,7 +16,7 @@ from adorm import (
     OperationalError,
     OperationTimeout,
 )
-from demo.models.clubs import Club, Member
+from tests.clubmodels.clubs import Club, Member
 
 pytestmark = pytest.mark.django_db(transaction=True)
 

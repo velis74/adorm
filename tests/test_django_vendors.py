@@ -31,7 +31,7 @@ from adorm.drivers.django.vendors import (
 )
 from adorm.exceptions import IntegrityError, InterfaceError, OperationalError, wrap_driver_error
 from adorm.executor import Pool, Router, set_runner
-from demo.models.clubs import Club
+from tests.clubmodels.clubs import Club
 
 SQLITE_ENGINE = {"ENGINE": "django.db.backends.sqlite3", "NAME": "/srv/data/clubs.sqlite3"}
 

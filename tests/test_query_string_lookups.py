@@ -46,9 +46,9 @@ from adorm.query import (
     When,
 )
 from adorm.schema import ModelSchema, Schema
-from demo.models import MODELS
-from demo.models.clubs import Club, Member, Membership
 from tests.club_schema import SCHEMA
+from tests.clubmodels import MODELS
+from tests.clubmodels.clubs import Club, Member, Membership
 
 MEMBERS = Query("club.Member")
 
@@ -270,7 +270,7 @@ def test_the_codec_and_resolve_lookup_resolve_a_path_alike(path):
 
 def test_a_driver_lacking_a_construct_reports_an_unresolvable_key_first():
     from adorm.operations import Count as CountOperation
-    from demo.api.memory import MemoryDriver
+    from tests.memory_driver import MemoryDriver
 
     driver = MemoryDriver()
     assert "path.nested" not in driver.capabilities.constructs

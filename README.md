@@ -25,10 +25,11 @@ uv run pytest
 
 The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
 `postgres://postgres@127.0.0.1:5432/adorm_test`). On that server they create and drop the database it names
-(`adorm_test` when it names `postgres` or none) and the databases `adorm_test_demo`, `adorm_test_limited`,
-`adorm_test_parallel` and `adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`). Other databases and
-the server's roles are left untouched. Run the tests as a dedicated user with `CREATEDB`. Under a superuser the test of
-the pool's refusal handling is skipped, because a database's connection limit does not apply to a superuser:
+(`adorm_test` when it names `postgres` or none) and the databases `adorm_test_demo`, `adorm_test_demo_owner`,
+`adorm_test_limited`, `adorm_test_parallel` and `adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`).
+Other databases and the server's roles are left untouched. Run the tests as a dedicated user with `CREATEDB`. Under a
+superuser the test of the pool's refusal handling is skipped, because a database's connection limit does not apply to
+a superuser, and so are the tests of the demo, which refuses a superuser:
 
 ```sql
 CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
@@ -55,18 +56,21 @@ uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
 
 ## Demo
 
-`demo.py` runs the demo application on PostgreSQL:
+`demo.py` runs the demo application, a library on PostgreSQL: every example and concurrency scenario on every
+available driver, with the adorm code, the SQL each driver sent, the result and the time side by side.
 
-- `demo/backend`: a Django project with a club domain;
+- `demo/backend`: a Django project with the app `library`;
 - `demo/models`: the adorm models generated from it;
-- `demo/api`: a FastAPI app that uses them; its `/api/data` endpoints run sessions and transactions on the executor.
+- `demo/api`: a FastAPI app running the examples and scenarios;
+- `demo/frontend`: the Vue frontend; `demo/e2e`: its Playwright tests.
 
-It creates, migrates and seeds the database `ADORM_DEMO_DATABASE_URL` (default
-`postgres://postgres@127.0.0.1:5432/adorm_demo`) and serves the API on <http://127.0.0.1:8000/docs>.
+It creates (owned by the user of `ADORM_DEMO_DATABASE_URL`, which must not be a superuser), migrates and seeds the
+demo database, then serves the API and the Vite dev server on <http://127.0.0.1:5173/>.
 
 ```bash
-uv run python demo.py --list-drivers
+npm install
 uv run python demo.py
+npm run test:e2e
 ```
 
 ## Documentation

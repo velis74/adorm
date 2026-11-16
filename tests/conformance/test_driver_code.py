@@ -14,10 +14,10 @@ import pytest
 import adorm
 
 from adorm import NotSupportedError
-from demo.backend.activities.models import Activity as DjangoActivity, Tag as DjangoTag
-from demo.models.activities import Activity, Tag
-from demo.models.clubs import Club, Member
+from tests.clubmodels.activities import Activity, Tag
+from tests.clubmodels.clubs import Club, Member
 from tests.conformance.drivers import DRIVER_CODE
+from tests.djangoproject.activities.models import Activity as DjangoActivity, Tag as DjangoTag
 
 pytestmark = pytest.mark.django_db(transaction=True)
 

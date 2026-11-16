@@ -32,7 +32,7 @@ from adorm.drivers.django.vendors import PROGRESS_STEPS, SQLITE_CAPABILITIES, TR
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import CheckTable
 from adorm.testing import wait_for_operation
-from demo.models.clubs import Club, Member, Membership
+from tests.clubmodels.clubs import Club, Member, Membership
 from tests.conformance.drivers import on_sqlite, SQLiteWriteLock, TrackedDjangoDriver
 from tests.library_data import in_thread
 
@@ -43,7 +43,7 @@ FOUNDED = datetime.date(2001, 2, 3)
 
 
 @pytest.fixture
-async def sqlite(demo_data):
+async def sqlite(club_data):
     """``make(**params)``: a router with one pool of a `TrackedDjangoDriver` on the SQLite test database, the
     profile's ``params`` applied, as adorm's runner; returns the pool. Returns the database's path as ``path``."""
     if not on_sqlite():
@@ -59,7 +59,7 @@ async def sqlite(demo_data):
         set_runner(router)
         return pool
 
-    make.path = demo_data.removeprefix("sqlite:///")
+    make.path = club_data.removeprefix("sqlite:///")
     try:
         yield make
     finally:
@@ -238,7 +238,7 @@ async def many_members(sqlite):  # noqa: ARG001 - on SQLite only
     """2000 members more, each in every club."""
 
     def add() -> None:
-        from demo.backend.clubs import models as dj
+        from tests.djangoproject.clubs import models as dj
 
         joined = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
         members = dj.Member.objects.bulk_create(
@@ -454,7 +454,7 @@ class SharedConnectionOnSQLiteTests(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        from demo.backend.clubs import models as dj
+        from tests.djangoproject.clubs import models as dj
 
         joined = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
         clubs = [

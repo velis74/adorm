@@ -1,7 +1,7 @@
 """Django settings for the driver conformance suite on SQLite.
 
 The database is a file in a temporary directory of the process's own, removed when the process ends; pytest-django
-creates and drops the test database ``adorm_test.sqlite3`` beside it. Only the demo's schema is installed: the test
+creates and drops the test database ``adorm_test.sqlite3`` beside it. Only the club schema is installed: the test
 library's models use PostgreSQL's array fields.
 
     uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
@@ -27,9 +27,9 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.auth",
-    "demo.backend.clubs",
-    "demo.backend.activities",
-    "demo.backend.billing",
+    "tests.djangoproject.clubs",
+    "tests.djangoproject.activities",
+    "tests.djangoproject.billing",
 ]
 
 ADORM_EXPOSE = ["auth.User.objects.create_user"]

@@ -238,7 +238,7 @@ except adorm.ValidationError as exc:
 
 Raises `ValueError` for an `exclude` name that is neither a field nor a relation, `TypeError` for a string
 `exclude`, and [`InterfaceError`](./exceptions) when no executor is available. A driver that does not declare
-`full_clean` raises `NotSupportedError` (the demo's memory driver).
+`full_clean` raises `NotSupportedError`.
 
 #### `delete()`
 

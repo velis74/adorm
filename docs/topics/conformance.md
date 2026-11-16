@@ -1,10 +1,11 @@
 # Driver conformance suite
 
-The conformance suite (`tests/conformance`) runs every driver of the [demo application](/intro/demo) (Django, native
-PostgreSQL, memory) over the same schema and data: the demo's apps `clubs`, `activities` and `billing`, filled by
-`manage.py seed_demo` in the test database. It runs in `uv run pytest` and in CI.
+The conformance suite (`tests/conformance`) runs every bundled driver (Django, native PostgreSQL) and the test
+suite's memory driver (`tests/memory_driver.py`) over the same schema and data: the test project's apps `clubs`,
+`activities` and `billing` (`tests/djangoproject`, their adorm models in `tests/clubmodels`), filled by
+`manage.py seed_clubs` in the test database. It runs in `uv run pytest` and in CI.
 
-The suite also runs the Django driver on SQLite, with the settings `tests.djangoproject.settings_sqlite`: the demo's
+The suite also runs the Django driver on SQLite, with the settings `tests.djangoproject.settings_sqlite`: the club
 schema in a SQLite database file in a temporary directory of the process, removed when it ends. The other drivers
 are skipped there, and the tests that read PostgreSQL's catalogue or sessions, drive its locks or listen for its
 notifications are skipped or replaced by `tests/conformance/test_sqlite.py`, which runs only on SQLite. CI runs both.
@@ -62,8 +63,8 @@ async def delete_cascades():
 
 A case's `django` is a synchronous mirror in the Django ORM. `test_django_mirror[<case>]` runs it over the seeded
 database in a rolled-back transaction and compares its result with `expected`, also for a case no driver runs to
-completion. Every write case has a mirror, and so does every case that no demo driver runs to completion; a coverage
-test fails for a case with neither.
+completion. Every write case has a mirror, and so does every case that no driver of the suite runs to completion; a
+coverage test fails for a case with neither.
 
 The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`, `none()`), every lookup, `Q`
 combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
@@ -85,9 +86,9 @@ Coverage tests fail when:
   [`construct_names()`](/ref/query#adorm-query-construct-names) has no case;
 - a driver declares a name adorm does not know;
 - a driver declares a name no case uses;
-- a demo driver has no entry in the suite;
-- a case neither runs to completion on a demo driver nor has a Django mirror;
-- a demo driver declares a connection option the transaction tests have no value for.
+- a bundled driver has no entry in the suite;
+- a case neither runs to completion on a driver of the suite nor has a Django mirror;
+- a driver of the suite declares a connection option the transaction tests have no value for.
 
 ## Transactions and connection options
 

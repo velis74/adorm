@@ -23,3 +23,7 @@ coverage.json
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# The demo's end-to-end runs
+demo/test-results/
+playwright-report/

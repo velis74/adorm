@@ -36,8 +36,7 @@ await Member.objects.filter(memberships__club__city="Koper").count()   # SchemaM
   ([`Driver.check(operation, schema_hashes=...)`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none)).
 - The check runs before the operation waits for a slot. Inside a transaction a failed check leaves the transaction
   usable: the operation never reached the connection.
-- A model without a hash (written by hand) and a driver whose `schema_hash()` returns `None` (the demo's memory driver)
-  are not checked.
+- A model without a hash (written by hand) and a driver whose `schema_hash()` returns `None` are not checked.
 
 ```python
 try:

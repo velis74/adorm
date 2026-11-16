@@ -14,8 +14,8 @@ import adorm
 
 from adorm import cancellation_outcome, CancellationOutcome, DatabaseError, IntegrityError
 from adorm.drivers import is_connection_error
-from demo.models.activities import Tag
-from demo.models.clubs import Club, Member
+from tests.clubmodels.activities import Tag
+from tests.clubmodels.clubs import Club, Member
 from tests.conformance.drivers import on_sqlite
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -47,12 +47,12 @@ async def stored(prefix):
 
 
 @pytest.fixture
-async def catalogue(demo_data):
+async def catalogue(club_data):
     """A connection of the test's own to the test database, which watches PostgreSQL's sessions; the test is skipped
     on SQLite."""
     if on_sqlite():
         pytest.skip("the test watches PostgreSQL's sessions")
-    conn = await asyncpg.connect(demo_data)
+    conn = await asyncpg.connect(club_data)
     try:
         yield conn
     finally:
@@ -146,13 +146,13 @@ async def test_cancelling_a_waiting_bulk_create_inserts_nothing(driver, make_rou
 @pytest.mark.parametrize("outer", [False, True], ids=["own transaction", "in atomic"])
 @pytest.mark.parametrize("mode", ["terminate", "cancel"])
 async def test_a_bulk_create_lost_after_its_first_batch_stores_nothing(
-    driver, make_router, catalogue, demo_data, mode, outer
+    driver, make_router, catalogue, club_data, mode, outer
 ):
     """The connection lost or the call cancelled while the second batch waits on a row another transaction inserted:
     the first batch's row is not stored, the slot is returned and the next call works."""
     sql_only(driver)
     pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
-    holder = await asyncpg.connect(demo_data)
+    holder = await asyncpg.connect(club_data)
     try:
         for n in REPEAT:
             prefix = f"lost-{mode}-{outer}-{n}"

@@ -172,17 +172,14 @@
   ported is reported as `CodegenWarning`; the methods of installed packages (`adorm.codegen.django.is_installed()`)
   are listed in one `ThirdPartyMethodsWarning` per manager, which `adorm generate --ignore-third-party` leaves out,
   and `get_by_natural_key` (`PROTOCOL_METHODS`) is not reported. The schema hash covers managers with an ORM name.
-- Demo application (`demo.py`, `demo/`): a Django project with clubs, members, activities (with a multi-table
-  inheritance child) and billing (with a generic foreign key) on PostgreSQL, the adorm models generated from it by
-  `adorm generate` into `demo/models` (setup checks them with `--check` and compares them with the Django models with
-  the `check_adorm_models` command), and a FastAPI app. Its `/api/operations` endpoints build adorm operations and
-  report what each available driver does not support; its `/api/data` endpoints run the generated models through
-  sessions (header `X-Adorm-Session`), transactions, savepoints, `on_commit` callbacks and concurrent tasks on the
-  executor and answer the calls the driver received (a slot timeout answers 503, a database deadlock 409, both with
-  an `ExecutorError` body); `/api/executor` reports the pools. The demo's in-memory driver
-  (`demo.api.memory`, loaded from the demo database, with transactions, savepoints and row locks with deadlock
-  detection) runs them until an ORM driver is available. An end-to-end test runs the demo and its data endpoints once
-  per available driver, and `ADORM_DEMO_REQUIRED_DRIVERS` fails the suite when a listed driver is missing.
+- Demo application (`demo.py`, `demo/`): a library (authors, books, editions, tags, readers, loans) in a Django project
+  on PostgreSQL, its adorm models generated into `demo/models`, a FastAPI API and a Vue frontend (`demo/frontend`, npm
+  workspace `adorm-demo-frontend`). Every example runs on every available driver and shows its code, the SQL each driver
+  sent, the result and the time; concurrency scenarios (two flows racing for one row, a lock wait with `lock_timeout`,
+  cancelling a running statement, a deadlock in the database, a deadlock on the pool's slots that adorm detects with
+  `DeadlockError`, pool exhaustion) show what every flow saw and when. The database is created and owned by the user of
+  `ADORM_DEMO_DATABASE_URL`; setup refuses a superuser. `tests/demo` runs the API on both real drivers; the Playwright
+  tests (`demo/e2e`, `npm run test:e2e`) run in CI.
 - Test suite on PostgreSQL (Django test project, pytest-django, pytest-asyncio) and CI; short tracebacks, so database
   URLs passed to fixtures do not appear in the output.
 - Documentation site (VitePress, `docs/`, published on docs.velis.si): introduction, concepts (sessions,
@@ -209,7 +206,7 @@
   as `InterfaceError`); a manager's `get_queryset()` that accesses the database raises `NotSupportedError` and leaves
   the connection in the pool. `DjangoCompiler` gains `params` (keys replacing the entry's), `settings_dict` and
   `compile_count()`; `DjangoStatement.rows()` returns `timestamptz` values in the connection's time zone (naive
-  without `USE_TZ`), as Django's psycopg loader does. The demo runs on the driver (`--driver asyncpg`).
+  without `USE_TZ`), as Django's psycopg loader does.
 - Documentation: "The native PostgreSQL driver" topic.
 - Django ORM driver `adorm.drivers.django.DjangoDriver` (threaded, one Django connection per slot thread) for reads:
   `select`, `get`, `first`, `last`, `count` and `exists` with every lookup, relation paths in adorm names (renamed
@@ -228,17 +225,18 @@
 - `First` (`first()`) refuses a sliced query without an ordering of its own with `TypeError`.
 - `ThreadedConnection.prepare_call_sync()`: a hook that prepares each call's context on the connection's thread.
 - Documentation: "The Django driver" topic.
-- Driver conformance suite (`tests/conformance`, part of the test run): a catalogue of operations over the demo's
-  schema and data set that every demo driver (Django, asyncpg, memory) runs, each case with the operation kinds and
-  constructs it uses; a driver that declares them all must return the catalogue's result, any other driver must
+- Driver conformance suite (`tests/conformance`, part of the test run): a catalogue of operations over the club schema
+  and data set of the test suite (`tests/djangoproject/clubs`, `activities`, `billing`, `manage.py seed_clubs`) that
+  every driver of the suite (Django, asyncpg, the test suite's memory driver) runs, each case with the operation kinds
+  and constructs it uses; a driver that declares them all must return the catalogue's result, any other driver must
   refuse it with `NotSupportedError` before a connection is reached; a case may list drivers that refuse it while
   executing, for limits that depend on the schema or the rows (`refusals`). A case no driver runs has a Django ORM
   mirror that returns its expected result over the seeded database. Coverage checks fail when an operation kind or
   construct has no case, or a driver declares a name adorm does not know. The same drivers run the failure tests:
   refusals while the pool is full and inside transactions, concurrent tasks on one transaction, cancellation of a
-  waiting operation (also racing its completion; the released slot keeps no transaction or lock open) and
-  connections lost mid-operation, and the transaction tests: nested `atomic()` blocks commit and roll back on a
-  driver with savepoints and are refused on one without, and an undeclared connection option is refused.
+  waiting operation (also racing its completion; the released slot keeps no transaction or lock open) and connections
+  lost mid-operation, and the transaction tests: nested `atomic()` blocks commit and roll back on a driver with
+  savepoints and are refused on one without, and an undeclared connection option is refused.
 - `Driver.check()`: the capability check (and the `call` method check) that `DriverConnection.execute()` runs;
   `Router.run()` runs it before acquiring a slot, so an unsupported operation neither waits for nor opens one.
   `Capabilities.check()`, `check_savepoints()` and `check_options()` take the driver's name, and the
@@ -247,18 +245,11 @@
   `only()`, `defer()` and `distinct()` fields; `adorm.query.NESTED_PATH`) and `clause.annotate` (a query with
   annotations); the Django and asyncpg drivers declare both. `adorm.query.CLAUSES` lists the clause construct names
   and `adorm.query.construct_names()` every construct name an operation can report.
-- Demo memory driver: a negated condition keeps a row whose field in a lookup is NULL, as Django's `exclude()` does;
-  a model instance in a condition stands for its primary key; an update reaches the rows a multi-table inheritance
-  parent and child share; inserting or deleting a row of a multi-table inheritance child and deleting a row a foreign
-  key references raise `NotSupportedError` (checked for every row before any is deleted); relation paths and
-  annotations are refused before execution (`path.nested`, `clause.annotate`).
-- Demo reads on two drivers: the API loads every available driver and registers each as the connection profile named
-  after it (the active driver is also `default`). The read endpoints of `/api/data` run on the driver the header
-  `X-Adorm-Driver` names (422 for a name that is not an available driver), the writes on the active driver; `Traced`
-  reports the `driver`. `GET /api/data/compare/members` reads one page of members on every available driver
-  concurrently and reports whether they agree, with an adorm error of one read in that read's `error`. Tests run the
-  reads on the Django and asyncpg drivers in one process: the same answers, concurrent reads on both, a full pool of
-  one driver not delaying the other, cancellation of a waiting read cancelling its statement, and no slot left in use.
+- The test suite's memory driver (`tests/memory_driver.py`): a negated condition keeps a row whose field in a lookup is
+  NULL, as Django's `exclude()` does; a model instance in a condition stands for its primary key; an update reaches the
+  rows a multi-table inheritance parent and child share; inserting or deleting a row of a multi-table inheritance child
+  and deleting a row a foreign key references raise `NotSupportedError` (checked for every row before any is deleted);
+  relation paths and annotations are refused before execution (`path.nested`, `clause.annotate`).
 - Django driver writes and transactions: `create` (through the query's manager), `save` (`update_fields`,
   `force_insert`, `force_update`; an instance with a primary key is saved with only its fields loaded, and inserted
   when its row is missing), `update`, `delete` (Django's collector: cascades, `SET_NULL`, `ProtectedError` and
@@ -275,11 +266,11 @@
   `model_row()` turns a Django instance into a `ModelRow`; `adorm.drivers.django.translation` gains
   `model_queryset()`, `field_kwargs()`, `lookup_kwargs()` and `instance_row()`.
 - `adorm.operations.UpdateOrCreate` (`defaults`, `create_defaults`), `QuerySet.update_or_create()` and the bound
-  model's `update_or_create()`; the demo memory driver executes it.
+  model's `update_or_create()`; the test suite's memory driver executes it.
 - `adorm.operations.DeleteInstance` (kind `delete_instance`) and `Model.delete()`: deletes the instance's row as the
-  target deletes one instance and, when rows were deleted, sets its primary key to `None`; the demo memory driver
-  executes it. A `ProtectedError` or `RestrictedError` from `QuerySet.delete()` or `Model.delete()` carries instances
-  of the registered models, and one without a SQLSTATE leaves the transaction usable.
+  target deletes one instance and, when rows were deleted, sets its primary key to `None`; the test suite's memory
+  driver executes it. A `ProtectedError` or `RestrictedError` from `QuerySet.delete()` or `Model.delete()` carries
+  instances of the registered models, and one without a SQLSTATE leaves the transaction usable.
 - A read of rows with `select_for_update()` outside a transaction raises `TransactionManagementError` in the session,
   on every driver.
 - `ThreadedConnection.after_call_sync(fn)`: work that runs on the connection's thread after a call's outcome is
@@ -363,13 +354,6 @@
   connections of their own to the process's test database; `manage.py test --parallel` and pytest-django work
   unchanged. A connection opened in a `TestCase` test is unusable after that test, one opened in another Django test
   while a `TestCase` transaction is open. The native PostgreSQL driver raises `NotSupportedError` inside a `TestCase`.
-- Demo writes and transactions on every driver: registrations lock the activity with `select_for_update()` and take
-  `nowait`, `lock_timeout` (`adorm.connection_options()`) and `timeout` (`adorm.timeout()`);
-  `POST /api/data/invoices/settlements` pays the earliest due open invoices, read with
-  `select_for_update(skip_locked=True)`. `ExecutorError` gains `sqlstate`, `phase`, `operation` and `outcome`; a lock
-  that is not available (SQLSTATE `55P03`) answers 409, `OperationTimeout` 504 and `NotSupportedError` 501. The demo
-  memory driver executes `select_for_update()` with `nowait` and `skip_locked`. Tests run the write flows in process
-  with the Django and the asyncpg driver active, and the end-to-end test runs them on every driver.
 - `cancellation_outcome()` of a cancellation that reaches `atomic()` while it waits for a slot is `NOT_STARTED`.
 - Annotations, expressions and aggregates on the Django and native PostgreSQL drivers: the functions `Length`,
   `Coalesce`, `Concat`, `Now`, `Trunc` and `TruncYear` … `TruncTime`, the aggregates `Count` (also `Count("*")`),
@@ -399,7 +383,7 @@
   a relation nor a JSON field, and a lookup a relation does not take (`Lookup.on_relations`: `exact`, `gt`, `gte`,
   `lt`, `lte`, `in`, `isnull`). Every driver raises it for such a key: the Django and native PostgreSQL drivers map
   Django's `FieldError` and `FieldDoesNotExist` to it and refuse a path past a scalar field before Django sees it,
-  the demo's memory driver resolves keys with `resolve_lookup()`, and `Driver.check()` raises it in place of
+  the test suite's memory driver resolves keys with `resolve_lookup()`, and `Driver.check()` raises it in place of
   `NotSupportedError` when the operation also lacks a construct. `adorm.schema.resolve_field_type()` resolves paths
   as `resolve_lookup()` does and raises `FieldError`. A `FieldError` without a SQLSTATE leaves the transaction it is
   raised in usable.
@@ -418,10 +402,10 @@
   was loaded for; a missing row is `None`. `adorm.models.get_generic_foreign_keys()`, `CONTENT_TYPE_MODEL`.
   `adorm generate` writes it for Django's `GenericForeignKey` (`RelationSpec` kind `generic_foreign_key`, `ct_field`).
 - `QuerySet.in_bulk(id_list=None, *, field_name="pk")` and the `InBulk` operation (kind `in_bulk`): instances keyed by
-  the primary key, a unique field or a unique foreign key (keyed by its column), which the Django and native
-  PostgreSQL drivers check as Django does (`adorm.drivers.django.translation.check_in_bulk_field()`); the native
-  PostgreSQL driver runs one statement per `adorm.drivers.asyncpg.IN_BULK_BATCH_SIZE` ids; the demo's memory driver
-  takes the primary key.
+  the primary key, a unique field or a unique foreign key (keyed by its column), which the Django and native PostgreSQL
+  drivers check as Django does (`adorm.drivers.django.translation.check_in_bulk_field()`); the native PostgreSQL driver
+  runs one statement per `adorm.drivers.asyncpg.IN_BULK_BATCH_SIZE` ids; the test suite's memory driver takes the
+  primary key.
 - `QuerySet.create_from_parent(parent, **values)` and the `CreateFromParent` operation (kind `create_from_parent`):
   the row of a multi-table inheritance child for an existing parent row, the child's table only
   (`adorm.models.parent_link()`); the Django driver saves it with `save_base(raw=True)`, the native PostgreSQL driver
@@ -445,13 +429,13 @@
   `parse_key_detail()` and `references_key()`. The memory driver fills `model`, `fields`, `columns` and, for a
   duplicate primary key, `values` and `detail`. Encoded errors carry them, and `decode_error()` rejects malformed
   ones.
-- Lookup `overlap` (`adorm.query.Overlap`, construct `lookup.overlap`): an array field with at least one item in
-  common with an iterable of values, a query of one column or an array expression; each value is encoded as an item
-  of the field's type. The Django and the native PostgreSQL drivers run it as Django's `ArrayField` `overlap`
-  (PostgreSQL's `&&`), the memory driver on lists. `Lookup.applies_to()` tells whether a lookup applies to a field's
-  type; `resolve_lookup()` and `check_lookups()` raise `FieldError` for `overlap` on a field that is not an array or a
-  key inside a JSON field. A lookup that a JSON or hstore field does not have raises `FieldError` on both SQL drivers,
-  also on an annotation that refers to such a field, instead of reading the name as a key. The demo's `Club` has the
+- Lookup `overlap` (`adorm.query.Overlap`, construct `lookup.overlap`): an array field with at least one item in common
+  with an iterable of values, a query of one column or an array expression; each value is encoded as an item of the
+  field's type. The Django and the native PostgreSQL drivers run it as Django's `ArrayField` `overlap` (PostgreSQL's
+  `&&`), the memory driver on lists. `Lookup.applies_to()` tells whether a lookup applies to a field's type;
+  `resolve_lookup()` and `check_lookups()` raise `FieldError` for `overlap` on a field that is not an array or a key
+  inside a JSON field. A lookup that a JSON or hstore field does not have raises `FieldError` on both SQL drivers, also
+  on an annotation that refers to such a field, instead of reading the name as a key. The test suite's `Club` has the
   array field `disciplines`.
 - `QuerySet.bulk_create(objs, batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None,
   unique_fields=None)` (also on bound models and managers) and the `BulkCreate` operation (kind `bulk_create`, the
@@ -459,11 +443,11 @@
   each with the fields it set, and returned with the values the database set, as Django's `bulk_create()`. The Django
   driver calls `bulk_create()` of the base manager or the query's manager; the native PostgreSQL driver runs Django's
   `bulk_create()` steps for the installed Django version, at most `MAX_QUERY_PARAMS` parameters per statement, and
-  refuses a manager or query set that overrides `bulk_create()`. Several statements of one call run in one
-  transaction on both drivers. Both refuse what Django refuses on PostgreSQL with `ProgrammingError`
-  (`adorm.drivers.django.translation.check_bulk_create()`, `bulk_create_options()`). The demo's memory driver inserts
-  every row or none and refuses the conflict options. Without `update_conflicts`, `update_fields` and `unique_fields`
-  are ignored, and with no instances only `batch_size` is checked, as in Django.
+  refuses a manager or query set that overrides `bulk_create()`. Several statements of one call run in one transaction
+  on both drivers. Both refuse what Django refuses on PostgreSQL with `ProgrammingError`
+  (`adorm.drivers.django.translation.check_bulk_create()`, `bulk_create_options()`). The test suite's memory driver
+  inserts every row or none and refuses the conflict options. Without `update_conflicts`, `update_fields` and
+  `unique_fields` are ignored, and with no instances only `batch_size` is checked, as in Django.
 - Set operations `Query.union(*others, all=False)`, `intersection()` and `difference()`, also on query sets, bound
   models and managers (constructs `clause.union`, `clause.intersection`, `clause.difference`; `Query.combinator`,
   `combinator_all`, `combined_queries`, `is_combined`, `adorm.query.COMBINATORS`), with Django's handling of empty
@@ -474,7 +458,7 @@
   query, each typed by its own model. The Django and the native PostgreSQL drivers translate them into Django's
   `union()`, `intersection()` and `difference()`, also as subqueries, and an ordering by a column that `values()`
   names after the set operation orders by the first query's column at the same position; the native PostgreSQL
-  driver leaves out empty combined queries as Django does. The demo's memory driver compares the rows column by
+  driver leaves out empty combined queries as Django does. The test suite's memory driver compares the rows column by
   column by value and combines empty queries as Django compiles them.
 - Content types: `adorm.content_types` (`ContentTypes`) gives the content type id of a model (`get_id()`,
   `get_for_model()`, `cached_id()`) and the model of an id (`get_model()`, `natural_keys()`), cached per database
@@ -512,49 +496,37 @@
   `DatabaseMonitor.activity(pids)` with `BackendActivity` (state, wait event, blocking pids). The Django driver
   (`DjangoMonitor`, `adorm.drivers.django.backend_pid()`) and the native PostgreSQL driver (`AsyncpgMonitor`) read
   `pg_stat_activity` on a connection of their own (`adorm.drivers.postgresql.activity_sql()`,
-  `backend_activity()`); the demo's memory driver reports its row lock waits.
-- Backend events from both drivers: every connection emits `BackendEvent("notice", severity, payload)` for the
-  server's notices and warnings (before the outcome of the request that caused them), `BackendEvent("notify",
-  channel, payload)` for notifications on the channels it listens on, and `BackendEvent("connection_lost")` when the
-  server ends the connection (`adorm.events.NOTICE`, `NOTIFY`, `CONNECTION_LOST`; the Django driver with psycopg 3).
+  `backend_activity()`); the test suite's memory driver reports its row lock waits.
+- Backend events from both drivers: every connection emits `BackendEvent("notice", severity, payload)` for the server's
+  notices and warnings (before the outcome of the request that caused them), `BackendEvent("notify", channel, payload)`
+  for notifications on the channels it listens on, and `BackendEvent("connection_lost")` when the server ends the
+  connection (`adorm.events.NOTICE`, `NOTIFY`, `CONNECTION_LOST`; the Django driver with psycopg 3).
   `adorm.listen(*channels)` (`Listener`) holds a slot whose connection listens and returns each notification from
   `get()` and `async for`; a lost connection, a closed slot or a closed pool ends every waiting and later `get()` with
   `InterfaceError`, as leaving the block does (`Pool.wait_closed()`). The driver contract adds `Driver.check_listen()`,
   `DriverConnection.listen()`, `unlisten()`, `listening`, `Capabilities.max_channel_length`, `check_channel()` and
   `check_backend_event()`, `adorm.drivers.check_channel()`, `adorm.drivers.postgresql.MAX_IDENTIFIER_LENGTH`, and on
-  `ThreadedConnection` `listen_sync()`, `unlisten_sync()`, `idle_fileno()` and `idle_sync()`, which let the
-  connection's thread read while no call runs. With psycopg 2 the Django driver declares no backend events
-  (`PSYCOPG2_CAPABILITIES`); inside Django's `TestCase` it refuses to listen before a slot is taken. A slot closes a
-  connection that still listens when its lease ends (`CloseReason.LISTENING`). The demo's memory driver listens too
-  (`MemoryDatabase.notify()`).
+  `ThreadedConnection` `listen_sync()`, `unlisten_sync()`, `idle_fileno()` and `idle_sync()`, which let the connection's
+  thread read while no call runs. With psycopg 2 the Django driver declares no backend events (`PSYCOPG2_CAPABILITIES`);
+  inside Django's `TestCase` it refuses to listen before a slot is taken. A slot closes a connection that still listens
+  when its lease ends (`CloseReason.LISTENING`). The test suite's memory driver listens too (`MemoryDatabase.notify()`).
 - Schema checks: before an operation waits for a slot, a driver compares the schema hash the client expects of every
   model the operation reaches (its own, those of subqueries and `union()` parts, and those its relation paths lead to;
   `adorm.drivers.operation_models()`) with its own (`Driver.schema_hash()`, `Driver.check_schema_hash(label,
-  expected)`), and raises `SchemaMismatchError` (with `reason` when the driver has no hash) for a mismatched model
-  only. The client's hashes come from the model registry (`ModelRegistry.schema_hashes()`) or are passed as
+  expected)`), and raises `SchemaMismatchError` (with `reason` when the driver has no hash) for a mismatched model only.
+  The client's hashes come from the model registry (`ModelRegistry.schema_hashes()`) or are passed as
   `Driver.check(operation, schema_hashes=...)`. The Django and the native PostgreSQL drivers compute the hash of the
   installed Django model (`adorm.drivers.django.model_schema_hash()`, `adorm.codegen.django.schema_hash(model,
   warn=False)`) once per label. `adorm.check_schema()` compares models with the database through the operation
-  `CheckTable` (`adorm.checks.table_check()`, `adorm.checks.check_models()`), which both PostgreSQL drivers execute
-  from `adorm.drivers.django.expected_tables()` by reading the catalogue: missing tables and columns, column types and
+  `CheckTable` (`adorm.checks.table_check()`, `adorm.checks.check_models()`), which both PostgreSQL drivers execute from
+  `adorm.drivers.django.expected_tables()` by reading the catalogue: missing tables and columns, column types and
   nullability, `NOT NULL` columns without a default the model does not set, automatic many-to-many link tables, as
   `SchemaProblem` values (`adorm.checks.SchemaProblemKind`), or `SchemaCheckError` with `raise_on_problems=True`. The
-  pool setting `check_schema` (`"warn"` or `"raise"`, also in `ADORM["pool"]`) runs the check once before a pool
-  serves its first acquisition. `adorm check-schema` runs it from the command line with the profiles of the Django
-  settings or of `--configure` modules (exit status 1 on problems; `adorm.contrib.django.ensure_configured()`), and the
-  demo answers it at `GET /api/data/schema`. The comparison helpers are `adorm.drivers.postgresql.ExpectedTable`,
-  `ExpectedColumn`, `columns_sql()`, `normalize_type()` and `table_problems()`.
-- Demo aggregates and related objects: `/api/data` read endpoints for annotations, `aggregate()` and grouping
-  (`demo.api.aggregates`: club reports with a condition on an aggregate, fee totals, the activity schedule,
-  outstanding invoices by club and invoices by month; the query sets of the club report, the schedule and the
-  outstanding invoices are those the operation endpoints encode), and for `prefetch_related()` with `Prefetch` and
-  `to_attr`, `in_bulk()` by primary key and by slug, invoice lines read through their generic foreign key with or
-  without a prefetch (a line whose item is gone has none), an invoice line written through it under the invoice's row
-  lock (409 when the total would exceed its digits), and `full_clean()` of invoice
-  changes and of a new membership (`demo.api.instances`). The memory driver answers those it does not support with
-  501. The end-to-end test runs them on every available driver; in-process tests compare them on the Django and
-  asyncpg drivers with the database and cover cancelled prefetches, concurrent lines of one invoice (never beyond the
-  total's digits) and slots left in use.
+  pool setting `check_schema` (`"warn"` or `"raise"`, also in `ADORM["pool"]`) runs the check once before a pool serves
+  its first acquisition. `adorm check-schema` runs it from the command line with the profiles of the Django settings or
+  of `--configure` modules (exit status 1 on problems; `adorm.contrib.django.ensure_configured()`). The comparison
+  helpers are `adorm.drivers.postgresql.ExpectedTable`, `ExpectedColumn`, `columns_sql()`, `normalize_type()` and
+  `table_problems()`.
 - The Django driver on every database Django supports (`adorm.drivers.django.vendors`): `Vendor` per Django vendor
   (`PostgreSQL`, `SQLite`, `MySQL`, `Oracle`, and `Vendor` with `features_capabilities()` for any other backend) with
   its capabilities (`CAPABILITIES`, `PSYCOPG2_CAPABILITIES`, `SQLITE_CAPABILITIES`, `MYSQL_CAPABILITIES`,
@@ -580,5 +552,3 @@
   shared connection raises `CancelledError`.
 - The conformance suite runs the Django driver on SQLite (`tests.djangoproject.settings_sqlite`, a database file in a
   temporary directory; `tests/conformance/test_sqlite.py`), locally and in CI. MySQL and Oracle are untested.
-- The demo runs on SQLite (`ADORM_DEMO_DATABASE_URL=sqlite:///path`; the asyncpg driver is not available there).
-  `Club.disciplines` is `demo.backend.clubs.fields.ListField`: PostgreSQL's array, JSON text on other databases.

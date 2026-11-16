@@ -1,0 +1,13 @@
+{
+  "name": "adorm-demo-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "End-to-end tests of the demo. Nothing here is part of adorm.",
+  "type": "module",
+  "scripts": {
+    "test:e2e": "playwright test --config playwright.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1"
+  }
+}

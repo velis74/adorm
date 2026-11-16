@@ -5,14 +5,14 @@ aggregates over all rows of a query (`aggregate()`), per row (`annotate()` on mo
 (`values()` followed by `annotate()`). The [Django driver](/topics/django-driver) and the
 [native PostgreSQL driver](/topics/postgresql-driver) run every form on this page.
 
-The examples use the demo's models:
+The examples use the club models of the test suite (`tests/clubmodels`):
 
 ```python
 from decimal import Decimal
 
 from adorm import Avg, Case, Coalesce, Count, Exists, F, Max, Min, OuterRef, Q, Subquery, Sum, TruncMonth, Value, When
-from demo.models.billing import Invoice
-from demo.models.clubs import Club, Member, Membership
+from tests.clubmodels.billing import Invoice
+from tests.clubmodels.clubs import Club, Member, Membership
 ```
 
 ## Over all rows: `aggregate()`
