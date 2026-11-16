@@ -257,7 +257,7 @@ The executor's debug checks run when its debug switch is on. The switch is set b
 - [`adorm.configure(debug=...)`](/ref/settings#adorm-configure-profiles-none-providers-pool-none-debug-none);
 - the `debug` key of the [`ADORM`](/ref/settings#adorm) Django setting, which the
   [Django app](/ref/settings#django-app) passes to `adorm.configure()` on `django.setup()` and when a test overrides
-  `ADORM`;
+  `ADORM`, or `DATABASES` while `ADORM` has no `profiles`;
 - [`set_debug()`](#adorm-executor-set-debug-value).
 
 `True` turns the checks on and `False` off. `None` makes them follow the running event loop's debug mode
