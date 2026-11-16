@@ -10,28 +10,28 @@ adorm is pre-release. The [API reference](/ref/) lists what the installed versio
 
 ## Why adorm
 
-adorm's API is modelled on the Django ORM: querysets, lookups, `Q` and `F`, managers and model instances work as
-Django developers know them, without the `a` prefix. The Django driver lets an existing Django project move to
-adorm one task at a time, on its existing models and migrations.
+adorm's API is modelled on the Django ORM: querysets, lookups, `Q` and `F`, managers and model instances work as in
+Django, without the `a` prefix. With the Django driver an existing Django project moves to adorm one task at a time,
+on its existing models and migrations.
 
-Django's ORM is synchronous. Its `a`-prefixed methods (`aget`, `acreate`, …) run the synchronous ORM in a
-thread through `sync_to_async`, one call at a time, and part of the API (forward relation access,
-transactions) has no async form at all. An async application therefore ends up mixing two styles,
-wrapping blocks of ORM code in threads, or moving business logic into Celery workers only because the ORM
-cannot run on the event loop.
+Django's ORM is synchronous. Its `a`-prefixed methods (`aget`, `acreate`, …) run the synchronous ORM in a thread
+through `sync_to_async`, one call at a time. Forward relation access and transactions have no async form.
+An async application on Django's ORM therefore mixes two styles, wraps blocks of ORM code in threads, or moves business
+logic into Celery workers because the ORM cannot run on the event loop.
 
-adorm gives the application one async API, whatever executes the work:
+adorm provides one async API for every driver:
 
-- Every call that touches the database is a coroutine or returns an awaitable. Only configuration is
-  synchronous.
-- The API follows the Django ORM, without the `a` prefix: `get`, `save`, `count`, `await member.club`,
-  `async for` over a queryset.
-- Query building blocks (`Q`, `F`, aggregates, lookups) are adorm's own. Building a query needs no connection;
-  it produces an adorm operation description.
-- A driver turns that description into work on its target. The Django ORM driver calls only the synchronous
-  Django ORM, on a thread owned by one slot; the native PostgreSQL driver runs on asyncpg without threads.
-- Connections are managed by adorm: a pool of slots per connection profile, logical sessions, transactions
-  that hold one slot, acquisition timeouts and deadlock detection.
+- Every call that touches the database is a coroutine or returns an awaitable. Only configuration is synchronous.
+- The names are the Django ORM's, without the `a` prefix: `get`, `save`, `count`, `await member.club`, `async for`
+  over a queryset.
+- `Q`, `F`, aggregates and lookups are adorm's own. Building a query needs no connection and produces an adorm
+  operation description.
+- A driver executes that description on its target. The Django ORM driver calls only the synchronous Django ORM, on
+  a thread owned by one slot. The native PostgreSQL driver runs every database call on the event loop through
+  asyncpg, without threads; it uses Django only without I/O: Django's compiler builds the SQL, and Django's models
+  supply the field, relation and deletion metadata and the schema hash.
+- adorm manages the connections: a pool of slots per connection profile, logical sessions, transactions that hold one
+  slot, acquisition timeouts and deadlock detection.
 
 ```python
 import adorm
@@ -53,19 +53,23 @@ async def active_names() -> list[str]:
 
 ## What adorm is not
 
-- adorm does not patch Django and does not wrap the Django ORM's own async methods. An application uses either
-  adorm or synchronous Django ORM code for a given task; there is no mixed mode.
-- adorm has no primitive that runs an arbitrary synchronous function. The application builds a query or an
-  operation and awaits its execution; the driver decides how it runs.
+- adorm does not patch Django and does not wrap the Django ORM's async methods. A task uses either adorm or
+  synchronous Django ORM code; there is no mixed mode.
+- adorm has no primitive that runs an arbitrary synchronous function. The application awaits a query or an
+  operation; the driver decides how it runs.
 - adorm has no signals (`pre_save`, `post_save`, …). Signals of the target ORM fire inside the driver and are
   not visible to adorm's client.
-- Schema migrations remain the target ORM's job (for Django, `manage.py migrate`).
+- adorm has no migrations. With the Django driver the schema belongs to Django's migrations (`manage.py migrate`);
+  the native PostgreSQL driver assumes the tables exist. adorm checks the schema instead: the schema hash when a model
+  is used, and the tables and columns on `adorm.check_schema()`, `adorm check-schema` or a pool's start-up check
+  (`check_schema`). See [Schema checks](/topics/schema-checks).
 
 ## Requirements
 
 - Python 3.11 or newer
-- The `django` extra for the Django ORM driver, the `asyncpg` extra for the native PostgreSQL driver (it installs
-  asyncpg, Django and psycopg 3: the driver compiles its SQL with Django's compiler)
+- The `django` extra for the Django ORM driver
+- The `asyncpg` extra for the native PostgreSQL driver. It installs asyncpg, Django and psycopg 3: the driver compiles
+  its SQL with Django's compiler.
 
 ```bash
 pip install "adorm[django]"

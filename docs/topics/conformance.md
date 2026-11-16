@@ -2,19 +2,19 @@
 
 The conformance suite (`tests/conformance`) runs every driver of the [demo application](/intro/demo) (Django, native
 PostgreSQL, memory) over the same schema and data: the demo's apps `clubs`, `activities` and `billing`, filled by
-its seed command (`manage.py seed_demo`) in the test database. It is part of `uv run pytest` and so of CI.
+`manage.py seed_demo` in the test database. It runs in `uv run pytest` and in CI.
 
-A driver states what it executes in its [capabilities](/topics/drivers#capabilities). The suite holds it to that
-statement in both directions:
+The suite checks each driver against its [capabilities](/topics/drivers#capabilities):
 
 - an operation whose kind and constructs the driver declares returns the same result on every driver;
-- an operation that uses a kind or construct the driver does not declare raises `NotSupportedError` naming what is
-  missing, before it reaches a connection, and leaves the pool and the transaction usable.
+- an operation with a kind or construct the driver does not declare raises `NotSupportedError` naming what is
+  missing, before it reaches a connection; the pool and the transaction stay usable.
 
 ## The catalogue
 
-`tests/conformance/cases.py` holds the cases. Each one is a coroutine that runs operations through the public API,
-the names those operations report (operation kinds and construct names) and the expected result:
+`tests/conformance/cases.py` holds the cases. A case is a coroutine that runs operations through the public API,
+decorated with `@case`. The positional arguments of `@case` are the case's `uses`: the operation kinds and construct
+names its operations report. `expected` is the result:
 
 ```python
 @case("select", "lookup.lt", expected=["Regional bouldering cup"])
@@ -27,18 +27,18 @@ async def lookups_across_relations():
     return await first_names(Member.objects.filter(memberships__club__slug="koper-sailing"))
 ```
 
-The positional names of `@case` are the case's `uses`: the operation kinds and construct names its operations
-report. Every case runs on every driver (`test_case[<driver>-<case>]`):
+Every case runs on every driver (`test_case[<driver>-<case>]`):
 
 | The driver declares | The case must |
 |---|---|
 | every name in `uses` | return `expected`; the operations it sent report exactly `uses` |
 | not all of them | raise `NotSupportedError` whose `driver` is the driver's name and whose `unsupported` names only what the refused operation uses and the driver lacks |
 
-After each case no slot is in use, and the pool serves the next operation on the slot it kept. A case lists, in
-`refusals`, a driver that refuses it while executing, for a limit its names cannot show because it depends on the
-schema or the rows; the memory driver refuses a delete that would cascade, and a condition on a reverse or
-many-to-many relation name such as `clubs=club`:
+After each case no slot is in use, and the pool serves the next operation on the slot it kept.
+
+`refusals` lists drivers that refuse the case during execution, for a limit that depends on the schema or the rows
+and so does not show in the names. The memory driver refuses a delete that would cascade and a condition on a
+reverse or many-to-many relation name such as `clubs=club`:
 
 ```python
 @case("delete", "count", "lookup.exact", expected=(...), refusals={"memory": "does not cascade"}, django=...)
@@ -47,9 +47,9 @@ async def delete_cascades():
 ```
 
 A case's `django` is a synchronous mirror in the Django ORM. `test_django_mirror[<case>]` runs it over the seeded
-database in a transaction it rolls back and compares its result with `expected`, so a case is held to Django's
-result even when no driver runs it to completion. Every write case has one, and so has every case that no demo
-driver runs to completion; a coverage test fails for a case with neither.
+database in a rolled-back transaction and compares its result with `expected`, also for a case no driver runs to
+completion. Every write case has a mirror, and so does every case that no demo driver runs to completion; a coverage
+test fails for a case with neither.
 
 The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`, `none()`), every lookup, `Q`
 combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
@@ -69,7 +69,7 @@ Coverage tests fail when:
 - an operation kind of [`OPERATIONS`](/ref/operations#adorm-operations-operations) (other than `call`, which needs a
   driver method of the model) or a construct of adorm's
   [`construct_names()`](/ref/query#adorm-query-construct-names) has no case;
-- a driver declares a name adorm does not know (a misspelt construct would otherwise never match);
+- a driver declares a name adorm does not know;
 - a driver declares a name no case uses;
 - a demo driver has no entry in the suite;
 - a case neither runs to completion on a demo driver nor has a Django mirror;
@@ -89,7 +89,7 @@ Coverage tests fail when:
 
 `tests/conformance/test_options.py` runs every driver through [connection options](/topics/options) and
 `adorm.timeout()` on the executor, each test repeated. A blocked operation waits on the driver's `Blocker`
-(below); "waits" means it still waits after twice the limit the test set:
+(below). "Waits" means it still waits after twice the limit the test set:
 
 | Test | What holds |
 |---|---|
@@ -109,7 +109,7 @@ Coverage tests fail when:
 ## Python code of the target ORM
 
 `tests/conformance/test_driver_code.py` runs every driver through the Python code of the target ORM that a write
-would call. Each driver states in its `ConformanceDriver.driver_code` what it does with that code (`DRIVER_CODE`):
+calls. `ConformanceDriver.driver_code` (one of `DRIVER_CODE`) states what the driver does with that code:
 
 | `driver_code` | Driver | A model's `save()` / `delete()` override, a query set's `create()` / `update()` override, a custom `on_delete` handler | Django's signals, Django's `on_commit()` callbacks |
 |---|---|---|---|
@@ -120,9 +120,14 @@ would call. Each driver states in its `ConformanceDriver.driver_code` what it do
 `pre_init` and `post_init` fire on the Django and the native PostgreSQL driver, which build Django model instances,
 and not on the memory driver.
 
-The tests override the Django model `Tag`'s `save()` (it stores the name in upper case), `delete()` (it deletes
-nothing) and the `create()`, `update()` and `bulk_create()` of its base manager's query set after the data is seeded, replace the
-`on_delete` handler of `Activity.coach` with a custom one, and connect signal receivers:
+After the data is seeded, the tests:
+
+- override the Django model `Tag`'s `save()` (stores the name in upper case) and `delete()` (deletes nothing);
+- override `create()`, `update()` and `bulk_create()` of `Tag`'s base manager's query set;
+- replace the `on_delete` handler of `Activity.coach` with a custom one;
+- connect signal receivers.
+
+
 
 | Test | What holds |
 |---|---|
@@ -147,9 +152,8 @@ async def test_a_models_save_override(conformance_driver, router, calls):
 
 ## Integrity errors
 
-`tests/conformance/test_integrity.py` runs every driver into violated constraints. The constraint names are read from
-`pg_constraint`, not written into the tests. The memory driver, which enforces only the primary key, runs only the
-first test:
+`tests/conformance/test_integrity.py` violates constraints on every driver. The tests read constraint names from
+`pg_constraint`. The memory driver enforces only the primary key and runs only the first test:
 
 | Test | What holds |
 |---|---|
@@ -161,8 +165,8 @@ first test:
 
 ## Failures
 
-`tests/conformance/test_failures.py` runs every driver through what goes wrong in production, each concurrency test
-repeated:
+`tests/conformance/test_failures.py` runs every driver through refusals, concurrency, cancellation and lost
+connections, each concurrency test repeated:
 
 | Test | What holds |
 |---|---|
@@ -194,13 +198,15 @@ lock or a unique constraint other than the primary key run on the SQL drivers on
 | `ignore_conflicts` racing a transaction that inserted the same unique key | the call waits for it (seen in `pg_stat_activity`); the row is skipped when the transaction commits and inserted when it rolls back; the other row is inserted either way |
 | `update_conflicts` racing a transaction that inserted the same unique key | the call waits for it; it updates that row when the transaction commits and inserts its own when it rolls back |
 
-Each driver's `Blocker` (`tests/conformance/drivers.py`) makes an operation wait without sleeping: the SQL drivers
-read clubs while another connection holds an exclusive lock on their table, the memory driver updates a club while
-another transaction holds its row lock. `holder_pid()` names the session holding the lock: the holder connection's
-server pid on the SQL drivers, the holder connection's number on the memory driver. `open_transactions()` counts the
-connections other than the blocker's in an open transaction: on PostgreSQL every backend of the test database with a
-transaction start time, on the memory driver every open connection the driver created with a transaction. Lost connections apply to drivers with a server
-connection.
+Each driver's `Blocker` (`tests/conformance/drivers.py`) makes an operation wait without sleeping:
+
+| | SQL drivers | memory driver |
+|---|---|---|
+| the waiting operation | reads clubs while another connection holds an exclusive lock on their table | updates a club while another transaction holds its row lock |
+| `holder_pid()` | the holder connection's server pid | the holder connection's number |
+| `open_transactions()`: connections other than the blocker's in an open transaction | every backend of the test database with a transaction start time | every open connection the driver created with a transaction |
+
+The lost connection tests run only on drivers with a server connection.
 
 ## Lock waits
 

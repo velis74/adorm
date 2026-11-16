@@ -1,10 +1,14 @@
 # Cancellation
 
-Cancelling the task that awaits an adorm operation cancels the operation. A request still waiting for a slot or
-queued on one never runs; a statement running in the slot is cancelled in the database (psycopg's `cancel_safe()` in
-the [Django driver](/topics/django-driver#cancellation), asyncpg's cancellation in the
-[native PostgreSQL driver](/topics/postgresql-driver)). The cancelled task gets `asyncio.CancelledError` as usual, so
-`asyncio.timeout()`, `TaskGroup` and `gather()` behave as they do with any other coroutine.
+Cancelling the task that awaits an adorm operation cancels the operation:
+
+- a request waiting for a slot or queued on one never runs;
+- a statement running in the slot is cancelled in the database (psycopg's `cancel_safe()` in the
+  [Django driver](/topics/django-driver#cancellation), asyncpg's cancellation in the
+  [native PostgreSQL driver](/topics/postgresql-driver)).
+
+The task gets `asyncio.CancelledError`, so `asyncio.timeout()`, `TaskGroup` and `gather()` work as with any other
+coroutine.
 
 ```python
 task = asyncio.create_task(Member.objects.filter(club_id=1).update(active=False))
@@ -14,7 +18,7 @@ task.cancel()          # the UPDATE is cancelled in the database
 
 ## The slot after a cancellation
 
-The slot never leaks: releasing it completes also when the task is cancelled again meanwhile.
+The slot is always released, also when the task is cancelled again during the release.
 
 | Where the cancellation lands | The slot |
 |---|---|
@@ -25,9 +29,9 @@ The slot never leaks: releasing it completes also when the task is cancelled aga
 
 ## Outcome of a cancelled operation
 
-A cancellation can race the completion of the statement: the database may have finished it, or not, by the time the
-cancellation reaches it. [`adorm.cancellation_outcome(exc)`](/ref/pool#adorm-cancellation-outcome-exc) tells what
-is known about the cancelled operation from the `CancelledError` it raised:
+The database may or may not have finished the statement when the cancellation reaches it.
+[`adorm.cancellation_outcome(exc)`](/ref/pool#adorm-cancellation-outcome-exc) returns what is known about the
+cancelled operation from the `CancelledError` it raised:
 
 | [`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome) | Meaning |
 |---|---|
@@ -50,11 +54,10 @@ except asyncio.CancelledError as exc:
     raise
 ```
 
-The value is final when the `CancelledError` reaches the caller of an operation outside a transaction: the
-operation's slot is released first, which waits for the slot to finish the request, also when the caller is cancelled
-again meanwhile.
+For an operation outside a transaction the value is final when the `CancelledError` reaches the caller: the slot is
+released first, which waits until the slot has finished the request, also when the caller is cancelled again.
 
-What a driver reports for a statement cancelled while it ran decides between `SUCCEEDED`, `FAILED` and `UNKNOWN`
+For a statement cancelled while it ran, the driver's report selects `SUCCEEDED`, `FAILED` or `UNKNOWN`
 ([driver contract](/ref/drivers#cancellation)):
 
 | Driver | A statement cancelled while it ran |
@@ -73,9 +76,9 @@ except TimeoutError as exc:
     outcome = adorm.cancellation_outcome(exc)      # NOT_STARTED while waiting for a slot, else as above
 ```
 
-It returns `None` for an exception that no cancelled adorm operation raised. The same holds for the
-`OperationTimeout` of [`adorm.timeout()`](/topics/options#adorm-timeout), which also tells whether the operation was
-waiting for a slot or executing:
+It returns `None` for an exception not raised by a cancelled adorm operation. It also accepts the `OperationTimeout`
+of [`adorm.timeout()`](/topics/options#adorm-timeout), whose `phase` tells whether the operation was waiting for a slot
+or executing:
 
 ```python
 try:
@@ -85,8 +88,8 @@ except adorm.OperationTimeout as exc:
     outcome = adorm.cancellation_outcome(exc)      # NOT_STARTED when exc.phase == "waiting_for_slot"
 ```
 
-A set of [connection options](/topics/options) that a cancellation interrupts is sent again with the next operation
-that runs with them; the cancelled operation itself did not run.
+When a cancellation interrupts the setting of [connection options](/topics/options), they are sent again with the
+next operation that runs with them; the cancelled operation did not run.
 
 Inside an atomic block the outcome describes the request in the open transaction. A cancelled block rolls back, so
 none of its operations takes effect, whatever their outcome.
@@ -117,14 +120,14 @@ except asyncio.CancelledError:
 `ROLLED_BACK` when it, or a savepoint around it, was rolled back, and the outcome of its outermost block otherwise. It
 is final once the end of the block has returned or raised.
 
-When the commit succeeded but the end of the block was cancelled, the block's `on_commit()` callbacks still run, in a
-task of their own outside the transaction; an exception a callback raises is logged on the `adorm.executor` logger.
-When another task ends the block with `commit()` and is cancelled before the commit is confirmed, the end of the
-owner's `async with` raises `TransactionManagementError`, whose `__cause__` is that `CancelledError`.
+- When the commit succeeded and the end of the block was cancelled, the block's `on_commit()` callbacks run in a task
+  of their own outside the transaction; an exception a callback raises is logged on the `adorm.executor` logger.
+- When another task ends the block with `commit()` and is cancelled before the commit is confirmed, the end of the
+  owner's `async with` raises `TransactionManagementError` with that `CancelledError` as `__cause__`.
 
 ## Events
 
-Cancellation emits no events of its own. It consumes:
+Cancellation emits no events. It consumes:
 
 | Event | Interpretation |
 |---|---|
@@ -133,5 +136,5 @@ Cancellation emits no events of its own. It consumes:
 | `ResultEvent` or `ErrorEvent` of a request whose caller was cancelled | the request finished first: `SUCCEEDED`, or `FAILED` (`UNKNOWN` for a connection error) |
 | `CallbackEvent("on_commit")` before the outcome of a cancelled `commit` | the transaction committed: `TransactionOutcome.COMMITTED` |
 
-The slot delivers the outcome of a request whose caller was cancelled to the lease's channel as usual, which
-completes the `CancellationOutcome` of the caller's `CancelledError`.
+The slot delivers the outcome of a request whose caller was cancelled to the lease's channel; it sets the
+`CancellationOutcome` of the caller's `CancelledError`.

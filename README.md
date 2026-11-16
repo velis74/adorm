@@ -23,22 +23,22 @@ uv run pytest
 ```
 
 The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
-`postgres://postgres@127.0.0.1:5432/adorm_test`). They create and drop the database it names (`adorm_test` when it names
-`postgres` or none) and their own `adorm_test_demo`, `adorm_test_limited`, `adorm_test_parallel` and
-`adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`) databases on that server and leave other
-databases and the server's roles untouched. Run them as a dedicated user with `CREATEDB`, not as a superuser (a
-database's connection limit does not apply to a superuser, so the test of the pool's refusal handling is skipped):
+`postgres://postgres@127.0.0.1:5432/adorm_test`). On that server they create and drop the database it names
+(`adorm_test` when it names `postgres` or none) and the databases `adorm_test_demo`, `adorm_test_limited`,
+`adorm_test_parallel` and `adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`). Other databases and
+the server's roles are left untouched. Run the tests as a dedicated user with `CREATEDB`. Under a superuser the test of
+the pool's refusal handling is skipped, because a database's connection limit does not apply to a superuser:
 
 ```sql
 CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
 ```
 
-With `ADORM_TEST_CREATE_ROLES=1` the tests of `SET ROLE` in connection profiles also run: they create and drop the
-roles `adorm_test_login`, `adorm_test_alice` and `adorm_test_bob`, which need `CREATEROLE`. Roles belong to the whole
-server and outlive the test databases, so set it only on a server of the tests' own (CI sets it).
+`ADORM_TEST_CREATE_ROLES=1` also runs the tests of `SET ROLE` in connection profiles. They create and drop the roles
+`adorm_test_login`, `adorm_test_alice` and `adorm_test_bob` and need `CREATEROLE`. Roles belong to the whole server and
+outlive the test databases: set the variable only on a server dedicated to the tests (CI sets it).
 
-The demo reads its database URL from `ADORM_DEMO_DATABASE_URL`. Both variables can be set in the file `.env` in the
-repository root (ignored by git; `.env.example` lists them); variables set in the environment take precedence.
+The demo reads its database URL from `ADORM_DEMO_DATABASE_URL`. Both variables can be set in `.env` in the repository
+root (ignored by git; `.env.example` lists them). Variables set in the environment take precedence.
 
 ```bash
 cp .env.example .env    # then fill in the user and password
@@ -47,10 +47,14 @@ uv run pytest
 
 ## Demo
 
-`demo.py` runs the demo application: a Django project with a club domain (`demo/backend`), the adorm models generated
-from it (`demo/models`), a FastAPI app using them (`demo/api`) and PostgreSQL. It creates, migrates and seeds the
-database `ADORM_DEMO_DATABASE_URL` (default `postgres://postgres@127.0.0.1:5432/adorm_demo`), then serves the API on
-<http://127.0.0.1:8000/docs>; its `/api/data` endpoints run sessions and transactions on the executor.
+`demo.py` runs the demo application on PostgreSQL:
+
+- `demo/backend`: a Django project with a club domain;
+- `demo/models`: the adorm models generated from it;
+- `demo/api`: a FastAPI app that uses them; its `/api/data` endpoints run sessions and transactions on the executor.
+
+It creates, migrates and seeds the database `ADORM_DEMO_DATABASE_URL` (default
+`postgres://postgres@127.0.0.1:5432/adorm_demo`) and serves the API on <http://127.0.0.1:8000/docs>.
 
 ```bash
 uv run python demo.py --list-drivers

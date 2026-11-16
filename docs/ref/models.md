@@ -198,11 +198,11 @@ Coroutine: validate the instance as the target validates one before a save, with
 [`FullClean`](./operations#adorm-operations-fullclean-model-pk-values-exclude-validate-unique-true-validate-constraints-true-adding-true)
 operation on the instance's executor. On the Django driver it is Django's `Model.full_clean()`: field validation
 (`clean_fields()`), the model's `clean()`, the unique checks (`validate_unique()`) and the model's constraints
-(`validate_constraints()`). Every query of the validation runs on the session's slot, on the profile's database
-alias, whatever the project's Django routers choose, so it sees the session's open transaction.
+(`validate_constraints()`). Every query of the validation runs on the session's slot and the profile's database
+alias, regardless of the project's Django routers, and sees the session's open transaction.
 
-- The instance validated is the one `save()` would write: its loaded and assigned fields over the stored row (for an
-  instance with a primary key that is not `_state.adding`; the row is read when fields are missing), otherwise over
+- The instance validated is the one `save()` would write: its loaded and assigned fields over the stored row for an
+  instance with a primary key that is not `_state.adding` (the row is read when fields are missing), otherwise over
   the target's defaults. A unique check of a stored instance leaves its own row out.
 - `exclude` names fields (or relations, for their column; `"pk"` for the primary key) that are not validated.
   `validate_unique` and `validate_constraints` switch the unique checks and the constraints off.
@@ -246,7 +246,7 @@ Coroutine: delete the instance's row and the rows that cascade from it with a
 [`DeleteInstance`](./operations#adorm-operations-deleteinstance-model-pk) operation on the instance's executor, which
 runs the target's delete of one instance (on the Django driver the model's `delete()`, an override included; the
 native PostgreSQL driver raises `NotSupportedError` for a model with an override). Returns
-`(total, {label: count})`; when rows were deleted it sets the primary key to `None`, otherwise (a missing row, a
+`(total, {label: count})`. When rows were deleted, the primary key is set to `None`; otherwise (a missing row, a
 `delete()` override that deletes nothing) the instance keeps it.
 
 ```python
@@ -267,10 +267,10 @@ dataclass; an invalid label or pk name raises `ValueError`.
   ([`adorm.codegen.compute_schema_hash`](./codegen#adorm-codegen-compute-schema-hash-label-pk-fields-relations-parents-managers)),
   `None` for a model written by hand. An empty or non-string value raises `ValueError`.
 - `orm_names`: the target ORM's name of each field or relation whose Python name differs, by Python name; `None` is an
-  empty mapping. A generated model fills it for the names it renames. A model class's `_meta` also holds the entries
-  of its model bases for the fields and relations it inherits, so a multi-table inheritance child or a proxy maps an
-  inherited name like its parent. It is stored read-only; a name that is not an identifier raises `ValueError`, a
-  model class whose `orm_names` names no field or relation of it raises `TypeError`.
+  empty mapping. A generated model fills it for the names it renames. A model class's `_meta` also holds its model
+  bases' entries for inherited fields and relations, so a multi-table inheritance child or a proxy maps an inherited
+  name like its parent. It is stored read-only. A name that is not an identifier raises `ValueError`; an `orm_names`
+  entry that names no field or relation of the model class raises `TypeError`.
 - `concrete_model`: the label of the concrete model a proxy model stands for (Django's `concrete_model`), `None` for a
   concrete model. [`adorm generate`](/howto/generating-models) sets it on every proxy. The content type of a proxy is
   its concrete model's ([`natural_key()`](#adorm-models-natural-key-model-for-concrete-model-true)). An invalid label,
@@ -327,18 +327,16 @@ pending assignments; a deep copy deep-copies them. A pickled instance comes back
 Base class of relation descriptors. `target` is the label of the related model, `name` the attribute name the
 descriptor is assigned to. `target_model()` returns the registered class of `target` (`LookupError` when none is
 registered). A relation is not a pydantic field: it is not validated, dumped or part of the JSON schema. A bare
-`Relation` names the target only: query paths traverse it (`memberships__active`), but it carries no join columns,
-and on an instance the attribute is the descriptor itself.
+`Relation` names only the target: query paths traverse it (`memberships__active`), it has no join columns, and on an
+instance the attribute is the descriptor.
 
 ### `adorm.ForeignKey(target, *, column=None)`
 
-A many-to-one (or one-to-one) relation stored in the field `column`, by default `<name>_id`. The column is an
-ordinary field; the relation reads and writes it.
+A many-to-one or one-to-one relation stored in the ordinary field `column`, by default `<name>_id`.
 
 - `await instance.rel` returns the related instance, or `None` when the column is `None`. The instance is loaded
   with a `Get` operation (`Query(target).filter(pk=column value)`) on the owner's executor and cached on the owner.
-  The cache serves later awaits while the cached instance's primary key equals the column; a row loaded with
-  `select_related()` fills it.
+  The cache serves while the cached instance's primary key equals the column; `select_related()` fills it.
 - A missing row raises the target's `DoesNotExist`.
 - Assigning an instance of the target sets the column to its primary key and caches the instance; assigning `None`
   clears both. Another model's instance raises `TypeError`, an instance without a primary key value `ValueError`.
@@ -363,9 +361,9 @@ Member.club.column                # "club_id"
 ```
 
 A relation name in Python input (the constructor, `model_validate()`) sets the column before the fields are
-validated, so it fills a required column too, and caches the instance: `Member(name="Ana", club=club)` sets
-`club_id`. Its value is a saved instance of the target or `None`. Anything else, the relation together with its
-column, and a relation name in JSON input (`model_validate_json()`) are a `ValidationError`.
+validated (a required column included) and caches the instance: `Member(name="Ana", club=club)` sets `club_id`. Its
+value is a saved instance of the target or `None`. Any other value, the relation together with its column, and a
+relation name in JSON input (`model_validate_json()`) raise `ValidationError`.
 
 ```python
 Member(name="Ana", club=club).club_id                         # club.pk
@@ -377,11 +375,10 @@ Member.model_validate_json('{"name": "Ana", "club_id": 5}')   # club_id == 5
 
 The reverse side of a `ForeignKey`: the rows of `target` whose field `column` holds the owner's primary key. On an
 instance it returns those rows from the target's [`objects`](#objects) manager on the owner's executor (the session
-that loaded it, else the current session): a query set of the manager's `queryset_class` that starts from its
-`get_queryset()` and carries its ORM manager, as Django's related managers derive from the default manager. An
-executor that is not a `Session` gets a query set of that class with the ORM manager but without a client-side
-`get_queryset()`. An instance without a primary key value raises `ValueError`; `column` that is not an identifier
-raises `ValueError`.
+that loaded it, else the current session): a query set of the manager's `queryset_class`, starting from its
+`get_queryset()` and carrying its ORM manager. On an executor that is not a `Session`, the query set has that class
+and the ORM manager but no client-side `get_queryset()`. An instance without a primary key value and a `column` that
+is not an identifier raise `ValueError`.
 
 ```python
 class Club(Model):
@@ -401,11 +398,11 @@ The reverse side of a one-to-one `ForeignKey`: the row of `target` whose field `
 (Django: the other side of a `OneToOneField`, also the parent's side of multi-table inheritance).
 
 - `await instance.rel` returns that row as an instance of `target`, loaded with a `Get` operation
-  (`Query(target).filter(<column>=instance.pk)`) on the owner's executor and cached on the owner. A row loaded with
+  (`Query(target).filter(<column>=instance.pk)`) on the owner's executor and cached on the owner.
   `select_related()` fills the cache.
 - No such row raises the target's `DoesNotExist`, also when `select_related()` cached no row.
-- An instance without a primary key value raises `ValueError`; `column` that is not an identifier raises
-  `ValueError`. On the class, the attribute is the descriptor.
+- An instance without a primary key value and a `column` that is not an identifier raise `ValueError`. On the class,
+  the attribute is the descriptor.
 
 ```python
 class Place(Model):
@@ -431,7 +428,7 @@ with a `target` row in `target_column`. For a link table without a model of its 
 ORM's generated through model (Django: `"<app_label>.<Model>_<field>"`, e.g. `"club.Activity_tags"`). On an instance
 it returns the related rows from the target's `objects` manager on the owner's executor, as `ReverseForeignKey` does;
 an instance without a primary key value raises `ValueError`. A forward `ForeignKey` and a `ReverseOneToOne` load
-their row without the target's manager, as Django's base manager does.
+their row without the target's manager (Django's base manager).
 
 ```python
 class Activity(Model):
@@ -449,9 +446,9 @@ activity.tags.query
 
 After [`prefetch_related()`](./queryset#prefetch-related-lookups) of a `ReverseForeignKey` or a `ManyToMany`, the
 query set the relation returns on the instance holds the prefetched rows: `async for`, `count()` and `exists()` read
-them without an operation. Its building methods (`filter()`, `order_by()` …) return query sets that run again, and so
-do its other terminal methods. A prefetched `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` fills the
-relation's cache, so `await instance.rel` runs no operation.
+them without an operation. Its building methods (`filter()`, `order_by()` …) return query sets that run an operation, and its
+other terminal methods run one. A prefetched `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` fills the relation's cache;
+`await instance.rel` then runs no operation.
 
 ```python
 club = await Club.objects.prefetch_related("memberships").get(slug="koper-sailing")
@@ -472,8 +469,8 @@ assigned proxy instance store its concrete model's content type, as in Django.
   [`content_types.get_model()`](#adorm-contenttypes) (cached; a miss is a `Get` operation), or through the content
   type relation's cache (`select_related("content_type")`); its row with the primary key in `fk_field` (converted to
   the primary key's type, `"7"` to `7`) is loaded with a `Get` operation on the owner's executor.
-- The instance is cached on the owner for the values of both fields it was loaded for, and serves while they keep
-  them; a field changed while a load or prefetch runs leaves the cache for the old values. A prefetch fills the
+- The instance is cached on the owner for the values of both fields it was loaded for and serves while the fields
+  keep them. A field changed while a load or prefetch runs leaves the cache for the old values. A prefetch fills the
   cache.
 - Either field `None`, or no row with that primary key, gives `None`. A content type of a model that is not
   registered raises `LookupError`; reading the relation while either field is deferred raises `AttributeError`.
@@ -509,8 +506,8 @@ Assigning an instance, as an attribute or as a constructor keyword, points the r
   [`create()`](./queryset#async-create-values) or [`bulk_create()`](./queryset#async-bulk-create-objs-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none).
   The write sets the content type field to the content type id of the instance's model (its concrete model's with
   `for_concrete_model`), taken with [`content_types.get_id()`](#adorm-contenttypes) on the executor that writes (the
-  instance's for `save()`, the query set's for `create()`; from the cache when it is there). A row written through
-  another session therefore gets that database's id.
+  instance's for `save()`, the query set's for `create()`), from the cache when cached. A row written through another
+  session gets that database's id.
 - Until that write the content type field holds the id [`content_types`](#adorm-contenttypes) has cached for the
   owner's executor. When none is cached, the field is unset: reading it raises `AttributeError`, and `model_dump()`
   and `repr()` leave it out, as they do a deferred field. `await instance.rel` gives the assigned instance without
@@ -519,7 +516,7 @@ Assigning an instance, as an attribute or as a constructor keyword, points the r
   ([`ObjectDoesNotExist`](./exceptions) when that model is not registered); nothing is written. A write that fails
   or is cancelled while it resolves leaves the assignment pending and writes nothing.
 - An assignment that changes while a write resolves it (another instance or `None` assigned, a field set, a
-  concurrent write resolving it first) is resolved anew or left as it is; the write stores the pair that is current.
+  concurrent write resolving it first) is resolved anew or left as it is; the write stores the current pair.
 - Assigning either field afterwards drops the pending content type.
 - As an attribute: an instance without a primary key value or whose key fits `fk_field` neither way raises
   `ValueError`, a value that is not an instance of a model with `_meta` `TypeError`; `None` sets both fields to
@@ -559,8 +556,7 @@ Methods of the descriptor:
 ## Content types
 
 A content type row (Django's `ContentType`) names a model by `app_label` and `model`, the lowercased class name; a
-generic foreign key stores its primary key. The rows are created by the target (Django's `migrate`); adorm only reads
-them.
+generic foreign key stores its primary key. The target creates the rows (Django's `migrate`); adorm only reads them.
 
 ### `adorm.ContentTypes`
 
@@ -575,16 +571,22 @@ Content type ids by model and models by content type id, cached per database: Dj
 - `for_concrete_model` (where a model is given): a proxy model uses its concrete model's content type
   ([`natural_key()`](#adorm-models-natural-key-model-for-concrete-model-true)).
 
-The cache belongs to the database a session's profile connects to, as its driver names it
-([`Driver.database_key()`](./drivers#database-key-profile)): profiles whose drivers name the same database share it, such as per-user
-profiles that differ only in hooks or options. The Django and asyncpg drivers name the host, port and database name of
-the profile's `DATABASES` entry with its `params` applied, and none for a profile with a `connect` hook. For a profile
-whose driver names no database the cache belongs to the profile: sessions of that profile share it, and a profile that
-is replaced or unregistered starts with an empty one. A session whose profile is not registered uses the profile's
-name, any other executor the executor object. Each lookup that misses runs its own operation; concurrent lookups do not
-wait for one another, and a cancelled one leaves the others running. The Django and asyncpg drivers connect Django's
-`post_migrate` signal to `clear()` (`migrate` and `flush`, which a `TransactionTestCase` runs after each test,
-create the rows again with other ids). Thread-safe.
+The cache key:
+
+- the database the session's profile connects to, as its driver names it
+  ([`Driver.database_key()`](./drivers#database-key-profile)). Profiles whose drivers name the same database share the
+  cache, such as per-user profiles that differ only in hooks or options. The Django and asyncpg drivers name the host,
+  port and database name of the profile's `DATABASES` entry with its `params` applied, and none for a profile with a
+  `connect` hook;
+- the profile, when its driver names no database: sessions of the profile share the cache, and a replaced or
+  unregistered profile starts with an empty one;
+- the profile's name, for a session whose profile is not registered;
+- the executor object, for any other executor.
+
+Each lookup that misses runs its own operation; concurrent lookups do not wait for one another, and a cancelled one
+leaves the others running. The Django and asyncpg drivers connect Django's `post_migrate` signal to `clear()`:
+`migrate` and `flush` (run by a `TransactionTestCase` after each test) recreate the rows with other ids.
+Thread-safe.
 
 | Method | Result |
 |---|---|
@@ -680,8 +682,7 @@ is neither a string nor a `Prefetch` `TypeError`.
 ### `adorm.models.RelatedObject`
 
 The awaitable a `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` returns on an instance. Nothing runs until it
-is awaited, so reading the relation without awaiting it leaves no coroutine behind; each `await` checks the cache
-again.
+is awaited; reading the relation without awaiting it creates no coroutine. Each `await` checks the cache.
 
 ### `adorm.models.get_relations(model)`
 
@@ -707,10 +708,10 @@ methods](#adorm-driver-method-func-queryset-only-false) run on and defaults to `
 its driver methods need a driver that runs `call` operations. A name that is not a public identifier raises
 `ValueError`.
 
-Reading the manager on a model class returns a copy of it bound to that class and the current session (a
+Reading the manager on a model class returns a copy bound to that class and the current session (a
 [`BoundModel`](./sessions#adorm-boundmodel)); reading it on an instance or on an abstract model raises
-`AttributeError`. Subclasses of the model inherit its managers, bound to themselves. A manager instance is declared
-under one name (`TypeError` otherwise), and a manager named like a field or relation raises `TypeError`.
+`AttributeError`. Subclasses of the model inherit its managers, bound to themselves. Declaring one manager instance
+under two names, and a manager named like a field or relation, raise `TypeError`.
 
 A subclass adds methods: client-side ones that build on `get_queryset()`, [driver
 methods](#adorm-driver-method-func-queryset-only-false), an overridden `get_queryset()`, and `queryset_class`, the
@@ -754,7 +755,7 @@ Declares an `async def` method of a `Manager` or `QuerySet` subclass as a method
 [`DriverMethod`](#adorm-models-drivermethod). Used bare (`@driver_method`) or with arguments
 (`@driver_method(queryset_only=True)`). The declaration's signature is the method's: a call checks its arguments
 against it (`TypeError` before anything is sent), and the annotations type the arguments' encoding. The body does not
-run. `queryset_only` keeps a query set method off the manager, as Django's `queryset_only` does.
+run. `queryset_only` keeps a query set method off the manager (Django's `queryset_only`).
 
 A function that is not a coroutine function or has no `self` parameter raises `TypeError`; a name starting with `_`
 raises `ValueError`; so does assigning it to a class attribute of another name.
@@ -825,9 +826,9 @@ dict(driver_methods(Loan))
 ### `adorm.models.find_driver_method(label, manager, target, method)`
 
 The driver method `method` declared for `target` of the ORM manager `manager` on the registered model `label`.
-[`DriverConnection.execute()`](./drivers#adorm-drivers-driverconnection) calls it for every `Call`, so a driver runs
-only declared methods. A model that is not registered, a `manager` of `None` and a method the model does not declare
-raise `NotSupportedError`.
+[`DriverConnection.execute()`](./drivers#adorm-drivers-driverconnection) looks up every `Call` with it; a driver
+runs only declared methods. A model that is not registered, a `manager` of `None` and a method the model does not
+declare raise `NotSupportedError`.
 
 ```python
 find_driver_method("library.Loan", "objects", "queryset", "archive")      # LoanQuerySet.archive
@@ -878,7 +879,7 @@ schema.
 | `unregister(label)` | remove the model; an unknown label is ignored |
 | `get(label)` | the model class; `LookupError` when none is registered |
 | `get_for_content_type(app_label, model_name)` | the model class whose label has the app part `app_label` and the model part `model_name`, compared case-insensitively (Django's `ContentType.model`); `LookupError` when none is registered |
-| `schema_hashes()` | the schema hash of every registered model that has one (`_meta.schema_hash`), as a dict by label: what a client sends a driver of another process to check its models against ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none)) |
+| `schema_hashes()` | the schema hash of every registered model that has one (`_meta.schema_hash`), as a dict by label; the `schema_hashes` argument of [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) |
 | `model_schema(label)` | the model's [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods), `None` for an unknown label; cached once the model class is complete (its forward references resolved) |
 | `label in registry`, `iter(registry)`, `len(registry)` | membership, the model classes, their number |
 

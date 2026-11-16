@@ -2,7 +2,7 @@
 
 `adorm generate` writes adorm models from Django models: one module per Django app, with the same labels, field
 names, types and relations, and a package `__init__.py` that imports them. The modules are checked into the
-application's repository; `adorm generate --check` fails a CI job when they no longer match the Django models.
+application's repository; `adorm generate --check` fails a CI job when they differ from the Django models.
 
 ## Generate the modules
 
@@ -21,8 +21,8 @@ wrote myproject/adorm_models/billing.py
 ```
 
 Without app labels every installed app with models is generated, in `INSTALLED_APPS` order. `python -m adorm generate`
-is the same command. The current directory comes first on the import path, then each `--pythonpath DIR`, ahead of
-installed packages and editable installs, so under `uv run` too the project's packages are imported from the current
+is the same command. The import path starts with the current directory, then each `--pythonpath DIR`, ahead of
+installed packages and editable installs, so also under `uv run` the project's packages are imported from the current
 directory:
 
 ```sh
@@ -31,7 +31,7 @@ uv run adorm generate --settings myproject.settings --output myproject/adorm_mod
 uv run adorm generate --settings settings --pythonpath src --output src/adorm_models  # settings in src/
 ```
 
-The package imports every module, so importing it registers every model, and lists the classes in `MODELS`:
+Importing the package imports every module, which registers every model. `MODELS` lists the classes:
 
 ```python
 from myproject.adorm_models import MODELS, clubs
@@ -53,8 +53,8 @@ schemas = {model._meta.label: model.model_json_schema() for model in MODELS}
 
 ## Generate selected models
 
-A model label (`app_label.Model`) selects one model; an app label selects every model of its app. The two mix in one
-command, and the module of each app holds only the selected models, in the Django order:
+A model label (`app_label.Model`) selects one model; an app label selects every model of its app. Both may appear in
+one command. The module of each app holds only the selected models, in the Django order:
 
 ```sh
 adorm generate --settings myproject.settings --output myproject/adorm_models clubs.Club clubs.Member billing
@@ -68,12 +68,14 @@ wrote myproject/adorm_models/billing.py
 3 written, 0 removed, 0 unchanged.
 ```
 
-An app named by its label too is generated whole, whatever model labels name it; `--exclude` still leaves models out.
-The model name matches case-insensitively (`clubs.member`). An unknown app or model, a label that is neither an app
-label nor a model label (`clubs.Member.email`, `clubs.`), an automatic many-to-many through model and a swapped model
-(`auth.User` with a custom `AUTH_USER_MODEL`) stop the command with an error.
+- An app also named by its app label is generated whole, whatever model labels name it; `--exclude` leaves models out
+  of it.
+- The model name matches case-insensitively (`clubs.member`).
+- These stop the command with an error: an unknown app or model, a label that is neither an app label nor a model
+  label (`clubs.Member.email`, `clubs.`), an automatic many-to-many through model, a swapped model (`auth.User` with
+  a custom `AUTH_USER_MODEL`).
 
-A selection keeps the relations to models outside it apart from the generated code:
+Relations to models outside the selection:
 
 | Relation | Generated |
 |---|---|
@@ -82,7 +84,7 @@ A selection keeps the relations to models outside it apart from the generated co
 | the reverse side of a relation declared on a model that is not selected | nothing |
 | a multi-table inheritance parent or a proxy's model that is not selected | the class derives from `Model` and declares every field |
 
-The column field keeps the code working with the key alone, without the related model:
+The column field gives the key without the related model:
 
 ```python
 from myproject.adorm_models import clubs
@@ -92,12 +94,12 @@ country_id = club.country_id  # the key; await club.country raises LookupError
 members = [member async for member in clubs.Member.objects.filter(club_id=club.id)]
 ```
 
-The selection is part of the output: run `--check` with the same labels.
+The selection determines the output; run `--check` with the same labels.
 
 ## Check the modules in CI
 
-The check compares every file with what the command would write now. Run it with the same arguments as the command
-that wrote the files:
+The check compares every file with what the command would write. Run it with the arguments of the command that wrote
+the files:
 
 ```yaml
 - run: uv run adorm generate --check --settings myproject.settings --output myproject/adorm_models clubs billing
@@ -119,8 +121,8 @@ Exit status 0 means up to date, 1 means at least one difference, 2 an error (an 
 up, a model the generator cannot describe, a usage error).
 
 A file is the generator's when its first line is the header `# Generated by adorm generate: …`. The command replaces
-and removes only such files: other files in the directory are left alone, and a `foreign` file stops the command
-before it writes anything.
+and removes only such files. Other files in the directory are left alone; a `foreign` file stops the command before
+it writes anything.
 
 ## What a module contains
 
@@ -220,9 +222,9 @@ A `null=True` field is `<type> | None`. The default follows Django's:
 | no default | required |
 | automatic primary key, parent link, `auto_now`, `auto_now_add`, `db_default`, `GeneratedField`, `_order`, any other callable default (`timezone.now`) | `<type> \| None = None` |
 
-The last row covers values the database or Django fills in when the row is stored: the field is optional and `None`
-until then, and [`save()`](/ref/models#save-update-fields-none-force-insert-false-force-update-false) leaves a field
-it was not given to the target.
+The last row covers values the database or Django fills in when the row is stored. The field is optional and `None`
+until then; [`save()`](/ref/models#save-update-fields-none-force-insert-false-force-update-false) leaves a field it was not given
+to the target.
 
 ### Relations
 
@@ -234,13 +236,12 @@ it was not given to the target.
 | `ManyToManyField`, either side | [`ManyToMany`](/ref/models#adorm-manytomany-target-through-source-column-target-column) through the declared or the automatic through model |
 | `GenericForeignKey` | [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true) with the content type field and the object id field (no arguments for `content_type` and `object_id`), and `for_concrete_model=False` when Django's is false |
 
-Reverse relations come only from models that are generated in the same run. A forward relation to a model that is not
-generated (or through a declared through model that is not) keeps its column and its descriptor and is reported as a
-warning: the descriptor raises `LookupError` when it is used unless that model is registered some other way
-([selected models](#generate-selected-models)). A relation hidden with
-`related_name="+"` is left out.
+Reverse relations come only from models generated in the same run. A forward relation to a model that is not
+generated (or through a declared through model that is not) keeps its column and descriptor and is reported as a
+warning; the descriptor raises `LookupError` when it is used unless that model is registered some other way
+([selected models](#generate-selected-models)). A relation hidden with `related_name="+"` is left out.
 
-These are reported as warnings and left out, while their columns stay ordinary fields:
+These are reported as warnings and left out; their columns stay ordinary fields:
 
 - generic relations (`GenericRelation`, the reverse side of a generic foreign key);
 - a foreign key with `to_field` naming a field other than the target's primary key, both its sides, and a
@@ -253,11 +254,12 @@ warning: auth.Permission.content_type: contenttypes.ContentType not generated, s
 
 ### Inheritance and proxies
 
-A multi-table inheritance child derives from its parent's generated class and declares only its own fields (the
-parent link is its primary key); a proxy model derives from the class of the model it stands for, adds no fields and
-names its concrete model in `ModelMeta(..., concrete_model=...)`, which gives it its concrete model's content type.
-When the parent is not generated, the class derives from `Model` and declares every field. A parent in another app
-is imported from that app's module.
+- A multi-table inheritance child derives from its parent's generated class and declares only its own fields; the
+  parent link is its primary key.
+- A proxy model derives from the class of the model it stands for, adds no fields and names its concrete model in
+  `ModelMeta(..., concrete_model=...)`, which gives it the concrete model's content type.
+- When the parent is not generated, the class derives from `Model` and declares every field.
+- A parent in another app is imported from that app's module.
 
 ```python
 class Competition(Activity):
@@ -277,21 +279,21 @@ class Competition(Activity):
 The parent gets the reverse side of the parent link, `competition = ReverseOneToOne("activities.Competition",
 column="activity_ptr_id")`.
 
-Abstract models are not generated (their fields are part of each concrete child); automatic many-to-many through
-models are not generated either (a `ManyToMany` names them by label, e.g. `"activities.Activity_tags"`). A model with a
-composite primary key stops the command with an error; leave it out with `--exclude`.
+Not generated: abstract models (their fields are part of each concrete child) and automatic many-to-many through
+models (a `ManyToMany` names them by label, e.g. `"activities.Activity_tags"`). A model with a composite primary key
+stops the command with an error; leave it out with `--exclude`.
 
 ## Managers
 
-The generator writes the managers of every model; the [managers topic](/topics/managers) explains what runs where.
+The generator writes the managers of every model; see the [managers topic](/topics/managers) for what runs where.
 
 - A manager whose class or query set class overrides a method the driver calls on the Django manager
   ([`ROUTED_METHODS`](/ref/codegen#adorm-codegen-django-routed-methods): `get_queryset()`, `create()`, `delete()`,
   `update()` …) gets its Django name as ORM name: `objects = Manager("objects")`. Every operation of that adorm
-  manager then runs through the Django manager, so the overrides apply. An override of another method
-  (`contribute_to_class()`, `deconstruct()` …) does not count, and neither does one the `@client_base` class defines
-  too: the method ported to the client replaces the Django one, so `get_queryset()` in the client base keeps the
-  manager's queries in the client, on every driver.
+  manager runs through the Django manager, with the overrides. An override of another method
+  (`contribute_to_class()`, `deconstruct()` …) does not count. Nor does one the `@client_base` class also defines:
+  the ported method replaces the Django one, so `get_queryset()` in the client base keeps the manager's queries in
+  the client, on every driver.
 - A manager with exposed methods and no such override runs only its driver methods on the Django manager:
   `objects = UserManager(method_manager="objects")`. Its queries carry no ORM manager and run on every driver.
 - Any other manager reads the plain rows: `all_loans = Manager()`. A plain `objects` is not written; `adorm.Model`
@@ -368,20 +370,20 @@ class Loan(Model):
 and, in the `auth` module, `class UserManager(Manager)` with `create_user(self, username, email=None, password=None,
 **extra_fields)` and `objects = UserManager(method_manager="objects")` on `User`.
 
-Parameter and return annotations are written when the generator can express them: builtins, `datetime`, `decimal`
-and `uuid` types, `X | None`, `Literal`, containers of these, and, as a return type, a model of the same module
-(quoted) or of another module (`Any`). Anything else becomes `Any` with a warning; a parameter typed as a model too,
-since arguments are plain values (pass the primary key). A method is not generated, with a warning, when it is a
-coroutine function, returns a query set (a query-building method belongs to the client base) or has a default the
-generator cannot write as a literal. A manager whose name would hide an attribute of `adorm.Model` is not generated
-either.
+Parameter and return annotations the generator writes: builtins, `datetime`, `decimal` and `uuid` types,
+`X | None`, `Literal`, containers of these, and, as a return type, a model of the same module (quoted) or of another
+module (`Any`). Anything else becomes `Any` with a warning. A parameter typed as a model also becomes `Any`: arguments
+are plain values (pass the primary key).
+
+Not generated, with a warning: a method that is a coroutine function, returns a query set (a query-building method
+belongs to the client base) or has a default the generator cannot write as a literal; a manager whose name would hide
+an attribute of `adorm.Model`.
 
 ### Methods of installed packages
 
-A manager or query set class of an installed package (a file under `site-packages` or `dist-packages`, such as
-django-model-utils or django-allauth) brings methods the application rarely calls through adorm. The generator
-reports them as one warning per manager, grouped by the class that defines them, while each method of the project's
-own classes keeps a warning of its own:
+Methods of a manager or query set class of an installed package (a file under `site-packages` or `dist-packages`,
+such as django-model-utils or django-allauth) are reported as one warning per manager, grouped by the class that
+defines them. Each method of the project's own classes gets a warning of its own:
 
 ```python
 from model_utils.managers import InheritanceManager
@@ -400,8 +402,8 @@ warning: assets.Asset.objects.filter_subclasses: not generated; expose it or por
 warning: assets.Asset.objects: 6 methods of installed packages not generated: model_utils.managers.InheritanceManagerMixin (get_subclass, instance_of, select_subclasses), model_utils.managers.InheritanceQuerySet (instance_of), model_utils.managers.InheritanceQuerySetMixin (get_subclass, select_subclasses); expose or port the ones the application calls
 ```
 
-A method listed in `ADORM_EXPOSE` or ported to the client base drops out of the list. `--ignore-third-party` leaves
-the list out and keeps every other warning:
+A method listed in `ADORM_EXPOSE` or ported to the client base is not listed. `--ignore-third-party` leaves out this
+warning and keeps every other:
 
 ```sh
 adorm generate --ignore-third-party --settings myproject.settings --output myproject/adorm_models
@@ -415,10 +417,14 @@ inside the project are.
 
 A field or relation whose name is an attribute of `adorm.Model` (pydantic's `model_dump`, `model_validate`,
 `model_fields`, `json`, `copy`, `schema`, `dict`, adorm's `save`, `objects`, `pk` …) or a Python keyword gets `_`
-appended. A name starting with `_`, which pydantic keeps for private attributes, loses its leading underscores and gets
-`_` appended (`_order` is `order_`). A renamed field gets its Django name as alias, and `_meta.orm_names` maps every
-renamed name to the Django one; a multi-table inheritance child or a proxy also maps the names it inherits. For the
-Django model
+appended. A name starting with `_` (pydantic's private attributes) loses its leading underscores and gets `_` appended
+(`_order` is `order_`). A renamed field gets its Django name as alias. `_meta.orm_names` maps every renamed name to the
+Django one; a multi-table inheritance child or a proxy also maps the names it inherits.
+
+A field name that is also a name the module imports (`datetime`, `uuid`, `decimal`, `Field`, `ForeignKey` …) makes
+the module import it under an alias (`import datetime as _datetime`); the field would hide it inside the class body.
+
+For the Django model
 
 ```python
 class Note(models.Model):
@@ -460,8 +466,8 @@ class Note(Model):
     item = GenericForeignKey()
 ```
 
-Code and queries use the suffixed name; serialisation and the JSON schema use the original one (the model base sets
-`serialize_by_alias` and accepts both names on input):
+Code and queries use the suffixed name; serialisation and the JSON schema use the original one. The model base sets
+`serialize_by_alias` and accepts both names on input:
 
 ```python
 notes = Note.objects.filter(json___icontains="draft", copy___title="Dune")
@@ -476,11 +482,10 @@ note.model_dump()["json"]      # "{}"
 `_meta.schema_hash` is 16 hexadecimal digits of a SHA-256 over the model's label, primary key, parents, every
 concrete field (name, Django name, type, nullability, constraints; inherited fields included), its forward
 relations and its managers with an ORM name or driver methods (names and the methods' parameters). Defaults,
-descriptions, return types and reverse relations do not take part. A driver computes the same hash from the
-Django model with [`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model-warn-true) and
-compares it with the generated model's when the model is used; a model generated from another version of the Django
-model raises [`SchemaMismatchError`](/topics/schema-checks#the-schema-hash-at-use) until the modules are generated
-again:
+descriptions, return types and reverse relations do not take part. When a model is used, a driver computes the hash
+from the Django model with [`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model-warn-true)
+and compares it with the generated model's. A model generated from another version of the Django model raises
+[`SchemaMismatchError`](/topics/schema-checks#the-schema-hash-at-use) until the modules are generated again:
 
 ```python
 from django.apps import apps
@@ -490,16 +495,11 @@ from adorm.codegen.django import schema_hash
 schema_hash(apps.get_model("clubs.Member")) == Member._meta.schema_hash
 ```
 
-A field name that is also a name the module imports (`datetime`, `uuid`, `decimal`, `Field`, `ForeignKey` …) makes
-the module import it under an alias (`import datetime as _datetime`), since the field would hide it inside the class
-body.
-
 ## Formatters and linters
 
-The modules are formatted as ruff and black format them at the given `--line-length`, and imports are sorted for an
+The modules are formatted as ruff and black format them at the given `--line-length`. Imports are sorted for an
 application that installs adorm: the standard library, then `adorm`, `pydantic` and client bases together, then a
-parent class imported from another generated module. Exclude the package from tools that format or sort differently, as any
-generated code, for example:
+parent class imported from another generated module. Exclude the package from tools that format or sort differently:
 
 ```toml
 [tool.ruff]

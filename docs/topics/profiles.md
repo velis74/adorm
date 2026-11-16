@@ -1,18 +1,13 @@
 # Connection profiles
 
-::: info Status
-The installed version provides connection profiles, their hooks, run-time profiles and the default router built
-from them, connection options and pool settings in a profile, and the Django app `adorm.contrib.django`, which
-configures adorm from the `ADORM` setting.
-The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run
-profiles' hooks; both execute reads, writes, row locks and savepoints. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver))
-works.
-:::
+A **connection profile** is a named entry in adorm's settings: the driver, the target's database alias, extra
+driver parameters, the hooks that run around a connection's use, connection options and pool settings. A session's
+`using` is a profile name, as a database alias is in Django. A call carries no connection parameters; different
+database accounts are different profiles.
 
-A **connection profile** is a named entry in adorm's settings. A session's `using` is the name of a profile, as a
-database alias is in Django. The profile says how its connections are made: the driver, the target's database
-alias, extra driver parameters and the hooks that run around a connection's use. A call never carries connection
-parameters: different database accounts are different profiles.
+The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run profile
+hooks and execute reads, writes, row locks and savepoints. Any `Driver` implementation works (see [Writing a driver](/howto/writing-a-driver)). The Django app
+`adorm.contrib.django` configures adorm from the `ADORM` setting.
 
 ```python
 import adorm
@@ -39,11 +34,13 @@ await reports.Member.objects.filter(active=True).count()       # a slot of "repo
 [`adorm.configure()`](/ref/settings#adorm-configure-profiles-none-providers-pool-none-debug-none) replaces the whole
 configuration: the profiles, the [profile providers](#profiles-created-at-run-time), the default pool settings and
 the executor's debug switch. A profile is a [`ConnectionProfile`](/ref/settings#adorm-connectionprofile) or a
-mapping of its arguments; every value is checked before anything changes, so an invalid configuration leaves the
-previous one in place. The new profiles, providers and pool settings replace the old ones in one step: an operation
-running meanwhile in another thread or event loop sees either the old configuration or the new one, never a state
-between them, so a profile name present in both resolves to the old or the new profile, never to none. A profile with
-the same values as the registered one keeps the registered one and its pools.
+mapping of its arguments.
+
+- Every value is checked before anything changes; an invalid configuration leaves the previous one in place.
+- Profiles, providers and pool settings are replaced in one step. An operation in another thread or event loop sees
+  the old or the new configuration; a profile name present in both resolves to the old or the new profile, never to
+  none.
+- A profile with the same values as the registered one keeps the registered one and its pools.
 
 ```python
 from adorm import ConnectionProfile, PoolSettings
@@ -61,8 +58,8 @@ adorm.configure(
 )
 ```
 
-The driver may be a `Driver` instance, a `Driver` subclass (instantiated without arguments) or an import path,
-`"package.module.Name"` or `"package.module:Name"`. A path is imported when the profile's pool is created, so
+The driver is a `Driver` instance, a `Driver` subclass (instantiated without arguments) or an import path,
+`"package.module.Name"` or `"package.module:Name"`. A path is imported when the profile's pool is created;
 configuring adorm imports no ORM.
 
 | Setting | Meaning |
@@ -74,14 +71,14 @@ configuring adorm imports no ORM.
 | `purge_stale_connections_at` | seconds an idle slot stays in the pool before its connection closes (default 300); `None` keeps idle slots until the pool closes |
 | `check_schema` | `"warn"` or `"raise"` runs the [schema check](/topics/schema-checks#at-pool-start-up) before the pool serves its first acquisition; `False` (the default) does not |
 
-`acquire_timeout` and `commit_timeout` are also the profile layer of the [connection options](/topics/options) of
-the same names, which a session or a `connection_options()` block can override.
+`acquire_timeout` and `commit_timeout` are the profile layer of the [connection options](/topics/options) of the
+same names; a session or a `connection_options()` block overrides them.
 
 ## Configuring from Django settings
 
-Each process configures adorm itself. In a Django project the app `adorm.contrib.django` does it on `django.setup()`
-(in its `AppConfig.ready()`), so the web workers, the API process, Celery workers and management commands all run with
-the same configuration:
+Each process configures adorm itself. In a Django project the app `adorm.contrib.django` does it in
+`AppConfig.ready()` on `django.setup()`, in every process that sets Django up (web workers, Celery workers,
+management commands):
 
 ```python
 # settings.py
@@ -95,17 +92,19 @@ ADORM = {
 }
 ```
 
-`ADORM` holds the keyword arguments of `adorm.configure()`: `profiles`, `providers`, `pool` and `debug`. Without
-`profiles`, every alias of `DATABASES` becomes a profile of the same name on the
-[Django driver](/topics/django-driver), so the setting above gives a `default` profile (and one per further alias)
-with the pool settings shown; without `ADORM` at all, the same profiles have the default pool settings. `"profiles": {}`
-configures no profile.
+`ADORM` holds the keyword arguments of `adorm.configure()`: `profiles`, `providers`, `pool` and `debug`.
 
-The settings module is imported before Django's apps are loaded, so it cannot import code that imports models. A
-profile's hooks (`connect`, `on_acquire`, `on_release`) and the providers may therefore be import paths,
-`"package.module.name"` or `"package.module:name"`; the app imports them in `ready()`, when the models are loaded. A
-driver given by import path stays a path in the profile, but the app imports it in `ready()` too, to check the
-profile's hooks and options against it; a misspelled driver path stops `django.setup()`.
+- Without `profiles`, every alias of `DATABASES` becomes a profile of the same name on the
+  [Django driver](/topics/django-driver). The setting above gives a `default` profile, and one per further alias,
+  with the pool settings shown.
+- Without `ADORM`, the same profiles have the default pool settings.
+- `"profiles": {}` configures no profile.
+
+The settings module cannot import code that imports models. A profile's hooks (`connect`, `on_acquire`,
+`on_release`) and the providers may be import paths, `"package.module.name"` or `"package.module:name"`; the app
+imports them in `ready()`, after the models are loaded. A driver given by import path stays a path in the profile;
+the app imports it in `ready()` to check the profile's hooks and options against it, so a misspelled driver path
+stops `django.setup()`.
 
 ```python
 ADORM = {
@@ -132,11 +131,13 @@ ADORM = {
 An invalid value stops `django.setup()` with `ImproperlyConfigured`, which names the entry, for example
 `ADORM['profiles']['default']['on_acquire']: module 'myapp.roles' has no hook 'set_rol'`; adorm's previous configuration stays.
 
-A test that overrides `ADORM` (`override_settings`, pytest-django's `settings` fixture) reconfigures adorm on entry
-and again on exit, as does one that overrides `DATABASES` while `ADORM` has no `profiles`. Profiles whose values do
-not change keep their pools. Pools of the replaced profiles close; a transaction that holds a slot of such a pool
-finishes on it, a request waiting for a slot of it continues on the new profile's pool, and operations after the
-change use the new profiles.
+Overriding `ADORM` in a test (`override_settings`, pytest-django's `settings` fixture) reconfigures adorm on entry
+and on exit; so does overriding `DATABASES` while `ADORM` has no `profiles`.
+
+- Profiles whose values do not change keep their pools.
+- Pools of replaced profiles close. A transaction holding a slot of such a pool finishes on it; a request waiting for
+  one of its slots continues on the new profile's pool.
+- Later operations use the new profiles.
 
 ```python
 @override_settings(ADORM={"profiles": {"default": {"driver": "adorm.drivers.django.DjangoDriver"}}, "debug": True})
@@ -144,15 +145,14 @@ class DebugTests(TransactionTestCase):
     ...
 ```
 
-A process that does not install the app calls
-[`configure_from_settings()`](/ref/settings#adorm-contrib-django-configure-from-settings) after `django.setup()` to
-apply the same setting, or `adorm.configure()` with its own arguments. A later `adorm.configure()` call replaces the
-configuration the app made.
+A process without the app calls
+[`configure_from_settings()`](/ref/settings#adorm-contrib-django-configure-from-settings) after `django.setup()`, or
+`adorm.configure()` with its own arguments. A later `adorm.configure()` call replaces the app's configuration.
 
 ## Connection options
 
-A profile's `options` are database connection options every session of the profile runs with, unless the session
-or a [`connection_options()`](/topics/options) block sets another value. A name the driver does not declare raises
+A profile's `options` are the database connection options of its sessions, unless the session or a
+[`connection_options()`](/topics/options) block sets another value. A name the driver does not declare raises
 `NotSupportedError` when the profile is created with a driver instance or class, else when its pool is created.
 
 ```python
@@ -168,13 +168,15 @@ The slot sets them once per connection and keeps them; see [what reaches the dat
 
 ## The default router
 
-Once a profile or a provider is configured, operations outside a transaction and `atomic()` blocks run on the
+With a profile or a provider configured, operations outside a transaction and `atomic()` blocks run on the
 **default router** of the running event loop
-([`adorm.settings.default_router()`](/ref/settings#adorm-settings-default-router-create-true)). It creates the pool
-of a profile on the first session that names it. Each event loop has its own default router, because a pool
-serves one event loop; [`set_runner()`](/ref/sessions#adorm-executor-set-runner-runner) takes precedence over it.
-The router's pools close when the loop shuts down, with `asyncio.run()`, `asyncio.Runner` or asgiref's
-`async_to_sync`, or on `close_pools()`.
+([`adorm.settings.default_router()`](/ref/settings#adorm-settings-default-router-create-true)).
+
+- It creates a profile's pool on the first session that names it.
+- Each event loop has its own default router; a pool serves one event loop.
+- [`set_runner()`](/ref/sessions#adorm-executor-set-runner-runner) takes precedence over it.
+- Its pools close when the loop shuts down under `asyncio.run()`, `asyncio.Runner` or asgiref's `async_to_sync`, or
+  on `close_pools()`.
 
 ```python
 async def lifespan(app):
@@ -194,14 +196,15 @@ A profile has three optional hooks:
 | `on_acquire(connection, profile, session)` | when a slot is assigned to a session, before its first request | `SET ROLE`, `set_config()` for row-level security |
 | `on_release(connection, profile, session)` | when the session returns a usable slot to the pool | `RESET ROLE`, undoing what `on_acquire` set |
 
-`connection` is the target's connection (for the Django ORM driver Django's connection wrapper, for asyncpg an
-`asyncpg.Connection`), `session` the session that gets or returns the slot. A threaded driver runs the hooks on the
-connection's thread, so they are plain functions, and so is `connect`: a coroutine function raises `TypeError` when
-the profile is created, or when its pool is created for a driver given by import path. An async driver awaits the
-result when it is awaitable.
+`connection` is the target's connection: Django's connection wrapper for the Django driver, an
+`asyncpg.Connection` for asyncpg. `session` is the session that gets or returns the slot.
 
-`on_acquire` runs in the context of the task that acquires the slot, so it can read context variables the
-application set, such as the current user. One profile, and one pool, then serves every user.
+A threaded driver runs `connect` and the hooks on the connection's thread; they must be plain functions. A coroutine
+function raises `TypeError` when the profile is created, or, for a driver given by import path, when its pool is
+created. An async driver awaits a hook's result when it is awaitable.
+
+`on_acquire` runs in the context of the task that acquires the slot and can read the application's context
+variables, such as the current user; one profile and one pool can serve every user.
 
 ```python
 def on_acquire(connection, profile, session):
@@ -214,16 +217,16 @@ def on_release(connection, profile, session):
         cursor.execute("RESET app.user_id")
 ```
 
-`on_acquire` runs with the session's [connection options](/topics/options) already set. A hook may set or reset
-options adorm manages, `RESET ALL` and `DISCARD ALL` included: after each hook the slot sets its options again before
-the next operation. A value a hook sets holds until a layer sets that option; once that layer ends, the slot resets
-the option to the database's default, not to the hook's value. The profile's `options` keep a value in every case.
+`on_acquire` runs with the session's [connection options](/topics/options) set. A hook may set or reset options
+adorm manages, including `RESET ALL` and `DISCARD ALL`; after each hook the slot sets its options again before the
+next operation. A value a hook sets holds until a layer sets that option; when that layer ends, the slot resets the
+option to the database's default, not to the hook's value. The profile's `options` apply in every case.
 
-An atomic operation outside a transaction runs `on_acquire`, the operation and `on_release`; a transaction runs
-`on_acquire` before `BEGIN` and `on_release` after `COMMIT` or `ROLLBACK`. The next session gets the slot only after
-`on_release` has finished.
+An atomic operation outside a transaction runs `on_acquire`, the operation and `on_release`. A transaction runs
+`on_acquire` before `BEGIN` and `on_release` after `COMMIT` or `ROLLBACK`. The next session gets the slot after
+`on_release` finishes.
 
-What happens when a hook does not finish:
+Hook failures:
 
 | Situation | Outcome |
 |---|---|
@@ -233,16 +236,16 @@ What happens when a hook does not finish:
 | `on_release` raises or runs past `release_timeout` | the error is logged, the slot leaves the pool |
 | the slot leaves the pool anyway (discarded, connection unusable, transaction left open, rolled back after `commit_timeout`) | `on_release` does not run |
 
-A threaded driver cancels a hook by asking the connection's thread to stop it; a hook that does not stop extends the
-release or the acquisition by up to the driver's `cancel_grace` seconds, after which the connection is given up.
+A threaded driver cancels a hook by asking the connection's thread to stop it. A hook that does not stop extends
+the release or the acquisition by up to the driver's `cancel_grace` seconds; then the connection is given up.
 
-A slot that left the pool closes its connection; the next request opens a fresh one, so session state set by
+A slot that leaves the pool closes its connection, and the next request opens a new one; session state set by
 `on_acquire` never reaches another session. The [multiple database users](/howto/multiple-database-users) recipe
 uses `on_acquire` and `on_release` for `SET ROLE`.
 
 ## Profiles created at run time
 
-Profiles can be registered while the application runs, for example one per user:
+Profiles can be registered at run time, for example one per user:
 
 ```python
 from adorm.settings import register_profile, unregister_profile
@@ -254,8 +257,7 @@ unregister_profile("user:alice")       # its pools close
 
 A **profile provider** creates profiles on demand: a callable that takes a profile name and returns a
 `ConnectionProfile`, `None` when it does not provide that name, or an awaitable of either. The first session that
-names an unknown profile asks the providers in the order they were added; the first profile returned is registered
-and used from then on.
+names an unknown profile asks the providers in the order they were added; the first profile returned is registered.
 
 ```python
 from adorm.settings import add_profile_provider
@@ -274,10 +276,10 @@ session = adorm.create_session(f"user:{request.user.username}", "web")
 await session.Member.objects.count()
 ```
 
-Each profile has a pool of its own, and a pool closes an idle connection after its `purge_stale_connections_at`
-seconds ([slot lifecycle](/topics/pool#slot-lifecycle)). Profiles per user therefore hold connections for the users
-active within that time; a single profile whose `on_acquire` reads the user from a context variable shares its
-connections between users.
+Each profile has its own pool, which closes an idle connection after `purge_stale_connections_at` seconds
+([slot lifecycle](/topics/pool#slot-lifecycle)). Per-user profiles hold connections for the users active within
+that time. A single profile whose `on_acquire` reads the user from a context variable shares its connections
+between users.
 
 ```python
 adorm.configure(providers=[per_user], pool={"max_connections": 2, "purge_stale_connections_at": 120})
@@ -287,18 +289,16 @@ Concurrent first uses of one name ask the providers once. A provider that raises
 next request asks again.
 
 When a profile is unregistered or replaced (`register_profile(profile, replace=True)`), or the default pool settings
-change for a profile without its own, every router built from the settings stops routing to its pool and closes it:
-idle slots close at once and held slots when their lease is released. The next session that names the profile gets
-a pool built from the current profile, or from a provider when it is no longer registered; a request waiting for a
-slot of the closed pool moves to that pool within its timeout, and raises `InterfaceError` when no profile of the name
-remains.
+change for a profile without its own, every router built from the settings stops routing to its pool and closes it.
+Idle slots close at once, held slots when their lease is released. The next session that names the profile gets a
+pool built from the current profile, or from a provider when none is registered. A request waiting for a slot of the
+closed pool moves to that pool within its timeout, or raises `InterfaceError` when no profile of the name remains.
 
 ## Remote execution
 
-A profile lives where its pool runs. Its parameters, credentials and hooks are not part of a session, an operation
-or anything sent with them: a session is the pair `(using, session_name)`, and `using` is only the profile name.
-When the pool runs in a separate adorm server, the application's driver sends the profile name and the server's
-own settings define the profile.
+A profile lives where its pool runs. Its parameters, credentials and hooks are not part of a session or an
+operation: a session is the pair `(using, session_name)`, and `using` is the profile name. For a pool in a separate
+adorm server, the application's driver sends the profile name and the server's settings define the profile.
 
 ## Routers with profiles
 
@@ -318,6 +318,6 @@ set_runner(router)
 
 ## Events
 
-Connection profiles emit no events of their own and consume none. Callbacks and backend events a connection emits
-while a hook runs follow the [pool's rules](/topics/pool#events): during `on_acquire` they go to the new lease's
-`events` queue, during `on_release` to the pool's `events` bus.
+Connection profiles emit and consume no events. Callbacks and backend events a connection emits while a hook runs
+follow the [pool's rules](/topics/pool#events): during `on_acquire` they go to the new lease's `events` queue, during
+`on_release` to the pool's `events` bus.

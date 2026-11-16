@@ -1,8 +1,8 @@
 # Model generator
 
-`adorm generate` and the Python API behind it. The [how-to guide](/howto/generating-models) shows the command in use
-and what the generated modules contain. `adorm.codegen` imports no ORM; `adorm.codegen.django` imports Django. The
-declarations the generator reads in the ORM's code are in [`adorm.porting`](#declarations-in-the-orm-s-code).
+`adorm generate` and its Python API. The [how-to guide](/howto/generating-models) covers the command and the
+generated modules. `adorm.codegen` imports no ORM; `adorm.codegen.django` imports Django. The declarations the
+generator reads in the ORM's code are in [`adorm.porting`](#declarations-in-the-orm-s-code).
 
 ```python
 from adorm.codegen import check, plan, write
@@ -22,11 +22,12 @@ adorm generate [-h] -o OUTPUT [--settings SETTINGS] [--pythonpath PYTHONPATH] [-
 Writes one module per Django app and a package `__init__.py` into `OUTPUT`; with `--check`, writes nothing and reports
 the differences. Each `label` is an app label, which selects every model of the app, or a model label
 (`app_label.Model`), which selects that model; without labels every app with models is generated.
-`python -m adorm generate` is the same command. Before Django is set up, the current directory and then each
-`--pythonpath` directory, as absolute paths, are put at the front of `sys.path`; entries that name the same directories
-further back are moved there. Warnings (constructs that are not generated, forward relations to models that are not
-generated) go to standard error as `warning: <message>`; `--ignore-third-party` leaves out the
-`ThirdPartyMethodsWarning` lines.
+`python -m adorm generate` is the same command.
+
+- Before Django is set up, the current directory and then each `--pythonpath` directory, as absolute paths, are put
+  at the front of `sys.path`; later entries naming the same directories are moved there.
+- Warnings (constructs that are not generated, forward relations to models that are not generated) go to standard
+  error as `warning: <message>`. `--ignore-third-party` leaves out the `ThirdPartyMethodsWarning` lines.
 
 | Exit status | Meaning |
 |---|---|
@@ -83,13 +84,18 @@ FieldSpec("json_", "json", TypeSpec("str"), default="", constraints={"max_length
 
 ### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False, ct_field=None, for_concrete_model=True)`
 
-A relation, rendered as `ForeignKey` (`kind="foreign_key"`), `ReverseForeignKey` (`"reverse_foreign_key"`),
-`ReverseOneToOne` (`"reverse_one_to_one"`), `ManyToMany` (`"many_to_many"`, with `through`, `source_column` and
-`target_column`; `reverse` for the side that did not declare it) or `GenericForeignKey` (`"generic_foreign_key"`:
-the content type foreign key `ct_field` to `target`, the object id field `column`, and `for_concrete_model=False`
-rendered when it is false). `is_forward` is true for a foreign
-key and a declared many-to-many relation; the schema hash covers only those. A missing column, and a generic foreign
-key without `ct_field`, raise `ValueError`.
+A relation. By `kind` it renders as:
+
+| `kind` | Rendered | Arguments |
+|---|---|---|
+| `"foreign_key"` | `ForeignKey` | |
+| `"reverse_foreign_key"` | `ReverseForeignKey` | |
+| `"reverse_one_to_one"` | `ReverseOneToOne` | |
+| `"many_to_many"` | `ManyToMany` | `through`, `source_column`, `target_column`; `reverse` for the side that did not declare it |
+| `"generic_foreign_key"` | `GenericForeignKey` | `ct_field`, the content type foreign key to `target`; `column`, the object id field; `for_concrete_model=False` rendered when false |
+
+`is_forward` is true for a foreign key and a declared many-to-many relation; the schema hash covers only those. A
+missing column, and a generic foreign key without `ct_field`, raise `ValueError`.
 
 ```python
 RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id",
@@ -112,19 +118,23 @@ str(TypeSpec("library.Loan", model=True))                    # "model:library.Lo
 
 ### `adorm.codegen.ManagerSpec(name, orm_name=None, class_name=None, methods=(), queryset=None, base=None, method_manager=None)`
 
-A manager of a generated model, the class attribute `name`. `orm_name` is the ORM manager the driver applies to every
-operation and `method_manager` the ORM manager the driver methods run on when it is not `orm_name`
-([`adorm.Manager`](./models#adorm-manager-orm-name-none-method-manager-none)). `class_name`, when set, is a generated
-manager class that derives from `base` (a `"package.module:ClassName"` path) or `adorm.Manager` and declares
-`methods` (target `"manager"`); `queryset` is the generated query set class. It renders as
-`ClassName(orm_name, method_manager=...)`, `QuerySetClass.as_manager(...)` or `Manager(...)`, with
-`method_manager=` only when it is set and differs from `orm_name`. Specs with the same `class_key` (`class_name`,
-`methods`, `queryset`, `base`) share one generated class. `has_methods` is true when the manager or its query set
-class declares driver methods; `is_plain` is true without ORM names, class and query set class.
+A manager of a generated model, the class attribute `name`.
 
-A name that is not a public identifier or that would hide an attribute of `adorm.Model` (other than `objects`), an
-`orm_name` or `method_manager` that is not a public identifier, methods or a base without a class name, a method of
-the wrong target, two methods with one name, and driver methods without either ORM name raise `ValueError`.
+- `orm_name`: the ORM manager the driver applies to every operation.
+- `method_manager`: the ORM manager the driver methods run on when it is not `orm_name`
+  ([`adorm.Manager`](./models#adorm-manager-orm-name-none-method-manager-none)).
+- `class_name`: a generated manager class that derives from `base` (a `"package.module:ClassName"` path) or
+  `adorm.Manager` and declares `methods` (target `"manager"`).
+- `queryset`: the generated query set class.
+- It renders as `ClassName(orm_name, method_manager=...)`, `QuerySetClass.as_manager(...)` or `Manager(...)`, with
+  `method_manager=` only when it is set and differs from `orm_name`.
+- Specs with the same `class_key` (`class_name`, `methods`, `queryset`, `base`) share one generated class.
+- `has_methods`: the manager or its query set class declares driver methods. `is_plain`: no ORM names, class or
+  query set class.
+
+`ValueError` for: a name that is not a public identifier or would hide an attribute of `adorm.Model` (other than
+`objects`); an `orm_name` or `method_manager` that is not a public identifier; methods or a base without a class
+name; a method of the wrong target; two methods with one name; driver methods without either ORM name.
 
 ```python
 ManagerSpec("all_loans")                                            # all_loans = Manager()
@@ -189,20 +199,28 @@ without an ORM name and methods.
 
 ### `adorm.codegen.CodegenError`
 
-Generation cannot proceed: an unknown app or model label, a label that is neither, an automatic many-to-many through
-model or a swapped model named by a model label, a model with a composite primary key or a name no Python name maps
-to, two fields of a model with the same Python name, a cycle of base classes between modules, a file to overwrite
-that the generator did not write, no settings module.
+Generation cannot proceed:
+
+- an unknown app or model label, or a label that is neither;
+- an automatic many-to-many through model or a swapped model named by a model label;
+- a model with a composite primary key or a name no Python name maps to;
+- two fields of a model with the same Python name;
+- a cycle of base classes between modules;
+- a file to overwrite that the generator did not write;
+- no settings module.
 
 ### `adorm.codegen.CodegenWarning`
 
-A `UserWarning` for a construct that is not generated (a generic relation, a relation that references a
-field other than the target's primary key, a manager that would hide an attribute of `adorm.Model`, an exposed method
-that is a coroutine function, returns a query set or has a default that is not a literal, a public manager or query
-set method that is neither exposed nor ported, those of installed packages as one
-[`ThirdPartyMethodsWarning`](#adorm-codegen-thirdpartymethodswarning) per manager) or is generated as `Any`
-(an unknown field type, a method annotation it cannot write), for a validator pattern pydantic cannot compile and for a
-forward relation to a model that is not generated.
+A `UserWarning` for:
+
+- a construct that is not generated: a generic relation; a relation that references a field other than the
+  target's primary key; a manager that would hide an attribute of `adorm.Model`; an exposed method that is a
+  coroutine function, returns a query set or has a default that is not a literal; a public manager or query set
+  method that is neither exposed nor ported (those of installed packages as one
+  [`ThirdPartyMethodsWarning`](#adorm-codegen-thirdpartymethodswarning) per manager);
+- a construct generated as `Any`: an unknown field type, a method annotation it cannot write;
+- a validator pattern pydantic cannot compile;
+- a forward relation to a model that is not generated.
 
 ### `adorm.codegen.ThirdPartyMethodsWarning`
 
@@ -222,16 +240,19 @@ warnings.simplefilter("ignore", ThirdPartyMethodsWarning)
 
 ### `adorm.codegen.HEADER`
 
-The first line of every generated file. A file that starts with it belongs to the generator.
+The first line of every generated file. A file that starts with it is the generator's.
 
 ### `adorm.codegen.render_module(app, *, classes=None, line_length=88, source="Django")`
 
 The source of `app`'s module. `classes` maps the labels of models in other modules to `(module, class name)`, for a
-base class in another app (imported as `from .<module> import <class>`). A statement longer than `line_length` is
-split one argument per line with a trailing comma, a long description into implicitly concatenated strings and a long
-`Literal` into a module-level alias (`MemberLevel = Literal[...]`). Imported modules and names that clash with a class,
-field or relation name of the module are imported under an alias (`from adorm import Model as _Model`,
-`import datetime as _datetime`).
+base class in another app (imported as `from .<module> import <class>`). Over `line_length`:
+
+- a statement is split one argument per line with a trailing comma;
+- a description is split into implicitly concatenated strings;
+- a `Literal` becomes a module-level alias (`MemberLevel = Literal[...]`).
+
+Imported modules and names that clash with a class, field or relation name of the module are imported under an
+alias (`from adorm import Model as _Model`, `import datetime as _datetime`).
 
 ### `adorm.codegen.render_package(apps, *, line_length=88)`
 
@@ -281,16 +302,18 @@ Django cannot import or use, raises `CodegenError`.
 ### `adorm.codegen.django.introspect(labels=None, *, exclude=())`
 
 A tuple of `AppSpec`, one per selected app with models: every app in `INSTALLED_APPS` order for `None`, else the apps
-of `labels` in the order they are first named. An app label in `labels` selects every model of the app; a model label
-(`"clubs.Member"`, the model name matched case-insensitively, as Django's `apps.get_model()` does) selects that model,
-and an app named both ways is selected whole. The models of an app keep Django's order, so the order of the labels
-does not change a module. `exclude` holds app labels and model labels and wins over `labels`; an app left without
-models is skipped. Swapped models and automatic through models are not included.
+of `labels` in the order they are first named.
 
-An unknown app or model label, a label that is neither (`"clubs.Member.email"`), an automatic many-to-many through
-model or a swapped model in `labels`, an app label that cannot name a module and an unsupported model raise
-`CodegenError`; constructs that are not generated and forward relations to models outside the selection are reported
-as `CodegenWarning`.
+- An app label selects every model of the app. A model label (`"clubs.Member"`) selects that model; the model name
+  matches case-insensitively, as in Django's `apps.get_model()`. An app named both ways is selected whole.
+- The models of an app keep Django's order; the order of the labels does not change a module.
+- `exclude` holds app labels and model labels and wins over `labels`. An app left without models is skipped.
+- Swapped models and automatic through models are not included.
+
+`CodegenError` for an unknown app or model label, a label that is neither (`"clubs.Member.email"`), an automatic
+many-to-many through model or a swapped model in `labels`, an app label that cannot name a module and an unsupported
+model. Constructs that are not generated and forward relations to models outside the selection are reported as
+`CodegenWarning`.
 
 ```python
 setup("myproject.settings")
@@ -300,24 +323,32 @@ apps = introspect(["clubs.Club", "clubs.Member", "billing"])  # two models of cl
 
 ### `adorm.codegen.django.model_spec(model, *, included=None)`
 
-The `ModelSpec` of a Django model class. `included` holds the labels generated with it: a multi-table child or a
-proxy derives from its parent's class only when the parent is included, and reverse relations come only from included
-models, while a forward relation to a model outside it is generated and reported as `CodegenWarning`; `None` includes
-every model. A composite primary key, and a model whose names give two fields or relations the same Python name, raise
+The `ModelSpec` of a Django model class. `included` holds the labels generated with it (`None`: every model):
+
+- a multi-table child or a proxy derives from its parent's class only when the parent is included;
+- reverse relations come only from included models;
+- a forward relation to a model not included is generated and reported as `CodegenWarning`.
+
+A composite primary key, and a model whose names give two fields or relations the same Python name, raise
 `CodegenError`.
 
 ### `adorm.codegen.django.manager_specs(model, *, local=False, included=None, exposed=None)`
 
 The `ManagerSpec` of every manager of a Django model class, in declaration order, by the rules in the
-[how-to guide](/howto/generating-models#managers). `local` takes only the managers the model declares itself;
-`included` holds the labels a driver method's return type may name (`None` for every model); `exposed` the
-`ADORM_EXPOSE` methods, by default `exposed_methods()`. A client base that does not import or is not a subclass of
-`adorm.Manager` or `adorm.QuerySet`, and an `ADORM_EXPOSE` method the manager does not have, raise `CodegenError`. A
-public method outside Django's own modules that is neither exposed, nor a method of Django's `Manager` or `QuerySet`,
-nor one of `PROTOCOL_METHODS`, nor defined by the client base is not generated. Each such method of the project's
-code is reported as a `CodegenWarning` of its own. The methods of installed packages (`is_installed()`) are reported
-together as one `ThirdPartyMethodsWarning` per manager, grouped by the class of the manager's or query set's MRO that
-holds them.
+[how-to guide](/howto/generating-models#managers).
+
+- `local`: only the managers the model declares itself.
+- `included`: the labels a driver method's return type may name (`None` for every model).
+- `exposed`: the `ADORM_EXPOSE` methods, by default `exposed_methods()`.
+
+A client base that does not import or is not a subclass of `adorm.Manager` or `adorm.QuerySet`, and an
+`ADORM_EXPOSE` method the manager does not have, raise `CodegenError`.
+
+A public method outside Django's own modules is not generated when it is neither exposed, nor a method of Django's
+`Manager` or `QuerySet`, nor one of `PROTOCOL_METHODS`, nor defined by the client base. Each such method of the
+project's code is reported as its own `CodegenWarning`. Those of installed packages (`is_installed()`) are reported
+as one `ThirdPartyMethodsWarning` per manager, grouped by the class of the manager's or query set's MRO that holds
+them.
 
 ```python
 manager_specs(apps.get_model("library.Loan"))
@@ -326,7 +357,7 @@ manager_specs(apps.get_model("library.Loan"))
 
 ### `adorm.codegen.django.ROUTED_METHODS`
 
-The Django manager and query set methods whose override gives a generated manager its ORM name, so the driver runs
+The Django manager and query set methods whose override gives a generated manager its ORM name; the driver then runs
 its operations through the Django manager: `get_queryset`, `all`, `filter`, `exclude`, `annotate`, `aggregate`,
 `order_by`, `values`, `values_list`, `only`, `defer`, `select_related`, `prefetch_related`, `distinct`, `none`,
 `select_for_update`, `get`, `first`, `last`, `count`, `exists`, `iterator`, `create`, `get_or_create`,
@@ -370,9 +401,9 @@ The `FieldSpec` of a concrete Django field, by the rules in the
 ### `adorm.codegen.django.schema_hash(model, *, warn=True)`
 
 The schema hash of a Django model class, the value `adorm generate` writes into `_meta.schema_hash`, managers included.
-It does not depend on which other models are generated. A model it cannot describe raises `CodegenError`. Describing
-the model issues the `CodegenWarning`s generating it would; with `warn=False` it issues none, through a context
-variable of its own, so the process's warning filters are not touched and other threads see no change.
+It does not depend on which other models are generated. A model it cannot describe raises `CodegenError`. It issues
+the `CodegenWarning`s generating the model would. `warn=False` suppresses them through a context variable of its own;
+the process's warning filters and other threads are not affected.
 
 ```python
 from django.apps import apps
@@ -390,7 +421,7 @@ schema_hash(apps.get_model("clubs.Member"), warn=False)   # the same, without wa
 Marks a method of a manager or query set class of the target ORM as a driver method and returns it. The generator
 declares it on the generated class with [`@driver_method`](./models#adorm-driver-method-func-queryset-only-false) and
 the method's signature; the driver runs the original. Django's `as_manager()` and `from_queryset()` copy the mark onto
-the manager's method. Something that is not callable raises `TypeError`.
+the manager's method. A non-callable argument raises `TypeError`.
 
 ```python
 class LoanQuerySet(models.QuerySet):
@@ -410,7 +441,7 @@ ADORM_EXPOSE = ["auth.User.objects.create_user"]
 
 A class decorator for a manager or query set class of the target ORM: the generated class for it derives from the
 adorm class at `path` (`"package.module:ClassName"`) instead of `adorm.Manager` or `adorm.QuerySet`. The base holds the
-methods ported by hand that run in the client. Subclasses inherit the declaration. A path in another form raises
+methods ported by hand, which run in the client. Subclasses inherit the declaration. A path in another form raises
 `ValueError`; decorating something that is not a class raises `TypeError`.
 
 ```python

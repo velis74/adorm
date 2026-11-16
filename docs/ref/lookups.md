@@ -22,13 +22,13 @@ A lookup key is a field path followed by an optional lookup name, joined with `_
 | `club__owner__name__startswith` | `club__owner__name` | `startswith` |
 | `range` | `range` | `exact` (a single segment is always a field) |
 | `range__exact` | `range` | `exact` |
-| `joined__year` | `joined__year` | `exact` (`year` is not a registered lookup, so the path continues past the scalar field `joined`, which every driver refuses with `FieldError`) |
+| `joined__year` | `joined__year` | `exact` (`year` is not a registered lookup; every driver refuses a path past the scalar field `joined` with `FieldError`) |
 
 The last segment is the lookup name when the key has more than one segment and the segment is a registered lookup.
-A field whose name equals a lookup name therefore takes an explicit lookup (`range__exact`). Segments are
-identifiers; a key with an empty segment (`a__`) or a segment containing `__` (`a____b`) raises `ValueError`.
+A field named like a lookup needs an explicit lookup (`range__exact`). Segments are identifiers; a key with an empty
+segment (`a__`) or a segment containing `__` (`a____b`) raises `ValueError`.
 
-A separator is the last `__` of a run of underscores, so a segment may end in `_`, as the names of
+A separator is the last `__` of a run of underscores, so a segment may end in `_`, as names in
 [generated models](/howto/generating-models#name-clashes) do:
 
 | Key | Field path | Lookup |
@@ -57,8 +57,8 @@ build_lookup("club", None)                       # IsNull(F('club'), True)
 
 ### Keys built at run time
 
-A key is a plain string, so it can be built at run time and passed as a keyword argument or as a `(key, value)`
-pair; both build the same lookup as the literal keyword:
+A key built at run time is passed as a keyword argument or as a `(key, value)` pair; both build the same lookup
+as the literal keyword:
 
 ```python
 key = f"{field}__{op}"                           # "club__name__icontains"
@@ -67,20 +67,20 @@ Query("club.Member").exclude(Q((key, value)))
 Q(*params.items(), _connector=Q.OR)              # pairs keep their order; keyword arguments are sorted
 ```
 
-Splitting and building check only the key's syntax. Whether its fields exist is known to the model's schema:
+Splitting and building check only the key's syntax.
 [`resolve_lookup()`](#adorm-query-resolve-lookup-target-key-annotations-source-none) and
 [`check_lookups()`](#adorm-query-check-lookups-target-condition-annotations-source-none) check a key or a condition
-against it without running an operation; otherwise the driver raises
+against the model's schema without running an operation; otherwise the driver raises
 [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) when it
-builds the statement. A misspelled lookup name is not a lookup, so it is parsed as a field: `first_name__icontain` is
-the path `first_name__icontain` with `exact`, which the schema then refuses.
+builds the statement. A misspelt lookup name is parsed as a field: `first_name__icontain` is the path
+`first_name__icontain` with `exact`, which the schema refuses.
 
 ## Resolving keys
 
 ### `adorm.query.resolve_lookup(target, key, *, annotations=(), source=None)`
 
-Resolves the lookup key `key` against `target` and returns a
-[`ResolvedLookup`](#adorm-query-resolvedlookup); runs no operation and needs no session.
+Resolves `key` against `target` and returns a [`ResolvedLookup`](#adorm-query-resolvedlookup). Runs no operation
+and needs no session.
 
 | Argument | Meaning |
 |---|---|
@@ -104,14 +104,14 @@ for:
 | `memberships__club__icontains` | `unsupported lookup 'icontains' for the relation clubs.Membership.club; a relation takes exact, gt, gte, lt, lte, in, isnull` |
 | `first_name__overlap`, `tags__overlap` | `unsupported lookup 'overlap' for clubs.Member.first_name` (`.tags`): a lookup whose `applies_to()` refuses the field |
 
-A path that ends at a relation compares the target's primary key, so it takes only the lookups whose `on_relations`
+A path that ends at a relation compares the target's primary key and takes only the lookups whose `on_relations`
 is true: `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`, `memberships__isnull`). The operation
 codec types field paths with the same resolution
 ([`resolve_field_type()`](./encoding#adorm-schema-resolve-field-type-source-label-path)).
 
-A model `source` does not know ends the check: the rest of the path is accepted unresolved. A relation the model
-does not declare (one [`adorm generate`](/howto/generating-models) leaves out) cannot be resolved, so the check
-refuses a key the driver might still run.
+At a model `source` does not know, the check stops and accepts the rest of the path unresolved. A relation the model
+does not declare (one [`adorm generate`](/howto/generating-models) leaves out) does not resolve: the check refuses
+such a key even when the driver could run it.
 
 ```python
 from adorm.query import resolve_lookup
@@ -122,8 +122,8 @@ resolve_lookup(Club, "address__street").keys        # ('street',): a key inside 
 resolve_lookup(Member.objects.annotate(n=Count("memberships")), "n__gte").field   # None: an annotation
 ```
 
-A filter built from request parameters checks each key before it builds the query, so a wrong key is a client error
-and never reaches a slot:
+A filter built from request parameters, checking each key before it builds the query; a wrong key is a 400
+response and never reaches a slot:
 
 ```python
 from pydantic import TypeAdapter
@@ -175,8 +175,8 @@ with the arguments of `resolve_lookup()`, and raises
 [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) for the
 first that does not resolve; anything other than a query node raises `TypeError`. A lookup's left-hand side `F` is
 resolved with the lookup, every other `F` (a right-hand side, a function argument, a `When` condition) as a field
-path. An `OuterRef` and the nodes of a query inside the condition (a `Subquery`, `Exists`, an `in` query) refer to
-other models and are not checked.
+path. An `OuterRef` and the nodes of a query inside the condition (a `Subquery`, `Exists`, an `in` query) are not
+checked.
 
 ```python
 from adorm.query import check_lookups
@@ -212,9 +212,9 @@ members = Member.objects.filter(condition)
 Except for `isnull`, `regex` and `iregex`, a right-hand side may also be an expression (`F("other")`,
 `Lower("name")` …) or a query (a [`Query`](./query) or an object whose `query` attribute is one), which becomes a
 [`Subquery`](./expressions#subqueries). `None` raises `ValueError` except where the table says otherwise. A plain
-value is copied when the lookup is built, so changing the caller's list or dict afterwards does not change the
-lookup; a value that cannot be compared (a `bytearray`, an object without `__hash__` that is not a list, tuple, set
-or dict) raises `TypeError`.
+value is copied when the lookup is built; later changes to the caller's list or dict do not affect the lookup. A
+value that cannot be compared (a `bytearray`, an object without `__hash__` that is not a list, tuple, set or dict)
+raises `TypeError`.
 
 ### `adorm.query.Lookup(lhs, rhs)`
 
@@ -223,7 +223,7 @@ Base class of lookups: a condition (`conditional` true, `output_type` `bool`) on
 subclass sets `lookup_name`, which gives it the construct name `lookup.<lookup_name>`, and may override
 `prepare_rhs(value)` to validate and normalise the right-hand side.
 
-Two class members tell the [operation codec](./encoding) how to type the right-hand side:
+Class members that type the right-hand side for the [operation codec](./encoding) and check the field:
 
 | Member | Meaning |
 |---|---|
@@ -231,12 +231,12 @@ Two class members tell the [operation codec](./encoding) how to type the right-h
 | `applies_to(field_type, keys)` | whether the lookup applies to a field of `field_type` (`None` when unknown) or to the keys `keys` inside a JSON or record field; `True` by default, for `overlap` only an array field or a field of unknown type; `resolve_lookup()` and `check_lookups()` raise `FieldError` when it is false |
 | `rhs_type(field_type)` | the type of a right-hand side value for a field of `field_type` (which may be `None`); `field_type` itself by default, `bool` for `isnull`, `str` for `regex`, `iregex` and the text pattern lookups (`None` for them when `field_type` is `None`), the item type for `overlap`; see `Contains` and `Overlap` for their exceptions |
 
-The class attribute `on_relations` tells whether the lookup applies to a path that ends at a relation (compared by the
-target's primary key): `True` for `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull`, `False` by default.
+The class attribute `on_relations` states whether the lookup applies to a path that ends at a relation (compared
+by the target's primary key): `True` for `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull`, `False` by default.
 [`resolve_lookup()`](#adorm-query-resolve-lookup-target-key-annotations-source-none) refuses the others on a
 relation.
 
-A lookup class is itself a condition: it goes where `Q` goes, with any expression on the left.
+A lookup instance is a condition and is accepted wherever `Q` is, with any expression on the left.
 
 ```python
 Query("club.Member").filter(Exact(Lower("name"), "ann"))
@@ -260,10 +260,9 @@ Query("club.Member").filter(GreaterThan("ends", F("starts")) | IsNull("ends", Tr
 `rhs` is an iterable of values or expressions, or a query selecting one column (no column selected means the primary
 key). A string, bytes, a mapping or another expression raises `TypeError`. An empty iterable matches no row.
 
-The values are stored as a tuple. `None` is left out, since it never matches; a set is sorted when its values are
+The values are stored as a tuple without `None`, which never matches. A set is sorted when its values are
 orderable, so equal sets give equal lookups. Each value is prepared like a single right-hand side: a query becomes a
-`Subquery`, and a condition (`Q`, a lookup, `Exists`) or another node that is not an expression raises
-`TypeError`.
+`Subquery`; a condition (`Q`, a lookup, `Exists`) or another node that is not an expression raises `TypeError`.
 
 ```python
 Query("club.Member").filter(pk__in=[1, 2, 3])
@@ -298,7 +297,7 @@ Query("club.Member").filter(birth_date__isnull=True)
 ### `adorm.query.IContains(lhs, rhs)`
 
 The text pattern lookups `iexact`, `startswith`, `istartswith`, `endswith`, `iendswith`, `contains` and `icontains`
-compare the field as text, so their right-hand side is typed as a string whatever the field's type
+compare the field as text; their right-hand side is typed as a string for any field type
 (`token__startswith="3f2a"` on a UUID field). `contains` on a container field (a list, tuple, set, dict or `Any`)
 takes a value of the field's type; on a record field (a pydantic model or `TypedDict`) a partial record, encoded with
 its inferred types.
@@ -328,9 +327,9 @@ common with `rhs`; PostgreSQL's `&&`. `rhs` is one of:
 | a query selecting one column (no column selected means the primary key) | the array of the column's values |
 | an expression that is not a condition (`F("other_array")`, `OuterRef`, `Value`) | the expression's array |
 
-A string, bytes, a mapping or a condition (`Q`, a lookup, `Exists`) raises `TypeError`, and so does `None`. The
-values are stored as a tuple as for [`In`](#adorm-query-in-lhs-rhs): `None` is left out, since a NULL item matches
-nothing, and a set is sorted when its values are orderable. Items compare by equality, so text is case-sensitive.
+A string, bytes, a mapping, a condition (`Q`, a lookup, `Exists`) or `None` raises `TypeError`. The values are
+stored as a tuple as for [`In`](#adorm-query-in-lhs-rhs): without `None` (a NULL item matches nothing), a set sorted
+when its values are orderable. Items compare by equality; text comparison is case-sensitive.
 
 The [operation codec](./encoding) encodes each value as an item of the field's type: `rhs_type()` returns `X` for a
 `list[X]`, `set[X]`, `frozenset[X]` or `tuple[X, ...]` field (also inside `Optional` or `Annotated`), else `None`.
@@ -351,7 +350,7 @@ Book.objects.filter(keywords__overlap=Value(["spice", "worm"]))
 `Annotated`), or whose type is unknown. On another field, a JSON field (typed `Any`) or a key inside one,
 `resolve_lookup()` and `check_lookups()` raise
 [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
-(`extra__overlap`: `unsupported lookup 'overlap' for library.Book.extra`), so every driver refuses the key before it
+(`extra__overlap`: `unsupported lookup 'overlap' for library.Book.extra`), and every driver refuses the key before it
 takes a slot. The Django and the native PostgreSQL drivers also refuse it on an annotation that refers to a JSON field
 (`annotate(e=F("extra"))`), where Django would read the name as a key.
 
@@ -363,10 +362,10 @@ A read-only mapping of lookup name to class, holding the built-in lookups and ev
 
 ### `adorm.query.register_lookup(cls)`
 
-Registers a `Lookup` subclass under its `lookup_name` and returns it, so it works as a class decorator. Registering
-the same class again does nothing; a different class under a taken name raises `ValueError`, as does a name that is
-not an identifier or contains `__`. A registered name is parsed as a lookup in every key from then on, and a driver
-must support its construct name.
+Registers a `Lookup` subclass under its `lookup_name` and returns it; usable as a class decorator. Registering the
+same class again does nothing. A different class under a taken name raises `ValueError`, as does a name that is not
+an identifier or contains `__`. After registration the name is parsed as a lookup in every key; a driver must declare
+its construct name to run it.
 
 ```python
 @register_lookup

@@ -1,10 +1,10 @@
 # Schema checks
 
-adorm does not create or alter tables: the target ORM's migrations own the schema, and adorm assumes the tables
-exist. Two checks catch a schema that has drifted from the adorm models:
+adorm does not create or alter tables; the target ORM's migrations own the schema. Two checks detect a schema that
+differs from the adorm models:
 
 - the **schema hash**, compared when a model is used on a driver: an operation on a model generated from another
-  version of the ORM model fails with `SchemaMismatchError`, every other model keeps working;
+  version of the ORM model raises `SchemaMismatchError`; other models are unaffected;
 - the **table check**: `adorm.check_schema()`, `adorm check-schema` and a pool's start-up check (the pool setting
   `check_schema`) compare each model with the database's tables and columns and list every difference.
 
@@ -14,9 +14,9 @@ exist. Two checks catch a schema that has drifted from the adorm models:
 model's `_meta.schema_hash`. A driver that knows its target's models computes the same hash
 ([`Driver.schema_hash()`](/ref/drivers#schema-hash-label)); the Django and the native PostgreSQL drivers compute it
 from the installed Django models. Before an operation runs, the driver compares the two for every model the operation
-reaches ([`operation_models()`](/ref/drivers#adorm-drivers-operation-models-operation)): its own, those of
-subqueries and `union()` parts, and those its relation paths in filters, annotations, ordering, `values()` and
-`select_related()` lead to:
+reaches ([`operation_models()`](/ref/drivers#adorm-drivers-operation-models-operation)): its own model, those of
+subqueries and `union()` parts, and those reached by relation paths in filters, annotations, ordering, `values()` and
+`select_related()`:
 
 ```python
 await Club.objects.count()
@@ -28,14 +28,14 @@ await Membership.objects.select_related("club").first()   # SchemaMismatchError 
 await Member.objects.filter(memberships__club__city="Koper").count()   # SchemaMismatchError for clubs.Club
 ```
 
-- The driver computes the hash of a label at the label's first use and keeps it; the model's hash is compared at every
-  use, so a reloaded module with a new hash is compared with the driver's at once.
+- The driver computes the hash of a label at its first use and caches it. The model's hash is compared at every use,
+  so a reloaded module with a new hash is compared at once.
 - A model the target lacks fails the same way, with `actual` `None` and the `reason` in the error.
-- The hashes compared are the client's: those of the model registry of the process by default. A driver executing
-  operations for clients in other processes receives each client's hashes when it connects
+- The client's hashes are compared: by default those of the process's model registry. A driver executing operations
+  for clients in other processes receives each client's hashes when it connects
   ([`Driver.check(operation, schema_hashes=...)`](/ref/drivers#check-operation-schema-hashes-none)).
-- The check runs before the operation waits for a slot. Inside a transaction it leaves the transaction usable: the
-  operation never reached the connection.
+- The check runs before the operation waits for a slot. Inside a transaction a failed check leaves the transaction
+  usable: the operation never reached the connection.
 - A model without a hash (written by hand) and a driver whose `schema_hash()` returns `None` (the demo's memory driver)
   are not checked.
 
@@ -55,11 +55,10 @@ schema hash too, and reads the database's catalogue for:
 - the model's table, and the tables of multi-table inheritance parents that hold its inherited fields;
 - every column of the model's fields: that it exists, its type and whether it takes `NULL`;
 - the automatic link tables of its many-to-many relations;
-- columns the model does not set that are `NOT NULL` without a default, since every insert of the model fails on
-  them.
+- columns the model does not set that are `NOT NULL` without a default: every insert of the model fails on them.
 
 It returns the [`SchemaProblem`](/ref/checks#adorm-schemaproblem) values it finds, an empty tuple when everything
-matches. A column of the table that the model does not know and that takes `NULL` or has a default is not a problem.
+matches. A column unknown to the model that takes `NULL` or has a default is not a problem.
 
 ```python
 from myproject.adorm_models import MODELS
@@ -72,8 +71,8 @@ for problem in problems:
 # billing.Invoice: the column billing_invoice.currency (character(3)) is NOT NULL without a default; the model does not set it
 ```
 
-Run it where the application starts, with `raise_on_problems=True` to refuse to start on a mismatch. The check takes
-a slot for each model's `check_table` operation (one catalogue query per table of the model); it changes nothing.
+Run it at application start-up; `raise_on_problems=True` raises on a mismatch. The check takes a slot for each
+model's `check_table` operation (one catalogue query per table of the model) and changes nothing.
 
 ```python
 from contextlib import asynccontextmanager
@@ -103,11 +102,11 @@ await adorm.check_schema(MODELS, session=adorm.create_session("reports"))
 
 ## At pool start-up
 
-The pool setting `check_schema` runs the table check without code in the application. With `"warn"` or `"raise"`, a
-pool checks every registered model before it serves its first acquisition, once per pool, on one of its slots;
-concurrent first operations and transactions wait for it within their acquisition timeout.
+The pool setting `check_schema` runs the table check without application code. With `"warn"` or `"raise"`, a pool
+checks every registered model once, on one of its slots, before it serves its first acquisition. Concurrent first
+operations and transactions wait for it within their acquisition timeout.
 
-- `"warn"` logs the problems as one warning on the `adorm.executor` logger and goes on;
+- `"warn"` logs the problems as one warning on the `adorm.executor` logger and continues;
 - `"raise"` makes every acquisition of the pool raise `SchemaCheckError` with the problems, so no operation runs on
   drifted tables;
 - a check that fails with an error (the database is unreachable, the driver does not declare `check_table`) raises
@@ -129,7 +128,7 @@ except adorm.SchemaCheckError as exc:
         log.error("%s", problem)
 ```
 
-The registered models are those of the generated modules the application has imported when the pool starts.
+The registered models are those of the generated modules imported when the pool starts.
 
 Types are compared as PostgreSQL spells them (`varchar(100)` and `character varying(100)` match,
 [`normalize_type()`](/ref/drivers#adorm-drivers-postgresql-normalize-type-type-name)). Tables are found on the
@@ -137,9 +136,8 @@ connection's `search_path`, as the queries find them.
 
 ## From the command line
 
-`adorm check-schema` runs the same check in a process of its own, with the profiles of the Django settings or of
-modules that call `adorm.configure()`. It exits with status 1 when it finds problems, so a deployment or CI step can
-stop on it:
+`adorm check-schema` runs the same check in its own process, with the profiles of the Django settings or of modules
+that call `adorm.configure()`. It exits with status 1 when it finds problems:
 
 ```sh
 adorm check-schema --settings myproject.settings -m myproject.adorm_models
@@ -157,7 +155,7 @@ A driver takes part in the checks through two parts of the [driver contract](/to
   models unchecked; [`check_schema_hash(label, expected)`](/ref/drivers#check-schema-hash-label-expected) compares it
   with the client's;
 - the operation kind `check_table` in its [capabilities](/topics/drivers#capabilities), executed by reading the
-  catalogue. The PostgreSQL helpers [`columns_sql()` and `table_problems()`](/ref/drivers#table-checks) do the
-  comparison; a driver only lists what each model expects.
+  catalogue. The PostgreSQL helpers [`columns_sql()` and `table_problems()`](/ref/drivers#table-checks) compare; a
+  driver lists what each model expects.
 
 [Writing a driver](/howto/writing-a-driver#schema-checks) shows both.

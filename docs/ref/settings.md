@@ -2,7 +2,7 @@
 
 Connection profiles, pool settings, the debug switch and the plugin API for profiles created at run time, in
 `adorm.settings`, and the Django app that configures adorm from the Django settings. `configure`, `ConnectionProfile`
-and `PoolSettings` are also importable from `adorm`. The [connection profiles topic](/topics/profiles) explains how they fit together.
+and `PoolSettings` are also importable from `adorm`. See the [connection profiles topic](/topics/profiles).
 
 ```python
 import adorm
@@ -37,11 +37,13 @@ default pool settings, and the executor's debug switch.
 | `pool` | the [`PoolSettings`](#adorm-poolsettings), or a mapping of its arguments, of profiles that set none; `None` for the defaults |
 | `debug` | the executor's debug switch ([`set_debug()`](/ref/transactions)); `None` follows the running event loop's debug mode |
 
-Every value is checked first; a `TypeError` or `ValueError` leaves the previous settings unchanged. The profiles,
-providers and pool settings then change in one step ([`ProfileRegistry.reset()`](#adorm-settings-profileregistry-pool-none)).
-Calling it without arguments removes every profile and provider. A profile with the same values as the registered one
-of its name keeps the registered one and its pools. Pools that routers built from replaced or removed profiles close,
-and those of profiles without own pool settings when `pool` changes.
+- Every value is checked first; a `TypeError` or `ValueError` leaves the previous settings unchanged.
+- Profiles, providers and pool settings change in one step
+  ([`ProfileRegistry.reset()`](#adorm-settings-profileregistry-pool-none)).
+- Without arguments it removes every profile and provider.
+- A profile with the same values as the registered one of its name keeps the registered one and its pools.
+- Routers close the pools of replaced or removed profiles, and, when `pool` changes, those of profiles without own
+  pool settings.
 
 ```python
 adorm.configure(
@@ -74,13 +76,16 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
 
 `connection` is the target's connection ([`DriverConnection.target`](/ref/drivers#adorm-drivers-driverconnection)).
-A threaded driver runs `connect` and the hooks on the connection's thread and they are plain functions; a coroutine
-function raises `TypeError` when the profile is created with a driver instance or class, and when the pool is
-created for a driver given by import path. A threaded hook that does not stop when cancelled extends the release or
-the acquisition by up to the driver's `cancel_grace`. An async driver awaits a hook's result when it is awaitable. A wrong
-type raises `TypeError`, an empty `name` or `alias` `ValueError`. `params` and `connect` do not appear in the
-representation. Profiles compare by identity ([`same_as()`](#same-as-other) compares their values) and copy as
-themselves.
+
+- A threaded driver runs `connect` and the hooks on the connection's thread; they are plain functions. A coroutine
+  function raises `TypeError` when the profile is created with a driver instance or class, or, for a driver given by
+  import path, when the pool is created.
+- A threaded hook that does not stop when cancelled extends the release or the acquisition by up to the driver's
+  `cancel_grace`.
+- An async driver awaits a hook's result when it is awaitable.
+- A wrong type raises `TypeError`, an empty `name` or `alias` `ValueError`.
+- `params` and `connect` are left out of the representation.
+- Profiles compare by identity ([`same_as()`](#same-as-other) compares values) and copy as themselves.
 
 ```python
 def set_role(connection, profile, session):
@@ -121,10 +126,13 @@ A class method: `value` when it is a profile named `name` (`ValueError` for anot
 
 `PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0, check_schema=False)`
 
-The settings of a profile's pool, frozen; see [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)
-for their meaning. `max_connections` is a non-negative integer; the timeouts and `purge_stale_connections_at` are
-positive, finite numbers of seconds, and `commit_timeout` and `purge_stale_connections_at` may be `None`.
-`check_schema` is `False`, `"warn"` or `"raise"`: the pool's [start-up schema check](/topics/schema-checks#at-pool-start-up).
+The settings of a profile's pool, frozen; their meaning is under [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false).
+
+- `max_connections`: a non-negative integer.
+- The timeouts and `purge_stale_connections_at`: positive, finite numbers of seconds; `commit_timeout` and
+  `purge_stale_connections_at` may be `None`.
+- `check_schema`: `False`, `"warn"` or `"raise"`, the pool's [start-up schema check](/topics/schema-checks#at-pool-start-up).
+
 Other values raise `ValueError`.
 
 | Method | Returns |
@@ -149,8 +157,8 @@ functions below change it, and the default routers take their pools from it.
 
 ### `adorm.settings.register_profile(profile, *, replace=False)`
 
-Registers `profile` in the settings and returns it. A registered name raises `ValueError` unless `replace`;
-routers close the pool of a replaced profile.
+Registers `profile` in the settings and returns it. A registered name raises `ValueError` unless `replace`.
+Routers close the pool of a replaced profile.
 
 ```python
 register_profile(ConnectionProfile("tenant:acme", AsyncpgDriver(), params={"NAME": "tenant_acme"}))
@@ -198,10 +206,10 @@ Connection profiles by name, with providers that create profiles at run time. Th
 | `register(profile, *, replace=False)` | registers `profile` under its name and returns it; a registered name raises `ValueError` unless `replace`; anything but a `ConnectionProfile` raises `TypeError` |
 | `unregister(name)` | removes the profile `name` and returns it, `None` when it was not registered |
 | `get(name)` | the registered profile `name`, `None` when there is none |
-| `async resolve(name)` | the registered profile `name`, else the first profile a provider returns, registered first; `InterfaceError` when there is none, `ValueError` when a provider returns a profile of another name, `TypeError` when it returns something else. When the profiles or providers change while a provider runs, its answer is discarded and `name` is resolved again from the current ones |
+| `async resolve(name)` | the registered profile `name`, else the first profile a provider returns, registered first; `InterfaceError` when there is none, `ValueError` when a provider returns a profile of another name, `TypeError` when it returns something else. When the profiles or providers change while a provider runs, its answer is discarded and `name` is resolved again |
 | `add_provider(provider)`, `remove_provider(provider)` | as the settings functions above |
 | `providers` | the providers, in the order they are asked |
-| `reset(profiles=(), providers=(), *, pool=None)` | replaces every profile, every provider and `pool` in one step, so no reader sees a state between the old and the new ones. A profile with the same values as the registered one of its name (`same_as()`) keeps the registered one. Routers retire the pools of profiles that are removed or replaced, and of kept profiles without own pool settings when `pool` changes. Anything but `ConnectionProfile` objects and callables raises `TypeError`, two profiles of one name or invalid pool settings `ValueError`, and then nothing changes |
+| `reset(profiles=(), providers=(), *, pool=None)` | replaces every profile, every provider and `pool` in one step; no reader sees an intermediate state. A profile with the same values as the registered one of its name (`same_as()`) keeps the registered one. Routers retire the pools of removed or replaced profiles, and, when `pool` changes, of kept profiles without own pool settings. Anything but `ConnectionProfile` objects and callables raises `TypeError`, two profiles of one name or invalid pool settings `ValueError`; nothing changes then |
 | `clear()` | removes every profile and provider (`reset()` without arguments) |
 | `is_empty()` | whether there is neither a profile nor a provider |
 | `name in registry`, `len(registry)`, `iter(registry)` | membership, count and the registered profiles |
@@ -232,19 +240,20 @@ hook = import_object("myapp.roles:set_role", "hook")
 ### `adorm.settings.default_router(*, create=True)`
 
 The [`Router`](/ref/pool#adorm-executor-router-pools-profiles-none) of the running event loop built from
-[`profiles`](#adorm-settings-profiles), created on the first call; with `create=False`, `None` when there is none
-yet. Raises `RuntimeError` outside a running event loop.
-The router's pools close when the loop shuts down its asynchronous generators, as `asyncio.run()`,
-`asyncio.Runner` and asgiref's `async_to_sync` do, or on `close_pools()`. Creating a router drops the routers of
-loops that closed without either: their threaded connections close on their own threads, other connections are
-reported in a warning on the `adorm.settings` logger.
-[`get_runner()`](/ref/sessions#adorm-executor-get-runner) returns it when no runner is set and the settings have a
-profile or a provider.
+[`profiles`](#adorm-settings-profiles), created on the first call. With `create=False`, `None` when none exists.
+Raises `RuntimeError` outside a running event loop.
+
+- Its pools close when the loop shuts down its asynchronous generators (as `asyncio.run()`, `asyncio.Runner` and
+  asgiref's `async_to_sync` do), or on `close_pools()`.
+- Creating a router drops the routers of loops that closed without either: their threaded connections close on their
+  own threads; other connections are reported in a warning on the `adorm.settings` logger.
+- [`get_runner()`](/ref/sessions#adorm-executor-get-runner) returns it when no runner is set and the settings have a
+  profile or a provider.
 
 ### `adorm.settings.close_pools()`
 
-A coroutine: closes the pools of the running event loop's default router and drops the router; the next operation builds a new
-one.
+A coroutine: closes the pools of the running event loop's default router and drops the router. The next operation
+builds a new one.
 
 ```python
 await adorm.settings.close_pools()
@@ -266,10 +275,10 @@ a missing setting or `None` is an empty mapping.
 | `debug` | the executor's debug switch, a bool or `None` |
 
 Import paths have the form `"package.module.name"` or `"package.module:name"` and are imported in `ready()`, after the
-models are loaded. A profile's driver given by import path stays a path in the profile; it is imported in `ready()` to
-check the profile's hooks and options against the driver. Another key, a value of the wrong type, an import path
-that does not import (whatever the error its module raises) and a value `configure()` refuses raise
-`ImproperlyConfigured`, whose message starts with the entry, such as `ADORM['providers'][0]`.
+models are loaded. A profile's driver given by import path stays a path in the profile; `ready()` imports it to check
+the profile's hooks and options. `ImproperlyConfigured`, with a message starting with the entry (such as
+`ADORM['providers'][0]`), is raised for another key, a value of the wrong type, an import path that does not import
+(whatever error its module raises) and a value `configure()` refuses.
 
 ```python
 # settings.py
@@ -291,9 +300,9 @@ ADORM = {
 A list of `"app_label.Model.manager.method"` strings in the Django settings: methods of a manager or of its query set
 class that [`adorm generate`](/howto/generating-models#managers) writes as driver methods, for code the project
 cannot decorate with [`@expose`](/ref/codegen#adorm-expose-func). Only code generation reads it, through
-[`exposed_methods()`](/ref/codegen#adorm-codegen-django-exposed-methods); the default is no methods. A string in
-place of the list, an entry of another form, a model Django does not know, a manager the model does not have and a
-method the manager does not have raise `CodegenError`. See [managers and driver methods](/topics/managers).
+[`exposed_methods()`](/ref/codegen#adorm-codegen-django-exposed-methods). Default: no methods. `CodegenError` is
+raised for a string in place of the list, an entry of another form, a model Django does not know, a manager the model
+does not have and a method the manager does not have. See [managers and driver methods](/topics/managers).
 
 ```python
 # settings.py
@@ -325,15 +334,14 @@ from adorm.contrib.django import (
 
 The app's configuration, label `adorm`; the app has no models. `ready()` calls
 [`configure_from_settings()`](#adorm-contrib-django-configure-from-settings) and connects a `setting_changed` receiver
-that calls it again whenever `ADORM` changes, and whenever `DATABASES` changes while `ADORM` has no `profiles`, on
-entering and on leaving `override_settings`. An invalid setting
-raises `ImproperlyConfigured` from `django.setup()`, or from entering the override.
+that calls it again on entering and leaving `override_settings` of `ADORM`, or of `DATABASES` while `ADORM` has no
+`profiles`. An invalid setting raises `ImproperlyConfigured` from `django.setup()` or from entering the override.
 
 ### `adorm.contrib.django.configure_from_settings()`
 
-Configures adorm from the Django settings: calls `adorm.configure()` with
-[`settings_configuration()`](#adorm-contrib-django-settings-configuration), replacing adorm's whole configuration.
-Raises `ImproperlyConfigured`, and then changes nothing. For a process that sets Django up without the app:
+Calls `adorm.configure()` with [`settings_configuration()`](#adorm-contrib-django-settings-configuration),
+replacing adorm's whole configuration. On `ImproperlyConfigured` nothing changes. For a process that sets Django up
+without the app:
 
 ```python
 django.setup()
@@ -343,8 +351,8 @@ configure_from_settings()
 ### `adorm.contrib.django.ensure_configured()`
 
 Calls [`configure_from_settings()`](#adorm-contrib-django-configure-from-settings) unless the app
-`adorm.contrib.django` is installed, whose `ready()` has configured adorm when Django was set up. Needs a set-up
-Django. [`adorm check-schema`](/ref/checks#adorm-check-schema) calls it.
+`adorm.contrib.django` is installed (its `ready()` configures adorm on `django.setup()`). Requires a set-up Django. [`adorm check-schema`](/ref/checks#adorm-check-schema)
+calls it.
 
 ```python
 django.setup()

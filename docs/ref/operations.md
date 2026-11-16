@@ -1,7 +1,7 @@
 # Operations
 
-The operation description, importable from `adorm.operations`. An operation is what the core hands a driver
-connection: one read or write, described without I/O, models by their label and fields by their adorm names.
+The operation description, importable from `adorm.operations`. An operation is one read or write that the core
+hands a driver connection, described without I/O: models by their label, fields by their adorm names.
 
 ```python
 from adorm import F, Now, Q
@@ -14,11 +14,11 @@ from adorm.query import Query
 `Aggregate`, `Count` and `Exists` in this module are operations; the aggregate base class, the aggregate `Count` and
 the expression `Exists` are `adorm.Aggregate`, `adorm.Count` and `adorm.Exists`.
 
-Every operation is a frozen dataclass compared by value (`Update(q, {"age": 1}) != Update(q, {"age": True})`) and
-hashable. Plain values are copied when the operation is built, so changing the caller's list afterwards does not
-change it. Every operation satisfies the driver contract's [`Operation`](./drivers#adorm-drivers-operation)
-protocol: `kind` names it in `Capabilities.operations` and `constructs()` names the constructs of its query and
-expressions.
+Every operation is a hashable frozen dataclass compared by value
+(`Update(q, {"age": 1}) != Update(q, {"age": True})`). Plain values are copied when the operation is built; later
+changes to the caller's objects do not affect it. Every operation satisfies the driver contract's
+[`Operation`](./drivers#adorm-drivers-operation) protocol: `kind` names it in `Capabilities.operations`,
+`constructs()` names the constructs of its query and expressions.
 
 | Application code | Operation |
 |---|---|
@@ -102,7 +102,7 @@ A read-only mapping of kind to operation class:
 | `update_or_create` | `UpdateOrCreate` | `(row, created)` |
 | `check_table` | `CheckTable` | a list of problem dicts |
 
-A row is a dict keyed by adorm field names and annotation names, for every `row_format`: the core builds model
+A row is a dict keyed by adorm field names and annotation names, for every `row_format`. The core builds model
 instances, tuples and named tuples from it.
 
 ## Reads
@@ -110,10 +110,11 @@ instances, tuples and named tuples from it.
 ### `adorm.operations.Select(query)`
 
 The rows of `query`: iterating, listing or awaiting a query. A query that is not a [`Query`](./query) raises
-`TypeError`, as for every operation that takes one. `Select`, `Get`, `First`, `Last`, `Count` and `Exists` take a
-query combined by a [set operation](./query#union-others-all-false); `InBulk`, `Aggregate`, `Update`, `Delete`,
-`GetOrCreate` and `UpdateOrCreate` raise [`NotSupportedError`](./exceptions) for one
-(`cannot call update() after union()`).
+`TypeError`, as for every operation that takes one.
+
+A query combined by a [set operation](./query#union-others-all-false) is accepted by `Select`, `Get`, `First`,
+`Last`, `Count` and `Exists`. `InBulk`, `Aggregate`, `Update`, `Delete`, `GetOrCreate` and `UpdateOrCreate` raise
+[`NotSupportedError`](./exceptions) for one (`cannot call update() after union()`).
 
 ```python
 Select(
@@ -144,9 +145,11 @@ Get(Query("club.Member").filter(pk=5))
 ### `adorm.operations.First(query)`
 
 The first row of `query`, or `None`. Without an ordering on the query or the model, rows are ordered by the primary
-key. A sliced query without an ordering of its own raises `TypeError`; the model's ordering does not count, as an
-adorm model does not carry it. So does a grouped query (`Query.is_grouped`) without an ordering: ordering by the
-primary key would split its groups.
+key. `TypeError` is raised for:
+
+- a sliced query without an ordering of its own; the model's ordering does not count, as an adorm model does not
+  carry it;
+- a grouped query (`Query.is_grouped`) without an ordering, as ordering by the primary key would split its groups.
 
 ### `adorm.operations.Last(query)`
 
@@ -168,11 +171,12 @@ The rows of `query` whose field `field_name` holds one of `ids`, every row when 
 `query.filter(<field_name>__in=ids)` (`query` itself for `ids=None`), so with ids the operation also reports
 `lookup.in`.
 
-`field_name` is `"pk"` or a field name without `__` (`ValueError`). The driver refuses a field that is neither the
-primary key, nor unique on its own (`unique=True` or a single-field unique constraint without a condition), nor the
-only field the query is distinct on with `ProgrammingError`. `ids` is an iterable of plain values, not a string
-(`TypeError`), kept in order without repeats. A sliced query, one after `values()` and one that defers the field
-raise `TypeError`. The encoded form has `"field_name"` and `"ids"` (`null` or the values, typed as the field).
+- `field_name` is `"pk"` or a field name without `__` (`ValueError`). The driver raises `ProgrammingError` for a
+  field that is not the primary key, not unique on its own (`unique=True` or a single-field unique constraint
+  without a condition) and not the only field the query is distinct on.
+- `ids` is an iterable of plain values, not a string (`TypeError`), kept in order without repeats.
+- A sliced query, one after `values()` and one that defers the field raise `TypeError`.
+- The encoded form has `"field_name"` and `"ids"` (`null` or the values, typed as the field).
 
 ```python
 InBulk(Query("clubs.Club"), ids=[1, 2])
@@ -181,15 +185,18 @@ InBulk(Query("clubs.Club"), "slug", ["koper-sailing"])
 
 ### `adorm.operations.Aggregate(query, aggregations)`
 
-The values of `aggregations` over the rows of `query`, a dict by name. `aggregations` is a mapping or
-`(name, expression)` pairs, at least one (else `TypeError`), kept as a tuple of pairs in the order given. A name is a
-non-empty string without whitespace, control characters, quotes, backticks, brackets, `;`, `#`, `--`, `/*` or `*/`
-and may contain `__` (`"fee__sum"`); anything else, or a name given twice, raises `ValueError`. An expression without
-an aggregate outside a subquery raises `TypeError`, and so does a query distinct on fields (`distinct("role")`). The
-expressions refer to the query's fields, annotations and aliases.
+The values of `aggregations` over the rows of `query`, a dict by name.
 
-Over a sliced, distinct (without fields) or grouped query, or one with an annotation that aggregates, the expressions aggregate the
-query's rows as a subquery. Over no rows `Count` gives `0`, the other aggregates their `default` or `None`.
+- `aggregations` is a mapping or `(name, expression)` pairs, at least one (else `TypeError`), kept as a tuple of
+  pairs in the order given.
+- A name is a non-empty string without whitespace, control characters, quotes, backticks, brackets, `;`, `#`, `--`,
+  `/*` or `*/`; it may contain `__` (`"fee__sum"`). Anything else, or a name given twice, raises `ValueError`.
+- The expressions refer to the query's fields, annotations and aliases. An expression without an aggregate outside a
+  subquery raises `TypeError`, and so does a query distinct on fields (`distinct("role")`).
+
+Over a sliced, distinct (without fields) or grouped query, or one with an aggregating annotation, the expressions
+aggregate the query's rows as a subquery. Over no rows `Count` gives `0`, the other aggregates their `default` or
+`None`.
 
 ```python
 Aggregate(Query("clubs.Membership").filter(active=True), {"fees": Sum("fee"), "rows": Count("*")})
@@ -207,16 +214,18 @@ expression; an expression containing an aggregate, or a node that is not an expr
 
 ### `adorm.operations.Create(model, values=(), manager=None)`
 
-Inserts a row of the model `model` (a label) with `values`. An expression value may not refer to a field of the new
-row, an `F` outside a subquery or an `OuterRef` of the value's own subquery: `TypeError`. A subquery's own fields are
-allowed. Result: the row as stored, including the values the database set (the primary key,
-database defaults).
+Inserts a row of the model `model` (a label) with `values`. An expression value that refers to a field of the new
+row (an `F` outside a subquery, an `OuterRef` of the value's own subquery) raises `TypeError`; a subquery's own fields
+are allowed. Result: the row as stored, including the values the database set (primary key, database defaults).
 
 `manager` names the target ORM's manager whose `create()` inserts the row, as
-[`Query.manager`](./query#adorm-query-query-model-manager-none); with one, the operation uses the construct
-`clause.manager` and `values` may name arguments that are not fields, which the encoding types by their values; a
-value that is a model instance raises `TypeError` (pass its primary key). The encoded form has `"manager"` only when
-there is one.
+[`Query.manager`](./query#adorm-query-query-model-manager-none). With a manager:
+
+- the operation uses the construct `clause.manager`;
+- `values` may name arguments that are not fields; the encoding types them by their values;
+- a value that is a model instance raises `TypeError` (pass its primary key).
+
+The encoded form has `"manager"` only when there is one.
 
 ```python
 Create("club.Member", {"name": "Ann", "joined": Now()})
@@ -226,17 +235,17 @@ Create("library.Reader", {"name": "Ann", "username": "ann"}, manager="objects")
 ### `adorm.operations.BulkCreate(model, rows=(), batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None, unique_fields=None, manager=None)`
 
 Inserts a row of the model `model` (a label) for each item of `rows`, as the target inserts several instances at
-once (Django's `bulk_create()`): no `save()`, no signals. Result: a list with one row per item of `rows`, in order:
-its values with those the database set, such as a generated primary key. Under `ignore_conflicts` the database
-returns nothing, so a generated primary key stays `None`.
+once (Django's `bulk_create()`): no `save()`, no signals. Result: a list with one row per item of `rows`, in order,
+each with its values and those the database set, such as a generated primary key. Under `ignore_conflicts` the
+database returns nothing, and a generated primary key stays `None`.
 
 - `rows` is an iterable of mappings or `(name, value)` pairs. Rows may name different fields; a field a row does not
   name gets the target's default. Values follow the rules of `Create`: an expression value that refers to a field
   of the row or contains an aggregate raises `TypeError`.
 - `batch_size`, `None` or a positive `int` (`ValueError` otherwise, `bool` included), is the most rows one statement
   inserts. A driver may insert fewer per statement (the native PostgreSQL driver keeps every statement within
-  asyncpg's parameter limit). Several statements run in one transaction, or inside an open one without a
-  savepoint of their own, so a failing row inserts none of the rows.
+  asyncpg's parameter limit). Several statements run in one transaction, or inside an open one without a savepoint
+  of their own; a failing row inserts none of the rows.
 - `ignore_conflicts` skips a row that violates a unique constraint; construct `clause.on_conflict.ignore`.
 - `update_conflicts` updates `update_fields` of the stored row a row conflicts with on `unique_fields`; construct
   `clause.on_conflict.update`. `unique_fields` may name `"pk"`.
@@ -244,14 +253,15 @@ returns nothing, so a generated primary key stays `None`.
   [`Query.manager`](./query#adorm-query-query-model-manager-none); construct `clause.manager`. The encoded form has
   `"manager"` only when there is one.
 
-`ignore_conflicts` with `update_conflicts` and `update_conflicts` without `update_fields` raise `ValueError`.
+`ignore_conflicts` with `update_conflicts`, and `update_conflicts` without `update_fields`, raise `ValueError`.
 `update_fields` and `unique_fields` are iterables of field names without `__` (a string raises `TypeError`); repeats
-are dropped. Without `update_conflicts` they are checked as names and then dropped (`None`), as Django's
-`bulk_create()` ignores them. The SQL drivers raise `ProgrammingError` for what Django's `bulk_create()` refuses on
-PostgreSQL ([`check_bulk_create()`](./drivers#adorm-drivers-django-translation-check-bulk-create-operation)): a
-multi-table inheritance child, `update_conflicts` without `unique_fields`, a primary key in `update_fields`, or a
-field without a column of its own in `update_fields` or `unique_fields`; a name that is no field raises
-`FieldError`.
+are dropped. Without `update_conflicts` they are checked as names and then set to `None`, as Django's
+`bulk_create()` ignores them.
+
+The SQL drivers raise `ProgrammingError` for what Django's `bulk_create()` refuses on PostgreSQL
+([`check_bulk_create()`](./drivers#adorm-drivers-django-translation-check-bulk-create-operation)): a multi-table
+inheritance child, `update_conflicts` without `unique_fields`, a primary key in `update_fields`, a field without a
+column of its own in `update_fields` or `unique_fields`. A name that is not a field raises `FieldError`.
 
 ```python
 BulkCreate("club.Tag", [{"name": "night"}, {"name": "dawn"}])
@@ -275,10 +285,12 @@ Saves an instance: updates the row with primary key `pk`, or inserts a row when 
   `update_fields` saves nothing. Duplicates are dropped.
 - `force_insert` always inserts, `force_update` never inserts.
 
-Result: the values the database set, at least the primary key. `pk` as an expression raises `TypeError`, and so
-does a value that refers to a field of the row when the save inserts (`pk` is `None` or `force_insert`). A name in
-`update_fields` without a value, `force_insert` with `force_update` or `update_fields`, and `force_update` without a
-`pk` raise `ValueError`.
+Result: the values the database set, at least the primary key.
+
+- `TypeError`: `pk` as an expression; a value that refers to a field of the row when the save inserts (`pk` is `None`
+  or `force_insert`).
+- `ValueError`: a name in `update_fields` without a value; `force_insert` with `force_update` or `update_fields`;
+  `force_update` without a `pk`.
 
 ```python
 Save("club.Member", 5, {"name": "Ann", "age": 31}, update_fields=["age"])
@@ -293,11 +305,15 @@ Inserts the row of the multi-table inheritance child `model` for the existing ro
 written. Result: the child's row as stored, the parent's fields included.
 
 `parent_pk` as `None` raises `ValueError`, as an expression `TypeError`; a value that refers to a field raises
-`TypeError`. The driver raises `ProgrammingError` for a model that is not a multi-table inheritance child and for a
-value of an inherited field, `ObjectDoesNotExist` when the parent has no row with `parent_pk` and `IntegrityError` when
-the child already has one. The Django driver reads the parent and saves the child with `save_base(raw=True,
-force_insert=True)` after its fields' `pre_save()`; the native PostgreSQL driver inserts the child's table as Django's
-save does, without the model's methods and signals.
+`TypeError`. The driver raises:
+
+- `ProgrammingError` for a model that is not a multi-table inheritance child and for a value of an inherited field;
+- `ObjectDoesNotExist` when the parent has no row with `parent_pk`;
+- `IntegrityError` when the child already has one.
+
+The Django driver reads the parent and saves the child with `save_base(raw=True, force_insert=True)` after its
+fields' `pre_save()`. The native PostgreSQL driver inserts the child's table as Django's save does, without the
+model's methods and signals.
 
 ```python
 CreateFromParent("activities.Competition", 3, {"discipline": "Climbing"})
@@ -305,17 +321,19 @@ CreateFromParent("activities.Competition", 3, {"discipline": "Climbing"})
 
 ### `adorm.operations.FullClean(model, pk, values=(), exclude=(), validate_unique=True, validate_constraints=True, adding=True)`
 
-Validates an instance of `model` as the target validates one before a save (Django: `Model.full_clean()`). The
-instance has the primary key `pk` and `values` (its loaded and assigned fields, plain values); the driver puts them
-over the stored row when `adding` is false and `pk` is not `None` (the row read first when `values` lacks fields),
-otherwise over the target's defaults. `exclude` names fields or relations that are not validated;
-`validate_unique` and `validate_constraints` switch the unique checks and the model's constraints. `adding` tells
-whether the instance is not stored yet: a unique check of a stored instance leaves its own row out.
+Validates an instance of `model` as the target validates one before a save (Django: `Model.full_clean()`).
+
+- The instance has the primary key `pk` and `values` (its loaded and assigned fields, plain values). The driver puts
+  them over the stored row when `adding` is false and `pk` is not `None` (reading the row first when `values` lacks
+  fields), otherwise over the target's defaults.
+- `exclude` names fields or relations that are not validated.
+- `validate_unique` and `validate_constraints` switch the unique checks and the model's constraints on or off.
+- `adding` is true for an instance not stored yet. A unique check of a stored instance leaves out its own row.
 
 Result: the instance's fields after cleaning, as a row. Errors raise `adorm.ValidationError` with the errors by
 adorm name (a foreign key's under its relation's name, the model's under `"__all__"`), each with its message, `code`
-and `params`. An expression as `pk` or value
-and a string `exclude` raise `TypeError`, an `exclude` name that is not an identifier `ValueError`.
+and `params`. An expression as `pk` or value and a string `exclude` raise `TypeError`; an `exclude` name that is not
+an identifier raises `ValueError`.
 
 ```python
 FullClean("billing.Invoice", 3, {"due": datetime.date(2025, 1, 1)}, exclude=["club"], adding=False)
@@ -332,9 +350,10 @@ Update(Query("club.Member").filter(club__name="Chess"), {"fee": F("fee") * 1.1, 
 
 ### `adorm.operations.Delete(query)`
 
-Deletes the rows of `query` and the rows that cascade from them; [`DeleteInstance`](#adorm-operations-deleteinstance-model-pk)
-deletes an instance. A sliced query, a query distinct on fields and one after `values()` or
-`values_list()` raise `TypeError`. Result: `(total, {label: count})`, the rows deleted per model.
+Deletes the rows of `query` and the rows that cascade from them;
+[`DeleteInstance`](#adorm-operations-deleteinstance-model-pk) deletes an instance. A sliced query, a query distinct
+on fields and one after `values()` or `values_list()` raise `TypeError`. Result: `(total, {label: count})`, the rows
+deleted per model.
 
 ```python
 Delete(Query("club.Member").filter(active=False, joined__lt=cutoff))
@@ -343,7 +362,7 @@ Delete(Query("club.Member").filter(active=False, joined__lt=cutoff))
 ### `adorm.operations.DeleteInstance(model, pk)`
 
 Deletes the instance of `model` with primary key `pk` as the target deletes one instance, with the rows that cascade
-from it: on the Django driver the model's `delete()` runs, an override included; the native PostgreSQL driver deletes
+from it. On the Django driver the model's `delete()` runs, an override included. The native PostgreSQL driver deletes
 with Django's collector and raises `NotSupportedError` for a model with an override. A missing row deletes nothing.
 `pk` as `None` raises `ValueError`, as an expression `TypeError`. Result: `(total, {label: count})`.
 
@@ -356,10 +375,11 @@ DeleteInstance("billing.Payment", 7)          # Model.delete() of a Payment with
 The row of `query` matching `lookups`, or a new row when there is none. The new row has the values of the lookups
 whose keys have no `__`, updated with `defaults`. A sliced query raises `TypeError`. Result: `(row, created)`.
 
-`lookups` is a mapping or pairs of lookup keys and values, prepared as `filter()` prepares them: `None` stays (it
-means `isnull`), an `in` list becomes a tuple without `None`, a query becomes a `Subquery`; an invalid key or value
-raises as `filter()` does, a key given twice raises `ValueError`. A lookup on an annotation name of `query` is typed
-by the annotation. `defaults` are field values that may not refer to fields of the new row, as for `Create`.
+- `lookups` is a mapping or pairs of lookup keys and values, prepared as `filter()` prepares them: `None` stays (it
+  means `isnull`), an `in` list becomes a tuple without `None`, a query becomes a `Subquery`. An invalid key or value
+  raises as in `filter()`; a key given twice raises `ValueError`.
+- A lookup on an annotation name of `query` is typed by the annotation.
+- `defaults` are field values that may not refer to fields of the new row, as for `Create`.
 
 ```python
 GetOrCreate(
@@ -392,21 +412,29 @@ UpdateOrCreate(
 
 ### `adorm.operations.Call(query, method, target="queryset", args=(), kwargs=(), manager=None)`
 
-Calls the driver method `method` on the target ORM's manager `manager`, which defaults to
-[`query.manager`](./query#adorm-query-query-model-manager-none) and, when the query carries one, equals it. With
-`target` `"manager"` the method runs on that manager, and `query` is the model's plain query (`Query(model)` or
-`Query(model, manager=manager)`); with `"queryset"` it runs on the query set of `query` started from that manager. A
-query without `Query.manager` uses no `clause.manager`, so only the `call` operation needs a driver that runs the
-target ORM's code. `args` are the positional arguments, `kwargs` the keyword arguments as a mapping or
-`(name, value)` pairs, kept as a tuple of pairs; both hold plain values, copied as in other operations.
+Calls the driver method `method` on the target ORM's manager `manager`.
 [Driver methods](./models#adorm-driver-method-func-queryset-only-false) build it.
+
+- `manager` defaults to [`query.manager`](./query#adorm-query-query-model-manager-none) and must equal it when the
+  query carries one.
+- `target` `"manager"`: the method runs on that manager; `query` is the model's plain query (`Query(model)` or
+  `Query(model, manager=manager)`).
+- `target` `"queryset"`: the method runs on the query set of `query` started from that manager.
+- `args` are the positional arguments; `kwargs` the keyword arguments as a mapping or `(name, value)` pairs, kept as
+  a tuple of pairs. Both hold plain values, copied as in other operations.
+
+A query without `Query.manager` uses no `clause.manager`; only the `call` operation needs a driver that runs the
+target ORM's code.
 
 Result: the method's return value as plain data, with every instance of a model of the target ORM as a
 [`ModelRow`](#adorm-operations-modelrow-model-row).
 
-No manager, an expression or a model instance among the arguments raises `TypeError`; a `manager` or `method` that is
-not a public identifier, a `manager` other than the query's, an unknown `target`, a manager call with a filtered
-query, an argument name that is not an identifier and a name given twice raise `ValueError`. A driver runs only the methods the registered model declares
+- `TypeError`: no manager; an expression or a model instance among the arguments.
+- `ValueError`: a `manager` or `method` that is not a public identifier; a `manager` other than the query's; an
+  unknown `target`; a manager call with a filtered query; an argument name that is not an identifier; a name given
+  twice.
+
+A driver runs only the methods the registered model declares
 ([`find_driver_method()`](./models#adorm-models-find-driver-method-label-manager-target-method)).
 
 | Member | Meaning |
@@ -433,7 +461,7 @@ Call(Query("library.Loan", manager="objects"), "archive").to_dict(registry)
 An instance of a model in the result of a `Call`: the row of the model `model` (a label) as a read-only mapping keyed
 by adorm field names. A driver returns one for every instance of the target ORM's model in a driver method's result;
 the caller builds an instance of the registered model from it. A frozen, hashable dataclass. A `model` that is not a
-label raises `ValueError`, a `row` that is not a mapping `TypeError`.
+label raises `ValueError`; a `row` that is not a mapping raises `TypeError`.
 
 ```python
 ModelRow("library.Loan", {"id": 9, "reader_id": 7, "book_id": "9780000000001", "due": date(2026, 3, 4)})
@@ -443,10 +471,10 @@ ModelRow("library.Loan", {"id": 9, "reader_id": 7, "book_id": "9780000000001", "
 
 ### `adorm.operations.CheckTable(model, fields=(), many_to_many=())`
 
-Compare the database tables of `model` (a label) with what the model expects of them; it reads the database's
-catalogue and changes nothing. `fields` are the target ORM's names of the model's fields, `many_to_many` those of its
-many-to-many relations, whose automatic link tables are checked too; both are iterables of names (not a string), kept
-without repeats. [`adorm.checks.table_check(model)`](./checks#adorm-checks-table-check-model) builds it from a model
+Compares the database tables of `model` (a label) with what the model expects of them. It reads the database's
+catalogue and changes nothing. `fields` are the target ORM's names of the model's fields; `many_to_many` those of its
+many-to-many relations, whose automatic link tables are checked too. Both are iterables of names (not a string),
+kept without repeats. [`adorm.checks.table_check(model)`](./checks#adorm-checks-table-check-model) builds it from a model
 class.
 
 Result: a list of problem dicts with the keys `kind` (a
@@ -464,7 +492,7 @@ CheckTable("clubs.Club", ("id",)).to_dict()
 
 ## Events
 
-Operations emit and consume no events: they are the requests a slot executes. The slot answers each one with a
+Operations emit and consume no events; they are the requests a slot executes. The slot answers each one with a
 [`ResultEvent`](./events#adorm-events-resultevent-request-id-value) carrying the result above, an
 [`ErrorEvent`](./events#adorm-events-errorevent-request-id-error) carrying an adorm exception, or a
 [`CancelledEvent`](./events#adorm-events-cancelledevent-request-id-started) when the client cancelled it. Callbacks

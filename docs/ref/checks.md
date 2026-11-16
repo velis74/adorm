@@ -19,18 +19,22 @@ adorm check-schema [-h] -m MODULE [--using USING] [--settings SETTINGS] [--confi
                    [label ...]
 ```
 
-Puts the current directory and each `--pythonpath` directory on the import path. With `--settings` or
-`DJANGO_SETTINGS_MODULE` it sets Django up (as [`adorm generate`](/ref/codegen#adorm-generate) does) and configures
-adorm from the Django settings unless the app `adorm.contrib.django` does
-([`ensure_configured()`](/ref/settings#adorm-contrib-django-ensure-configured)); without either Django is not
-imported. It then imports every `--configure` module (one that calls `adorm.configure()` or registers profiles, for a
-driver that is not configured from Django settings) and every `-m`/`--models` module (the package `adorm generate`
-wrote, which registers its models). Without a configured profile or profile provider it stops with status 2. Then it
-runs
-[`check_schema()`](#adorm-check-schema-models-none-session-none-raise-on-problems-false) on a session of the profile
-`--using` (default `default`) and closes the pools. Each `label` is an app label, which selects every registered model
-of the app, or a model label (`app_label.Model`); without labels every registered model is checked.
-`python -m adorm check-schema` is the same command.
+The command:
+
+1. puts the current directory and each `--pythonpath` directory on the import path;
+2. with `--settings` or `DJANGO_SETTINGS_MODULE`, sets Django up (as [`adorm generate`](/ref/codegen#adorm-generate)
+   does) and configures adorm from the Django settings unless the app `adorm.contrib.django` does
+   ([`ensure_configured()`](/ref/settings#adorm-contrib-django-ensure-configured)); without either, Django is not
+   imported;
+3. imports every `--configure` module (one that calls `adorm.configure()` or registers profiles, for a driver not
+   configured from Django settings) and every `-m`/`--models` module (the package `adorm generate` wrote, which
+   registers its models);
+4. stops with status 2 without a configured profile or profile provider;
+5. runs [`check_schema()`](#adorm-check-schema-models-none-session-none-raise-on-problems-false) on a session of the
+   profile `--using` (default `default`) and closes the pools.
+
+Each `label` is an app label, selecting every registered model of the app, or a model label (`app_label.Model`);
+without labels every registered model is checked. `python -m adorm check-schema` is the same command.
 
 Each problem goes to standard error as one line (`str(problem)`), followed by `<n> problems in <m> models.`; without
 problems standard output has `<m> models checked, no problems found.`
@@ -58,26 +62,25 @@ $ adorm check-schema --configure myproject.adorm_config -m myproject.adorm_model
 
 Compares `models` (model classes or registered labels; default: every registered model) with the database and the
 driver of `session` (default: the [current session](/ref/sessions#adorm-current-session)) and returns a tuple of
-[`SchemaProblem`](#adorm-schemaproblem) values in the order of `models`; an empty tuple means they match. It reads
-the database's catalogue and changes nothing.
+[`SchemaProblem`](#adorm-schemaproblem) values in the order of `models`, empty when they match. It reads the
+database's catalogue and changes nothing.
 
 Each model is checked with one [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many)
 operation ([`table_check(model)`](#adorm-checks-table-check-model)) executed on the session: on a slot of its own
 outside a transaction, in the session's transaction inside one. The driver's
 [`check()`](/ref/drivers#check-operation-schema-hashes-none) compares the model's schema hash with its own first; a
-[`SchemaMismatchError`](/ref/exceptions#adorm-schemamismatcherror-message-none-model-none-expected-none-actual-none-driver-none-reason-none)
-becomes a `schema_hash` problem and the model's tables are not compared; so does a model the driver's target does not
-have. A model given twice is checked once. A
-problem of a table several models share (a proxy model and its concrete model, a multi-table inheritance parent's
-table, a link table both ends of a many-to-many relation name) is reported once, for the first of them. Field names in
-the problems are the models' adorm names.
+[`SchemaMismatchError`](/ref/exceptions#adorm-schemamismatcherror-message-none-model-none-expected-none-actual-none-driver-none-reason-none),
+and a model the driver's target does not have, become a `schema_hash` problem; the model's tables are then not
+compared. A model given twice is checked once. A problem of a table several models share (a proxy model and its
+concrete model, a multi-table inheritance parent's table, a link table both ends of a many-to-many relation name) is
+reported once, for the first of them. Field names in the problems are adorm names.
 
 With `raise_on_problems` it raises [`SchemaCheckError`](/ref/exceptions#adorm-schemacheckerror-message-none-problems)
 with the problems instead of returning them; without problems it returns `()`.
 
-A label without a registered model raises `LookupError`, a class that is not a model with `_meta` `TypeError`; a
-driver that does not declare `check_table` raises `NotSupportedError` (the demo's memory driver), and slot and
-database errors pass through.
+A label without a registered model raises `LookupError`, a class that is not a model with `_meta` `TypeError`, a
+driver that does not declare `check_table` (the demo's memory driver) `NotSupportedError`. Slot and database errors
+pass through.
 
 ```python
 from demo.models import MODELS
@@ -128,10 +131,10 @@ of the error); each is `None` where it does not apply. A frozen dataclass; an un
 ### `adorm.checks.check_models(models, execute)`
 
 The problems of `models` (model classes with `_meta`) as `check_schema()` finds them, with `execute`, an async
-callable, executing each model's `table_check()` operation: `check_schema()` passes the session's `execute`, a
+callable, executing each model's `table_check()` operation (`check_schema()` passes the session's `execute`, a
 pool's [start-up check](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)
-one that runs on its slot. A `SchemaMismatchError` of the checked model becomes a `schema_hash` problem; other errors
-pass through.
+one that runs on its slot). A `SchemaMismatchError` of the checked model becomes a `schema_hash` problem; other
+errors pass through.
 
 ```python
 problems = await check_models([Club, Member], session.execute)

@@ -1,7 +1,6 @@
 # How-to guides
 
-How-to guides are recipes for a specific task. Each guide gets its page as the package provides the features
-it uses:
+Recipes for specific tasks:
 
 | Guide | Task |
 |---|---|

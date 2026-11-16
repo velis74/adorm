@@ -1,8 +1,8 @@
 # Transactions
 
-`atomic()` blocks, `on_commit` callbacks and the active transactions of a context, importable from
-`adorm.executor`. `atomic`, `Atomic`, `on_commit` and `TransactionOutcome` are also importable from `adorm`. The
-[transactions topic](/topics/transactions) explains how they behave together.
+`atomic()` blocks, `on_commit` callbacks and the active transactions of a context, in `adorm.executor`. `atomic`,
+`Atomic`, `on_commit` and `TransactionOutcome` are also importable from `adorm`. See the
+[transactions topic](/topics/transactions).
 
 ```python
 from adorm import atomic, Atomic, on_commit, TransactionOutcome
@@ -31,25 +31,32 @@ block is entered once; entering it again raises `TransactionManagementError`.
 
 - When the session has no active transaction in the context, the block acquires a slot through the runner's
   `slot(session)` ([`Router.slot()`](/ref/pool#slot-session-timeout-none)) and sends `begin` with the database
-connection options in effect, which the slot sets (`SET`, `RESET`) before the `BEGIN`. The acquisition raises
-  `SessionTimeout` or `DeadlockError` here, after the `acquire_timeout` [connection option](/ref/options) in effect;
-  the lease's `commit_timeout` is the `commit_timeout` option in effect at entry. A runner that is not a
-  [`TransactionRunner`](/ref/sessions#adorm-executor-transactionrunner), or no runner, raises `InterfaceError`. When
-  `begin` fails or is cancelled, the slot is discarded and the error propagates.
-- When the active transaction of the session is an `Atomic`, the block is a savepoint of it, on the same slot. It
-  waits until a savepoint that another task opened in the same enclosing block ends; after the `acquire_timeout`
-  connection option in effect the wait raises `DeadlockError` with the session in `held_sessions`. An enclosing block that has
-  ended raises `TransactionClosed`; one with a failed operation raises `TransactionManagementError`. A driver
-  without savepoints raises `NotSupportedError`.
+  connection options in effect; the slot sets them (`SET`, `RESET`) before the `BEGIN`.
+  - The acquisition raises `SessionTimeout` or `DeadlockError` after the `acquire_timeout`
+    [connection option](/ref/options) in effect.
+  - The lease's `commit_timeout` is the `commit_timeout` option in effect at entry.
+  - A runner that is not a [`TransactionRunner`](/ref/sessions#adorm-executor-transactionrunner), or no runner, raises
+    `InterfaceError`.
+  - When `begin` fails or is cancelled, the slot is discarded and the error propagates.
+- When the active transaction of the session is an `Atomic`, the block is a savepoint of it, on the same slot.
+  - It waits until a savepoint another task opened in the same enclosing block ends; after the `acquire_timeout`
+    connection option in effect the wait raises `DeadlockError` with the session in `held_sessions`.
+  - An enclosing block that has ended raises `TransactionClosed`; one with a failed operation raises
+    `TransactionManagementError`.
+  - A driver without savepoints raises `NotSupportedError`.
 - Any other active transaction ([`bind_transaction()`](#adorm-executor-bind-transaction-session-transaction)) raises
   `TransactionManagementError`.
 
 The entered block is the session's active transaction for the context of the `async with` statement and of tasks
 created inside it.
 
-**Exiting** (`__aexit__`) closes the block to further operations and to new savepoints, closes savepoint blocks
-of other tasks still open inside it, waits for the operations already sent, then rolls back to the outermost
-savepoint it closed (when it would commit or release), and then:
+**Exiting** (`__aexit__`), in order:
+
+1. closes the block to further operations and new savepoints;
+2. closes savepoint blocks of other tasks still open inside it;
+3. waits for the operations already sent;
+4. rolls back to the outermost savepoint it closed, when it would commit or release;
+5. ends the block:
 
 | Exit | Transaction | Savepoint |
 |---|---|---|
@@ -61,13 +68,16 @@ savepoint it closed (when it would commit or release), and then:
 | while `commit()` or `rollback()` of another task runs | waits for it; a normal exit raises its error | waits for it; a normal exit raises its error |
 | normal, after the enclosing block closed it | | raises `TransactionClosed` |
 
-The `commit` carries the database connection options in effect where the block ends, which the slot sets
-(`SET LOCAL`) before the `COMMIT`; with an option the driver does not declare the transaction rolls back instead and
-the exit raises `TransactionManagementError` from the `NotSupportedError`. A failing `commit` or `release_savepoint` propagates. A failing rollback on an exit with an exception is logged and
-the block's exception propagates. A failing rollback to a savepoint closed by the end is logged and the block rolls
-back instead (to its own savepoint), as after a failed operation. A transaction block returns its slot to the pool at the end; a slot whose commit
-or rollback did not succeed leaves the pool. A savepoint whose end failed or was cancelled marks the enclosing
-block as failed.
+- The `commit` carries the database connection options in effect where the block ends; the slot sets them
+  (`SET LOCAL`) before the `COMMIT`. With an option the driver does not declare, the transaction rolls back instead
+  and the exit raises `TransactionManagementError` from the `NotSupportedError`.
+- A failing `commit` or `release_savepoint` propagates.
+- A failing rollback on an exit with an exception is logged and the block's exception propagates.
+- A failing rollback to a savepoint closed by the end is logged and the block rolls back to its own savepoint, as
+  after a failed operation.
+- A transaction block returns its slot to the pool at the end; a slot whose commit or rollback did not succeed leaves
+  the pool.
+- A savepoint whose end failed or was cancelled marks the enclosing block as failed.
 
 | Member | Meaning |
 |---|---|
@@ -79,12 +89,13 @@ block as failed.
 | `closed` | whether the block no longer takes operations: it is ending or has ended |
 | `outcome` | the [`TransactionOutcome`](#adorm-transactionoutcome) of the transaction; for a savepoint `ROLLED_BACK` when it or a savepoint around it was rolled back, else the outermost block's; `None` while the transaction is open and for a block that never began; final once the end of the block has returned or raised |
 
-When the end of the block is cancelled while it commits, the end raises `CancelledError` once the slot has finished
-the commit, if it was sent, and `outcome` tells whether it committed. After a confirmed commit its `on_commit()`
-callbacks run in a task of their own, which logs an exception a callback raises on the `adorm.executor` logger. When
-the block was ended by another task's `commit()` that was cancelled before the commit was confirmed, the end of the
-owner's `async with` raises `TransactionManagementError` with that `CancelledError` as `__cause__`. See
-[cancellation](/topics/cancellation).
+- When the end of the block is cancelled during the commit, it raises `CancelledError` once the slot has finished a
+  sent commit; `outcome` tells whether it committed. After a confirmed commit the `on_commit()` callbacks run in a task
+  of their own, which logs an exception a callback raises on the `adorm.executor` logger.
+- When another task's `commit()` ended the block and was cancelled before the commit was confirmed, the end of the
+  owner's `async with` raises `TransactionManagementError` with that `CancelledError` as `__cause__`.
+
+See [cancellation](/topics/cancellation).
 
 ```python
 block = adorm.atomic()
@@ -101,23 +112,27 @@ except asyncio.CancelledError:
 
 Runs `operation` on the transaction's slot and returns its result, with the database connection options in effect
 ([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)), which the slot sets with
-`SET LOCAL`. An option the driver does not declare raises `NotSupportedError` before anything is sent. While a
-savepoint block of another task is open directly inside this block, it first waits until that savepoint ends; after
-the `acquire_timeout` connection option in effect it raises `DeadlockError`. Raises `TransactionClosed` once the block (or an enclosing block) is closed or the slot aborted the
-transaction, and `TransactionManagementError` after an operation of the block failed. An operation that fails with
-a `DatabaseError` or `InterfaceError`, or is cancelled after it reached the slot's connection, marks the block as
-failed. A `NotSupportedError` without `sqlstate` and `original` (a capability check on the client side) and a
-cancellation of an operation still queued do not. A cancellation while the operation waits for a savepoint carries
-[`CancellationOutcome.NOT_STARTED`](/ref/pool#adorm-cancellationoutcome); a cancellation after the request was sent
-carries the outcome [`SlotLease.call()`](/ref/pool#async-call-method-args-options-none) gives it. Enclosing
-[`adorm.timeout()`](/ref/options#adorm-timeout-delay) blocks see the operation `"waiting_for_slot"` while it waits for
-the savepoint, then `"executing"`; they see the block's own requests by name (`"begin"`, `"savepoint"`, `"commit"`,
-`"rollback"` …). Operations of a session's bound models reach the block through
+`SET LOCAL`. Operations of a session's bound models reach the block through
 [`Session.execute()`](/ref/sessions#async-execute-operation).
+
+- An option the driver does not declare raises `NotSupportedError` before anything is sent.
+- While a savepoint block of another task is open directly inside this block, it first waits until that savepoint
+  ends; after the `acquire_timeout` connection option in effect it raises `DeadlockError`.
+- Raises `TransactionClosed` once the block (or an enclosing block) is closed or the slot aborted the transaction, and
+  `TransactionManagementError` after an operation of the block failed.
+- An operation that fails with a `DatabaseError` or `InterfaceError`, or is cancelled after it reached the slot's
+  connection, marks the block as failed. A `NotSupportedError` without `sqlstate` and `original` (a client-side
+  capability check) and a cancellation of a queued operation do not.
+- A cancellation while the operation waits for a savepoint carries
+  [`CancellationOutcome.NOT_STARTED`](/ref/pool#adorm-cancellationoutcome); a cancellation after the request was sent
+  carries the outcome [`SlotLease.call()`](/ref/pool#async-call-method-args-options-none) gives it.
+- Enclosing [`adorm.timeout()`](/ref/options#adorm-timeout-delay) blocks see the operation as `"waiting_for_slot"`
+  while it waits for the savepoint, then `"executing"`, and the block's own requests by name (`"begin"`,
+  `"savepoint"`, `"commit"`, `"rollback"` …).
 
 #### `async commit()`
 
-Ends the block now as a normal exit does: commits (releases the savepoint) after the operations already sent.
+Ends the block as a normal exit does: commits (releases the savepoint) after the operations already sent.
 Raises `TransactionClosed` when the block is not open, and `TransactionManagementError` after a failed operation
 (once it has rolled back).
 
@@ -129,9 +144,8 @@ async with adorm.atomic() as tx:
 
 #### `async rollback()`
 
-Ends the block now as an exit with an exception does: rolls back (to the savepoint). Raises `TransactionClosed`
-when the block is not open. A failing rollback propagates, unless an operation of the block failed before; then it
-is logged.
+Ends the block as an exit with an exception does: rolls back (to the savepoint). Raises `TransactionClosed` when the
+block is not open. A failing rollback propagates; after a failed operation of the block it is logged instead.
 
 ```python
 async with adorm.atomic() as tx:
@@ -142,8 +156,8 @@ async with adorm.atomic() as tx:
 
 #### `on_commit(func, *, robust=False)`
 
-Registers `func` to run after the transaction commits. A plain method: it only registers. `func()` is called
-without arguments; an awaitable it returns is awaited.
+Registers `func` to run after the transaction commits; a synchronous method. `func()` is called without arguments;
+an awaitable it returns is awaited.
 
 - The callbacks run after the commit succeeded and the slot is back in the pool, in registration order, in a copy
   of the block's context without this session's transaction; an operation in a callback takes a slot of its own.
@@ -205,8 +219,8 @@ finally:
 
 ### `adorm.executor.Transaction`
 
-The protocol of what runs the operations of a session inside a transaction: `await transaction.execute(operation)`.
-`Atomic` is one.
+The protocol of an object that runs a session's operations inside a transaction:
+`await transaction.execute(operation)`. `Atomic` implements it.
 
 ### `adorm.executor.active_transaction(session)`
 
@@ -220,8 +234,8 @@ async with reports.atomic() as tx:
 ### `adorm.executor.bind_transaction(session, transaction)`
 
 A synchronous context manager that makes `transaction` the active transaction of `session` for its block and yields
-it. The binding is a context variable: tasks created inside the block inherit it, also after the block ends. A
-binding for the same session inside the block replaces it until the inner block ends; bindings of other sessions are
+it. The binding is a context variable; tasks created inside the block inherit it, also after the block ends. A
+binding for the same session inside the block replaces it until the inner block ends; other sessions' bindings are
 unaffected. An object without an `async execute(operation)` raises `TypeError`.
 
 ```python

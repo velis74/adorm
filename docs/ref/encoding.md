@@ -1,9 +1,9 @@
 # Operation encoding
 
-Operations and query nodes convert to JSON-safe data and back, so an operation can cross a process boundary: from
-the application to an adorm server (over [muxws](:muxws:/) or HTTP) that executes it with an ORM driver. Values are encoded by the type
-of the field they are compared with or written to, taken from the model schema, with a pydantic `TypeAdapter`: the
-same concept as the argument transport of [`celery_viewset`](:fastapi_viewsets:/) in fastapi-viewsets.
+Operations and query nodes convert to JSON-safe data and back, for sending an operation across a process boundary,
+for example to an adorm server (over [muxws](:muxws:/) or HTTP) that executes it with an ORM driver. A value is
+encoded with a pydantic `TypeAdapter` for the type of the field it is compared with or written to, taken from the
+model schema, as in the argument transport of [`celery_viewset`](:fastapi_viewsets:/) in fastapi-viewsets.
 
 ```python
 from adorm.codec import decode_value, encode_value
@@ -38,8 +38,8 @@ restored = Operation.from_dict(data, schema)
 dict(restored.values)["fee"]          # Decimal('12.50')
 ```
 
-The encoding and the decoding side use the same schema. Data encoded with a schema decodes only with a schema
-that types the same positions: decoding a typed value without its type raises `ValueError`.
+Encoding and decoding use the same schema. Data encoded with a schema decodes only with a schema that types the
+same positions; decoding a typed value without its type raises `ValueError`.
 
 ## The data
 
@@ -66,25 +66,33 @@ Query("club.Member").filter(fee__gt=10).to_dict(schema)["filters"]
 A value is typed by:
 
 - a lookup's right-hand side: the type of the expression on the left (see `expression_type()` below), passed through
-  the lookup's [`rhs_type()`](./lookups#adorm-query-lookup-lhs-rhs): `isnull` takes a `bool`; `regex`, `iregex` and
-  the text pattern lookups (`iexact`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`) a
-  string, except `contains` on a container field (the field's type) or a record field (untyped); the others the
-  field's type; each value of `in` and `range` has that type, each value of `overlap` the item type of the array
-  field (`str` for `list[str]`); an expression in place of the values (`disciplines__overlap=Value(["Lead"])`) has the type of
-  the expression on the left;
+  the lookup's [`rhs_type()`](./lookups#adorm-query-lookup-lhs-rhs):
+  - `isnull`: `bool`;
+  - `regex`, `iregex` and the text pattern lookups (`iexact`, `contains`, `icontains`, `startswith`, `istartswith`,
+    `endswith`, `iendswith`): `str`, except `contains` on a container field (the field's type) or a record field
+    (untyped);
+  - the others: the field's type; each value of `in` and `range` has that type;
+  - each value of `overlap`: the item type of the array field (`str` for `list[str]`);
+  - an expression in place of the values (`disciplines__overlap=Value(["Lead"])`): the type of the expression on the
+    left;
 - a field value of `Create`, each row of `BulkCreate`, `Save`, `Update` and the defaults of `GetOrCreate` and
-  `UpdateOrCreate`: the field's type; the primary key of
-  `Save` and `DeleteInstance`: the primary key's type;
+  `UpdateOrCreate`: the field's type;
+- the primary key of `Save` and `DeleteInstance`: the primary key's type;
 - `Value(value, output_type=...)`: the `output_type`;
 - a `Value` without `output_type`: the type of its position. A `Case` passes its `output_type`, or else its own
   position's type, to the results of its `When` branches and its `default`; a `Coalesce` passes it to its arguments.
   Other expressions (arithmetic, other functions, conditions) pass no type to their operands.
 
-The type of an expression is its field's type for `F` (against the queried model) and `OuterRef` (against the
-enclosing query's model), the annotation's type for an annotation name, else its `output_type`, else the first known
-type of a `Coalesce` argument or a `Case` result, or the type of the field a one-column `Subquery` selects. The
-combined queries of a [set operation](./query#union-others-all-false) are typed by their own models at the level of
-the combined query: an `OuterRef` in them refers to the query that encloses the combination.
+The type of an expression is, in this order:
+
+- for `F`, the field's type in the queried model; for `OuterRef`, in the enclosing query's model;
+- for an annotation name, the annotation's type;
+- its `output_type`;
+- the first known type of a `Coalesce` argument or a `Case` result;
+- for a one-column `Subquery`, the type of the selected field.
+
+The combined queries of a [set operation](./query#union-others-all-false) are typed by their own models at the level
+of the combined query; an `OuterRef` in them refers to the query that encloses the combination.
 
 ```python
 inner = Query("club.Club").filter(Exact(OuterRef("joined"), "2026-01-01T00:00:00"))
@@ -98,34 +106,34 @@ Update(Query("club.Member"), {"level": Case(When(age__gt=5, then=Value(Level.MAS
 # the Value is encoded as {"value": "master"}, typed by the field level
 ```
 
-A path that ends at a relation (`club=5`) has the type of the target's primary key. A position the schema does not
-type (no schema, a model the schema does not know, a key of a JSON field, an expression without a type) encodes the
-value with the type inferred from it and names that type in the data. A field the schema of a known model does not
-have raises `ValueError`.
+A path that ends at a relation (`club=5`) has the type of the target's primary key. In an untyped position (no
+schema, a model the schema does not know, a key of a JSON field, an expression without a type) the value is encoded
+with its inferred type, named in the data. A field the schema of a known model does not have raises `ValueError`.
 
-Encoding with a type validates the value with the `TypeAdapter`, in pydantic's lax mode: `"12.50"` for a `Decimal`
-field encodes as `"12.50"` and decodes as `Decimal("12.50")`, `"5"` for an `int` field becomes `5`. A value that is not
-valid for its type raises `ValueError`, and so does a float that is NaN or infinite, typed or not, since JSON has no
-form for it. `None` encodes as `{"value": null}` in every position. Values decode by their field's type, so a decoded
-operation equals the original when its values already had their fields' types.
+Encoding with a type validates the value with the `TypeAdapter` in pydantic's lax mode: `"12.50"` for a `Decimal`
+field encodes as `"12.50"` and decodes as `Decimal("12.50")`; `"5"` for an `int` field becomes `5`. `ValueError` is
+raised for a value not valid for its type and for a NaN or infinite float, typed or not (JSON cannot represent it).
+`None` encodes as `{"value": null}` in every position. Values decode by their field's type; a decoded operation
+equals the original when its values had their fields' types.
 
 ## `adorm.schema`
 
 ### `adorm.schema.ModelSchema(label, pk, fields, relations={}, *, orm_names={}, methods={})`
 
-The schema of the model `label`: `fields` maps every concrete field name (a foreign key's column field such as
-`club_id` included) to its type hint, `relations` maps every relation name (forward, reverse and many-to-many) to the
-target model's label, and `pk` names the primary key field. `orm_names` maps a field or relation name to the target
-ORM's name where the two differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)
-does. `methods` maps the [`MethodKey`](#adorm-schema-methodkey) of every driver method of the model's managers to
-its [`MethodSchema`](#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none); a
-[`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) encodes its arguments with
-those types. A frozen dataclass; the mappings are copied into read-only views.
+The schema of the model `label`, a frozen dataclass; the mappings are copied into read-only views.
 
-A label that is not `"app_label.ModelName"` (also among the relation targets), a `pk` that is not one of `fields`, a
-name that is both a field and a relation, an `orm_names` key that is neither and a `methods` key that is not a
-`(manager, "manager" | "queryset", method)` triple raise `ValueError`; a `methods` value that is not a
-`MethodSchema` raises `TypeError`.
+| Field | Contents |
+|---|---|
+| `pk` | the primary key field name |
+| `fields` | every concrete field name, including a foreign key's column field such as `club_id`, to its type hint |
+| `relations` | every relation name (forward, reverse and many-to-many) to the target model's label |
+| `orm_names` | a field or relation name to the target ORM's name where they differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none) |
+| `methods` | the [`MethodKey`](#adorm-schema-methodkey) of every driver method of the model's managers to its [`MethodSchema`](#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none); a [`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) encodes its arguments with those types |
+
+Raises `ValueError` for a label (also a relation target) that is not `"app_label.ModelName"`, a `pk` not in
+`fields`, a name that is both a field and a relation, an `orm_names` key that is neither, and a `methods` key that is
+not a `(manager, "manager" | "queryset", method)` triple; `TypeError` for a `methods` value that is not a
+`MethodSchema`.
 
 ```python
 ModelSchema("club.Payment", "code", {"code": uuid.UUID, "amount": decimal.Decimal}, {"member": "club.Member"})
@@ -145,10 +153,10 @@ The type of a key of `ModelSchema.methods`: `tuple[str, str, str]`, the ORM mana
 
 ### `adorm.schema.MethodSchema(positional=(), keyword={}, var_positional=None, var_keyword=None)`
 
-The parameter types of a driver method (the parameters after `self`). `positional` holds the types of the
-parameters that take positional arguments, in order; `keyword` the types of those that take keyword arguments, by
-name; `var_positional` and `var_keyword` the types of `*args` and `**kwargs`. `None` is a parameter without a type,
-whose values are encoded with their inferred type. A frozen dataclass.
+The parameter types of a driver method, after `self`; a frozen dataclass. `positional`: the types of the
+parameters that take positional arguments, in order. `keyword`: the types of those that take keyword arguments, by
+name. `var_positional`, `var_keyword`: the types of `*args` and `**kwargs`. `None` marks an untyped parameter, whose
+values are encoded with their inferred type.
 
 | Method | Returns |
 |---|---|
@@ -177,12 +185,15 @@ earlier one of the same label; a value that is not a `ModelSchema` raises `TypeE
 
 The type hint of the field at `path` (the segments of a field path) from the model `label`, resolved as
 [`resolve_lookup()`](./lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) resolves a field path.
-Every segment but the last is a relation, until a JSON or record field, whose following segments are keys inside its
-value; `pk` stands for the primary key at any segment, and a path that ends at a relation resolves to the target's
-primary key type. `None` when `source` is `None`, does not know a model on the way, or the path continues into a JSON
-field's value. A segment that is neither a field nor a relation of a model `source` knows, and segments after a field
-that is neither a relation nor a JSON field, raise
-[`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none).
+
+- Every segment but the last is a relation, until a JSON or record field; the following segments are keys inside
+  its value.
+- `pk` stands for the primary key at any segment.
+- A path that ends at a relation resolves to the target's primary key type.
+- `None` when `source` is `None`, does not know a model on the way, or the path continues into a JSON field's value.
+- A segment that is neither a field nor a relation of a model `source` knows, and segments after a field that is
+  neither a relation nor a JSON field, raise
+  [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none).
 
 ```python
 resolve_field_type(schema, "club.Member", ["club", "name"])   # str
@@ -196,13 +207,14 @@ resolve_field_type(schema, "club.Guest", ["nickname"])        # None (a model th
 
 ### `adorm.codec.encode_value(value, hint=None)`
 
-`value` encoded with the type `hint` as `{"value": ...}`, or with its inferred type as `{"type": ..., "value": ...}`
-when `hint` is `None` or `Any`. `bytes` are base64 strings at any depth of `Annotated`, unions and generic containers
-in the hint. Bytes inside a pydantic model, dataclass or `TypedDict` follow that type's config: with
-`ser_json_bytes="base64"` and `val_json_bytes="base64"` they are base64, without it UTF-8 text. Raises `ValueError`
-when the value is not valid for `hint`, contains NaN or infinity, or holds non-UTF-8 bytes in such a type without
-the base64 config; `TypeError` when an untyped value's type is not in `TYPES`, a list, tuple, set, frozenset or a
-dict with string keys of such values.
+`value` encoded with the type `hint` as `{"value": ...}`, or, when `hint` is `None` or `Any`, with its inferred type
+as `{"type": ..., "value": ...}`. `bytes` are base64 strings at any depth of `Annotated`, unions and generic
+containers in the hint. Bytes inside a pydantic model, dataclass or `TypedDict` are base64 with
+`ser_json_bytes="base64"` and `val_json_bytes="base64"` in that type's config, else UTF-8 text.
+
+Raises `ValueError` when the value is not valid for `hint`, contains NaN or infinity, or holds non-UTF-8 bytes in
+such a type without the base64 config. Raises `TypeError` when an untyped value is not of a type in `TYPES`, nor a
+list, tuple, set, frozenset or dict with string keys of such values.
 
 ```python
 encode_value(decimal.Decimal("1.50"), decimal.Decimal)   # {"value": "1.50"}
@@ -220,15 +232,14 @@ valid for its type, or typed data without `hint`.
 ### `adorm.codec.TYPES`
 
 The scalar types an untyped value may have, by type name, checked in this order: `bool`, `int`, `float`, `str`,
-`decimal`, `datetime`, `date`, `time`, `timedelta`, `uuid`, `bytes`. `bool` comes before `int`, so `True` and `1`
-keep their types, as they do in node equality.
+`decimal`, `datetime`, `date`, `time`, `timedelta`, `uuid`, `bytes`. `True` and `1` keep their types, as in node
+equality.
 
 ### `adorm.codec.type_name(tp)`
 
 The name of a type in `TYPES`, or of `list`, `tuple`, `set`, `frozenset` or `dict`; any other type raises
-`TypeError`. Node `output_type` values are encoded with it, so an `output_type` must be one of these types: the
-constructors of `Value`, `CombinedExpression`, `Func` (and its subclasses), `Case` and `Subquery` raise `TypeError`
-for any other.
+`TypeError`. Node `output_type` values are encoded with it. The constructors of `Value`, `CombinedExpression`, `Func`
+and its subclasses, `Case` and `Subquery` raise `TypeError` for an `output_type` of another type.
 
 ### `adorm.codec.type_from_name(name)`
 
@@ -236,15 +247,15 @@ The type `type_name()` names; an unknown name raises `ValueError`.
 
 ### `adorm.codec.adapter_for(hint)`
 
-The cached `TypeAdapter` values of type `hint` are encoded and decoded with (with `bytes` as base64, as for
-`encode_value()`).
+The cached `TypeAdapter` that encodes and decodes values of type `hint`, with `bytes` as base64 as in
+`encode_value()`.
 
 ### `adorm.codec.node_name(cls)`
 
 The name a node class is encoded under: `lookup.<lookup name>` for a registered lookup, the class name for adorm's
-own nodes, and `<module>.<qualified name>` for any other class. Decoding finds the class among the imported
-subclasses of `Node`, so a custom function or lookup must be imported on the decoding side; a name that matches more
-than one class raises `ValueError`.
+own nodes, `<module>.<qualified name>` for any other class. Decoding looks the name up among the imported subclasses
+of `Node`; a custom function or lookup must be imported on the decoding side. A name that matches more than one
+class raises `ValueError`.
 
 ```python
 node_name(Exact)       # "lookup.exact"
@@ -258,17 +269,17 @@ node_name(Reverse)     # "myapp.functions.Reverse"
 
 ### `adorm.codec.decode_node(data, schema=None)`
 
-The node `encode_node()` encoded with the same `schema`. It rebuilds nodes without calling their constructors and
-checks what the constructors check: field paths, model labels, connectors, truncation kinds, `ForUpdate` options,
-the types of a query's attributes, the kinds of child nodes (a `Q`'s children and a `When`'s condition are
-conditions, a `Case` holds `When` nodes, a `Subquery` a `Query`, a lookup's left-hand side is an expression), the
-flags of `OrderBy` and aggregates and the number of a function's arguments. Raises `ValueError` for malformed data,
-an unknown node name or a node its constructor would refuse.
+The node `encode_node()` encoded with the same `schema`. Nodes are rebuilt without calling their constructors, with
+the constructors' checks: field paths, model labels, connectors, truncation kinds, `ForUpdate` options, the types of
+a query's attributes, the kinds of child nodes (a `Q`'s children and a `When`'s condition are conditions, a `Case`
+holds `When` nodes, a `Subquery` a `Query`, a lookup's left-hand side is an expression), the flags of `OrderBy` and
+aggregates, and the number of a function's arguments. Raises `ValueError` for malformed data, an unknown node name
+or a node its constructor refuses.
 
 ### `adorm.codec.Encoder(schema)`
 
-Encodes the nodes and operands of one top-level value, resolving field types against `schema`. Operations use it in
-`to_dict()`; a custom operation uses it the same way:
+Encodes the nodes and operands of one top-level value, resolving field types against `schema`. `to_dict()` of
+operations, custom ones included, uses it:
 
 | Member | Meaning |
 |---|---|
@@ -282,6 +293,5 @@ Encodes the nodes and operands of one top-level value, resolving field types aga
 
 ### `adorm.codec.Decoder(schema)`
 
-Decodes what `Encoder` produced; `schema` must type values as it did when they were encoded. It has the members of
-`Encoder`, with `node(data, hint=None)` and `operand(data, hint=None, *, sequence=False)` decoding instead of
-encoding.
+Decodes what `Encoder` produced; `schema` must type values as the encoding schema did. It has the members of
+`Encoder`; `node(data, hint=None)` and `operand(data, hint=None, *, sequence=False)` decode.

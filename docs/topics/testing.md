@@ -1,7 +1,7 @@
 # Testing
 
-Code that uses adorm is tested with Django's test classes as they are. While Django's test environment is set up
-(Django's test runner, its parallel workers, pytest-django), the [Django driver](/topics/django-driver) looks for the
+Code that uses adorm is tested with Django's test classes unchanged. While Django's test environment is set up
+(Django's test runner, its parallel workers, pytest-django), the [Django driver](/topics/django-driver) looks up the
 test's database connection whenever a slot opens a connection:
 
 | Test | Slots |
@@ -9,13 +9,13 @@ test's database connection whenever a slot opens a connection:
 | `TestCase` (pytest-django's `django_db`) | share the test's connection: they see the test's data, and everything they write is rolled back with the test |
 | `TransactionTestCase` (`django_db(transaction=True)`) | open connections of their own to the process's test database, as in production |
 
-No setting, base class or test runner is needed; [`adorm.testing.django`](/ref/testing) holds the parts.
+No setting, base class or test runner is needed; the parts are in [`adorm.testing.django`](/ref/testing).
 
 ## Inside a `TestCase`
 
-The pool works as configured, with several slots, but every slot's connection is the test's connection. A slot holds
-it for one call at a time: an operation, a `BEGIN`, a `COMMIT`. Flows take turns on it, so concurrent operations
-work, and the data of `setUpTestData()`, of the test and of adorm's writes is the same data:
+The pool works as configured, with several slots, and every slot's connection is the test's connection. A slot holds
+it for one call at a time (an operation, a `BEGIN`, a `COMMIT`); flows take turns on it. Concurrent operations work,
+and `setUpTestData()`, the test and adorm's writes see the same data:
 
 ```python
 import asyncio
@@ -46,23 +46,25 @@ class MemberTests(TestCase):
         assert counts == [1] * 10
 ```
 
-An operation outside a transaction runs in a savepoint of its own: one that fails, an `IntegrityError` for example,
-leaves the test's transaction usable, as it leaves nothing behind in production.
+An operation outside a transaction runs in a savepoint of its own, so a failing one (an `IntegrityError`, for
+example) leaves the test's transaction usable.
 
-Django ORM code, of the test or of the code under test, uses the same connection from its own thread
-(`sync_to_async()`). Each of its statements takes a turn on the connection as an operation outside a transaction does,
-without adorm's connection options. While an adorm transaction is open, a statement of Django code that does not run
-inside the transaction's context raises `TransactionOverlapError`; one that does joins the transaction's savepoint and
-is rolled back with it. An `atomic()` block of Django code spans several statements, between which slots take turns;
-run such a block while no adorm operation of the test is running.
+Django ORM code of the test or of the code under test uses the same connection from its own thread
+(`sync_to_async()`):
+
+- Each statement takes a turn on the connection like an operation outside a transaction, without adorm's connection
+  options.
+- While an adorm transaction is open, a Django statement outside the transaction's context raises
+  `TransactionOverlapError`; one inside it joins the transaction's savepoint and is rolled back with it.
+- A Django `atomic()` block spans several statements, and slots take turns between them. Run such a block while no
+  adorm operation of the test is running.
 
 ## Transactions in a `TestCase`
 
 An `atomic()` block is a savepoint in the test's transaction. Its commit makes its writes visible to the rest of the
-test, its rollback undoes them, and the test's end undoes everything. adorm's `on_commit()` callbacks run after its
-commit, as they do in production. Django's `on_commit()` callbacks (registered by a `save()` override or a signal
-receiver) stay with the test's transaction, as those of Django's own nested `atomic()` blocks do, so
-`captureOnCommitCallbacks()` sees them unchanged:
+test, its rollback undoes them, and the end of the test undoes everything. adorm's `on_commit()` callbacks run after
+its commit. Django's `on_commit()` callbacks (registered by a `save()` override or a signal receiver) stay with the
+test's transaction, like those of Django's nested `atomic()` blocks, and `captureOnCommitCallbacks()` sees them:
 
 ```python
 def test_welcome_mail(self):
@@ -82,10 +84,10 @@ async def test_transfer(self):
     assert (await Account.objects.get(pk=account.pk)).balance == account.balance     # rolled back
 ```
 
-One connection cannot isolate transactions from each other. A transaction is therefore exclusive: while one is open,
-a transaction or an operation outside a transaction that another flow starts raises
-[`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror). What runs inside the open transaction's
-context, including tasks created inside the block and transactions of other sessions, nests in it and runs:
+One connection cannot isolate transactions, so a transaction is exclusive. While one is open, a transaction or an
+operation outside a transaction started by another flow raises
+[`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror). Work inside the open transaction's context
+nests in it and runs, including tasks created inside the block and transactions of other sessions:
 
 ```python
 async with adorm.atomic():                               # session ("default", "default")
@@ -103,32 +105,35 @@ async with adorm.atomic():
         await task                                       # its first operation raises
 ```
 
-Nested work belongs to the outer transaction's savepoint: when the outer transaction rolls back, the nested work is
-rolled back too, also that of another session, which production commits on its own connection. While a transaction
-begun inside it is open, the outer transaction cannot run operations: they would run inside the inner transaction's
-savepoint, so they raise `TransactionOverlapError`. A transaction that ends while a transaction begun inside it is
-still open (a task that outlives the block), or whose slot closes then, rolls back both and raises
-`TransactionOverlapError`; the inner transaction raises it on its next operation.
+- Nested work belongs to the outer transaction's savepoint and rolls back with it, also the work of another session,
+  which production commits on its own connection.
+- While a transaction begun inside it is open, an operation of the outer transaction raises
+  `TransactionOverlapError`: it would run inside the inner transaction's savepoint.
+- A transaction that ends, or whose slot closes, while a transaction begun inside it is open (a task that outlives
+  the block) rolls back both and raises `TransactionOverlapError`; the inner transaction raises it on its next
+  operation.
 
-A test that needs concurrent transactions to be isolated (two flows racing for a row, a lock that one flow waits for)
-uses `TransactionTestCase`.
+A test that needs isolated concurrent transactions (two flows racing for a row, a lock that one flow waits for) uses
+`TransactionTestCase`.
 
 ## Failures and cancellation
 
-A failed operation inside a transaction leaves PostgreSQL's transaction failed, and on a shared connection that would
-fail every other flow too. The slot rolls the failed transaction back to its innermost savepoint at once; the
-transaction itself refuses further operations until it, or that savepoint, is rolled back, as it does in production.
+A failed operation leaves PostgreSQL's transaction failed, which on the shared connection would fail every flow. The
+slot rolls the failed transaction back to its innermost savepoint at once. The adorm transaction refuses further
+operations until it, or that savepoint, is rolled back, as in production.
 
-Cancelling a flow while its operation runs cancels the statement on the test's connection and rolls back to the
-operation's savepoint; cancelling it while it waits for its turn ends the wait without running anything. Either way the
-other flows go on. A slot that aborts an abandoned transaction ([`commit_timeout`](/topics/pool#slot-lifecycle)) rolls
-back its savepoint and frees the connection for the next transaction.
+- Cancelling a flow while its operation runs cancels the statement on the test's connection and rolls back to the
+  operation's savepoint.
+- Cancelling it while it waits for its turn ends the wait; nothing runs.
+
+The other flows continue in both cases. A slot that aborts an abandoned transaction
+([`commit_timeout`](/topics/pool#slot-lifecycle)) rolls back its savepoint and frees the connection for the next
+transaction.
 
 ## Connection options and profile hooks
 
-[Connection options](/topics/options) stay per slot as in production: each slot's options are set with `SET LOCAL`
-before each of its operations, and the options another slot set are reset, so they never leak from one flow to another
-or out of a transaction.
+[Connection options](/topics/options) are per slot: a slot's options are set with `SET LOCAL` before each of its
+operations and the options another slot set are reset. They do not leak between flows or out of a transaction.
 
 ```python
 with adorm.connection_options(statement_timeout=2):
@@ -136,15 +141,18 @@ with adorm.connection_options(statement_timeout=2):
 await Member.objects.count()              # runs without one, on whichever slot
 ```
 
-A profile with `on_acquire` or `on_release` hooks cannot share the test's connection: what a hook changes in the
-session, a `SET ROLE` for example, would reach every slot. Neither can a profile with `params` that differ from the
-alias's `DATABASES` entry, or with a `connect` hook. The first operation of such a profile raises `NotSupportedError`;
-tests of such profiles use `TransactionTestCase`.
+These profiles cannot share the test's connection:
+
+- a profile with `on_acquire` or `on_release` hooks: a session change such as `SET ROLE` would reach every slot;
+- a profile with `params` that differ from the alias's `DATABASES` entry;
+- a profile with a `connect` hook.
+
+The first operation of such a profile raises `NotSupportedError`; test such profiles with `TransactionTestCase`.
 
 ## Inside a `TransactionTestCase`
 
-The slots open connections of their own to the process's test database. Transactions are real transactions,
-isolated from each other, and commit; the test case empties the tables afterwards.
+The slots open connections of their own to the process's test database. Transactions are isolated from each other
+and commit; the test case empties the tables afterwards.
 
 ```python
 from django.test import TransactionTestCase
@@ -156,18 +164,18 @@ class RaceTests(TransactionTestCase):
         assert sum(isinstance(r, adorm.IntegrityError) for r in results) == 1
 ```
 
-The [native PostgreSQL driver](/topics/postgresql-driver) works here as anywhere; inside a `TestCase` it raises
-`NotSupportedError`, since its own connection could neither see nor roll back the test's transaction.
+The [native PostgreSQL driver](/topics/postgresql-driver) works in a `TransactionTestCase`. Inside a `TestCase` it
+raises `NotSupportedError`: its own connection can neither see nor roll back the test's transaction.
 
-The test case's `flush` deletes the content type rows and Django's `post_migrate` creates them again with other ids;
-both drivers clear [`adorm.content_types`](/ref/models#adorm-contenttypes) on that signal, so a content type id read
-in one test is not used in the next.
+The test case's `flush` deletes the content type rows and Django's `post_migrate` creates them again with other ids.
+Both drivers clear [`adorm.content_types`](/ref/models#adorm-contenttypes) on that signal, so a content type id read in
+one test is not used in the next.
 
 ## Waiting until an operation is in the database
 
-A race or cancellation test needs to know that a flow's operation has reached the database, or that it waits there for
-a lock another flow holds, before it releases the lock, cancels the flow or starts a competitor.
-[`adorm.testing`](/ref/testing#waiting-for-the-database) answers both without polling the database by hand:
+[`adorm.testing`](/ref/testing#waiting-for-the-database) waits until a flow's operation has reached the database, or
+waits there for a lock another flow holds. A race or cancellation test uses it before it releases the lock, cancels
+the flow or starts a competitor:
 
 | Helper | Returns once |
 |---|---|
@@ -175,11 +183,12 @@ a lock another flow holds, before it releases the lock, cancels the flow or star
 | `wait_for_lock(task)` | an operation of `task` waits for a lock in the database; the result names the sessions that hold it |
 | `running_operations(task)` | at once: the operations of `task` running now |
 
-`task` is the task that awaits the operation, also when it runs inside a transaction; `session=` selects by session
-instead, and without either any operation counts. An operation the flow awaits through `asyncio.gather()`, a
-`TaskGroup` or, on Python 3.11, `asyncio.wait_for()` runs in a child task and does not match the flow's task: select it
-with `session=`. Both waits raise `RuntimeError` when the task finishes first, so a
-flow that did not block at all fails the test at once, and `TimeoutError` after `timeout` seconds (default 10).
+- `task` is the task that awaits the operation, also inside a transaction. `session=` selects by session instead;
+  without either, any operation counts.
+- An operation awaited through `asyncio.gather()`, a `TaskGroup` or, on Python 3.11, `asyncio.wait_for()` runs in a
+  child task and does not match the flow's task: select it with `session=`.
+- Both waits raise `RuntimeError` when the task finishes first, so a flow that did not block fails the test at once,
+  and `TimeoutError` after `timeout` seconds (default 10).
 
 ```python
 from adorm.testing import wait_for_lock
@@ -213,18 +222,20 @@ class RaceTests(TransactionTestCase):
             await rename
 ```
 
-`wait_for_lock()` reads the database sessions of the selected operations through a monitor connection of the driver's
-own ([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)), opened for the wait and closed afterwards; the
-Django and native PostgreSQL drivers read `pg_stat_activity`. It works in a `TestCase` too, where the slots' statements
-share the test's connection: a statement waits there for a lock held by a connection of the test's own. A statement
-that waits for the shared connection while another slot's statement holds it has not reached the database: neither
-helper reports it until it holds the connection.
-Both helpers work on the demo's memory driver too; `wait_for_operation()` needs no database access and works on every
-driver.
+`wait_for_lock()` reads the database sessions of the selected operations through the driver's monitor connection
+([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)), opened for the wait and closed afterwards. The
+Django and native PostgreSQL drivers read `pg_stat_activity`.
+
+- In a `TestCase` the slots' statements share the test's connection; a statement there waits for a lock held by a
+  connection the test opened itself.
+- A statement waiting for the shared connection while another slot's statement holds it has not reached the database;
+  neither helper reports it until it holds the connection.
+- Both helpers work on the demo's memory driver. `wait_for_operation()` needs no database access and works on every
+  driver.
 
 ## pytest
 
-pytest-django sets Django's test environment up, so the same holds there:
+pytest-django sets up Django's test environment, so the same applies:
 
 ```python
 import pytest
@@ -241,16 +252,18 @@ async def test_race():
     ...
 ```
 
-With pytest-asyncio the event loop runs on the test's own thread; with Django's async test methods it runs on a thread
-of its own while the test's thread waits. adorm finds the test's connection in both cases
-([`find_test_database()`](/ref/testing#adorm-testing-django-find-test-database-alias)), the `direct` Django driver included.
+With pytest-asyncio the event loop runs on the test's thread; with Django's async test methods it runs on its own
+thread while the test's thread waits. adorm finds the test's connection in both cases, also with the `direct` Django
+driver ([`find_test_database()`](/ref/testing#adorm-testing-django-find-test-database-alias)).
 
 ## Parallel runs and pools across tests
 
-`manage.py test --parallel` runs each worker with its own clone of the test database; each worker's slots use that
-worker's database. A pool belongs to its event loop: Django's async test methods and pytest-asyncio's default
-function-scoped loop give each test a loop, and the default router's pools close with it. A pool that outlives its test
-(a session-scoped loop) does not reuse a slot opened in a `TestCase` test in the next test: the slot reports itself
-unusable once that test has ended, and the next request opens a slot for the current test. A slot opened outside a
-`TestCase` (a `TransactionTestCase`) stays usable in later tests of that kind and reports itself unusable while a
-`TestCase` test runs.
+`manage.py test --parallel` gives each worker its own clone of the test database; the worker's slots use it.
+
+A pool belongs to its event loop. Django's async test methods and pytest-asyncio's default function-scoped loop give
+each test a loop, and the default router's pools close with it. When a pool outlives its test (a session-scoped loop):
+
+- a slot opened in a `TestCase` test reports itself unusable once that test has ended, and the next request opens a
+  slot for the current test;
+- a slot opened outside a `TestCase` (in a `TransactionTestCase`) stays usable in later tests of that kind and reports
+  itself unusable while a `TestCase` test runs.

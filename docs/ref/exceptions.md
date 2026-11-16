@@ -1,17 +1,12 @@
 # Exceptions
 
-::: info Status
-The installed version provides the exception classes, `wrap_driver_error`, the [driver contract](/ref/drivers),
-whose connections raise these exceptions, the [pool and router](/ref/pool), [`atomic()`](/ref/transactions),
+adorm's exceptions are modelled on Django's. They are raised by the connections of the
+[driver contract](/ref/drivers), the [pool and router](/ref/pool), [`atomic()`](/ref/transactions),
 [`adorm.timeout()`](/ref/options#adorm-timeout-delay), the [Django driver](/topics/django-driver) and the
-[native PostgreSQL driver](/topics/postgresql-driver).
-:::
-
-adorm has its own exceptions, modelled on Django's. Applications catch adorm's classes, never the target ORM's or
-the database library's: a driver converts the errors it gets with
-[`wrap_driver_error`](#adorm-exceptions-wrap-driver-error-exc-details-none). Every class in the tree below is importable from
-`adorm` and from `adorm.exceptions`; `ModelExceptionsMixin`, `wrap_driver_error` and `TimeoutPhase` only from
-`adorm.exceptions`.
+[native PostgreSQL driver](/topics/postgresql-driver). A driver converts the errors of the target ORM and the
+database library with [`wrap_driver_error`](#adorm-exceptions-wrap-driver-error-exc-details-none), so applications
+catch only adorm's classes. Every class in the tree below is importable from `adorm` and from `adorm.exceptions`;
+`ModelExceptionsMixin`, `wrap_driver_error` and `TimeoutPhase` only from `adorm.exceptions`.
 
 ```text
 AdormError
@@ -74,9 +69,8 @@ A query that expects one object found several. Base class of every model's `Mult
 
 ### Per-model exceptions
 
-Every model class has its own `DoesNotExist` and `MultipleObjectsReturned`, as in Django. A model's exceptions
-derive from its parent model's exceptions, so `except Member.DoesNotExist` also catches `Coach.DoesNotExist` when
-`Coach` subclasses `Member`.
+Every model class has its own `DoesNotExist` and `MultipleObjectsReturned`, as in Django. They derive from the
+parent model's: `except Member.DoesNotExist` also catches `Coach.DoesNotExist` when `Coach` subclasses `Member`.
 
 ```python
 try:
@@ -98,8 +92,8 @@ except adorm.ObjectDoesNotExist:          # any model
 
 Adds the two classes to every subclass in `__init_subclass__`; `Model` inherits it. Their
 `__qualname__` is `<Model>.DoesNotExist` in the model's module, so they pickle when the model is defined at module
-level. A class that defines `DoesNotExist` or `MultipleObjectsReturned` itself keeps its own; the class must then
-derive from `ObjectDoesNotExist` or `MultipleObjectsReturned` for subclasses to inherit from it.
+level. A class that defines `DoesNotExist` or `MultipleObjectsReturned` itself keeps its own; subclasses inherit from
+it only when it derives from `ObjectDoesNotExist` or `MultipleObjectsReturned`.
 
 ```python
 from adorm.exceptions import ModelExceptionsMixin
@@ -136,9 +130,8 @@ Data failed validation. Mirrors `django.core.exceptions.ValidationError`. `messa
 
 Iterating a dict error yields `(field, messages)` pairs; iterating any other yields the messages.
 
-The drivers raise Django's validation errors with each error's `message`, `code` and `params`, so code can act on
-the code without parsing the text. An instance's errors (`full_clean()`, a `save()` that validates) form a dict error
-keyed by the operation model's adorm field names (see
+The drivers raise Django's validation errors with each error's `message`, `code` and `params`. An instance's errors
+(`full_clean()`, a `save()` that validates) form a dict error keyed by the operation model's adorm field names (see
 [`full_clean()`](/ref/models#full-clean-exclude-none-validate-unique-true-validate-constraints-true)); a value error,
 such as an invalid UUID, stays a single error.
 
@@ -164,7 +157,7 @@ The database errors follow PEP 249, as Django's `django.db` errors do. Each one 
 | `original` | the exception the driver got from its ORM or database library, or `None` |
 | `sqlstate` | the five-character SQLSTATE code the database reported, or `None` |
 
-The original exception is also the `__cause__`, so a traceback shows both.
+The original exception is also the `__cause__`.
 
 ```python
 try:
@@ -187,8 +180,8 @@ An error of the database interface rather than of the database, such as using a 
 
 ### `adorm.DatabaseError`
 
-An error of the database. **An error adorm does not recognise becomes a `DatabaseError`**, with the driver's
-exception in `original`.
+An error of the database. An error adorm does not recognise becomes a `DatabaseError`, with the driver's exception
+in `original`.
 
 ```python
 try:
@@ -206,9 +199,8 @@ A value is invalid for its column: out of range, too long, wrong format, divisio
 The database failed to perform the operation: failed authentication, missing database, lost connection, statement
 cancelled by `statement_timeout`, serialization failure, a deadlock between database transactions, lock not
 available. An `OSError` from the driver, such as an unknown host or a connect timeout, also becomes an
-`OperationalError`. A deadlock the database
-detects is an `OperationalError`; `DeadlockError` (see [Executor errors](#executor-errors)) is a different
-condition, between slots of adorm's pool.
+`OperationalError`. [`DeadlockError`](#executor-errors) is a deadlock between slots of adorm's pool, not one the
+database detects.
 
 ```python
 for attempt in range(3):
@@ -224,7 +216,7 @@ for attempt in range(3):
 ### `adorm.IntegrityError(message=None, *, constraint_name=None, table_name=None, schema_name=None, columns=(), values=(), detail=None, model=None, fields=(), **kwargs)`
 
 A constraint was violated: unique, foreign key, not null, check, exclusion (SQLSTATE class `23`). Besides `original`
-and `sqlstate` it describes the violation, with the same values from every driver over PostgreSQL:
+and `sqlstate` it describes the violation; every driver over PostgreSQL gives the same values:
 
 | Attribute | Value |
 |---|---|
@@ -238,8 +230,7 @@ and `sqlstate` it describes the violation, with the same values from every drive
 | `fields` | the adorm field names of `columns` on `model`, in their order; a column that is no field (an index expression) is left out |
 | `key` | property: `dict(zip(columns, values))`, `{}` when `values` is empty |
 
-What is not known is `None`, or `()` for `columns`, `values` and `fields`. What PostgreSQL reports for each
-violation:
+An unknown value is `None`, or `()` for `columns`, `values` and `fields`. Values by violation:
 
 | Violation | SQLSTATE | `constraint_name` | `columns` | `values` |
 |---|---|---|---|---|
@@ -250,20 +241,21 @@ violation:
 | not null | `23502` | `None` | the column | `()` |
 | check | `23514` | constraint | `()` | `()` |
 
-`columns` and `values` are read from the `Key (…)=(…)` part of `detail`. Quoted column names are unquoted; a column of
-an expression index is the expression as PostgreSQL prints it (`lower((email)::text)`). PostgreSQL does not quote
-values: the value of a key of one column is the whole text, and `values` of a key of several columns is `()` when a
-value contains `", "` and the text splits into more parts than there are columns. `detail` is `None` when PostgreSQL
-leaves the detail out (the user may not read the key's columns). `columns` and `values` are then empty, and so are
-they when PostgreSQL prints the detail in another language (`lc_messages`), except the column of a not-null
-violation, which PostgreSQL reports on its own.
-
-`columns` are database column names: a foreign key's column is `club_id`, a field with `db_column="book_isbn"` is
-`book_isbn`. `fields` are the names adorm models use: `book_id` for that foreign key, `copy_` for a field
-[renamed](/howto/generating-models#name-clashes) from `copy`. The Django and the native PostgreSQL drivers find `model` among the installed
-Django models by their table, a model registered with adorm first; `model` is `None` and `fields` empty when no
-installed model has the table. For the key of a referenced row (a delete or update of the row), `fields` is empty:
-its columns are the referenced table's, which PostgreSQL does not name.
+- `columns` and `values` are read from the `Key (…)=(…)` part of `detail`. Quoted column names are unquoted; a
+  column of an expression index is the expression as PostgreSQL prints it (`lower((email)::text)`).
+- The value of a one-column key is the whole text. PostgreSQL does not quote values, so `values` of a key of several
+  columns is `()` when a value contains `", "` and the text splits into more parts than there are columns.
+- `detail` is `None` when PostgreSQL leaves the detail out (the user may not read the key's columns). `columns` and
+  `values` are then empty, also when PostgreSQL prints the detail in another language (`lc_messages`); the column of
+  a not-null violation is reported in both cases.
+- `columns` are database column names: a foreign key's column is `club_id`, a field with `db_column="book_isbn"` is
+  `book_isbn`. `fields` are the adorm model's names: `book_id` for that foreign key, `copy_` for a field
+  [renamed](/howto/generating-models#name-clashes) from `copy`.
+- The Django and the native PostgreSQL drivers find `model` among the installed Django models by their table,
+  preferring a model registered with adorm. When no installed model has the table, `model` is `None` and `fields`
+  empty.
+- For the key of a referenced row (a delete or update of the row), `fields` is empty: PostgreSQL does not name the
+  referenced table.
 
 ```python
 try:
@@ -292,11 +284,11 @@ references, before any statement runs.
 
 ### `adorm.ProtectedError(message=None, protected_objects=(), **kwargs)`
 
-A delete was refused because `on_delete=PROTECT` references point at the objects being deleted.
-`protected_objects` holds the referencing objects: a driver raises it with
-[`ModelRow`](./operations#adorm-operations-modelrow-model-row) values, which `QuerySet.delete()` and `Model.delete()`
-turn into instances of the registered models (a row of a model that is not registered stays a `ModelRow`). Without
-a SQLSTATE it leaves an open transaction usable: the references are checked before any statement changes data.
+A delete was refused: `on_delete=PROTECT` references point at the objects being deleted. `protected_objects` holds
+the referencing objects. A driver raises it with [`ModelRow`](./operations#adorm-operations-modelrow-model-row)
+values; `QuerySet.delete()` and `Model.delete()` turn them into instances of the registered models, and a row of a
+model that is not registered stays a `ModelRow`. Without a SQLSTATE it leaves an open transaction usable: the references are checked before any statement changes
+data.
 
 ```python
 try:
@@ -307,8 +299,8 @@ except adorm.ProtectedError as exc:
 
 ### `adorm.RestrictedError(message=None, restricted_objects=(), **kwargs)`
 
-A delete was refused because `on_delete=RESTRICT` references point at the objects being deleted.
-`restricted_objects` holds the referencing objects, as `protected_objects` of `ProtectedError` does.
+A delete was refused: `on_delete=RESTRICT` references point at the objects being deleted. `restricted_objects` holds
+the referencing objects, as `protected_objects` of `ProtectedError` does.
 
 ### `adorm.InternalError`
 
@@ -323,20 +315,22 @@ affects a row twice, `RAISE EXCEPTION` in PL/pgSQL (SQLSTATE classes `42`, `21`,
 
 ### `adorm.FieldError(message=None, *, model=None, key=None, original=None, sqlstate=None)`
 
-A field path or lookup key does not resolve on its model, as Django's `FieldError`: a segment that is neither a field
-nor a relation, a segment after a field that is neither a relation nor a JSON field (an unknown lookup name such as
-`first_name__icontain`, a Django transform such as `joined__year`), or a lookup a relation does not take
-(`club__icontains`).
-`model` is the label of the model the failing segment was resolved on and `key` the path or key; a driver that
-reports the error without them leaves them `None`.
+A field path or lookup key does not resolve on its model, as Django's `FieldError`:
 
-[`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) and
-[`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) raise it
-before any operation runs; every driver raises it for a path it cannot resolve while it builds the statement, and
-[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) raises it in place of `NotSupportedError` for an operation that also
-uses a construct the driver lacks. A
-`FieldError` without a SQLSTATE does not affect the [transaction](/topics/transactions#a-failed-operation) it is
-raised in.
+- a segment that is neither a field nor a relation;
+- a segment after a field that is neither a relation nor a JSON field: an unknown lookup name
+  (`first_name__icontain`), a Django transform (`joined__year`);
+- a lookup a relation does not take (`club__icontains`).
+
+`model` is the label of the model the failing segment was resolved on, `key` the path or key; both are `None` when
+the driver reports the error without them.
+
+Raised by [`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) and
+[`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) before any
+operation runs, by every driver for a path it cannot resolve while building the statement, and by
+[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) in place of `NotSupportedError` for an operation
+that also uses a construct the driver lacks. A `FieldError` without a SQLSTATE does not affect the
+[transaction](/topics/transactions#a-failed-operation) it is raised in.
 
 ```python
 try:
@@ -353,7 +347,7 @@ except adorm.FieldError as exc:
 The database or the driver does not support the requested feature (SQLSTATE class `0A`). A driver's capability
 check ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none), [`Capabilities`](/ref/drivers#adorm-drivers-capabilities))
 sets `driver` to the driver's name and `unsupported` to the tuple of names it lacks: an operation kind, construct
-names, connection option names or `"savepoints"`. It raises before anything reaches the connection, so a
+names, connection option names or `"savepoints"`. The check raises before anything reaches the connection; a
 transaction it is raised in stays usable. Otherwise `driver` is `None` and `unsupported` is empty.
 
 ```python
@@ -371,15 +365,20 @@ except adorm.NotSupportedError as exc:
 ### `adorm.SchemaMismatchError(message=None, *, model=None, expected=None, actual=None, driver=None, reason=None)`
 
 A [`ProgrammingError`](#adorm-programmingerror): the adorm model `model` (a label) was generated from another schema
-than the driver's target has. `expected` is the model's schema hash (`_meta.schema_hash`), `actual` the driver's,
-`None` when the target has no such model or the driver could not compute it; `reason` then says which (`"the target
-has no model clubs.Club"`, or the error's type and message). `driver` is the driver's name.
+than the driver's target has.
+
+| Attribute | Value |
+|---|---|
+| `expected` | the model's schema hash (`_meta.schema_hash`) |
+| `actual` | the driver's hash; `None` when the target has no such model or the driver could not compute it |
+| `reason` | when `actual` is `None`, why: `"the target has no model clubs.Club"`, or the error's type and message |
+| `driver` | the driver's name |
+
 [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) raises it for an operation on the mismatched
-model, or on any model the operation reaches ([`operation_models()`](/ref/drivers#adorm-drivers-operation-models-operation)),
-before the operation waits for a slot or reaches the connection; every other model keeps working, and a transaction it
-is raised in stays usable. A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) of
-a model the target lacks raises it too, before any statement. The [schema checks topic](/topics/schema-checks)
-explains when it is raised.
+model or on any model the operation reaches ([`operation_models()`](/ref/drivers#adorm-drivers-operation-models-operation)),
+before the operation waits for a slot or reaches the connection. Other models keep working; a transaction it is
+raised in stays usable. A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) of a
+model the target lacks raises it too, before any statement. See the [schema checks topic](/topics/schema-checks).
 
 ```python
 try:
@@ -410,10 +409,14 @@ except adorm.SchemaCheckError as exc:
 
 ### `adorm.TransactionManagementError`
 
-A transaction was used incorrectly. An [`atomic()`](/ref/transactions) block raises it for an operation after an
-operation of the block failed, at a normal end after such a failure (once it has rolled back, with the failure as
-`__cause__`), when it is entered a second time, and when it would nest in an active transaction that is not an
-`Atomic`. A session raises it for a read of rows with `select_for_update()` outside a transaction.
+A transaction was used incorrectly. An [`atomic()`](/ref/transactions) block raises it:
+
+- for an operation after an operation of the block failed;
+- at a normal end after such a failure, once it has rolled back, with the failure as `__cause__`;
+- when it is entered a second time;
+- when it would nest in an active transaction that is not an `Atomic`.
+
+A session raises it for a read of rows with `select_for_update()` outside a transaction.
 
 ```python
 async with adorm.atomic():
@@ -426,11 +429,13 @@ async with adorm.atomic():
 
 ### `adorm.TransactionClosed`
 
-An operation arrived for a transaction that has already ended, typically from a task that inherited the
-transaction's context and outlived the `atomic()` block. It is also raised by operations after `tx.commit()` or
-`tx.rollback()`, by the requests of a lease whose slot aborted the transaction (its `commit_timeout`), by the
-normal end of a block whose transaction the slot aborted, and by the normal end of a savepoint block that its
-enclosing block closed first.
+An operation arrived for a transaction that has ended. Raised by:
+
+- an operation of a task that inherited the transaction's context and outlived the `atomic()` block;
+- operations after `tx.commit()` or `tx.rollback()`;
+- the requests of a lease whose slot aborted the transaction (its `commit_timeout`);
+- the normal end of a block whose transaction the slot aborted;
+- the normal end of a savepoint block that its enclosing block closed first.
 
 ```python
 async with adorm.atomic():
@@ -445,11 +450,13 @@ except adorm.TransactionClosed:
 
 ### `adorm.TransactionOverlapError`
 
-Two transactions that are not nested overlapped on a connection that cannot isolate them: the test connection that the
-slots share inside Django's `TestCase` ([test mode](/topics/testing)). A transaction, or an operation outside a
-transaction, raises it when it starts while another flow's transaction is open; the end of a transaction raises it
-while a transaction begun inside it is still open, and so does that inner transaction's next operation. A test that
-needs concurrent transactions isolated uses `TransactionTestCase`.
+Two transactions that are not nested overlapped on a connection that cannot isolate them: the test connection the
+slots share inside Django's `TestCase` ([test mode](/topics/testing)). Raised by:
+
+- a transaction, or an operation outside a transaction, that starts while another flow's transaction is open;
+- the end of a transaction while a transaction begun inside it is open, and that inner transaction's next operation.
+
+Tests that need isolated concurrent transactions use `TransactionTestCase`.
 
 ```python
 async def other_flow():
@@ -484,11 +491,13 @@ except adorm.SessionTimeout as exc:
 
 ### `adorm.DeadlockError(message=None, *, held_sessions=(), session=None, timeout=None)`
 
-A `SessionTimeout` raised while the waiting flow already holds slots, so waiting can make it wait on itself. It is
-raised when the acquisition times out while the flow holds a slot, and at once when every slot is held by a flow
-that itself waits for a slot. Inside a transaction, an operation or a nested `atomic()` that waits longer than the
-`acquire_timeout` connection option in effect for a savepoint of another task to end raises it too, with the
-transaction's session in `held_sessions`. `held_sessions` is a tuple of the sessions whose slots the flow holds.
+A `SessionTimeout` raised for a flow that waits for a slot while it holds slots. `held_sessions` is a tuple of the
+sessions whose slots the flow holds. Raised:
+
+- when the acquisition times out while the flow holds a slot;
+- at once when every slot is held by a flow that itself waits for a slot;
+- inside a transaction, when an operation or a nested `atomic()` waits for a savepoint of another task to end longer
+  than the `acquire_timeout` connection option in effect; `held_sessions` holds the transaction's session.
 
 ```python
 audit = adorm.create_session(using="default", session_name="audit")
@@ -503,9 +512,9 @@ async with adorm.atomic():                 # holds a slot of the "default" pool
 
 ### `adorm.OperationTimeout(message=None, *, phase=None, operation=None, session=None, timeout=None)`
 
-An [`adorm.timeout()`](/ref/options#adorm-timeout-delay) block expired. A subclass of `TimeoutError`, so
-`except TimeoutError` catches it too. It is raised from the block's `TimeoutError`, so
-[`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) tells what the interrupted request did.
+An [`adorm.timeout()`](/ref/options#adorm-timeout-delay) block expired. A subclass of `TimeoutError`. It is raised
+from the block's `TimeoutError`; [`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) tells what the
+interrupted request did.
 
 | Attribute | Value |
 |---|---|
@@ -529,8 +538,7 @@ except adorm.OperationTimeout as exc:
 
 ### `adorm.exceptions.wrap_driver_error(exc, details=None)`
 
-Returns the adorm exception for an exception a driver got from its ORM or database library. The caller raises the
-result:
+Returns the adorm exception for an exception a driver got from its ORM or database library; the caller raises it:
 
 ```python
 from adorm.exceptions import AdormError, wrap_driver_error
@@ -550,8 +558,8 @@ The class is chosen in this order:
 1. An adorm exception, and an exception that is not an `Exception` (`asyncio.CancelledError`,
    `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`), is returned unchanged, so a cancelled task stays cancelled.
 2. The SQLSTATE code from the `sqlstate` (asyncpg, psycopg 3) or `pgcode` (psycopg 2) attribute of the exception
-   or of an exception in its `__cause__` chain (Django sets the database library's exception as the cause). When
-   a SQLSTATE is found, its class alone decides, so every driver maps the same database error to the same class:
+   or of an exception in its `__cause__` chain (Django sets the database library's exception as the cause). A
+   SQLSTATE's class alone decides, so every driver maps a database error to the same class:
 
    | SQLSTATE class | Exception |
    |---|---|
@@ -563,8 +571,8 @@ The class is chosen in this order:
    | `08`, `27`, `28`, `2F`, `38`, `39`, `3B`, `3D`, `40`, `53`, `54`, `55`, `57`, `58`, `F*`, `H*` | `OperationalError` |
    | any other | `DatabaseError` |
 
-   The table is psycopg's, except class `3D` (missing database): psycopg reports a failed connection as
-   `OperationalError` without a SQLSTATE, and asyncpg reports it with SQLSTATE `3D000`.
+   The table is psycopg's, except class `3D` (missing database), mapped to `OperationalError`: psycopg reports a
+   missing database as `OperationalError` without a SQLSTATE, asyncpg with SQLSTATE `3D000`.
 
 3. Without a SQLSTATE, a PEP 249 class name in the exception's MRO (`DataError`, `OperationalError`,
    `IntegrityError`, `InternalError`, `ProgrammingError`, `NotSupportedError`, `InterfaceError`, `DatabaseError`),
@@ -573,11 +581,11 @@ The class is chosen in this order:
 5. Anything else becomes `DatabaseError`.
 
 The result carries the exception in `original` and `__cause__`, and the SQLSTATE in `sqlstate`. For an
-`IntegrityError`, `details(exc)` returns the keyword arguments that describe the violation; the drivers over
-PostgreSQL pass [`adorm.drivers.postgresql.integrity_details`](/ref/drivers#adorm-drivers-postgresql-integrity-details-exc),
-without `details` the violation is not described. Errors with data
-of their own, such as Django's `ProtectedError` and `ValidationError`, are converted by the driver before it calls
-`wrap_driver_error`, because their objects must become adorm data.
+`IntegrityError`, `details(exc)` returns the keyword arguments that describe the violation; without `details` the
+violation is not described. The drivers over PostgreSQL pass
+[`adorm.drivers.postgresql.integrity_details`](/ref/drivers#adorm-drivers-postgresql-integrity-details-exc). Errors
+that carry objects, such as Django's `ProtectedError` and `ValidationError`, are converted by the driver itself before
+`wrap_driver_error`, so the objects become adorm data.
 
 ### `adorm.exceptions.TimeoutPhase`
 

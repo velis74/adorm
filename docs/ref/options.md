@@ -1,8 +1,8 @@
 # Connection options and timeouts
 
-Connection options in layers and the client-side time limit of adorm operations, in `adorm.executor.options`.
-`connection_options` and `timeout` are also importable from `adorm`, `Timeout` from `adorm.executor`. The
-[connection options topic](/topics/options) explains how they fit together.
+Layered connection options and the client-side time limit of adorm operations, in `adorm.executor.options`.
+`connection_options` and `timeout` are also importable from `adorm`, `Timeout` from `adorm.executor`. See the
+[connection options topic](/topics/options).
 
 ```python
 import adorm
@@ -31,24 +31,28 @@ from adorm.executor.options import (
 | `idle_in_transaction_session_timeout` | database | as `statement_timeout` | the database, through the driver |
 | any other name | database | what the driver accepts, or `None` for the database's default | the database, through the driver |
 
-The layers, the last one wins: the profile (its pool settings for the adorm options, its
-[`options`](/ref/settings#adorm-connectionprofile) for the database options), the session
-([`Session.set_options()`](/ref/sessions#set-options-options)), then the enclosing `connection_options()` blocks,
-innermost last. A database option is sent only to a driver that declares it in
-[`Capabilities.connection_options`](/ref/drivers#adorm-drivers-capabilities); an operation run with an option its
-driver does not declare raises [`NotSupportedError`](/ref/exceptions) before it takes a slot. An option whose value
-is `None` is not sent and needs no declaration. The [Django driver](/topics/django-driver) and the
+Layers, from first to last; a later layer overrides an earlier one:
+
+1. the profile: its pool settings for the adorm options, its [`options`](/ref/settings#adorm-connectionprofile) for
+   the database options;
+2. the session ([`Session.set_options()`](/ref/sessions#set-options-options));
+3. the enclosing `connection_options()` blocks, innermost last.
+
+A database option is sent only to a driver that declares it in
+[`Capabilities.connection_options`](/ref/drivers#adorm-drivers-capabilities). An operation with an undeclared option
+raises [`NotSupportedError`](/ref/exceptions) before it takes a slot. An option whose value is `None` is not sent and
+needs no declaration. The [Django driver](/topics/django-driver) and the
 [native PostgreSQL driver](/topics/postgresql-driver) declare `statement_timeout`, `lock_timeout` and
 `idle_in_transaction_session_timeout`.
 
 ### `adorm.connection_options(**options)`
 
-A synchronous context manager that sets connection options for its block: it only sets a context variable, so it
-uses `with`, not `async with`. Its options replace those of enclosing blocks, of the session and of the profile with
-the same names; on exit the previous block layer is restored, also on an exception. Tasks created inside the block
-inherit its options, also when they outlive it. `as` binds the block layer in effect inside the block, a read-only
-mapping. Values are checked as in [`check_options()`](#adorm-executor-options-check-options-options); a refused value
-raises `ValueError` and sets nothing.
+A synchronous context manager (`with`, not `async with`) that sets connection options for its block in a context
+variable. Its options override those of the same names in enclosing blocks, the session and the profile. On exit,
+also on an exception, the previous block layer is restored. Tasks created inside the block inherit its options, also
+when they outlive it. `as` binds the block layer in effect inside the block, a read-only mapping. Values are checked
+as in [`check_options()`](#adorm-executor-options-check-options-options); a refused value raises `ValueError` and
+sets nothing.
 
 ```python
 with adorm.connection_options(statement_timeout=5, lock_timeout=2):
@@ -62,9 +66,9 @@ with adorm.connection_options(statement_timeout=60) as layer:
         ...                                       # the database's default
 ```
 
-Outside a transaction the slot sets database options for its connection (`SET`) and resets those a later operation
-does not run with (`RESET`); inside a transaction it sets them for the transaction (`SET LOCAL`). It sends nothing
-when the connection already has the values (see [`Slot`](/ref/pool#adorm-executor-slot)).
+Outside a transaction the slot sets database options with `SET` and resets with `RESET` those a later operation
+does not run with. Inside a transaction it uses `SET LOCAL`. It sends nothing when the connection already has the
+values (see [`Slot`](/ref/pool#adorm-executor-slot)).
 
 ### `adorm.timeout(delay)`
 
@@ -84,13 +88,13 @@ except adorm.OperationTimeout as exc:
 
 ### `adorm.executor.Timeout`
 
-A time limit for the adorm operations of an `async with` block. It wraps `asyncio.timeout()`: on expiry the task
-running the block is cancelled, and the block raises [`OperationTimeout`](/ref/exceptions#adorm-operationtimeout-message-none-phase-none-operation-none-session-none-timeout-none)
-instead of `TimeoutError`, from that `TimeoutError`. Other exceptions, a `TimeoutError` the block raises itself
-included, pass through unchanged.
+A time limit for the adorm operations of an `async with` block, wrapping `asyncio.timeout()`. On expiry the task
+running the block is cancelled and the block raises [`OperationTimeout`](/ref/exceptions#adorm-operationtimeout-message-none-phase-none-operation-none-session-none-timeout-none)
+from the `TimeoutError`. Other exceptions, including a `TimeoutError` the block raises itself, pass through
+unchanged.
 
-The operations of the block, including those of tasks that inherit its context (`asyncio.create_task()`,
-`TaskGroup`, `gather()`), report what they do to it:
+The operations of the block report their state to it, including those of tasks that inherit its context
+(`asyncio.create_task()`, `TaskGroup`, `gather()`):
 
 | `OperationTimeout` attribute | Value |
 |---|---|
@@ -99,12 +103,11 @@ The operations of the block, including those of tasks that inherit its context (
 | `session` | the operation's session |
 | `timeout` | `delay` |
 
-The reported operation is the first one the expiry interrupted (its cancellation reached it), else the oldest one
-still in progress, as for a task that is not awaited inside the block; with none, `phase`, `operation` and `session`
-are `None`. [`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) of the error reports what the
-interrupted operation did, also when it ran in a child task; for an operation still in progress it reports what the
-`CancelledError` of the block reports. Nested
-blocks each see the operations inside them; the block that expired raises.
+The reported operation is the first one the expiry's cancellation reached, else the oldest one in progress (as for
+a task not awaited inside the block). With neither, `phase`, `operation` and `session` are `None`.
+[`cancellation_outcome()`](/ref/pool#adorm-cancellation-outcome-exc) of the error reports what the interrupted
+operation did, also in a child task; for an operation in progress it reports what the block's `CancelledError`
+reports. Nested blocks each see the operations inside them; the block that expired raises.
 
 | Method | Meaning |
 |---|---|
@@ -125,11 +128,15 @@ async with adorm.timeout(10) as t:
 
 ### `adorm.executor.options.check_options(options)`
 
-`options`, a mapping, checked, as a read-only mapping. Raises `ValueError` for a name that is not an identifier, an
-`acquire_timeout` that is not a positive, finite number of seconds, a `commit_timeout` that is neither that nor
-`None`, and a value of `TIMEOUT_OPTIONS` that is neither a number of seconds from 0 to `MAX_TIMEOUT_OPTION` nor
-`None`;
-`TypeError` for anything but a mapping. Other values are checked by the driver that sets them.
+Returns the mapping `options`, checked, as a read-only mapping. Raises `TypeError` for anything but a mapping and
+`ValueError` for:
+
+- a name that is not an identifier;
+- an `acquire_timeout` that is not a positive, finite number of seconds;
+- a `commit_timeout` that is neither that nor `None`;
+- a value of a `TIMEOUT_OPTIONS` option that is neither a number of seconds from 0 to `MAX_TIMEOUT_OPTION` nor `None`.
+
+Other values are checked by the driver that sets them.
 
 ```python
 check_options({"statement_timeout": 5, "work_mem": "64MB"})   # mappingproxy({...})
@@ -152,7 +159,7 @@ checked options. Thread-safe.
 ### `adorm.executor.options.resolve_options(session, pool)`
 
 The [`ResolvedOptions`](#adorm-executor-options-resolvedoptions) in effect in the current context for `session` on
-`pool`: the pool's `acquire_timeout`, `commit_timeout` and `options`, replaced by the session's options, replaced by
+`pool`: the pool's `acquire_timeout`, `commit_timeout` and `options`, overridden by the session's options, then by
 those of the enclosing blocks.
 
 ```python
@@ -182,5 +189,4 @@ value `check_options()` checks as a number of seconds.
 
 ### `adorm.executor.options.MAX_TIMEOUT_OPTION`
 
-`2147483.647`: the largest value of a `TIMEOUT_OPTIONS` option in seconds, PostgreSQL's limit of 2147483647
-milliseconds.
+`2147483.647`: the largest value of a `TIMEOUT_OPTIONS` option in seconds (PostgreSQL's limit of 2147483647 ms).

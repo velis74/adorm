@@ -53,14 +53,17 @@ encoding](./encoding) documents the data and how values are typed.
 
 ### `adorm.Expression`
 
-Base class of expressions. Attributes: `output_type` (the Python type of the result, or `None` when it follows
-from the source; where a constructor takes it, a type [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp)
-names, else `TypeError`; it types the values compared with the expression when it is encoded), `conditional` (true for conditions: `Q`, lookups, `Exists`) and `contains_aggregate` (whether an
-aggregate occurs outside a subquery).
+Base class of expressions.
 
-Arithmetic operators build a [`CombinedExpression`](#adorm-query-combinedexpression-lhs-connector-rhs-output-type-none); a plain operand, a string
-included, becomes a `Value`. A conditional expression combines with `&`, `|` and `~` into a `Q`; on any other
-expression these operators raise `TypeError`.
+| Attribute | Meaning |
+|---|---|
+| `output_type` | the Python type of the result, `None` when it follows from the source; types the values compared with the expression when it is encoded. Where a constructor takes it, it must be a type [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp) names, else `TypeError` |
+| `conditional` | true for conditions: `Q`, lookups, `Exists` |
+| `contains_aggregate` | whether an aggregate occurs outside a subquery |
+
+Arithmetic operators build a [`CombinedExpression`](#adorm-query-combinedexpression-lhs-connector-rhs-output-type-none);
+a plain operand, a string included, becomes a `Value`. `&`, `|` and `~` combine a conditional expression into a `Q`
+and raise `TypeError` on any other expression.
 
 ```python
 F("price") * F("quantity")          # (F('price') * F('quantity'))
@@ -91,11 +94,11 @@ list(F("club__name").constructs())    # ['path.nested']
 
 ### `adorm.OuterRef(name)`
 
-A reference to a field of the outer query, used inside a [`Subquery`](#adorm-subquery-query-output-type-none) or
-[`Exists`](#adorm-exists-query-negated-false). A subclass of `F`. `name` is a field path, or another `OuterRef`:
-`OuterRef(OuterRef("pk"))` refers to the query that encloses the outer query. `levels` counts how many queries out
-the reference goes (`1` for a field path); the Django and PostgreSQL drivers raise `ProgrammingError` when there are not that many
-enclosing queries.
+A reference to a field of the outer query inside a [`Subquery`](#adorm-subquery-query-output-type-none) or
+[`Exists`](#adorm-exists-query-negated-false); a subclass of `F`. `name` is a field path or another `OuterRef`:
+`OuterRef(OuterRef("pk"))` refers to the query that encloses the outer query. `levels` is the number of enclosing
+queries the reference goes out (`1` for a field path); the Django and PostgreSQL drivers raise `ProgrammingError`
+when there are fewer enclosing queries.
 
 ```python
 invoiced = Query("billing.Invoice").filter(member=OuterRef("member"), club=OuterRef(OuterRef("pk")))
@@ -106,13 +109,15 @@ OuterRef(OuterRef("pk")).levels   # 2
 
 ### `adorm.Value(value, output_type=None)`
 
-A literal value; `output_type` optionally names its Python type. Wrapping a node raises `TypeError`. `output_type`
-types the value when the node is encoded and must be a type [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp)
-names; any other type raises `TypeError`. Without it, the value takes the type of its position (a field's value, a
-lookup's right-hand side, a `Case` result or a `Coalesce` argument there). The value is
-copied when the node is built, so changing the caller's list or dict afterwards does not change the node; a value
-that cannot be compared (a `bytearray`, an object without `__hash__` that is not a list, tuple, set or dict) raises
-`TypeError`.
+A literal value. Wrapping a node raises `TypeError`.
+
+- `output_type` types the value when the node is encoded and must be a type
+  [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp) names, else `TypeError`. Without it, the value
+  takes the type of its position: a field's value, a lookup's right-hand side, a `Case` result or a `Coalesce`
+  argument.
+- The value is copied when the node is built; later changes to the caller's list or dict do not affect the node.
+- A value that cannot be compared (a `bytearray`, an object without `__hash__` that is not a list, tuple, set or
+  dict) raises `TypeError`.
 
 ```python
 Concat("first_name", Value(" "), "last_name")
@@ -125,7 +130,7 @@ All rows, as in `Count("*")`.
 ### `adorm.query.CombinedExpression(lhs, connector, rhs, output_type=None)`
 
 `lhs <connector> rhs`. `connector` is `+`, `-`, `*`, `/`, `%` or `^` (power); any other raises `ValueError`. Plain
-operands become `Value`. Arithmetic operators on expressions build it.
+operands become `Value`. Arithmetic operators on expressions return it.
 
 ### `adorm.query.OrderBy(expression, *, descending=False, nulls_first=None, nulls_last=None)`
 
@@ -142,12 +147,10 @@ OrderBy(Lower("name"))
 ### `adorm.Func(*expressions, output_type=None)`
 
 Base class of functions. String arguments are field references; other plain arguments become `Value`. A subclass
-sets `arity` (the exact number of arguments) or `min_args`, and `default_output_type`; a wrong number of arguments
-raises `TypeError`, as does instantiating `Func` itself. `output_type`, here and on aggregates, types the values
-compared with the function when it is encoded and must be a type
-[`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp) names; any other type raises `TypeError`. A subclass
-gets the construct name
-`function.<class name>`, so a function a driver adds is declared like this:
+sets `arity` (the exact number of arguments) or `min_args`, and `default_output_type`. A wrong number of arguments
+raises `TypeError`, as does instantiating `Func`. `output_type`, here and on aggregates, types the values compared
+with the function when it is encoded and must be a type [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp)
+names, else `TypeError`. A subclass has the construct name `function.<class name>`; a function a driver adds:
 
 ```python
 from adorm.query import Exact, Func, Query
@@ -202,8 +205,8 @@ Query("club.Member").annotate(full_name=Concat("first_name", Value(" "), "last_n
 
 ### `adorm.Now()`
 
-The Django and native PostgreSQL drivers give the start time of the statement (`STATEMENT_TIMESTAMP()`), so
-every row of one statement gets the same value.
+On the Django and native PostgreSQL drivers: the start time of the statement (`STATEMENT_TIMESTAMP()`), the same
+value for every row of one statement.
 
 ```python
 Query("club.Activity").filter(starts_at__gte=Now())
@@ -246,8 +249,8 @@ Query("club.Payment").annotate(month=TruncMonth("paid_at")).filter(month__gte=st
 
 ### `adorm.Aggregate(*expressions, distinct=False, filter=None, default=None, output_type=None)`
 
-Base class of aggregates; instantiating it raises `TypeError`. An aggregate takes one argument (a string is a field
-path).
+Base class of aggregates; instantiating it raises `TypeError`. An aggregate takes one argument; a string is a field
+path.
 
 | Argument | Meaning |
 |---|---|
@@ -255,8 +258,8 @@ path).
 | `filter` | a condition (`Q`, a lookup, `Exists`) limiting the aggregated rows; anything else raises `TypeError`; an empty `Q()` is no filter |
 | `default` | the result instead of NULL; a string is a field path. `Count` does not take it |
 
-An aggregate cannot take an aggregate as its argument, nor contain one in `filter` or `default` (`TypeError`); an
-aggregate inside a subquery is allowed.
+An aggregate as the argument, in `filter` or in `default` raises `TypeError`; an aggregate inside a subquery is
+allowed.
 
 #### `default_alias`
 
@@ -299,8 +302,8 @@ Avg("age", distinct=True)
 ### `adorm.When(condition=None, then=None, **lookups)`
 
 A branch of `Case`. The condition is a `Q`, a lookup or `Exists`, keyword lookups, or a condition and keyword
-lookups joined with AND. A missing or non-boolean condition raises `TypeError`, an empty `Q()` `ValueError`. A string `then` is a field path;
-`Value("text")` is a literal string. Attributes: `condition`, `result`.
+lookups joined with AND. A missing or non-boolean condition raises `TypeError`, an empty `Q()` `ValueError`. A
+string `then` is a field path; `Value("text")` is a literal string. Attributes: `condition`, `result`.
 
 ### `adorm.Case(*cases, default=None, output_type=None)`
 

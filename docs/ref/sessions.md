@@ -14,9 +14,9 @@ from adorm.executor import get_runner, Runner, set_runner, TransactionRunner
 
 ### `adorm.create_session(using="default", session_name="default")`
 
-The open session `(using, session_name)`, created when no live object holds that pair; while a session is
-referenced, every call for its pair returns that object. A session nothing references is freed. Both names are non-empty strings (`ValueError` otherwise). Thread-safe: concurrent first calls for one pair
-return one session.
+The session `(using, session_name)`. While a session is referenced, every call for its pair returns that object; a
+session nothing references is freed and the next call creates a new one. Both names are non-empty strings
+(`ValueError` otherwise). Thread-safe: concurrent first calls for one pair return one session.
 
 ```python
 reports = create_session(using="reports", session_name="nightly")
@@ -95,9 +95,9 @@ async with reports.atomic() as tx:
 
 Replaces the session's [connection options](/ref/options), the layer between the profile's options and
 [`connection_options()`](/ref/options#adorm-connection-options-options) blocks; without arguments it removes them.
-They belong to the pair `(using, session_name)`, so a session object created again for the pair has them too.
-Returns the checked options as a read-only mapping. Values are checked as in `connection_options()` (`ValueError`);
-a name the session's driver does not declare raises `NotSupportedError` when an operation runs. Thread-safe.
+They belong to the pair `(using, session_name)`: a session object created again for the pair has them. Returns the
+checked options as a read-only mapping. Values are checked as in `connection_options()` (`ValueError`); a name the
+session's driver does not declare raises `NotSupportedError` when an operation runs. Thread-safe.
 
 ```python
 reports.set_options(statement_timeout=300, acquire_timeout=60)
@@ -111,12 +111,13 @@ The connection options set on the session with `set_options()`, a read-only mapp
 
 #### `async execute(operation)`
 
-Run `operation` and return its result: in this session's transaction active in the current context
-([`active_transaction()`](/ref/transactions#adorm-executor-active-transaction-session)), or else on the
-[runner](#adorm-executor-runner).
-Without a transaction and without a runner it raises [`InterfaceError`](./exceptions). Without a transaction, a read
-of rows (`select`, `get`, `first`, `last`, `in_bulk`) whose query has `select_for_update()` raises `TransactionManagementError`
-before it reaches the runner. Errors of the transaction or the runner propagate unchanged.
+Runs `operation` and returns its result: in this session's transaction active in the current context
+([`active_transaction()`](/ref/transactions#adorm-executor-active-transaction-session)), else on the
+[runner](#adorm-executor-runner). Errors of the transaction or the runner propagate unchanged. Without a transaction:
+
+- without a runner it raises [`InterfaceError`](./exceptions);
+- a read of rows (`select`, `get`, `first`, `last`, `in_bulk`) whose query has `select_for_update()` raises
+  `TransactionManagementError` before it reaches the runner.
 
 ```python
 from adorm.operations import Count
@@ -130,16 +131,17 @@ await reports.execute(Count(Query("club.Member")))
 ### `adorm.BoundModel`
 
 A model class bound to a session: what [`Model.objects`](./models#objects), another
-[manager](./models#adorm-manager-orm-name-none-method-manager-none) of the model and `session.<ModelName>` return. A declared `Manager` is
-a `BoundModel` that is not bound yet; reading it on a model class gives a bound copy of the same class, so the
-methods of a `Manager` subclass are methods of the bound model. Immutable; equal when class, model, session, manager
-name and ORM names are the same; a copy and a deep copy are the same object, and it pickles by model class, manager
-name and session. `BoundModel(model, session)` is a manager without manager logic (no ORM names, plain `QuerySet`
-query sets) and takes a concrete model class and a `Session` (`TypeError` otherwise); the declared managers come from
-`Model.<manager>`, `session.<ModelName>` and [`bind()`](#bind-model-manager-objects).
+[manager](./models#adorm-manager-orm-name-none-method-manager-none) of the model and `session.<ModelName>` return.
 
-Binding takes no slot and includes no transaction: every operation looks up the session's active transaction when
-it runs.
+- A declared `Manager` is an unbound `BoundModel`. Reading it on a model class gives a bound copy of the same class,
+  so the methods of a `Manager` subclass are methods of the bound model.
+- Immutable. Equal when class, model, session, manager name and ORM names are the same. A copy and a deep copy are
+  the same object; it pickles by model class, manager name and session.
+- `BoundModel(model, session)` is a manager without manager logic (no ORM names, plain `QuerySet` query sets) and
+  takes a concrete model class and a `Session` (`TypeError` otherwise). The declared managers come from
+  `Model.<manager>`, `session.<ModelName>` and [`bind()`](#bind-model-manager-objects).
+- Binding takes no slot and holds no transaction: every operation looks up the session's active transaction when it
+  runs.
 
 | Member | Meaning |
 |---|---|
@@ -207,7 +209,7 @@ async with router.slot(session) as lease:
 
 ### `adorm.executor.set_runner(runner)`
 
-Set the `Runner` that `Session.execute()` uses outside a transaction. Returns the previous runner; `None` removes it.
+Sets the `Runner` that `Session.execute()` uses outside a transaction. Returns the previous runner; `None` removes it.
 An object without an `async run(session, operation)` raises `TypeError`.
 
 ```python
@@ -229,5 +231,5 @@ get_runner()          # inside a coroutine: the event loop's default router
 ## Instances
 
 Importing `adorm` installs an [executor resolver](./models#adorm-models-set-executor-resolver-resolver) that returns
-the current session, so an instance without its own executor (one the application built) runs `save()` and relation
+the current session: an instance without its own executor (one the application built) runs `save()` and relation
 loads on the session current when they run. Instances a query set returns keep that query set's session.

@@ -1,19 +1,14 @@
 # Pool and router
 
-::: info Status
-The installed version provides pools, the router, slots and leases, used by [transactions](/topics/transactions)
-and built from [connection profiles](/topics/profiles), with [connection options](/topics/options) and the
-[slot lifecycle](#slot-lifecycle). The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) execute
-reads, writes, row locks and savepoints. Any `Driver` implementation (see [Writing a driver](/howto/writing-a-driver)) works.
-:::
+A **pool** holds the slots of one [connection profile](/topics/profiles). A **slot** is an exclusive channel to one
+driver connection; for a threaded driver (the Django ORM) it also has its own thread. The **router** assigns slots to
+sessions: a session's `using` names the pool. Operations, [transactions](/topics/transactions) and
+[connection options](/topics/options) run on slots of the [Django driver](/topics/django-driver), the
+[native PostgreSQL driver](/topics/postgresql-driver) or any other `Driver` implementation (see
+[Writing a driver](/howto/writing-a-driver)).
 
-A **pool** holds the slots of one connection profile. A **slot** is an exclusive channel to one driver connection;
-for a threaded driver (the Django ORM) it also has its own thread. The **router** assigns slots to the sessions
-that ask for one: a session's `using` names the pool.
-
-`adorm.configure()` is all an application needs: the default router of each event loop creates the pool of a
-profile when a session first names it (see [connection profiles](/topics/profiles)). Pools and routers can also be
-built in code, as on the rest of this page:
+With `adorm.configure()`, the default router of each event loop creates the pool of a profile when a session first
+names it (see [connection profiles](/topics/profiles)). Pools and routers can also be built in code:
 
 ```python
 from dataclasses import dataclass, field
@@ -44,8 +39,8 @@ await Member.objects.count()          # acquires a slot of "default", executes, 
 ## Acquiring a slot
 
 `router.acquire(session)` returns a **lease**: the slot, handed to the current task until `release()`. A request
-takes an idle slot, or opens a new one when the pool's limit allows, or waits in a first-in, first-out queue until
-a lease returns a slot.
+takes an idle slot, opens a new one when the pool's limit allows, or waits in a first-in, first-out queue until a
+lease returns a slot.
 
 ```python
 lease = await router.acquire(create_session("reports", "nightly"))
@@ -55,7 +50,7 @@ finally:
     await lease.release()
 ```
 
-`router.slot(session)` does the same as an `async with` block and records the lease as held by the block's context
+`router.slot(session)` is the same as an `async with` block and records the lease as held by the block's context
 (see [deadlocks](#deadlocks)):
 
 ```python
@@ -65,7 +60,7 @@ async with router.slot(session) as lease:
     await lease.call("commit")
 ```
 
-`router.run(session, operation)` is one operation on a slot of its own, the way an operation outside a transaction
+`router.run(session, operation)` runs one operation on a slot of its own, as an operation outside a transaction
 runs.
 
 When the pool's profile has [hooks](/topics/profiles#hooks), `acquire()` runs `on_acquire` before it returns the
@@ -75,12 +70,14 @@ within the pool's `release_timeout`. A hook that fails takes its slot out of the
 ### Pool size
 
 `max_connections` limits the slots of a pool. With `0`, the default, the pool opens new connections until the
-database refuses one; the driver decides what a refusal is (`Driver.is_refusal()`, by default SQLSTATE class `53`,
-such as PostgreSQL's `too many connections`). After a refusal the request waits for a slot instead of failing, and
-the pool opens no more slots than it had at that moment until a slot leaves the pool. This also applies below a
-non-zero `max_connections`, when the database allows fewer connections than configured. A refusal when the pool has
-no slot at all raises the driver's error. A request whose open was refused keeps its place at the head of the
-queue.
+database refuses one. The driver decides what a refusal is (`Driver.is_refusal()`, by default SQLSTATE class `53`,
+such as PostgreSQL's `too many connections`). After a refusal:
+
+- the request waits for a slot and keeps its place at the head of the queue;
+- the pool opens no more slots than it had at that moment until a slot leaves the pool (`pool.limit`);
+- with no slot in the pool, the driver's error is raised.
+
+The same applies below a non-zero `max_connections` when the database allows fewer connections.
 
 ```python
 pool = Pool(AsyncpgDriver(), profile)          # max_connections=0
@@ -91,35 +88,34 @@ pool.limit                                     # 20
 
 A slot inside a transaction waits at most the lease's `commit_timeout` for the next request of its lease: the
 pool's `commit_timeout` (60 seconds by default, `None` for no limit), or the `commit_timeout`
-[connection option](/topics/options) in effect when the transaction acquired the slot. When none arrives, the slot rolls the transaction back and leaves the pool; the lease is then
-`aborted`, and its requests raise `TransactionClosed`. This frees the slot of a client that is gone.
+[connection option](/topics/options) in effect when the transaction acquired the slot. When none arrives, the slot
+rolls the transaction back and leaves the pool; the lease is then `aborted` and its requests raise
+`TransactionClosed`.
 
 ```python
 pool = Pool(AsyncpgDriver(), profile, commit_timeout=60)
 ```
 
 A driver method that does not return a coroutine fails its request with `InterfaceError`. When the slot's serving
-task itself fails, every queued request fails with `InterfaceError` and the slot leaves the pool on release.
+task fails, every queued request fails with `InterfaceError` and the slot leaves the pool on release.
 
 ## Slot lifecycle
 
-adorm decides how long a connection lives, not the target ORM (Django's `CONN_MAX_AGE` does not apply). Acquiring a
-slot does nothing to its connection: no ping, no reset, no query; the profile's `on_acquire` hook is the only work
-before a lease's first request. The connection's state is kept clean by closing it instead: when a lease ends, the
-slot closes its connection and leaves the pool, and the next request gets a fresh connection, when
+adorm decides how long a connection lives; Django's `CONN_MAX_AGE` does not apply. Acquiring a slot sends no ping,
+reset or query; the profile's `on_acquire` hook is the only work before a lease's first request. When a lease ends,
+the slot closes its connection and leaves the pool, and the next request gets a fresh connection, when
 
 - the session ended without a commit or rollback: its client is gone, a `commit` or `rollback` failed, or a lease
   inside a transaction was released (a transaction the slot aborts after `commit_timeout` leaves the same way);
 - a request failed with a connection error ([`is_connection_lost()`](/ref/drivers#adorm-drivers-driverconnection),
   such as PostgreSQL's `57P01` after `pg_terminate_backend()`), even when the driver still reports the connection
   usable;
-- the connection ran custom SQL, SQL that adorm did not generate, such as a Django signal receiver's
-  `cursor.execute()` ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), also when the transaction committed: that SQL
-  may have changed the connection's state;
-- the connection still listens on a notification channel
-  ([`listening`](/ref/drivers#adorm-drivers-driverconnection)), as after an
-  [`adorm.listen()`](/topics/events#listening-for-notifications) block that did not unlisten: a later lease would
-  receive its notifications;
+- the connection ran SQL that adorm did not generate, such as a Django signal receiver's `cursor.execute()`
+  ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), also when the transaction committed: that SQL may have changed
+  the connection's state;
+- the connection listens on a notification channel ([`listening`](/ref/drivers#adorm-drivers-driverconnection)), as
+  after an [`adorm.listen()`](/topics/events#listening-for-notifications) block that did not unlisten:
+  a later lease would receive its notifications;
 - the connection reports itself unusable, or the lease was released with `discard=True`.
 
 ```python
@@ -141,9 +137,8 @@ async with adorm.atomic():
 ```
 
 An idle slot closes its connection and leaves the pool after `purge_stale_connections_at` seconds (300 by default,
-`None` to keep idle slots until the pool closes). A request takes the idle slot returned last, so under a smaller
-load the slots it no longer needs stay idle and reach that age; a request never takes a slot past it, also when the
-loop is too busy to run the purge on time.
+`None` to keep idle slots until the pool closes). A request takes the idle slot returned last, so slots not needed
+under a smaller load reach that age. A request never takes a slot past that age, even when the purge runs late.
 
 ```python
 pool = Pool(DjangoDriver(), profile, purge_stale_connections_at=60)
@@ -155,10 +150,10 @@ adorm.configure(profiles={...}, pool={"purge_stale_connections_at": 60})       #
 
 ## Requests and events
 
-A lease is a pair of queues, like the reader and writer of an asyncio stream: `lease.requests` takes
-[`Request`](/ref/pool#adorm-executor-request-method-args-request-id-options-none) objects, and `lease.events` delivers what the
-slot sends back that the lease's [event channel](/topics/events) (`lease.channel`) does not interpret itself. The slot runs the requests one at a time, in the order they were put, each in the context of the
-task that put it.
+A lease is a pair of queues. `lease.requests` takes
+[`Request`](/ref/pool#adorm-executor-request-method-args-request-id-options-none) objects; `lease.events` delivers
+what the slot sends back and the lease's [event channel](/topics/events) (`lease.channel`) does not interpret. The
+slot runs the requests one at a time, in the order they were put, each in the context of the task that put it.
 
 ```python
 from adorm.events import CallbackEvent, ErrorEvent, ResultEvent
@@ -181,20 +176,20 @@ a queued request arrives as soon as it is cancelled, ahead of the outcomes of ea
 that awaits `lease.call()` cancels its request the same way; the raised `CancelledError` carries the request's
 [`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome) ([cancellation](/topics/cancellation)).
 
-`lease.call(method, *args)` sends one request and returns its result or raises its error; the channel settles
-the call with the outcome, so it does not appear on `events`. Concurrent calls on one lease queue behind each other. A request that the driver or the slot
+`lease.call(method, *args)` sends one request and returns its result or raises its error; that outcome does not
+appear on `events`. Concurrent calls on one lease queue behind each other. A request that the driver or the slot
 cancels without the caller cancelling it fails with `InterfaceError`.
 
 `release()` waits until every queued request has run, then returns the slot. It completes even when the releasing
-task is cancelled meanwhile, so a cancelled flow does not leak its slot.
+task is cancelled meanwhile.
 
 A request runs from the moment the slot hands it to the driver connection, after its connection options are set,
 until the connection call ends. `slot.running` is that [`RunningRequest`](/ref/pool#adorm-executor-runningrequest):
 the request, the session, the task that sent it and the slot. [`running_requests()`](/ref/pool#adorm-executor-running-requests)
-lists those of the event loop's slots, and [`on_request_started()`](/ref/pool#adorm-executor-on-request-started-callback)
+lists those of the event loop's slots; [`on_request_started()`](/ref/pool#adorm-executor-on-request-started-callback)
 calls a function as each one starts. On a connection that shares its database session with others, as in Django's
-`TestCase`, a running call may still wait for that session; `in_session` tells whether it has it now. The
-[test helpers](/topics/testing#waiting-until-an-operation-is-in-the-database) build on them.
+`TestCase`, a running call may wait for that session; `in_session` tells whether it has it. The
+[test helpers](/topics/testing#waiting-until-an-operation-is-in-the-database) use them.
 
 ```python
 stop = on_request_started(lambda running: print(running.session, running.operation))
@@ -220,9 +215,9 @@ handed to the request just before goes to the next one.
 
 ## Deadlocks
 
-A flow that already holds a slot and waits for another one can wait forever: the slot it needs may be held by a flow
-that waits for the slot it holds. The router reports such waits with `DeadlockError`, a `SessionTimeout` whose
-`held_sessions` lists the sessions of the slots the flow holds.
+A flow that holds a slot and waits for another one waits forever when the slot it needs is held by a flow waiting
+for the slot it holds. The router reports such waits with `DeadlockError`, a `SessionTimeout` whose `held_sessions`
+lists the sessions of the slots the flow holds.
 
 A flow holds a slot when its task acquired an unreleased lease, or when its context holds one: `router.slot()` and
 [`holding(lease)`](/ref/pool#adorm-executor-holding-lease) record the lease in a context variable, so tasks created
@@ -238,11 +233,11 @@ async with router.slot(create_session()):            # holds a slot of "default"
         log.error("holding %s", exc.held_sessions)    # (Session('default', 'default'),)
 ```
 
-When the wait cannot end, the router does not wait for the timeout. The simplest case is a task that holds the only
-slot of a pool through `router.slot()` and asks that pool for another one. In general: every slot of the pool is
-held through `router.slot()` or `router.run()` by tasks that themselves wait for a slot, the pool cannot open
-another one, and the same holds for the pools those tasks wait for. Of these tasks, the newest one that holds a slot
-of such a pool gets `DeadlockError` at once, with its `session` and `timeout`; when it releases its slots, the others
+When the wait cannot end, `DeadlockError` is raised without waiting for the timeout. A wait cannot end when every
+slot of the pool is held through `router.slot()` or `router.run()` by tasks that wait for a slot, the pool cannot
+open another one, and the same holds for the pools those tasks wait for; for example, a task that holds the only slot
+of a pool through `router.slot()` and asks that pool for another one. The newest of these tasks that holds a slot of
+such a pool gets `DeadlockError` at once, with its `session` and `timeout`; when it releases its slots, the others
 proceed.
 
 ```python
@@ -258,8 +253,8 @@ await asyncio.gather(flow(one, two), flow(two, one), return_exceptions=True)
 ```
 
 A flow whose held slot belongs to a task that is not waiting for a slot (for example a parent task that awaits its
-children) waits until the timeout, then gets `DeadlockError`. So does a flow whose slot was taken with
-`router.acquire()`: any task may release that lease, so the router cannot tell that the wait will not end.
+children) gets `DeadlockError` after the timeout. So does a flow whose slot was taken with `router.acquire()`, since
+any task may release that lease.
 
 ## Closing
 

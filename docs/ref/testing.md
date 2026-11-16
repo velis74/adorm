@@ -1,9 +1,9 @@
 # Testing
 
-`adorm.testing` holds helpers that wait until an operation has reached the database or waits there for a lock, defined
-in `adorm.testing.waits`. `adorm.testing.django` is the test mode of the [Django driver](/topics/django-driver): what
-lets adorm run inside Django's `TestCase` and `TransactionTestCase` without changes to the test classes. The
-[testing topic](/topics/testing) shows both in use. The package `adorm.testing` imports no ORM; importing
+`adorm.testing` holds helpers, defined in `adorm.testing.waits`, that wait until an operation has reached the
+database or waits there for a lock. `adorm.testing.django` is the test mode of the
+[Django driver](/topics/django-driver): adorm runs inside Django's `TestCase` and `TransactionTestCase` without changes
+to the test classes. The [testing topic](/topics/testing) shows both in use. `adorm.testing` imports no ORM;
 `adorm.testing.django` imports Django.
 
 ```python
@@ -16,7 +16,7 @@ from adorm.testing.django import find_test_database, in_test_environment
 The helpers select operations by the task that sent them (`task`, the task that awaits the operation, also inside a
 transaction) and by their session (`session`); without either, any operation of the running event loop counts. An
 operation awaited through `asyncio.gather()`, a `TaskGroup` or, on Python 3.11, `asyncio.wait_for()` is sent by a
-child task and matches only that task, not its parent; `session` selects it. An operation runs from the moment its
+child task and matches only that task; `session` selects it. An operation runs from the moment its
 slot hands it to the driver connection ([running requests](/ref/pool#running-requests)); `begin`, `commit` and
 savepoint calls do not count. On a connection that shares its database session with others (the shared test connection
 of Django's `TestCase`), it has reached the database only once its call holds that session
@@ -34,11 +34,11 @@ assert running_operations(session=reports) == ()      # no report runs now
 ### `adorm.testing.wait_for_operation(task=None, *, session=None, timeout=10.0, interval=0.01)`
 
 A coroutine: waits until a selected operation has been sent to the database (its driver connection call has started
-and has its database session, `RunningRequest.reached_session`) and returns its `RunningRequest`, the first such of
-`running_operations()` when one runs already. A started operation that still waits for a shared session is checked
-again every `interval` seconds; one that ends without it is not returned. An operation that starts and ends while the
-helper waits is still returned; `running` tells whether it still runs. Raises `RuntimeError` when `task` finishes first (chained to
-the task's exception when it raised one) and `TimeoutError` after `timeout` seconds. Works on every driver.
+and has its database session, `RunningRequest.reached_session`) and returns its `RunningRequest`; when one runs
+already, the first such of `running_operations()`. A started operation that waits for a shared session is checked
+every `interval` seconds; one that ends without it is not returned. An operation that starts and ends while the
+helper waits is returned; `running` tells whether it runs. Raises `RuntimeError` when `task` finishes first (chained
+to the task's exception when it raised one) and `TimeoutError` after `timeout` seconds. Works on every driver.
 
 ```python
 task = asyncio.create_task(Member.objects.filter(pk=ann.pk).update(active=False))
@@ -56,8 +56,8 @@ A coroutine: waits until a selected operation waits for a lock in the database
 (`RunningRequest.in_session`) through a
 [`DatabaseMonitor`](/ref/drivers#adorm-drivers-databasemonitor) of their pool's driver, one per pool, opened on first
 use and closed when the helper returns, raises or is cancelled. Checks repeat every `interval` seconds and whenever a
-selected operation starts. A wait read for an operation that ended, or whose connection released or took its shared
-session again, during the read is not reported: the session may already run another call.
+selected operation starts. A wait is not reported when, during the read, its operation ended or its connection
+released or took its shared session again.
 
 | Raises | When |
 |---|---|
@@ -94,7 +94,7 @@ A frozen dataclass: an operation waiting for a lock.
 
 Whether Django's test environment is set up: `django.test.utils.setup_test_environment()` has run and
 `teardown_test_environment()` has not. Django's test runner, its parallel workers and pytest-django set it up. Outside
-it the drivers look for no test connection.
+it the drivers do not look for a test connection.
 
 ```python
 assert in_test_environment()      # inside `manage.py test` or pytest with pytest-django
@@ -117,10 +117,10 @@ was found.
 | `atomics` | the `TestCase` atomic blocks open on `wrapper` ([`open_testcase_atomics()`](#adorm-testing-django-open-testcase-atomics-wrapper)), empty outside a `TestCase` |
 | `in_test_case` | whether `atomics` is not empty: the slots share `wrapper` |
 
-`current()` returns whether `wrapper`'s `TestCase` atomic blocks are still those in `atomics` (none, for a wrapper found
-outside a `TestCase`): false after the `TestCase` test that found it, and, for one found outside a `TestCase`, while a
-`TestCase` transaction is open. A connection opened in a Django test reports itself unusable (`is_usable()`) while
-`current()` is false, so a pool that outlives a `TestCase` test opens new connections in the next test.
+`current()` returns whether `wrapper`'s `TestCase` atomic blocks are those in `atomics` (none, for a wrapper found
+outside a `TestCase`). It is false after the `TestCase` test that found it and, for one found outside a `TestCase`,
+while a `TestCase` transaction is open. A connection opened in a Django test reports itself unusable (`is_usable()`)
+while `current()` is false; a pool that outlives a `TestCase` test opens new connections in the next test.
 
 ### `adorm.testing.django.find_test_database(alias)`
 
@@ -151,7 +151,7 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `transactions` | the connections with an open transaction, innermost last |
 | `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it (counted in the connection's `session_holds`); give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the threaded bridge reports as a cancellation |
 | `hold(connection)` | a `with` block between `acquire()` and `release()` |
-| `cancel(connection, cancel)` | cancels `connection`'s running call: `cancel()` (the driver's statement cancel) while it holds the shared connection, else it ends its wait. The owner cannot change meanwhile, so a cancel never reaches another connection's statement |
+| `cancel(connection, cancel)` | cancels `connection`'s running call: `cancel()` (the driver's statement cancel) while it holds the shared connection, else it ends its wait. The owner does not change meanwhile; a cancel never reaches another connection's statement |
 | `apply_options(desired)` | sets the connection options `desired` with `SET LOCAL` and resets the others set before (`SET LOCAL … TO DEFAULT`); only differences from what is known to be set are sent |
 | `forget_options()` | treats the options as unknown, after a rollback to a savepoint may have undone a `SET LOCAL`; the next `apply_options()` sets every option it ever set |
 | `unwind(connection, error)` | rolls back `connection`'s transaction and those opened after it; the later ones raise `error` on their next call |
@@ -173,7 +173,7 @@ Makes a [`DjangoConnection`](/ref/drivers#adorm-drivers-django-djangoconnection)
 | Call | Does |
 |---|---|
 | every call but `connect_sync()` | holds the shared connection ([`hold()`](#adorm-testing-django-sharedtestconnection-test)) while it runs; `execute_sync()` first applies the connection's options ([`apply_options()`](#adorm-testing-django-sharedtestconnection-test)) |
-| `connect_sync()` | takes the test's wrapper: Django's `inc_thread_sharing()` and `connections[alias] = wrapper` on the slot's thread, and [`attach()`](#adorm-testing-django-sharedtestconnection-test)es. A profile with a `connect` hook, `params` that differ from the wrapper's settings, or an `on_acquire` or `on_release` hook raises `NotSupportedError`: a hook's changes to the session (`SET ROLE`) would reach every slot |
+| `connect_sync()` | takes the test's wrapper: Django's `inc_thread_sharing()` and `connections[alias] = wrapper` on the slot's thread, and [`attach()`](#adorm-testing-django-sharedtestconnection-test)es. A profile with a `connect` hook, `params` that differ from the wrapper's settings, or an `on_acquire` or `on_release` hook raises `NotSupportedError`; a hook's session changes (`SET ROLE`) would reach every slot |
 | `begin_sync()` | enters `transaction.atomic(using=alias)`, a savepoint of the test's transaction. Raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction of another connection is open that the caller's context is not inside |
 | `execute_sync(operation)` | outside a transaction: raises `TransactionOverlapError` as `begin_sync()` does, else runs the operation in a savepoint of its own. Inside a transaction: raises `TransactionOverlapError` while a transaction begun inside this one is open; a failure that leaves the transaction failed rolls back to its innermost savepoint at once; after Django marked it for rollback, further operations raise `TransactionManagementError` until a rollback |
 | `savepoint_sync()`, `release_savepoint_sync()`, `rollback_to_savepoint_sync()` | as `DjangoConnection`; raise `TransactionOverlapError` while a transaction begun inside this one is open |

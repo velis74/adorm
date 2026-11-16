@@ -1,7 +1,7 @@
 # Query
 
-The immutable query, importable from `adorm.query` (defined in `adorm.query.query`). [Making
-queries](/topics/queries) shows it in context.
+The immutable query, importable from `adorm.query` (defined in `adorm.query.query`). See [Making
+queries](/topics/queries).
 
 ```python
 from adorm import F, Lower, Q, Sum
@@ -10,9 +10,9 @@ from adorm.query import COMBINATORS, ForUpdate, Query, as_query
 
 ### `adorm.query.Query(model, *, manager=None)`
 
-The rows of one model that a read returns. `model` is the model's label, `"app_label.ModelName"`; anything else
-raises `ValueError`. `manager` names the target ORM's manager the driver starts from (a public identifier, otherwise
-`ValueError`); [managers](/topics/managers) set it. A `Query` is a [node](./expressions#adorm-query-node): immutable, compared by value and
+The rows of one model that a read returns. `model` is the model's label, `"app_label.ModelName"`. `manager` names
+the target ORM's manager the driver starts from, a public identifier; [managers](/topics/managers) set it. Other
+values raise `ValueError`. A `Query` is a [node](./expressions#adorm-query-node): immutable, compared by value and
 hashable. Every method returns a new query; building does no I/O.
 
 ```python
@@ -59,9 +59,9 @@ q = (
 #### `filter(*args, **kwargs)`
 
 Rows that also match the conditions, arguments as for [`Q`](./expressions#adorm-q-args-kwargs): appends
-`Q(*args, **kwargs)` to `filters`, unless it is empty. Calls chain with AND; as in Django, a multi-valued relation
-(a reverse foreign key, a many-to-many relation) is joined once per call, so the conditions of separate calls may
-match different related rows. On a sliced query raises `TypeError`.
+`Q(*args, **kwargs)` to `filters` unless it is empty. Calls chain with AND. As in Django, a multi-valued relation (a
+reverse foreign key, a many-to-many relation) is joined once per call; conditions of separate calls may match
+different related rows. On a sliced query raises `TypeError`.
 
 ```python
 Query("library.Book").filter(authors__name="Ann").filter(authors__name="Cid")   # an author Ann and an author Cid
@@ -75,10 +75,10 @@ empty. On a sliced query raises `TypeError`.
 
 #### `annotate(**annotations)`
 
-Adds computed columns, name to expression. A name already used, a name with `__` or one that is not an identifier
-raises `ValueError`; a value that is not an expression raises `TypeError`. Later calls of `filter()`,
-`order_by()` and `values()` refer to annotations by name. A condition on an annotation that contains an aggregate
-filters the aggregated rows (SQL `HAVING`).
+Adds computed columns, name to expression. A name already used, a name with `__` or a non-identifier raises
+`ValueError`; a value that is not an expression raises `TypeError`. `filter()`, `order_by()` and `values()` refer
+to annotations by name. A condition on an annotation that contains an aggregate filters the aggregated rows (SQL
+`HAVING`).
 
 On model rows an aggregate is computed per row:
 
@@ -86,11 +86,15 @@ On model rows an aggregate is computed per row:
 Query("clubs.Club").annotate(headcount=Count("memberships")).filter(headcount__gt=3)
 ```
 
-After `values()` or `values_list()` with fields, the new names are added to `select`, and the first annotation that
-contains an aggregate (directly or through `F` of another such annotation) groups the rows: `group_by` becomes the
-names selected so far plus the new annotations without an aggregate, and `group_mark` the number of annotations
-before the call. Later `values()` calls keep the grouping, and an annotation without an aggregate added later joins
-`group_by`. An aggregate annotated before `values()` does not group: it stays per row.
+After `values()` or `values_list()` with fields:
+
+- the new names are added to `select`;
+- the first annotation that contains an aggregate (directly or through `F` of another such annotation) groups the
+  rows: `group_by` becomes the names selected so far plus the new annotations without an aggregate, `group_mark` the
+  number of annotations before the call;
+- later `values()` calls keep the grouping; an annotation without an aggregate added later joins `group_by`.
+
+An aggregate annotated before `values()` does not group; it is computed per row.
 
 ```python
 q = Query("clubs.Membership").values("role").annotate(n=Count("*"), fees=Sum("fee"))
@@ -110,11 +114,15 @@ months.group_by   # ("month",)
 q.annotate(club=F("club__slug")).group_by   # ("role", "club")
 ```
 
-A condition on a field filters the rows before they are aggregated (SQL `WHERE`), a condition on an aggregate filters
-the groups (`HAVING`). Filters and annotations apply in the order they were added (`filter_marks`), as in Django: an
-aggregate annotation added after a condition on a multi-valued relation aggregates only the related rows that matched
-it, and a condition added after the annotation joins the relation again, so each row repeats once per matching
-related row and the aggregate multiplies. An aggregate's `filter=` limits it whatever the order.
+A condition on a field filters the rows before aggregation (SQL `WHERE`), a condition on an aggregate filters the
+groups (`HAVING`). Filters and annotations apply in the order added (`filter_marks`), as in Django:
+
+- an aggregate annotation added after a condition on a multi-valued relation aggregates only the related rows that
+  matched it;
+- a condition added after the annotation joins the relation again; each row repeats once per matching related row
+  and the aggregate multiplies.
+
+An aggregate's `filter=` limits it regardless of order.
 
 ```python
 Query("clubs.Club").filter(memberships__role="member").annotate(n=Count("memberships"))   # members per club
@@ -123,8 +131,8 @@ Query("clubs.Club").annotate(n=Count("memberships")).filter(memberships__role="m
 
 #### `alias(**annotations)`
 
-As `annotate()`, but the names go to `aliases`: conditions, orderings and other expressions refer to them, and the
-rows do not include them. Selecting an alias with `values()` or `values_list()` raises `ValueError`. An alias with an
+As `annotate()`, but the names go to `aliases`: conditions, orderings and other expressions refer to them; rows do
+not include them. Selecting an alias with `values()` or `values_list()` raises `ValueError`. An alias with an
 aggregate after `values()` groups the rows as an annotation does.
 
 ```python
@@ -165,8 +173,8 @@ Query("club.Member").values_list("name", "age", named=True)
 
 #### `only(*fields)`
 
-Loads only `fields` (and the primary key) of model rows; the other fields are deferred. It replaces an earlier
-`only()`; fields deferred before are left out. After `values()` or `values_list()` raises `TypeError`.
+Loads only `fields` and the primary key of model rows; the other fields are deferred. Replaces an earlier `only()`;
+fields deferred before are left out. After `values()` or `values_list()` raises `TypeError`.
 
 ```python
 Query("club.Member").only("name", "email")          # pk, name and email loaded
@@ -175,8 +183,7 @@ Query("club.Member").defer("biography")            # every field but biography
 
 #### `defer(*fields)`
 
-Leaves `fields` unloaded until they are accessed. Calls add up; after `only()` it removes the fields from the loaded
-set. `defer(None)` loads every field again. After `values()` or `values_list()` raises `TypeError`.
+Leaves `fields` unloaded until accessed. Calls add up; after `only()` it removes the fields from the loaded set. `defer(None)` loads every field again. After `values()` or `values_list()` raises `TypeError`.
 
 ```python
 Query("club.Member").only("name", "club__name")
@@ -225,16 +232,16 @@ Query("club.Member")[10:20][5:]      # rows 15 to 19
 
 #### `query | other`, `query & other`
 
-Rows matching either query (`|`) or both (`&`). Both queries are on the same model and manager, unsliced, and agree
-on distinctness, `select`, `row_format`, annotations, aliases, grouping, `only()`, `defer()` and
-`select_for_update()`; otherwise
-`TypeError`. `&` keeps the filters of both queries and their `filter_marks`; `|` has one filter, the `where` of both
-joined with OR, placed after the annotations either query's filters followed. The result
-has the ordering of `other`, or of `query` when `other` has none, and the `select_related()` paths of both. A query
-without conditions matches every row, so `|` with it has no conditions;
-`|` with a `none()` query returns the other query, `&` returns the empty one.
+Rows matching either query (`|`) or both (`&`). Both queries must be on the same model and manager, unsliced, not
+combined by a set operation, and agree on distinctness, `select`, `row_format`, annotations, aliases, grouping,
+`only()`, `defer()` and `select_for_update()`; otherwise `TypeError`.
 
-Either query combined by a set operation raises `TypeError`.
+- `&` keeps the filters of both queries and their `filter_marks`.
+- `|` has one filter, the `where` of both joined with OR, placed after the annotations either query's filters
+  followed. `|` with a query without conditions has no conditions.
+- With a `none()` query, `|` returns the other query, `&` the empty one.
+- The result has the ordering of `other`, or of `query` when `other` has none, and the `select_related()` paths of
+  both.
 
 ```python
 active = Query("club.Member").filter(active=True)
@@ -245,17 +252,18 @@ active & guests            # where: active=True AND guest=True
 
 #### `union(*others, all=False)`
 
-The rows of the query and of the queries `others` (SQL `UNION`); `all=True` keeps duplicate rows, otherwise they are
-removed. Returns a combined query: `combinator` `"union"`, `combined_queries` the query followed by `others`, and
-`select` and `row_format` of the query, so the combined rows have its row format. The queries are compared column by
-column: they select the same number of columns of matching types and may be on different models (the database
-refuses other columns). The query keeps its ordering and slice; each of `others` keeps them when it is sliced or
-distinct on fields, and loses its ordering otherwise. An argument that is not a `Query` raises `TypeError`.
+The rows of the query and of the queries `others` (SQL `UNION`); `all=True` keeps duplicate rows. Returns a combined
+query: `combinator` `"union"`, `combined_queries` the query followed by `others`, and the query's `select` and
+`row_format`. The queries select the same number of columns of matching types, column by column, and may be on
+different models; the database refuses other columns. The query keeps its ordering and slice; each of `others` keeps
+them when it is sliced or distinct on fields, and loses its ordering otherwise. An argument that is not a `Query`
+raises `TypeError`.
 
-Without `others` returns the query itself. An empty query (`is_empty`: `none()`, or a slice that leaves no rows)
-among `others` stays among the combined queries, and the database leaves it out (see [Empty queries](#empty-queries)).
-On an empty query, the queries of `others` that are not empty are combined instead: a single one is returned as it
-is, none at all returns the query.
+- Without `others`, returns the query itself.
+- An empty query (`is_empty`: `none()`, or a slice that leaves no rows) among `others` stays among the combined
+  queries; the database leaves it out (see [Empty queries](#empty-queries)).
+- On an empty query, the non-empty queries of `others` are combined instead; a single one is returned as it is, and
+  with none the query is returned.
 
 ```python
 adults = Query("club.Member").filter(age__gte=18).values_list("name", flat=True)
@@ -285,16 +293,19 @@ adults.union(coaches).difference(Query("club.Member").filter(guest=True).values_
 
 #### After a set operation
 
-A combined query has no filters, annotations or other clauses of its own; these methods apply to the combined rows:
-`order_by()`, slicing, `values()` and `values_list()`, `none()` and another set operation, which nests the
-combination. `values()` and `values_list()` select their fields in every combined query that selects model rows; a
-combined query with its own `values()` keeps its columns, and the combined rows are keyed by the names given, column
-by column. After `values()` or `values_list()` the keys of `order_by()` name columns of the combined rows, including
-names that only the later `values()` gives; a key that names no column raises
-[`DatabaseError`](./exceptions) (`ORDER BY term does not match any column in the result set.`). Combined model
-rows are ordered by the fields of the first combined query's model. `filter()`, `exclude()`, `annotate()`,
-`alias()`, `distinct()`, `only()`, `defer()`, `select_related()` and `select_for_update()` raise
-[`NotSupportedError`](./exceptions) (`cannot call filter() after union()`), as in Django.
+A combined query has no filters, annotations or other clauses of its own. These methods apply to the combined rows:
+`order_by()`, slicing, `values()` and `values_list()`, `none()`, and another set operation, which nests the
+combination.
+
+- `values()` and `values_list()` select their fields in every combined query that selects model rows. A combined
+  query with its own `values()` keeps its columns; the combined rows are keyed by the names given, column by column.
+- After `values()` or `values_list()`, `order_by()` keys name columns of the combined rows, including names only the
+  later `values()` gives. A key that names no column raises [`DatabaseError`](./exceptions)
+  (`ORDER BY term does not match any column in the result set.`).
+- Combined model rows are ordered by the fields of the first combined query's model.
+- `filter()`, `exclude()`, `annotate()`, `alias()`, `distinct()`, `only()`, `defer()`, `select_related()` and
+  `select_for_update()` raise [`NotSupportedError`](./exceptions) (`cannot call filter() after union()`), as in
+  Django.
 
 ```python
 combined = adults.union(coaches)
@@ -305,13 +316,15 @@ combined.values_list("label", flat=True).order_by("label")   # the one column, n
 
 #### Empty queries
 
-The drivers combine empty queries as Django compiles them. An empty query is left out of a union, and of a difference
-after its first query; an empty query in an intersection makes the result empty. A combination left with a single
-query reads that query's rows as they are (with duplicates, also for `intersection()` and `difference()`), except a
-sliced union, which still removes duplicate rows unless `all=True`. That single query is placed in parentheses
-before the combination's own ordering and slice, so PostgreSQL refuses an ordering, offset or limit given to both
-with `ProgrammingError` (`multiple ORDER BY clauses not allowed`; an ordering of the single query counts only when it
-is sliced).
+The drivers combine empty queries as Django compiles them:
+
+- an empty query is left out of a union, and of a difference after its first query;
+- an empty query in an intersection makes the result empty;
+- a combination left with a single query reads that query's rows as they are, with duplicates, also for
+  `intersection()` and `difference()`; a sliced union removes duplicate rows unless `all=True`;
+- that single query is placed in parentheses before the combination's own ordering and slice. PostgreSQL refuses an
+  ordering, offset or limit given to both with `ProgrammingError` (`multiple ORDER BY clauses not allowed`); an
+  ordering of the single query counts only when it is sliced.
 
 ```python
 first_two = adults.order_by("name")[:2]
@@ -325,12 +338,18 @@ Raises `NotSupportedError` (`cannot call <action>() after <combinator>()`) when 
 
 #### Construct names
 
-`constructs()` yields the construct names of the filters, the annotations and the ordering, plus
-`clause.annotate` (an annotation that is not an alias), `clause.alias`, `clause.group_by`, `clause.distinct` or
-`clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager` and the names of
-`for_update` for the clauses in use, `clause.union`, `clause.intersection` or `clause.difference` for a set
-operation, followed by the construct names of the combined queries, and [`path.nested`](#adorm-query-nested-path) when a field of `values()`,
-`values_list()`, `group_by`, `only()`, `defer()` or `distinct()` has several segments. `values()` and `values_list()` of plain fields, `none()` and slicing have none.
+`constructs()` yields:
+
+- the construct names of the filters, the annotations and the ordering;
+- for the clauses in use: `clause.annotate` (an annotation that is not an alias), `clause.alias`, `clause.group_by`,
+  `clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`,
+  `clause.manager` and the names of `for_update`;
+- for a set operation: `clause.union`, `clause.intersection` or `clause.difference`, followed by the construct names
+  of the combined queries;
+- [`path.nested`](#adorm-query-nested-path) when a field of `values()`, `values_list()`, `group_by`, `only()`,
+  `defer()` or `distinct()` has several segments.
+
+`values()` and `values_list()` of plain fields, `none()` and slicing have none.
 
 ```python
 set(Query("library.Loan", manager="objects").filter(archived=False).constructs())
@@ -347,10 +366,14 @@ set operation are encoded under `combined_queries`, each typed by its own model.
 
 ### `adorm.query.ForUpdate(*, nowait=False, skip_locked=False, of=(), no_key=False)`
 
-The row locks of `select_for_update()`, a node. `nowait` fails instead of waiting for a locked row, `skip_locked`
-skips locked rows, `of` names the relations whose rows are locked (`"self"` for the queried model; duplicates are
-dropped) and `no_key` takes the weaker `FOR NO KEY UPDATE` lock. `nowait` with `skip_locked` raises `ValueError`, a
-string `of` raises `TypeError`.
+The row locks of `select_for_update()`, a node.
+
+- `nowait`: fail instead of waiting for a locked row.
+- `skip_locked`: skip locked rows.
+- `of`: the relations whose rows are locked (`"self"` for the queried model); duplicates are dropped.
+- `no_key`: take the weaker `FOR NO KEY UPDATE` lock.
+
+`nowait` with `skip_locked` raises `ValueError`, a string `of` raises `TypeError`.
 
 Its construct names are `clause.select_for_update`, plus `clause.select_for_update.<option>` for each option set
 (`nowait`, `skip_locked`, `of`, `no_key`).
@@ -371,9 +394,9 @@ a tuple: `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`
 ### `adorm.query.NESTED_PATH`
 
 `"path.nested"`: the construct name of a field path with several segments (`club__name`, `address__street`), which
-crosses a relation or goes into a JSON field. [`F`](./expressions) reports it for such a path, and so does a query for
-its `values()`, `only()`, `defer()` and `distinct()` fields. A driver that evaluates only a model's own columns
-leaves it out of its capabilities.
+crosses a relation or goes into a JSON field. [`F`](./expressions) reports it for such a path, a query for such
+`values()`, `only()`, `defer()` and `distinct()` fields. A driver that evaluates only a model's own columns leaves
+it out of its capabilities.
 
 ```python
 list(F("club__name").constructs())     # ['path.nested']
@@ -382,9 +405,9 @@ list(F("name").constructs())           # []
 
 ### `adorm.query.construct_names()`
 
-Returns every construct name an operation can report, as a frozenset: `CLAUSES`, `NESTED_PATH`,
-`aggregate.distinct`, `aggregate.filter`, and the construct of every node class defined so far, custom
-[lookups](./lookups) and [functions](./expressions) included. A driver's declared constructs are a subset of it.
+Every construct name an operation can report, as a frozenset: `CLAUSES`, `NESTED_PATH`, `aggregate.distinct`,
+`aggregate.filter`, and the construct of every node class defined at the time of the call, including custom
+[lookups](./lookups) and [functions](./expressions). A driver's declared constructs are a subset of it.
 
 ```python
 "lookup.icontains" in construct_names()                        # True
@@ -393,5 +416,5 @@ DjangoDriver.capabilities.constructs <= construct_names()      # True
 
 ### `adorm.query.as_query(value)`
 
-`value` when it is a `Query`, its `query` attribute when that is a `Query`, else `None`. Lookups and `Subquery` use
-it to accept any object that carries a query.
+`value` when it is a `Query`, its `query` attribute when that is a `Query`, else `None`. Lookups and `Subquery`
+accept any object for which it returns a query.

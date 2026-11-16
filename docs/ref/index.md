@@ -1,7 +1,7 @@
 # API reference
 
-This section documents every public name of the `adorm` package. A name is public when it is listed in
-`adorm.__all__`; everything else is internal and may change without notice.
+Every public name of the `adorm` package. A name is public when `adorm.__all__` lists it; other names are internal
+and may change without notice.
 
 ## Package
 
@@ -17,8 +17,7 @@ print(adorm.__version__)   # "0.0.1"
 
 ## Sections
 
-Reference pages are grouped as in the Django documentation. A group links to its page once the package provides
-the names it covers:
+Reference pages are grouped as in the Django documentation:
 
 | Group | Covers |
 |---|---|

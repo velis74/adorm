@@ -1,8 +1,8 @@
 # Models
 
-An adorm model is a pydantic `BaseModel` subclass of [`adorm.Model`](/ref/models#adorm-model). The same class
-describes a database row for adorm and a schema for pydantic and fastapi-viewsets. A model class declares its fields,
-its identity (`_meta`) and its relations; this page shows what a model class contains and how its instances behave.
+An adorm model is a pydantic `BaseModel` subclass of [`adorm.Model`](/ref/models#adorm-model). The class describes a
+database row for adorm and a schema for pydantic and fastapi-viewsets. It declares its fields, its identity (`_meta`)
+and its relations.
 
 ```python
 import decimal
@@ -28,18 +28,17 @@ class Member(Model):
 
 ## Generated models
 
-Models of an application whose schema Django owns are not written by hand: [`adorm generate`](/howto/generating-models)
-writes one module per Django app, with the same labels, field names and relations as the Django models, and checks in
-CI that the modules are up to date.
+For a schema that Django owns, [`adorm generate`](/howto/generating-models) writes one module per Django app, with
+the same labels, field names and relations as the Django models, and checks in CI that the modules are up to date.
 
 ```sh
 adorm generate --settings myproject.settings --output myproject/adorm_models clubs billing library
 ```
 
-A generated model is an ordinary adorm model. It also carries the hash of the Django model's schema in
-`_meta.schema_hash`, which a driver compares with its own model's at use ([schema checks](/topics/schema-checks)), and a
-field whose name clashes with pydantic (`json`, `copy`, `model_dump` …) gets a `_` suffix
-and an alias with the original name: code and queries use `json_`, JSON and the JSON schema use `json`.
+A generated model is an ordinary adorm model with the hash of the Django model's schema in `_meta.schema_hash`,
+which a driver compares with its own model's at use ([schema checks](/topics/schema-checks)). A field whose name
+clashes with pydantic (`json`, `copy`, `model_dump` …) gets a `_` suffix and an alias with the original name: code and
+queries use `json_`, JSON and the JSON schema use `json`.
 
 ```python
 from myproject.adorm_models.library import Note
@@ -59,15 +58,15 @@ member = await Member.objects.get(pk=1)
 active = [m async for m in Member.objects.filter(active=True)]
 ```
 
-`objects` is a class attribute, not a field: instances and abstract models do not have it. It is the model's
-default [manager](/topics/managers); a model declares other managers, and the methods of its managers and query sets,
-the same way.
+`objects` is a class attribute, not a field; instances and abstract models do not have it. It is the model's
+default [manager](/topics/managers). A model declares other managers, and methods of its managers and query sets, the
+same way.
 
 ## Model identity
 
-`_meta` names the model by its label (`"app_label.ModelName"`), the name operations and drivers use, and names
-the primary key field (`"id"` unless given). A class with `_meta` registers in `adorm.models.registry`, which
-finds model classes by label and gives the [operation encoding](/ref/encoding) the type of every field.
+`_meta` names the model by its label (`"app_label.ModelName"`), which operations and drivers use, and names the
+primary key field (`"id"` unless given). A class with `_meta` registers in `adorm.models.registry`, which finds model
+classes by label and gives the [operation encoding](/ref/encoding) the type of every field.
 
 ```python
 from adorm.models import registry
@@ -78,9 +77,8 @@ registry.model_schema("club.Member").fields["fee"]   # decimal.Decimal
 
 ## Instances from rows
 
-A row from the database becomes an instance through `from_row()`, built with pydantic's `model_construct()`:
-no validation runs, the values are the ones the driver returned. The fields the row contained are the instance's
-`model_fields_set`.
+`from_row()` builds an instance from a database row with pydantic's `model_construct()`, without validation. The
+fields the row contained are the instance's `model_fields_set`.
 
 ```python
 member = Member.from_row({"id": 1, "name": "Ana", "fee": decimal.Decimal(12), "club_id": 7})
@@ -96,8 +94,7 @@ Member(name="Ana", fee="abc")                  # pydantic.ValidationError
 ## Deferred fields
 
 A query with `only()` or `defer()` loads some fields; the others are deferred. Reading a deferred field raises
-`AttributeError`; adorm never loads a field implicitly, because every load is an awaited operation. Assigning a
-deferred field sets it.
+`AttributeError`; adorm never loads a field implicitly. Assigning a deferred field sets it.
 
 ```python
 member = Member.from_row({"id": 1, "name": "Ana"})     # e.g. from .only("name")
@@ -120,7 +117,7 @@ member.payments_total          # Decimal("30")
 ## Relations
 
 A relation is a descriptor, not a field: it is not validated, not dumped and not in the JSON schema. Reading a
-`ForeignKey` returns an awaitable, because loading the related row is an operation.
+`ForeignKey` returns an awaitable.
 
 ```python
 club = await member.club       # loads the club, then caches it
@@ -129,8 +126,8 @@ member.club = other_club       # sets member.club_id
 member.club = None             # clears member.club_id
 ```
 
-A row loaded with `select_related("club")` carries the related row and fills the cache, so the first `await`
-needs no operation. Changing `club_id` makes the next `await` load the new club.
+A row loaded with `select_related("club")` fills the cache; the first `await` runs no operation. After `club_id`
+changes, the next `await` loads the new club.
 
 A `ReverseOneToOne` (the other side of a one-to-one foreign key) returns an awaitable too; no related row raises the
 target's `DoesNotExist`:
@@ -139,10 +136,10 @@ target's `DoesNotExist`:
 restaurant = await place.restaurant
 ```
 
-A `ReverseForeignKey` (the other side of a foreign key) and a `ManyToMany` return a
-[`QuerySet`](/ref/queryset) of the related rows on the owner's session instead, from the target model's `objects`
-manager ([related rows](/topics/managers#related-rows)); building it needs no connection, and its operations find
-that session's transaction when they run.
+A `ReverseForeignKey` (the other side of a foreign key) and a `ManyToMany` return a [`QuerySet`](/ref/queryset) of
+the related rows on the owner's session, from the target model's `objects` manager
+([related rows](/topics/managers#related-rows)). Building it needs no connection; its operations run in that
+session's transaction.
 
 ```python
 club.members.query             # Query("club.Member").filter(club_id=club.pk)
@@ -162,9 +159,9 @@ prefetched rows for `async for`, `count()` and `exists()`.
 
 A [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true) points at a
 row of any model: the content type field (a foreign key to Django's `ContentType`) names the model, the object id
-field holds the row's primary key. `adorm generate` writes one for every Django `GenericForeignKey`. Awaiting it
-finds the registered adorm model for the content type and loads the row; the object is cached while both fields keep
-their values. A missing row gives `None`, as in Django.
+field holds the row's primary key. `adorm generate` writes one for every Django `GenericForeignKey`. Awaiting it loads
+the row of the registered adorm model for the content type; the object is cached while both fields keep their values.
+A missing row gives `None`, as in Django.
 
 ```python
 class InvoiceLine(Model):
@@ -185,18 +182,16 @@ await line.save()                      # reads Activity's content type id first 
 line = await InvoiceLine.objects.create(invoice_id=1, item=membership, description="Fee", unit_price=120)
 ```
 
-Assigning an instance sets the object id at once. The content type id is a row of the database: the next `save()`,
-`full_clean()`, `create()` or `bulk_create()` takes it through [`adorm.content_types`](/ref/models#adorm-contenttypes)
-on the session that writes (from the cache when it is there). Until then `content_type_id` holds the id cached for the
-instance's session, or, when none is cached, is unset: reading it raises `AttributeError` and `model_dump()` leaves it
-out. `get_or_create()` and `update_or_create()` take an instance in `defaults` too. Details are in the
+Assigning an instance sets the object id at once. The next `save()`, `full_clean()`, `create()` or `bulk_create()`
+reads the content type id through [`adorm.content_types`](/ref/models#adorm-contenttypes) on the session that writes,
+from the cache when it is there. Until then `content_type_id` holds the id cached for the instance's session; when
+none is cached it is unset, reading it raises `AttributeError` and `model_dump()` leaves it out. `get_or_create()` and `update_or_create()` take an instance in `defaults` too. Details are in the
 [reference](/ref/models#generic-assignment). Query paths do not traverse a generic foreign key.
 
 ### Content types
 
 [`adorm.content_types`](/ref/models#adorm-contenttypes) is adorm's `ContentType.objects.get_for_model()`: the content
-type id of a model, read once per database and cached, and the model of a content type id. A filter on the
-fields of a generic foreign key takes the id from it, without a query on every call:
+type id of a model, read once per database and cached, and the model of a content type id:
 
 ```python
 from adorm import content_types
@@ -208,10 +203,10 @@ row = await content_types.get_for_model(Location)             # an instance of t
 await content_types.get_id(LocationProxy)                     # Location's id: a proxy uses its concrete model's
 ```
 
-A lookup inside a transaction reads on the transaction's slot. The rows are created by Django's `migrate`; adorm
-does not create them, and a model without a row raises `ContentType.DoesNotExist`. `migrate` and `flush` (after each
-`TransactionTestCase` test) create the rows again, and the Django and asyncpg drivers clear the cache on Django's
-`post_migrate` signal; `content_types.clear()` clears it otherwise.
+A lookup inside a transaction reads on the transaction's slot. Django's `migrate` creates the rows, adorm does not; a
+model without a row raises `ContentType.DoesNotExist`. `migrate` and `flush` (after each `TransactionTestCase` test)
+create the rows again, and the Django and asyncpg drivers clear the cache on Django's `post_migrate` signal;
+`content_types.clear()` clears it otherwise.
 
 ### Multi-table inheritance
 
@@ -238,9 +233,8 @@ Member.from_row({"id": 1, "name": "Ana"}) == Member.from_row({"id": 1, "name": "
 ## Saving
 
 `await instance.save()` writes the fields in `model_fields_set`: the fields the row was loaded with and the fields
-assigned since. For an instance loaded with deferred fields, this writes only the loaded ones, as Django does. For a
-new instance, it writes the fields given to the constructor or assigned; the target fills in the rest with its
-defaults.
+assigned since; deferred fields are not written, as in Django. For a new instance it writes the fields given to the
+constructor or assigned; the target fills in the rest with its defaults.
 
 ```python
 member = Member(name="Ana")
@@ -255,10 +249,10 @@ set that loaded the instance, or else the [current session](/topics/sessions#the
 ### Creating many instances
 
 [`bulk_create()`](/ref/queryset#async-bulk-create-objs-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none)
-inserts new instances with one operation instead of one `save()` each. Each instance writes the same fields `save()`
-would write for it; the target fills in the rest with its defaults. The instances come back with the values the
-database set, primary keys included, and are stored instances from then on. As in Django, no `save()` override runs
-and no signal fires, and a multi-table inheritance child cannot be inserted this way.
+inserts new instances with one operation. Each instance writes the fields `save()` would write; the target fills in
+the rest with its defaults. The instances come back with the values the database set, primary keys included, and are
+stored instances. As in Django, no `save()` override runs, no signal fires, and a multi-table inheritance child cannot
+be inserted this way.
 
 ```python
 clubs = await Club.objects.bulk_create(Club(name=name) for name in ("Koper", "Piran", "Izola"))

@@ -1,16 +1,9 @@
 # Events
 
-::: info Status
-The installed version provides the event types, their encoded form, the client's event channel on every slot lease,
-the slot's own callbacks, `on_commit` callbacks of [transactions](/topics/transactions), the backend events of the
-Django and native PostgreSQL drivers (notifications, notices, lost connections) and `adorm.listen()`. The remote
-driver that carries encoded events between processes is not part of it yet.
-:::
-
 A slot answers the client with events. Every request it runs ends with one outcome event; a commit or rollback adds
-a callback event; the driver connection adds callbacks and events the database raised on its own. On the client
-an **event channel** interprets each event: it returns a result to the code that awaits it, runs a callback, or
-calls the functions subscribed to it.
+a callback event; the driver connection adds callbacks and events the database raised on its own. On the client, the
+**event channel** of each slot lease interprets each event: it returns a result to the code that awaits it, runs a
+callback, or calls the functions subscribed to it.
 
 ```text
 client                        slot                             DriverConnection
@@ -44,18 +37,16 @@ as it is cancelled, ahead of the outcomes of earlier requests. An event a connec
 arrives before that request's outcome.
 
 Signals of the target (Django's `post_save`, SQLAlchemy's ORM events) and the target's own `on_commit` hooks run on
-the driver side; the client does not see them. A driver reports an effect the client must know about as a
-`CallbackEvent` or a `BackendEvent` of its own. A connection emits nothing else: the slot drops and logs outcome
-events and the names `on_commit` and `on_rollback` when a connection emits them, because only the slot delivers
-those.
+the driver side and do not reach the client. A driver reports an effect the client must know about as a
+`CallbackEvent` or a `BackendEvent`. Outcome events and the names `on_commit` and `on_rollback` are delivered only by
+the slot; when a connection emits them, the slot drops and logs them.
 
 ## How adorm interprets an event
 
 **Return a result.** `lease.call()` and every operation that a session or a transaction runs await their
 request's outcome on the channel: a `ResultEvent` returns the value, an `ErrorEvent` raises the error, a
 `CancelledEvent` ends the call cancelled. A `CancelledEvent` for a call whose task was not cancelled raises
-`InterfaceError`. Code that writes to the request queue directly reads the outcomes from
-`lease.events` instead.
+`InterfaceError`. Code that writes to the request queue directly reads the outcomes from `lease.events`.
 
 ```python
 async with await router.acquire(session) as lease:
@@ -69,7 +60,7 @@ async with await router.acquire(session) as lease:
 ```
 
 **Run a callback.** A handler registered on the channel with `on(name, handler)` runs for every `CallbackEvent` of
-that name, instead of the event being queued. An `atomic()` block registers one for `on_commit` and runs its
+that name; the event is not queued. An `atomic()` block registers one for `on_commit` and runs its
 [`on_commit` callbacks](/topics/transactions#running-code-after-the-commit) when the slot reports the commit.
 
 ```python
@@ -103,9 +94,9 @@ psycopg 3) and the native PostgreSQL driver emit:
 | [`BackendEvent("notify", channel, payload)`](/ref/events#adorm-events-notify) | a notification arrives on a channel the connection listens on | an [`adorm.listen()`](#listening-for-notifications) block |
 | [`BackendEvent("connection_lost", None, reason)`](/ref/events#adorm-events-connection-lost) | the database connection ended without adorm closing it; the Django driver notices it only while the connection listens, the native driver at any time | the lease's channel, or the pool's `EventBus` while the slot is idle |
 
-An operation of a session does not read its lease's queue, so its notices reach the subscribers of the pool's
-`EventBus` once the slot is released, in the order the server sent them; inside a transaction, when the transaction
-ends. Subscribe by name, and by severity as the channel:
+The notices of a session's operations reach the subscribers of the pool's `EventBus` when the slot is released
+(inside a transaction, when the transaction ends), in the order the server sent them. Subscribe by name, and by
+severity as the channel:
 
 ```python
 pool = await adorm.settings.default_router().get_pool("default")
@@ -116,8 +107,8 @@ await Club.objects.filter(slug="koper-sailing").update(city="Koper")
 # the trigger's RAISE WARNING 'check the clubs' → alert(BackendEvent("notice", "WARNING", {"message": "check the clubs", ...}))
 ```
 
-Code that holds a lease reads the notices of its own requests from `lease.events`: they are queued before the
-request's outcome returns.
+Code that holds a lease reads the notices of its own requests from `lease.events`, queued before the request's
+outcome returns.
 
 ```python
 async with router.slot(session) as lease:
@@ -146,19 +137,19 @@ async with adorm.listen("orders", "invoices") as listener:
 SELECT pg_notify('orders', '42');
 ```
 
-- The slot counts against the pool's `max_connections` for as long as the block runs, and the block's flow holds it:
-  an operation of the same flow that needs a slot of a full pool raises `DeadlockError`. Another task or another
-  pool serves the block's other work.
+- The slot counts against the pool's `max_connections` while the block runs, and the block's flow holds it: an
+  operation of the same flow that needs a slot of a full pool raises `DeadlockError`. Run the block's other work in
+  another task or on another pool.
 - PostgreSQL delivers a notification sent inside a transaction when that transaction commits, never after a
   rollback; notifications of one sending transaction arrive in the order they were sent.
 - `listener.listen()` and `listener.unlisten()` change the channels while the block runs; a notification received
-  before `unlisten()` is still returned.
+  before `unlisten()` is returned.
 - A cancelled `get()` loses no notification: the next `get()` returns it.
 - When the server ends the connection (`pg_terminate_backend()`, a restart), the slot closes or its pool closes,
-  `get()` returns the notifications received before, then raises `InterfaceError`, in every task waiting in it. Notifications sent while no connection listens are lost; a
-  service that must not miss one reads the state it reflects again after listening anew.
+  `get()` returns the notifications received before, then raises `InterfaceError` in every task waiting in it.
+  Notifications sent while no connection listens are lost; after listening again, re-read the state they reflect.
 - Leaving the block releases the slot; the slot closes a connection that still listens instead of returning it to
-  the pool. A `get()` another task still waits in raises `InterfaceError`.
+  the pool. A `get()` another task waits in raises `InterfaceError`.
 
 ```python
 async def follow_orders():
@@ -185,10 +176,12 @@ taken; inside Django's `TestCase`, whose transaction never commits, the Django d
 
 ## Cancellation outcomes
 
-A cancelled request ends with a `CancelledEvent`. `started=False` means the request was still queued, or was
-cancelled before the slot handed it to the connection (as while its connection options were set), and never reached
-the database; `started=True` means it was cancelled in the driver connection while it ran, so part of its
-work may have reached the database and an open transaction is unusable. Whether it took effect is unknown.
+A cancelled request ends with a `CancelledEvent`:
+
+- `started=False`: the request was queued, or was cancelled before the slot handed it to the connection (for example
+  while its connection options were set), and never reached the database;
+- `started=True`: it was cancelled in the driver connection while it ran; part of its work may have reached the
+  database, whether it took effect is unknown, and an open transaction is unusable.
 
 ```python
 lease.requests.put_nowait(request := Request("execute", (slow_report,)))
@@ -199,17 +192,17 @@ match await lease.events.get():
     case ResultEvent() | ErrorEvent(): ...             # finished before the cancellation reached it
 ```
 
-A request that finishes before the cancellation reaches it delivers its result or error instead; either way it has
-exactly one outcome. Cancelling the task that awaits `lease.call()` cancels its request the same way; the
+A request that finishes before the cancellation reaches it delivers its result or error instead; it has exactly
+one outcome. Cancelling the task that awaits `lease.call()` cancels its request the same way; the
 `CancelledError` it raises carries the request's
 [`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome), which the request's outcome event completes when it
 arrives after the caller has left (see [cancellation](/topics/cancellation#events)).
 
 ## In process and remote
 
-The core has one path for events, whether the database is reached in the application's process or through a
-separate adorm server. The server is reached through a remote driver: its connection sits behind an ordinary slot
-of the application's pool, like any other driver connection.
+adorm has no remote driver; this section is the event contract one implements. The core handles events the same
+way whether the database is reached in the application's process or through a separate adorm server. A remote
+driver's connection sits behind an ordinary slot of the application's pool.
 
 ```text
 application                                               server
@@ -218,8 +211,8 @@ application                                               server
 ```
 
 Every event has a JSON-safe form: `event.to_dict()` encodes it, `Event.from_dict()` decodes it, and errors travel by
-class, message and their adorm attributes ([`encode_error()`](/ref/events#adorm-events-encode-error-error-encode-encode-value)). The
-remote connection decodes each event of the server slot and maps it onto the driver contract:
+class, message and their adorm attributes ([`encode_error()`](/ref/events#adorm-events-encode-error-error-encode-encode-value)).
+A remote connection decodes each event of the server slot and maps it onto the driver contract:
 
 | Server event | In the remote connection |
 |---|---|
@@ -229,8 +222,8 @@ remote connection decodes each event of the server slot and maps it onto the dri
 | `CallbackEvent` other than `on_commit` / `on_rollback`, `BackendEvent` | passed to `emit` |
 | `CallbackEvent("on_commit")`, `CallbackEvent("on_rollback")` | not forwarded: the application's slot delivers its own |
 
-The application's slot then delivers one outcome per request and its own `on_commit` and `on_rollback`, exactly as
-for a connection in the process. Server request ids never reach the application's channel.
+The application's slot delivers one outcome per request and its own `on_commit` and `on_rollback`, as for a
+connection in the process. Server request ids do not reach the application's channel.
 
 Result values and payloads are encoded by their inferred type ([`encode_value()`](/ref/encoding#adorm-codec-encode-value-value-hint-none));
 `to_dict(encode)` and `from_dict(data, decode)` take a codec that encodes them by the types of the model schema

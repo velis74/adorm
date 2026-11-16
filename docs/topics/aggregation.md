@@ -1,8 +1,8 @@
 # Aggregation
 
-An aggregate computes one value from many rows: a count, a sum, an average, a minimum or a maximum. adorm computes
-aggregates the way Django does: over all rows of a query (`aggregate()`), per row (`annotate()` on model rows) or per
-group of rows (`values()` followed by `annotate()`). The [Django driver](/topics/django-driver) and the
+An aggregate computes one value from many rows: a count, sum, average, minimum or maximum. As in Django, adorm
+aggregates over all rows of a query (`aggregate()`), per row (`annotate()` on model rows) or per group of rows
+(`values()` followed by `annotate()`). The [Django driver](/topics/django-driver) and the
 [native PostgreSQL driver](/topics/postgresql-driver) run every form on this page.
 
 The examples use the demo's models:
@@ -41,8 +41,7 @@ await Membership.objects.filter(role="treasurer").aggregate(n=Count("*"), total=
 ```
 
 `aggregate()` is a terminal method: it runs one [`Aggregate`](/ref/operations#adorm-operations-aggregate-query-aggregations)
-operation and returns its result. It aggregates the rows the query returns, so a slice or `distinct()` applies
-first:
+operation and returns its result. It aggregates the rows the query returns, after a slice or `distinct()`:
 
 ```python
 await Membership.objects.order_by("-fee")[:3].aggregate(Sum("fee"))   # the three highest fees
@@ -58,8 +57,8 @@ async for club in clubs.order_by("-headcount"):
     print(club.name, club.headcount, club.fees)
 ```
 
-The annotation is a value of the instance (an extra field); a condition and an ordering refer to it by name. A
-condition on an aggregate filters the rows after they are aggregated (SQL `HAVING`):
+The annotation is an extra field of the instance; conditions and orderings refer to it by name. A condition on an
+aggregate filters the rows after aggregation (SQL `HAVING`):
 
 ```python
 await Club.objects.annotate(headcount=Count("memberships")).filter(headcount__gt=3).count()
@@ -74,8 +73,8 @@ await Club.objects.annotate(headcount=Count("memberships")).aggregate(Avg("headc
 
 ## Per group: `values()` and `annotate()`
 
-`values()` followed by an annotation with an aggregate groups the rows by the selected names. Each row of the result
-is one group:
+`values()` followed by an annotation with an aggregate groups the rows by the selected names, one result row per
+group:
 
 ```python
 roles = Membership.objects.values("role").annotate(n=Count("*"), fees=Sum("fee")).order_by("role")
@@ -85,9 +84,9 @@ roles = Membership.objects.values("role").annotate(n=Count("*"), fees=Sum("fee")
 #  {"role": "member", "n": 9, "fees": Decimal("1042.00")}]
 ```
 
-The order of the calls decides: `annotate()` before `values()` aggregates per row, `annotate()` after `values()`
-per group. An annotation without an aggregate made before `values()` can be a grouping column, which groups by a
-computed value, such as the month of a date:
+`annotate()` before `values()` aggregates per row, `annotate()` after `values()` per group. An annotation without
+an aggregate made before `values()` can be a grouping column, to group by a computed value such as the month of a
+date:
 
 ```python
 months = (
@@ -100,8 +99,8 @@ months = (
 # [(date(2026, 1, 1), 10, Decimal("1102.00")), (date(2026, 3, 1), 9, Decimal("165.00"))]
 ```
 
-A grouped query is an ordinary query: `filter()` on an aggregate keeps some groups, `count()` counts the groups and
-`aggregate()` aggregates them:
+On a grouped query, `filter()` on an aggregate selects groups, `count()` counts the groups and `aggregate()`
+aggregates them:
 
 ```python
 groups = Membership.objects.values("club_id").annotate(n=Count("*"))
@@ -110,8 +109,8 @@ await groups.aggregate(largest=Max("n"))              # {"largest": 5}
 ```
 
 `first()` and `last()` on a grouped query need `order_by()`; ordering by the primary key would split the groups.
-[`Query.group_by`](/ref/query#annotate-annotations) shows the grouping names. An annotation without an aggregate added
-after the grouping is selected and joins the grouping names, as in Django:
+[`Query.group_by`](/ref/query#annotate-annotations) holds the grouping names. An annotation without an aggregate added
+after the grouping is selected and added to the grouping names, as in Django:
 
 ```python
 Membership.objects.values("role").annotate(n=Count("*")).annotate(club=F("club__slug"))
@@ -120,7 +119,7 @@ Membership.objects.values("role").annotate(n=Count("*")).annotate(club=F("club__
 
 ## Conditional aggregation
 
-`filter=` limits the rows one aggregate counts, so several aggregates over different rows run in one query:
+`filter=` limits the rows of one aggregate, so aggregates over different rows run in one query:
 
 ```python
 await Membership.objects.aggregate(
@@ -131,17 +130,20 @@ await Membership.objects.aggregate(
 Club.objects.annotate(inactive=Count("memberships", filter=Q(memberships__active=False)))
 ```
 
-The order of `filter()` and `annotate()` decides, as in Django. An aggregate annotation added after a `filter()` on a
-multi-valued relation counts only the related rows the condition matched. A `filter()` added after the annotation joins
-the relation again: each row repeats once per related row the condition matches, which multiplies the aggregate.
-`filter=` limits one aggregate whatever the order:
+The order of `filter()` and `annotate()` matters, as in Django:
+
+- An aggregate annotation after a `filter()` on a multi-valued relation counts only the related rows the condition
+  matched.
+- A `filter()` after the annotation joins the relation again: each row repeats once per matching related row, which
+  multiplies the aggregate.
+- `filter=` limits one aggregate in either order.
 
 ```python
 Club.objects.filter(memberships__role="member").annotate(n=Count("memberships"))   # the members of each club
 Club.objects.annotate(n=Count("memberships")).filter(memberships__role="member")   # memberships × members
 ```
 
-`Case` and `When` compute a value per row that an aggregate can then sum:
+`Case` and `When` compute a value per row for an aggregate:
 
 ```python
 await Membership.objects.aggregate(discounted=Sum(Case(When(role="board", then=F("fee") / 2), default=F("fee"))))
@@ -150,8 +152,7 @@ await Membership.objects.aggregate(discounted=Sum(Case(When(role="board", then=F
 
 ## Aliases
 
-`alias()` names an expression that conditions, orderings and other expressions use without returning it in the
-rows. It saves selecting a value nobody reads:
+`alias()` names an expression for conditions, orderings and other expressions without selecting it in the rows:
 
 ```python
 busy = Club.objects.alias(headcount=Count("memberships")).filter(headcount__gt=3).order_by("-headcount")
@@ -162,8 +163,8 @@ busy = Club.objects.alias(headcount=Count("memberships")).filter(headcount__gt=3
 
 ## Subqueries with aggregates
 
-`Subquery` and `OuterRef` compute an aggregate per row from rows the outer query does not join, which keeps two
-aggregates over different relations from multiplying each other's rows:
+`Subquery` and `OuterRef` compute an aggregate per row from rows the outer query does not join. Two aggregates over
+different relations then do not multiply each other's rows:
 
 ```python
 billed = (
@@ -185,13 +186,13 @@ Member.objects.filter(Exists(unpaid))
 
 ## Porting Django code
 
-Django code that aggregates moves to adorm with the same calls and `await`. Two kinds of code need a new home.
+Django code that aggregates ports with the same calls and `await`, except the two kinds of code below.
 
 ### Custom query set methods
 
-A method of a Django query set that builds a query becomes a function over an adorm query set, or a client-side
-method of an adorm `QuerySet` subclass ([managers](/topics/managers#query-set-classes)). Building runs in the client
-and needs no connection; the function returns a query set that further calls extend:
+A Django query set method that builds a query becomes a function over an adorm query set, or a client-side method of
+an adorm `QuerySet` subclass ([managers](/topics/managers#query-set-classes)). It runs in the client and returns a
+query set that further calls extend:
 
 ```python
 # Django
@@ -209,14 +210,15 @@ busy = await with_headcount(Club.objects.filter(city="Ljubljana")).filter(headco
 ```
 
 For a generated model, the method goes into the class that
-[`@client_base`](/topics/managers#client-side-methods-of-generated-models) names, so
-`Club.objects.with_headcount()` keeps working.
+[`@client_base`](/topics/managers#client-side-methods-of-generated-models) names; `Club.objects.with_headcount()`
+then works as in Django.
 
 ### Model properties that read the database
 
-A Django property such as `club.headcount` that runs a query on every access becomes either an annotation of the
-query that loads the rows, so the value comes with the row in the same statement, or an async function that runs the
-query for one instance:
+A Django property such as `club.headcount` that runs a query on every access becomes one of:
+
+- an annotation of the query that loads the rows: the value comes with the row in the same statement;
+- an async function that runs the query for one instance.
 
 ```python
 # Django
@@ -235,5 +237,5 @@ async def club_fees(club):
     return (await club.memberships.aggregate(total=Sum("fee", default=0)))["total"]
 ```
 
-The annotation suits lists, where a property would run one query per row; the function suits a single instance at
-hand. Neither runs implicitly on attribute access: reading the database is always awaited.
+The annotation suits lists, where a property runs one query per row; the function suits a single instance. Neither
+runs on attribute access: reading the database is always awaited.

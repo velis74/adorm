@@ -8,11 +8,9 @@ write whose manager or query set overrides the method it would call. Driver meth
 `NotSupportedError` on both.
 :::
 
-A Django model carries logic in its managers and query sets: a `get_queryset()` that hides soft-deleted rows, a
-`create()` that drops an argument, a `delete()` that refuses bulk deletion, a `create_user()` that hashes a
-password. adorm brings that logic into its API with the mechanism that brings the model definitions: the managers
-and their methods are declared on the adorm model, and `adorm generate` writes the declarations from the Django
-code.
+Django managers and query sets carry logic: a `get_queryset()` that hides soft-deleted rows, a `create()` that drops
+an argument, a `delete()` that refuses bulk deletion, a `create_user()` that hashes a password. In adorm the managers
+and their methods are declared on the adorm model; `adorm generate` writes the declarations from the Django code.
 
 ## Where a method runs
 
@@ -22,25 +20,29 @@ code.
 | overrides what adorm runs as an operation: `get_queryset()`, `create()`, `delete()`, `update()`, `get_or_create()` … | on the driver, through the ORM manager | nothing: the manager gets its ORM name, and every operation it builds names that manager |
 | does other work on the database (`create_user()`, `archive()`) | on the driver, on the manager's `method_manager`, as a [`Call`](/ref/operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) | [`@expose`](/ref/codegen#adorm-expose-func) or the `ADORM_EXPOSE` setting in the Django code; [`@driver_method`](/ref/models#adorm-driver-method-func-queryset-only-false) on the adorm class |
 
-A Django query set method that annotates or aggregates ports the same way; [porting Django
-code](/topics/aggregation#porting-django-code) shows it and the model properties that read the database. A query-building method stays in the client because building a query needs no connection: the result is a query
-set that further methods extend. A method of the driver side returns data, not a query set, so it is the last step
-of a chain.
+A Django query set method that annotates or aggregates ports the same way; see [porting Django
+code](/topics/aggregation#porting-django-code), which also covers model properties that read the database. A
+query-building method runs in the client and returns a query set that further methods extend. A driver-side method
+returns data, not a query set, so it ends a chain.
 
-A query with an ORM manager uses the construct `clause.manager`; a driver that builds its queries from the target
-ORM's query sets applies it: the Django driver and the native PostgreSQL driver. The native PostgreSQL driver builds
-the query on the event loop, so there a manager's `get_queryset()` must only build a query; one that accesses the
-database raises `NotSupportedError`. It runs no Python code of the manager's other methods: a write whose manager
-or query set overrides the method it would call raises `NotSupportedError` before anything is written: `create()`,
-`bulk_create()`, `update()`, `delete()`, `get_or_create()` or `update_or_create()`, and for `get_or_create()` also `get()` and
-`create()`, for `update_or_create()` also `select_for_update()`, `get_or_create()`, `get()` and `create()` ([what runs on the driver side](/topics/postgresql-driver#what-runs-and-what-does-not)). A driver method is a `call` operation and needs a driver that runs the ORM's
-code: the Django driver. A driver without these capabilities refuses them with `NotSupportedError` before anything
-runs. A manager that only has driver methods keeps its queries off the ORM manager, so on such a driver only its
-driver methods are refused.
+A query with an ORM manager uses the construct `clause.manager`. Drivers that build their queries from the target
+ORM's query sets apply it: the Django driver and the native PostgreSQL driver.
+
+- The native PostgreSQL driver builds the query on the event loop: a manager's `get_queryset()` must only build a
+  query, and one that accesses the database raises `NotSupportedError`.
+- It runs no Python code of the manager's other methods. A write whose manager or query set overrides the method it
+  would call raises `NotSupportedError` before anything is written: `create()`, `bulk_create()`, `update()`,
+  `delete()`, `get_or_create()` or `update_or_create()`; for `get_or_create()` also `get()` and `create()`; for
+  `update_or_create()` also `select_for_update()`, `get_or_create()`, `get()` and `create()`
+  ([what runs on the driver side](/topics/postgresql-driver#what-runs-and-what-does-not)).
+- A driver method is a `call` operation and needs a driver that runs the ORM's code: the Django driver.
+
+A driver without these capabilities raises `NotSupportedError` before anything runs. The queries of a manager that
+has only driver methods do not use the ORM manager, so on such a driver only its driver methods are refused.
 
 ## Managers
 
-Every model has `objects`. A manager declared in the class body is another way into the model's rows:
+Every model has `objects`. A manager declared in the class body is another entry to the model's rows:
 
 ```python
 from adorm import Manager, Model, ModelMeta
@@ -57,13 +59,14 @@ class Loan(Model):
 ```
 
 `Manager(orm_name)` names the target ORM's manager. Every query, `create()`, `bulk_create()`, `update()`, `delete()`,
-`get_or_create()` and `update_or_create()` of `Loan.objects` carries that name ([`Query.manager`](/ref/query#adorm-query-query-model-manager-none)),
-so the driver starts from that manager: Django's `Loan.objects.get_queryset()` decides the rows and Django's
-query set methods run the writes. `Manager()` without a name reads and writes the rows without manager logic.
+`get_or_create()` and `update_or_create()` of `Loan.objects` carries that name
+([`Query.manager`](/ref/query#adorm-query-query-model-manager-none)) and the driver starts from that manager: Django's
+`Loan.objects.get_queryset()` selects the rows and Django's query set methods run the writes. `Manager()` without a
+name reads and writes the rows without manager logic.
 
-`method_manager` names the target ORM's manager the [driver methods](#driver-methods) run on; it defaults to
+`method_manager` names the target ORM's manager that runs the [driver methods](#driver-methods); it defaults to
 `orm_name`. A manager whose target only adds methods, such as Django's `UserManager` with `create_user()`, declares
-`method_manager` alone: its queries carry no ORM manager and run on every driver.
+only `method_manager`: its queries carry no ORM manager and run on every driver.
 
 ```python
 class User(Model):
@@ -118,10 +121,10 @@ class OpenLoans(Manager):
 
 ## Related rows
 
-A reverse foreign key and a many-to-many relation return their rows from the target model's `objects` manager, as
-Django's related managers derive from the default manager: the query set has the manager's `queryset_class`, starts
-from its `get_queryset()` and carries its ORM manager. A forward foreign key and a reverse one-to-one load their row
-without the target's manager, as Django's base manager does.
+A reverse foreign key and a many-to-many relation return their rows from the target model's `objects` manager, like
+Django's related managers: the query set has the manager's `queryset_class`, starts from its `get_queryset()` and
+carries its ORM manager. A forward foreign key and a reverse one-to-one load their row without the target's manager,
+like Django's base manager.
 
 ```python
 await reader.loans.count()                              # Loan.objects: archived loans are left out
@@ -156,19 +159,17 @@ loan = await Loan.objects.lend(reader.pk, book.pk, days=7)          # runs LoanM
 count = await Loan.objects.overdue(today).archive("late")           # runs LoanQuerySet.archive on that query
 ```
 
-A call checks its arguments against the signature and sends one `Call` operation to the manager's `method_manager`:
-a manager method with the manager's plain query, a query set method with the query set's query. The annotations type
-the arguments' encoding, as field types type the values of other operations. The driver returns plain data; every
-instance of a model in it, also inside lists, tuples and the values of mappings, comes back as an instance of the
-registered adorm model.
-
-The driver runs only the methods the registered adorm model declares: a `Call` naming any other method, a private
-one or one of another manager raises `NotSupportedError` before it reaches the driver. Arguments are plain values:
-a model instance raises `TypeError`, so pass its primary key.
-
-A driver method is one operation. Outside a transaction it runs in the driver's autocommit mode; a method that
-writes several rows and must not stop halfway runs inside `adorm.atomic()` or opens its own transaction in the
-target ORM. Signals and `transaction.on_commit()` callbacks of the target ORM run on the driver side.
+- A call checks its arguments against the signature and sends one `Call` operation to the manager's
+  `method_manager`: a manager method with the manager's plain query, a query set method with the query set's query.
+- The annotations define the arguments' encoding, as field types do for the values of other operations.
+- The driver returns plain data. Every model instance in it, also inside lists, tuples and mapping values, is returned
+  as an instance of the registered adorm model.
+- The driver runs only the methods the registered adorm model declares. A `Call` naming another method, a private one
+  or one of another manager raises `NotSupportedError` before it reaches the driver.
+- Arguments are plain values: a model instance raises `TypeError`; pass its primary key.
+- A driver method is one operation. Outside a transaction it runs in the driver's autocommit mode; a method that writes
+  several rows and must not stop halfway runs inside `adorm.atomic()` or opens its own transaction in the target ORM.
+- Signals and `transaction.on_commit()` callbacks of the target ORM run on the driver side.
 
 ## Generated managers
 
@@ -281,9 +282,9 @@ await Loan.all_loans.count()                                       # every loan
 user = await User.objects.create_user("ann", password="secret")   # Django hashes the password
 ```
 
-`create()` on a manager with an ORM name sends the values that are not fields too, so an override that takes such
-arguments, like `username` above, receives them. `UserManager` overrides no operation, so `User.objects.filter()`
-and the other queries of `User` run on every driver; only `create_user()` needs the Django driver.
+`create()` on a manager with an ORM name also sends values that are not fields, so an override receives such
+arguments (`username` above). `UserManager` overrides no operation, so the queries of `User` run on every driver; only
+`create_user()` needs the Django driver.
 
 A manager gets its ORM name only for an override of a method the driver calls on the Django manager
 ([`ROUTED_METHODS`](/ref/codegen#adorm-codegen-django-routed-methods)) that its client base does not define too;
@@ -291,9 +292,9 @@ see [generating models](/howto/generating-models#managers).
 
 ### Client-side methods of generated models
 
-A generated module is rewritten on every run, so methods ported by hand live in a module of their own. A Django
-manager or query set class decorated with `@client_base("package.module:ClassName")` gets a generated class that
-derives from that adorm class:
+A generated module is rewritten on every run, so methods ported by hand go into a module of their own. A Django
+manager or query set class decorated with `@client_base("package.module:ClassName")` gets a generated class derived
+from that adorm class:
 
 ```python
 # library/adorm_bases.py
@@ -309,7 +310,7 @@ class LoanQuerySetBase(QuerySet):
 await Loan.objects.overdue(today).archive("late")   # overdue() in the client, archive() on the driver
 ```
 
-A method of the client base that the Django class overrides, such as `get_queryset()`, replaces the Django one: the
-generator does not route the manager through the ORM manager for it. A public Django method that is neither
-exposed nor ported is not generated and is reported as a warning; the methods of installed packages are listed
-together, once per manager, and `adorm generate --ignore-third-party` leaves that list out.
+A client-base method that the Django class also defines, such as `get_queryset()`, replaces the Django one: the
+generator does not route the manager through the ORM manager for it. A public Django method that is neither exposed
+nor ported is not generated and is reported as a warning. The methods of installed packages are listed together, once
+per manager; `adorm generate --ignore-third-party` omits that list.

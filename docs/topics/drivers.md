@@ -1,15 +1,14 @@
 # Drivers
 
 ::: info Status
-The installed version provides the driver contract (`adorm.drivers`), the event types (`adorm.events`), the
+adorm provides the driver contract (`adorm.drivers`), the event types (`adorm.events`), the
 [slots and pool](/topics/pool) that call drivers, and two drivers that execute reads, writes, row locks and
 savepoints: the [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver).
 :::
 
 A driver executes adorm operations on one target: an ORM such as Django's or SQLAlchemy, or a database library
-such as asyncpg. The core of adorm (queries, models, sessions, the pool) never imports a target; everything it
-knows about one comes through the contract on this page, so the same application code runs on any driver that
-implements it.
+such as asyncpg. The core of adorm (queries, models, sessions, the pool) does not import a target and uses only the
+contract on this page. Application code runs unchanged on any driver that implements it.
 
 ```text
 slot ── operation ──▶ DriverConnection ──▶ target (Django ORM, asyncpg, SQLAlchemy …)
@@ -20,19 +19,18 @@ slot ── operation ──▶ DriverConnection ──▶ target (Django ORM, a
 
 ## Operations in, plain data out
 
-A slot hands its connection one operation at a time. An [operation](/ref/operations) is adorm's description of a
-read or write; it names its `kind` (`"select"`, `"update"` …) and the constructs it uses (`"lookup.icontains"`,
-`"function.Lower"` …), models by their label and fields by their adorm names. The driver translates it into the
-target's terms and executes it. A [`Query`](/ref/query) is an immutable tree of [expressions](/ref/expressions) and
-[lookups](/ref/lookups): `walk()` visits its nodes and `constructs()` names the constructs it uses, the names an
-operation reports to `Capabilities`.
+A slot passes its connection one operation at a time. An [operation](/ref/operations) describes a read or write:
+its `kind` (`"select"`, `"update"` …), the constructs it uses (`"lookup.icontains"`, `"function.Lower"` …), models by
+label and fields by adorm name. The driver translates it for the target and executes it. A [`Query`](/ref/query) is
+an immutable tree of [expressions](/ref/expressions) and [lookups](/ref/lookups): `walk()` visits its nodes,
+`constructs()` returns the construct names the operation reports to `Capabilities`.
 
 `execute()` returns plain data: rows as dicts keyed by adorm field names, a scalar or a count. The core builds
-model instances from the rows, so no target object crosses the contract.
+model instances from the rows; no target object crosses the contract.
 
 An adorm name can differ from the target's: a generated model renames fields that clash with pydantic (`json_` for
-Django's `json`). The driver translates every segment of a field path, every key of the values it writes and every
-key of the rows it returns with the `orm_names` of the model that segment reaches: `ModelMeta.orm_name()` on a model
+Django's `json`). The driver translates every segment of a field path, every key of written values and every key of
+returned rows with the `orm_names` of the model that segment reaches: `ModelMeta.orm_name()` on a model
 class, `ModelSchema.orm_names` from a [schema source](/ref/encoding#adorm-schema-schemasource). A name `orm_names`
 does not list is the same on both sides.
 
@@ -42,35 +40,34 @@ registry.model_schema("library.Note").orm_names["copy_"]         # "copy"
 # copy___title: "copy_" on library.Note, then "title" on library.Book -> Django's "copy__title"
 ```
 
-Operations convert to JSON-safe data with every value encoded by its field's type ([Operation
-encoding](/ref/encoding)), so a driver that forwards them to another process sends `operation.to_dict(schema)` and
+Operations convert to JSON-safe data, each value encoded by its field's type ([Operation
+encoding](/ref/encoding)). A driver that forwards operations to another process sends `operation.to_dict(schema)`;
 the receiving side executes `Operation.from_dict(data, schema)`.
 
 ```python
 rows = await connection.execute(operation)    # [{"id": 1, "name": "Ana"}, ...]
 ```
 
-Transactions are calls of their own: `begin()`, `savepoint(name)`, `release_savepoint(name)`,
-`rollback_to_savepoint(name)`, `commit()` and `rollback()`. The slot decides when to call them; a driver never
-opens or ends a transaction on its own.
+Transactions are separate calls: `begin()`, `savepoint(name)`, `release_savepoint(name)`,
+`rollback_to_savepoint(name)`, `commit()` and `rollback()`. The slot calls them; a driver does not open or end a
+transaction on its own.
 
 ## Events
 
-Besides return values a connection reports events through the `emit` callable it receives when it opens:
+A connection reports events through the `emit` callable it receives when it opens:
 
 | Event | Meaning | Example |
 |---|---|---|
 | `CallbackEvent(name, payload)` | a point in the connection's life the client runs callbacks for; not `on_commit` or `on_rollback`, which the slot delivers itself | `cache_cleared` |
 | `BackendEvent(name, channel, payload)` | something the database or the target raised on its own | PostgreSQL `NOTIFY`, a server notice, a lost connection |
 
-The slot forwards them over its event queue together with the outcome of each request (`ResultEvent`,
+The slot forwards them over its event queue, together with the outcome of each request (`ResultEvent`,
 `ErrorEvent`, `CancelledEvent`) and its own `CallbackEvent("on_commit")` and `CallbackEvent("on_rollback")` after a
-successful commit or rollback. A connection emits nothing else: the slot drops and logs any other event it emits,
-outcome events and the names `on_commit` and `on_rollback` included. On the client the
-lease's event channel interprets each event, and the pool's [`EventBus`](/ref/events#adorm-events-eventbus)
-dispatches the unclaimed ones to subscribers; the [events topic](/topics/events) describes the path. Signals of the
-target (Django's `post_save`, SQLAlchemy's ORM events) and the target's own `on_commit` hooks run on the driver
-side only; the client sees what the driver emits.
+successful commit or rollback. The slot drops and logs any other event a connection emits, including outcome events
+and the names `on_commit` and `on_rollback`. On the client the lease's event channel interprets each event, and the
+pool's [`EventBus`](/ref/events#adorm-events-eventbus) dispatches unclaimed ones to subscribers
+([events topic](/topics/events)). Signals of the target (Django's `post_save`, SQLAlchemy's ORM events) and the
+target's own `on_commit` hooks run on the driver side only; the client sees only what the driver emits.
 
 A driver lists the backend event names it emits in `Capabilities.backend_events`. The names adorm interprets:
 
@@ -87,18 +84,21 @@ A threaded connection that must read while idle returns a descriptor from `idle_
 
 A driver declares what it supports in a [`Capabilities`](/ref/drivers#adorm-drivers-capabilities) value:
 operation kinds, constructs, connection options, backend event names, savepoints, cancellation and the longest
-notification channel name (`max_channel_length`). `savepoints`
-and `cancellation` default to `False`, so a driver declares only what it implements.
+notification channel name (`max_channel_length`). `savepoints` and `cancellation` default to `False`.
 
-`DriverConnection` checks every call against the declaration before the driver sees it: an operation that uses an
-unsupported kind or construct, an unsupported connection option, or a savepoint call on a driver without
-savepoints raises `NotSupportedError` and nothing is executed. The router checks an operation outside a
-transaction with [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) before it acquires a slot, so an unsupported
-operation does not wait for a slot of a full pool. Inside a transaction the check in `execute()` refuses before
-anything reaches the database, so the transaction stays usable. The error names the driver and the missing names
-(`NotSupportedError.driver`, `.unsupported`). The checks live in the concrete `execute()`,
-`set_options()` and savepoint methods; a driver implements `_execute()`, `_set_options()` and the `_savepoint()`
-family, for threaded and async drivers alike.
+`DriverConnection` checks every call against the declaration before the driver sees it. An operation with an
+unsupported kind or construct, an unsupported connection option, or a savepoint call on a driver without savepoints
+raises `NotSupportedError`, and nothing is executed. The error names the driver and the missing names
+(`NotSupportedError.driver`, `.unsupported`).
+
+- Outside a transaction the router checks an operation with
+  [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) before it acquires a slot, so an unsupported
+  operation does not wait for a slot of a full pool.
+- Inside a transaction the check in `execute()` refuses before anything reaches the database; the transaction stays
+  usable.
+
+The checks are in the concrete `execute()`, `set_options()` and savepoint methods. A driver, threaded or async,
+implements `_execute()`, `_set_options()` and the `_savepoint()` family.
 
 ```python
 Capabilities(
@@ -114,39 +114,39 @@ Construct names have the form `<category>.<name>`: `lookup.<lookup name>`, `func
 (`expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`,
 `expression.CombinedExpression`), `clause.<clause>` (`clause.annotate`, `clause.distinct_on`,
 `clause.select_for_update` …) and `path.nested`, a field path across a relation or into a JSON field
-(`club__name`, `address__street`). Query nodes report theirs through `constructs()`; the [expression reference](/ref/expressions) lists
-them, and [`construct_names()`](/ref/query#adorm-query-construct-names) returns them all.
+(`club__name`, `address__street`). Query nodes report theirs through `constructs()`. The
+[expression reference](/ref/expressions) lists them; [`construct_names()`](/ref/query#adorm-query-construct-names)
+returns them all.
 
 ```python
 query = Member.objects.filter(memberships__club__slug="koper-sailing").query
 MemoryDriver.capabilities.unsupported(Select(query))   # ['path.nested']
 ```
 
-The [driver conformance suite](/topics/conformance) runs every bundled driver over the same schema and data and
-holds each to its declaration.
+The [driver conformance suite](/topics/conformance) checks every bundled driver against its declaration over the
+same schema and data.
 
 ## Execution mode
 
 A driver's `mode` says how its connections run:
 
 - **`"threaded"`**: a synchronous target runs on a dedicated thread per connection. Every call of a connection
-  runs on that thread, so a target whose connections are bound to the thread that opened them (Django) works
-  unchanged. [`ThreadedDriver`](/ref/drivers#adorm-drivers-threadeddriver) and
-  [`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection) implement the bridge: the driver
-  writes plain synchronous methods.
+  runs on that thread, which suits a target whose connections are bound to the thread that opened them (Django).
+  [`ThreadedDriver`](/ref/drivers#adorm-drivers-threadeddriver) and
+  [`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection) provide the thread handling; the driver
+  implements synchronous methods.
 - **`"async"`**: native coroutines on the event loop, no threads.
 
-A threaded driver can also run **direct**: with `direct = True` on the driver, every `*_sync` method runs on the
-event loop's own thread instead of a dedicated one. This is for one task per event loop, such as a Celery task:
-each call blocks the loop while it runs. During a direct call no running event loop is visible on the thread, so a
-target's check against use from an event loop (Django's `async_unsafe`) accepts adorm's calls and still applies
-to everything else. A running direct call cannot be interrupted by cancelling a task, since the loop is blocked;
-`cancel()` from another thread cancels it.
+A threaded driver with `direct = True` runs **direct**: every `*_sync` method runs on the event loop's own thread.
+Each call blocks the loop while it runs; direct mode is for one task per event loop, such as a Celery task. During a
+direct call no running event loop is visible on the thread, so a target's check against use from an event loop
+(Django's `async_unsafe`) accepts adorm's calls and applies to all other code. Cancelling a task does not interrupt
+a running direct call; `cancel()` from another thread does.
 
-Every `*_sync` call runs in a copy of the awaiting task's context: context variables set by the caller are visible to
-the target; changes made inside the call do not flow back. A value a library ties to the thread that set it (an
-asgiref `Local`, which holds Django's active language) needs re-binding to the connection's thread;
-`prepare_call_sync()` runs before each call in its context copy for that, and the Django driver re-binds there.
+Every `*_sync` call runs in a copy of the awaiting task's context: the target sees context variables set by the
+caller; changes made inside the call do not reach the caller. A value bound to the thread that set it (an asgiref
+`Local`, which holds Django's active language) must be re-bound on the connection's thread in
+`prepare_call_sync()`, which runs before each call in its context copy. The Django driver re-binds there.
 
 A connection belongs to one slot, which awaits one call at a time.
 
@@ -154,16 +154,15 @@ A connection belongs to one slot, which awaits one call at a time.
 
 Cancelling the task that awaits `execute()` cancels the statement running on the target. The call raises
 `asyncio.CancelledError`; the slot rolls back an open transaction, and closes the connection when the driver
-reports it unusable (the native PostgreSQL driver does after every statement cancelled before it finished). When the
-statement completed just before the cancellation arrived, its effect remains and its result is discarded.
+reports it unusable (the native PostgreSQL driver does after every statement cancelled before it finished). A
+statement that completed before the cancellation arrived keeps its effect; its result is discarded.
 
 `cancel()` cancels the running statement from any thread without cancelling the awaiting task: the call then
 raises `OperationalError` with SQLSTATE `57014` (`query_canceled`). A cancellation request reaches only the
 statement it was meant for; a threaded connection starts no further call until `cancel_sync()` returns.
 
-`cancel()` returns without waiting. Called on the event loop's thread, a threaded connection runs
-`cancel_sync()` on a thread of its own, so a slow cancel request never blocks the loop. Cancelling the awaiting
-task does the same.
+`cancel()` returns without waiting. On the event loop's thread, a threaded connection runs `cancel_sync()` on a
+separate thread, so a slow cancel request does not block the loop; the same applies to cancelling the awaiting task.
 
 A threaded call that does not finish within the driver's `cancel_grace` after a cancellation leaves the
 connection unusable: `is_usable()` returns `False` and the slot drops it. A driver that declares
@@ -174,24 +173,24 @@ connection unusable: `is_usable()` returns `False` and the slot drops it. A driv
 Every error a connection raises is an adorm [exception](/ref/exceptions); `asyncio.CancelledError` passes
 through. `DriverConnection.map_error()` converts the target's exceptions, by default with
 [`wrap_driver_error`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): SQLSTATE first, then the PEP 249
-class name. A driver overrides it where the target reports an error without a SQLSTATE that adorm classifies
-differently, for example a cancelled statement.
+class name. A driver overrides it for errors the target reports without a SQLSTATE that adorm classifies
+differently, such as a cancelled statement.
 
 `DriverConnection.is_connection_lost()` decides whether a mapped error leaves the connection unusable. The
 default, [`is_connection_error`](/ref/drivers#adorm-drivers-is-connection-error-exc), follows PostgreSQL:
 `InterfaceError`, and `OperationalError` without a SQLSTATE or with a connection or shutdown SQLSTATE. A target
 that reports ordinary statement errors as `OperationalError` without a SQLSTATE (`sqlite3` for a missing table
-or a locked database, MySQL drivers for lock wait timeouts) overrides it, so that only a lost connection counts.
-A slot drops an unusable connection, and one whose request failed with such an error even when the driver still
-reports it usable; the next request gets a fresh one.
+or a locked database, MySQL drivers for lock wait timeouts) overrides it to count only a lost connection.
+A slot drops an unusable connection and a connection whose request failed with such an error, even when the driver
+reports it usable; the next request gets a new one.
 
 ## Custom SQL
 
 A connection that runs SQL adorm did not generate, such as SQL of application code the target ORM runs on the
-driver side, calls [`mark_custom_sql()`](/ref/drivers#mark-custom-sql). Its slot then closes the connection when the
-lease ends, also after a commit, since that SQL may have changed the connection's state. Work that runs after a
-call's outcome (Django's `on_commit()` callbacks) counts too: the slot waits for the connection to settle
-([`settle()`](/ref/drivers#async-settle)) before it decides.
+driver side, calls [`mark_custom_sql()`](/ref/drivers#mark-custom-sql). The slot then closes the connection when the
+lease ends, also after a commit, because that SQL may have changed the connection's state. Work that runs after a
+call's outcome (Django's `on_commit()` callbacks) counts too: the slot waits for
+[`settle()`](/ref/drivers#async-settle) before it decides.
 
 ```python
 def execute_sync(self, operation):
@@ -203,12 +202,12 @@ def execute_sync(self, operation):
 
 A connection is opened for a [`Profile`](/ref/drivers#adorm-drivers-profile): its `name` (the `using` value), the
 target's database `alias`, driver `params` and an optional `connect` hook. When `connect` is set, the driver
-opens the target's connection with `connect(profile)` instead of its default: a threaded driver calls it in
+opens the target's connection with `connect(profile)`: a threaded driver calls it in
 `connect_sync()` on the connection's thread, an async driver awaits its result in `open_connection()`.
 
 The profile's `on_acquire` and `on_release` hooks run through the connection's `call_hook()`, which passes them
-the connection's `target`: the target's own connection object, so that a hook can run `SET ROLE` or similar with the
-target's API. A threaded connection runs them on its thread. See [connection profiles](/topics/profiles#hooks).
+the connection's `target`, the target's own connection object (for `SET ROLE` and similar through the target's API).
+A threaded connection runs them on its thread. See [connection profiles](/topics/profiles#hooks).
 
 ```python
 class DjangoConnection(ThreadedConnection):
@@ -219,8 +218,7 @@ class DjangoConnection(ThreadedConnection):
 
 ## The contract on Django ORM, asyncpg and SQLAlchemy
 
-The tables below map each element of the contract onto the Django ORM, native PostgreSQL (asyncpg) and
-SQLAlchemy.
+How each element of the contract maps onto the Django ORM, native PostgreSQL (asyncpg) and SQLAlchemy:
 
 ### Execution mode
 
@@ -230,11 +228,10 @@ SQLAlchemy.
 | direct: `direct = True`; the connection is the loop thread's own Django connection, and `async_unsafe` accepts adorm's calls because no running loop is visible during them | not applicable | direct with a synchronous `Connection` |
 
 Under Django's `TestCase` the test's connection is bound to the test thread and wrapped in the test's
-transaction. When the event loop runs on the test thread (pytest-asyncio), this maps onto direct calls: the
-connection's `connect_sync()` takes that same connection, and `begin()`, `commit()` and `rollback()` become
-savepoint calls inside the test's transaction. When the
-loop runs on another thread (asgiref's `async_to_sync`, as Django's test runner does for `async def` test
-methods), no direct call reaches the test's connection; the installed contract does not provide that placement.
+transaction. With the event loop on the test thread (pytest-asyncio), direct calls use it: `connect_sync()` takes
+that connection, and `begin()`, `commit()` and `rollback()` become savepoint calls inside the test's transaction.
+With the loop on another thread (asgiref's `async_to_sync`, which Django's test runner uses for `async def` test
+methods), no direct call reaches the test's connection, and adorm does not support that setup.
 
 ### Profiles and the `connect` hook
 

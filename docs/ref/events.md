@@ -1,8 +1,7 @@
 # Events
 
-Event types, their encoded form, the client end of a slot's event queue and event dispatch, importable from
-`adorm.events`. The [events topic](/topics/events) describes the path from a slot to the client and how adorm
-interprets each event.
+Event types, their encoded form, the client end of a slot's event queue and event dispatch, in `adorm.events`. The
+[events topic](/topics/events) describes the path from a slot to the client and how adorm interprets each event.
 
 ```python
 from adorm.events import BackendEvent, CallbackEvent, EventBus, EventChannel
@@ -19,17 +18,16 @@ Base class of every event.
 
 #### `to_dict(encode=encode_value)`
 
-The event as JSON-safe data, `{"event": <kind>, ...}`. `encode` encodes result values and payloads; the default is
-[`adorm.codec.encode_value`](/ref/encoding#adorm-codec-encode-value-value-hint-none), which infers each value's
-type. Request ids are strings or integers; any other id raises `TypeError`. The base class has no encoded form
-and raises `TypeError`.
+The event as JSON-safe data, `{"event": <kind>, ...}`. `encode` encodes result values and payloads; the default,
+[`adorm.codec.encode_value`](/ref/encoding#adorm-codec-encode-value-value-hint-none), infers each value's type.
+Raises `TypeError` for a request id that is neither a string nor an integer, and on the base class.
 
 #### `from_dict(data, decode=decode_value)`
 
-A static method: the event `to_dict()` encoded. `decode` decodes result values and payloads. Data that is not a
-mapping, an unknown `"event"`, a missing field and a field of the wrong type (a request id that is not a string or
-an integer, a `name` that is not a string, a `channel` that is neither a string nor `null`, a `started` that is not a
-boolean) raise `ValueError`.
+A static method: the event `to_dict()` encoded. `decode` decodes result values and payloads. Raises `ValueError`
+for data that is not a mapping, an unknown `"event"`, a missing field, and a field of the wrong type: a request id
+that is neither a string nor an integer, a `name` that is not a string, a `channel` that is neither a string nor
+`null`, a `started` that is not a boolean.
 
 ```python
 event = ResultEvent(12, [{"id": 1, "name": "Ana"}])
@@ -51,15 +49,16 @@ event's `encode`.
 
 ### `adorm.events.CancelledEvent(request_id, started)`
 
-The request `request_id` was cancelled at the client's request. `started` is `False` when the request's call never
-started: it was still queued, or it was cancelled before the slot handed it to the connection, as while the slot set its
-connection options. It is `True` when it was
-cancelled in the connection while it ran, so that whether it took effect is unknown. Kind `"cancelled"`.
+The request `request_id` was cancelled at the client's request. Kind `"cancelled"`.
+
+- `started` is `False` when the request's call did not start: it was queued, or cancelled before the slot handed it
+  to the connection (for example while the slot set its connection options).
+- `started` is `True` when it was cancelled in the connection while running; whether it took effect is unknown.
 
 ### `adorm.events.CallbackEvent(name, payload=None)`
 
-A point in a connection's life the client runs callbacks for. Kind `"callback"`. The slot itself delivers the
-names in [`RESERVED_CALLBACKS`](#adorm-events-reserved-callbacks); a driver connection emits other names.
+A point in a connection's life the client runs callbacks for. Kind `"callback"`. The slot delivers the names in
+[`RESERVED_CALLBACKS`](#adorm-events-reserved-callbacks); a driver connection emits other names.
 
 ```python
 # inside a driver connection, after the target cleared a cache the client keeps a copy of
@@ -68,9 +67,9 @@ self.emit(CallbackEvent("cache_cleared", {"keys": ["club:1"]}))
 
 ### `adorm.events.BackendEvent(name, channel=None, payload=None)`
 
-An event the database or the target raised on its own. `name` is the kind of event (`"notify"` for PostgreSQL
-`NOTIFY`), `channel` its source within that kind (the `NOTIFY` channel) and `payload` its data. A driver lists the
-names it emits in `Capabilities.backend_events`. Kind `"backend"`.
+An event the database or the target raised without a request. Kind `"backend"`. `name` is the kind of event
+(`"notify"` for PostgreSQL `NOTIFY`), `channel` its source within that kind (the `NOTIFY` channel), `payload` its
+data. A driver lists the names it emits in `Capabilities.backend_events`.
 
 ```python
 # inside a driver connection, when PostgreSQL delivers NOTIFY orders, '42'
@@ -91,10 +90,14 @@ BackendEvent("notify", "Orders", "")        # NOTIFY "Orders"
 ### `adorm.events.NOTICE`
 
 `"notice"`: the `BackendEvent` name of a message the server sends with a statement's result, such as PL/pgSQL's
-`RAISE NOTICE` or a `WARNING`. `channel` is its untranslated severity (`"NOTICE"`, `"WARNING"`, `"INFO"`, `"DEBUG"`,
-`"LOG"`); `payload` a dict with `severity`, `sqlstate`, `message`, `detail` and `hint`, `None` for a field the server
-did not send. The server's `client_min_messages` decides which severities it sends (`NOTICE` and above by default).
-It arrives before the outcome of the request whose statement caused it.
+`RAISE NOTICE` or a `WARNING`.
+
+- `channel`: the untranslated severity (`"NOTICE"`, `"WARNING"`, `"INFO"`, `"DEBUG"`, `"LOG"`).
+- `payload`: a dict with `severity`, `sqlstate`, `message`, `detail` and `hint`; `None` for a field the server did
+  not send.
+
+The server's `client_min_messages` selects the severities sent (default: `NOTICE` and above). The event arrives
+before the outcome of the request whose statement caused it.
 
 ```python
 # RAISE WARNING 'check the clubs' USING ERRCODE = '01000';
@@ -104,11 +107,13 @@ BackendEvent("notice", "WARNING", {"severity": "WARNING", "sqlstate": "01000", "
 
 ### `adorm.events.CONNECTION_LOST`
 
-`"connection_lost"`: the `BackendEvent` name a connection emits when its database connection ends without adorm
-closing it, as when the server terminates the session; at most once per connection. A driver that declares it notices
-the end at least while the connection listens and no call runs; the native PostgreSQL driver notices it at any time,
-the Django driver only while the connection listens. `channel` is `None`, `payload` the reason as text. The connection is no longer usable; a [`Listener`](#adorm-listener) raises
-`InterfaceError` once it reaches the event.
+`"connection_lost"`: the `BackendEvent` name a connection emits, at most once, when its database connection ends
+without adorm closing it (for example, the server terminates the session). `channel` is `None`, `payload` the reason
+as text. The connection is unusable afterwards; a [`Listener`](#adorm-listener) raises `InterfaceError` when it
+reaches the event.
+
+A driver that declares it detects the end at least while the connection listens and no call runs. The native
+PostgreSQL driver detects it at any time, the Django driver only while the connection listens.
 
 ```python
 BackendEvent("connection_lost", None, "the server connection ended")
@@ -132,8 +137,8 @@ outcome, and when it rolls back a transaction whose client sent no request withi
 
 ### `adorm.events.RESERVED_CALLBACKS`
 
-`frozenset({ON_COMMIT, ON_ROLLBACK})`. A slot drops a `CallbackEvent` with one of these names that its driver
-connection emits, and logs an error on the `adorm.executor` logger.
+`frozenset({ON_COMMIT, ON_ROLLBACK})`. A slot drops a `CallbackEvent` with one of these names emitted by its driver
+connection and logs an error on the `adorm.executor` logger.
 
 ### `adorm.events.Emit`
 
@@ -164,11 +169,16 @@ The driver's `original` exception, the objects of a `ProtectedError` or `Restric
 ### `adorm.events.decode_error(data, decode=decode_value)`
 
 The exception `encode_error()` encoded; `decode` decodes validation params. Sessions are restored with
-`create_session()`; a model label that is not registered gives the generic `ObjectDoesNotExist` or
-`MultipleObjectsReturned`; an unknown class gives `DatabaseError`. Data without a string `"class"`, and a validation
-error entry without a string `message`, with a `code` that is not a string or with `params` that are not a mapping,
-raise `ValueError`, and so does an `IntegrityError` whose `constraint_name`, `table_name`, `schema_name`, `detail` or
-`model` is not a string or whose `columns`, `values` or `fields` are not a list of strings.
+`create_session()`. An unregistered model label gives the generic `ObjectDoesNotExist` or `MultipleObjectsReturned`,
+an unknown class `DatabaseError`.
+
+Raises `ValueError` for:
+
+- data without a string `"class"`;
+- a validation error entry without a string `message`, with a non-string `code` or with `params` that are not a
+  mapping;
+- an `IntegrityError` whose `constraint_name`, `table_name`, `schema_name`, `detail` or `model` is not a string, or
+  whose `columns`, `values` or `fields` are not a list of strings.
 
 ```python
 data = encode_error(IntegrityError("duplicate key", sqlstate="23505"))
@@ -256,10 +266,9 @@ channel.close()
 
 ### `adorm.events.EventBus`
 
-Dispatches events to subscribed handlers. Handlers run synchronously, in subscription order. A handler that raises
-is logged on the `adorm.events` logger and the remaining handlers still run. A handler subscribed during a
-dispatch first runs for the next event; one unsubscribed during a dispatch no longer runs for the current one.
-Each pool has one as `events`.
+Dispatches events to subscribed handlers, synchronously, in subscription order. A handler that raises is logged on
+the `adorm.events` logger and the remaining handlers run. A handler subscribed during a dispatch first runs for the
+next event; one unsubscribed during a dispatch does not run for the current one. Each pool has one as `events`.
 
 #### `subscribe(event_type, handler, *, name=None, channel=None)`
 
@@ -302,16 +311,18 @@ async with adorm.listen("orders", "invoices") as listener:
 
 Backend notifications (PostgreSQL's `LISTEN` / `NOTIFY`) received on a slot the `async with` block holds.
 
-Entering acquires a slot for `session` from the [`TransactionRunner`](/ref/sessions#adorm-executor-transactionrunner),
-as [`atomic()`](/ref/transactions#adorm-atomic) does: the acquisition timeout raises `SessionTimeout`, a flow holding
-another slot `DeadlockError`. A driver that cannot listen ([`Driver.check_listen()`](/ref/drivers#async-check-listen-profile):
-`notify` missing from its [`backend_events`](/ref/drivers#adorm-drivers-capabilities), Django's `TestCase`) raises
-`NotSupportedError` before a slot is taken. The
-connection then listens on each channel; a failure or cancellation there releases the slot and raises. While the
-block runs, its flow holds the slot, so an operation of that flow that needs another slot of a full pool raises
-`DeadlockError`. Leaving the block releases the slot; the slot closes its connection while it still listens on a
-channel ([`CloseReason.LISTENING`](/ref/pool#adorm-executor-closereason)) and returns it to the pool otherwise. Only the
-task that entered the block may leave it. A listener is entered once.
+- Entering acquires a slot for `session` from the
+  [`TransactionRunner`](/ref/sessions#adorm-executor-transactionrunner), as [`atomic()`](/ref/transactions#adorm-atomic)
+  does: the acquisition timeout raises `SessionTimeout`, a flow holding another slot `DeadlockError`.
+- A driver that cannot listen ([`Driver.check_listen()`](/ref/drivers#async-check-listen-profile): `notify` missing
+  from its [`backend_events`](/ref/drivers#adorm-drivers-capabilities), Django's `TestCase`) raises
+  `NotSupportedError` before a slot is taken.
+- The connection then listens on each channel; a failure or cancellation there releases the slot and raises.
+- While the block runs, its flow holds the slot; an operation of that flow that needs another slot of a full pool
+  raises `DeadlockError`.
+- Leaving the block releases the slot. A slot whose connection listens on a channel closes it
+  ([`CloseReason.LISTENING`](/ref/pool#adorm-executor-closereason)); otherwise the connection returns to the pool.
+- Only the task that entered the block may leave it. A listener is entered once.
 
 | Member | Does |
 |---|---|

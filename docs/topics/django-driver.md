@@ -1,18 +1,22 @@
 # The Django driver
 
 ::: info Status
-The installed version of the Django driver executes reads (`select`, `get`, `first`, `last`, `count`, `exists`,
-`aggregate`) with annotations, aliases, grouping, functions, aggregates and subqueries, writes (`create`, `bulk_create`,
-`save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`), row locks (`select_for_update()`),
-transactions, savepoints and the connection options of
-[`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options). Driver methods raise `NotSupportedError`
-before anything runs.
+The Django driver executes:
+
+- reads (`select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`) with annotations, aliases, grouping,
+  functions, aggregates and subqueries;
+- writes (`create`, `bulk_create`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`,
+  `update_or_create`);
+- row locks (`select_for_update()`), transactions and savepoints;
+- the connection options of [`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options).
+
+Driver methods raise `NotSupportedError` before anything runs.
 :::
 
 [`DjangoDriver`](/ref/drivers#adorm-drivers-django-djangodriver) executes adorm operations with Django's ORM. It is
-a [threaded driver](/topics/drivers#execution-mode): every slot has a thread of its own with that thread's Django
-connection, and the driver calls only Django's synchronous ORM methods on it. The application never touches
-Django's query sets; the driver builds them from adorm's [operation description](/ref/operations). The
+a [threaded driver](/topics/drivers#execution-mode): every slot has its own thread with that thread's Django
+connection, and the driver calls only Django's synchronous ORM methods on it. The driver builds Django query sets
+from adorm's [operation description](/ref/operations); the application does not use them. The
 [native PostgreSQL driver](/topics/postgresql-driver) builds the same query sets and runs their SQL on asyncpg.
 
 ```bash
@@ -44,22 +48,24 @@ alias of `DATABASES` is a profile of the same name on this driver. Without the a
 
 ## Connections
 
-The driver supports PostgreSQL databases: a profile whose alias uses another database backend raises
-`NotSupportedError` when its first connection opens.
+The driver supports PostgreSQL only. A profile whose alias uses another backend raises `NotSupportedError` when its
+first connection opens.
 
 A connection is `django.db.connections[profile.alias]` on the slot's thread: Django's connection wrapper for that
-`DATABASES` entry, opened when the slot opens and closed when the slot leaves the pool. Its lifetime is the slot's
-([slot lifecycle](/topics/pool#slot-lifecycle)): the wrapper runs with `CONN_MAX_AGE = None` and
-`CONN_HEALTH_CHECKS = False`, so neither Django's `close_old_connections()` (which its request signals and Celery's
-Django integration call) nor a health check closes or pings it. With Django's own connection pool configured on the
-alias (`OPTIONS["pool"]`), the slot's connection is still opened directly, not taken from that pool, and closing the
-slot ends it on the server. The profile's `params` replace keys of the `DATABASES` entry for the connections of that
-profile, and the shared `DATABASES` entry stays as it is. On a `direct` driver the event loop thread's wrapper gets
-its own settings back when the slot closes. The `connect` hook, when set, returns the DB-API connection (a psycopg
-connection) the wrapper uses instead of opening one; Django then configures it as its own
-(`OPTIONS["isolation_level"]`, time zone, `assume_role`). A psycopg 3 connection needs the parameters Django opens its
-own with (its cursor class and type adapters); the hook runs on the slot's thread, so it gets them from the thread's
-wrapper.
+`DATABASES` entry. It opens when the slot opens and closes when the slot leaves the pool
+([slot lifecycle](/topics/pool#slot-lifecycle)).
+
+- The wrapper runs with `CONN_MAX_AGE = None` and `CONN_HEALTH_CHECKS = False`. Neither `close_old_connections()`
+  (called by Django's request signals and Celery's Django integration) nor a health check closes or pings it.
+- With Django's connection pool on the alias (`OPTIONS["pool"]`), the slot opens its connection directly, not from
+  that pool; closing the slot ends it on the server.
+- The profile's `params` replace keys of the `DATABASES` entry for that profile's connections. The shared `DATABASES`
+  entry is unchanged. On a `direct` driver the event loop thread's wrapper gets its own settings back when the slot
+  closes.
+- The `connect` hook, when set, returns the DB-API connection (a psycopg connection) the wrapper uses instead of
+  opening one. Django configures it as its own (`OPTIONS["isolation_level"]`, time zone, `assume_role`). A psycopg 3
+  connection needs Django's connection parameters (cursor class, type adapters); the hook runs on the slot's thread
+  and reads them from the thread's wrapper.
 
 ```python
 import psycopg
@@ -90,10 +96,10 @@ Profile hooks (`on_acquire`, `on_release`) receive the wrapper and run on the sl
 [Multiple database users](/howto/multiple-database-users).
 
 Every ORM call of the driver runs on the profile's alias: query sets with `using(alias)`, `save(using=alias)`,
-`transaction.atomic(using=alias)`. Inside `full_clean()` the queries Django routes itself (the unique checks, the
-constraints, foreign key validation, the queries of the model's `clean()`) go to the profile's alias too, ahead of the
-project's `DATABASE_ROUTERS` ([`pinned_alias()`](/ref/drivers#adorm-drivers-django-translation-pinned-alias-alias)),
-so they run on the slot's connection and see its open transaction:
+`transaction.atomic(using=alias)`. Inside `full_clean()`, the queries Django routes itself (unique checks,
+constraints, foreign key validation, queries of the model's `clean()`) also go to the profile's alias, ahead of the
+project's `DATABASE_ROUTERS` ([`pinned_alias()`](/ref/drivers#adorm-drivers-django-translation-pinned-alias-alias)).
+They run on the slot's connection and see its open transaction:
 
 ```python
 adorm.configure(profiles={"tenant": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "tenant"}})
@@ -106,15 +112,14 @@ async with tenant.atomic():
         # ValidationError({'email': ['Member with this Email already exists.']})
 ```
 
-A `full_clean()` that a model's `save()` calls itself is not pinned: its queries go to the alias the project's routers
-choose.
+A `full_clean()` that a model's `save()` calls itself is not pinned; its queries go to the alias the project's
+routers choose.
 
 ## The caller's context
 
-Every call runs in a copy of the context of the task that awaits it. Django's active language and time zone are
-part of it: a manager whose `get_queryset()` reads `translation.get_language()` or
-`timezone.get_current_timezone()` sees the caller's values, also when concurrent tasks with different languages
-share the pool.
+Every call runs in a copy of the context of the awaiting task. This includes Django's active language and time
+zone: a manager whose `get_queryset()` reads `translation.get_language()` or `timezone.get_current_timezone()` sees
+the caller's values, also when concurrent tasks with different languages share the pool.
 
 ```python
 from django.utils import translation
@@ -123,14 +128,13 @@ with translation.override("sl"):
     titles = [row async for row in Article.translated.values_list("title", flat=True)]
 ```
 
-Django keeps these values in asgiref `Local` objects, whose values are tied to the thread that set them; the driver
-re-binds them to the slot's thread before each call
-([`adopt_context_locals()`](/ref/drivers#adorm-drivers-django-adopt-context-locals)). Changes a call makes to the
-context stay in its copy.
+Django keeps these values in asgiref `Local` objects, which are bound to a thread. The driver re-binds them to the
+slot's thread before each call ([`adopt_context_locals()`](/ref/drivers#adorm-drivers-django-adopt-context-locals)).
+Context changes a call makes stay in its copy.
 
 ## What a query becomes
 
-The driver turns an adorm [`Query`](/ref/query) into a Django query set
+The driver translates an adorm [`Query`](/ref/query) into a Django query set
 ([`translate()`](/ref/drivers#adorm-drivers-django-translation-translate-query)) and evaluates it with
 `values_list()`:
 
@@ -162,8 +166,8 @@ The driver turns an adorm [`Query`](/ref/query) into a Django query set
 | `select_related()` | the related fields joined into the same `values_list()` |
 | `union(*others, all=)`, `intersection()`, `difference()` | Django's `union(all=)`, `intersection()`, `difference()` of the translated combined queries, then `order_by()` and the slice; `values()` after the set operation is applied to each combined query of model rows, and an ordering key that only that `values()` names orders by the first query's column at the same position; Django leaves out empty combined queries; as a subquery, a combination of model rows selects the primary key |
 
-Each adorm filter is one Django `filter()` call, so a condition on a multi-valued relation (a reverse foreign key, a
-many-to-many relation) joins that relation once per call, as in Django:
+Each adorm filter is one Django `filter()` call. A condition on a multi-valued relation (reverse foreign key,
+many-to-many) joins that relation once per call, as in Django:
 
 ```python
 # a book with an author named Ann and an author named Cid
@@ -172,10 +176,10 @@ await Book.objects.filter(authors__name="Ann").filter(authors__name="Cid").count
 await Book.objects.filter(authors__name="Ann", authors__mentor__name="Cid").count()
 ```
 
-`qs1 & qs2` keeps the filters of both queries, so it matches as the chained calls do. `qs1 | qs2` puts the
-conditions of both queries into one filter, so the filters of each side share their joins.
+`qs1 & qs2` keeps the filters of both queries and matches as the chained calls do. `qs1 | qs2` puts the conditions
+of both queries into one filter; the filters of each side share their joins.
 
-Field paths use adorm names. Each segment is translated with the `orm_names` of the adorm model it reaches, and a
+Field paths use adorm names. Each segment is translated with the `orm_names` of the adorm model it reaches; a
 reverse relation's accessor name becomes its query name:
 
 ```python
@@ -188,11 +192,10 @@ await Book.objects.filter(schema_="v2").exists()                              # 
 
 Every read returns rows keyed by adorm names; the core builds the instances.
 
-- A model row has the model's fields, minus those `only()` and `defer()` leave out (they are deferred on the
-  instance), plus the annotations.
-- `select_related("club__owner")` adds the related row under the relation's name, nested for each step; a missing
-  related row (a NULL foreign key, no row on the other side of a one-to-one) is `None`. Awaiting the relation then
-  reads the cache:
+- A model row has the model's fields, minus those `only()` and `defer()` leave out (deferred on the instance), plus
+  the annotations.
+- `select_related("club__owner")` adds the related row under the relation's name, nested per step. A missing related
+  row (NULL foreign key, no row on the other side of a one-to-one) is `None`. Awaiting the relation reads the cache:
 
   ```python
   activity = await Activity.objects.select_related("club", "coach").get(pk=1)
@@ -200,22 +203,26 @@ Every read returns rows keyed by adorm names; the core builds the instances.
   coach = await activity.coach     # None when the activity has no coach, still no query
   ```
 
-  `select_related()` without paths follows the non-null foreign keys, up to five relations deep, as Django does. A
+  `select_related()` without paths follows the non-null foreign keys up to five relations deep, as Django does. A
   path that is not a foreign key or one-to-one relation raises `ProgrammingError`. `only("name", "club__name")`
   limits the related row's fields as well.
-- `values()` and `values_list()` rows are keyed by the selected names, as written (`"club__name"`, `"pk"`). Without
+- `values()` and `values_list()` rows are keyed by the selected names as written (`"club__name"`, `"pk"`). Without
   names, `values()` selects the adorm model's fields and the annotations.
 
-`get()` runs Django's `get()`: no row raises the model's `DoesNotExist`, several rows its `MultipleObjectsReturned`,
-with Django's messages. `first()` and `last()` order by the primary key when neither the query nor the model has an
-ordering; `first()` on a sliced query needs `order_by()` (the core raises `TypeError` without it), and so do
-`first()` and `last()` on a grouped query. `count()` runs Django's `count()`, which of a grouped query counts its
-groups; `exists()` runs Django's `exists()`, and for a combined query reads its first row (`queryset[:1]`). `aggregate()` runs Django's `aggregate()` on the query's model rows and
-returns its dict. `in_bulk()` checks the field as Django's `in_bulk()` does
-([`check_in_bulk_field()`](/ref/drivers#adorm-drivers-django-translation-check-in-bulk-field-operation)), then reads the
-query's rows filtered with `<field>__in`.
+Read operations:
 
-Relations work as on any driver: `await member.club` runs a `get`, `club.memberships` and many-to-many relations
+- `get()` runs Django's `get()`. No row raises the model's `DoesNotExist`, several rows its
+  `MultipleObjectsReturned`, with Django's messages.
+- `first()` and `last()` order by the primary key when neither the query nor the model has an ordering. On a sliced
+  query, and on a grouped query, they need `order_by()`; the core raises `TypeError` without it.
+- `count()` runs Django's `count()`; on a grouped query it counts the groups.
+- `exists()` runs Django's `exists()`; on a combined query it reads the first row (`queryset[:1]`).
+- `aggregate()` runs Django's `aggregate()` on the query's model rows and returns its dict.
+- `in_bulk()` checks the field as Django's `in_bulk()` does
+  ([`check_in_bulk_field()`](/ref/drivers#adorm-drivers-django-translation-check-in-bulk-field-operation)), then reads
+  the query's rows filtered with `<field>__in`.
+
+Relations work as on any driver: `await member.club` runs a `get`; `club.memberships` and many-to-many relations
 are queries.
 
 ```python
@@ -227,8 +234,8 @@ content_type_id = await ContentType.objects.values_list("id", flat=True).get(app
 
 ## Writes
 
-Writes run through Django's model and query set methods, so a model's `save()` and `delete()` overrides, Django's
-signals and the overrides of the query's manager run as in Django code, on the slot's thread:
+Writes run through Django's model and query set methods on the slot's thread. A model's `save()` and `delete()`
+overrides, Django's signals and the overrides of the query's manager run as in Django code:
 
 | adorm | Django |
 |---|---|
@@ -244,10 +251,10 @@ signals and the overrides of the query's manager run as in Django code, on the s
 | `Child.objects.create_from_parent(parent, **values)` | the parent read with `_base_manager`, the child built with its values and the parent link, the child's fields' `pre_save()`, then `save_base(raw=True, force_insert=True)`: only the child's table is inserted, `pre_save` / `post_save` receive `raw=True`, and a `save()` override does not run |
 | `obj.full_clean(exclude=[...])` | `full_clean(exclude=..., validate_unique=..., validate_constraints=...)` of the instance with the adorm instance's values over its stored row; the model's `clean()` and every query of the validation, its own included, run on the slot's connection (the profile's alias, whatever the project's routers choose) |
 
-A save of an instance with a primary key that the database has no row for inserts the row when the instance was not
-loaded with every field, as Django does for a complete instance; the driver checks the row with one `exists()` query
-first, and the target's defaults fill the fields the instance never set. The values the target set (the primary key,
-`default`, `auto_now_add`, a `save()` override's changes) come back to the instance:
+Saving an instance with a primary key that has no row in the database inserts the row when the instance was not
+loaded with every field, as Django does for a complete instance. The driver checks for the row with one `exists()`
+query first; the target's defaults fill the fields the instance never set. The values the target set (primary key,
+`default`, `auto_now_add`, changes by a `save()` override) are copied to the instance:
 
 ```python
 book = await Book.objects.create(isbn="9780000000099", title="New", pages=10)
@@ -258,7 +265,7 @@ ann.rating = 4
 await ann.save()                 # UPDATE library_author SET rating = 4 WHERE id = ...
 ```
 
-Field names and lookup keys are adorm names: the driver renames them with `orm_names` and passes a foreign key named
+Field names and lookup keys are adorm names. The driver renames them with `orm_names` and passes a foreign key named
 by its relation as its column, so `get_or_create()` also creates the row with it:
 
 ```python
@@ -275,8 +282,8 @@ crag.capacity = F("capacity") + 1
 await crag.save(update_fields=["capacity"])      # crag.capacity stays the expression, as in Django
 ```
 
-A `delete()` override that deletes nothing (a soft delete) returns `(0, {})` to adorm unless it returns Django's
-`(total, {label: count})` itself, and the adorm instance keeps its primary key:
+A `delete()` override that deletes nothing (a soft delete) returns `(0, {})` to adorm, unless it returns Django's
+`(total, {label: count})` itself. The adorm instance keeps its primary key:
 
 ```python
 class Fine(models.Model):                       # Django
@@ -288,9 +295,9 @@ await fine.delete()                             # (0, {}): the fine is waived, f
 await Fine.objects.filter(pk=fine.pk).delete()  # (1, {"library.Fine": 1}): no model's delete() runs
 ```
 
-A delete that an `on_delete=PROTECT` or `RESTRICT` reference forbids raises `ProtectedError` or `RestrictedError`
-before anything is deleted. The driver reads the referencing rows again with every field, so the exception's objects
-are complete instances of the registered models. The refusal leaves the transaction usable, as in Django:
+A delete forbidden by an `on_delete=PROTECT` or `RESTRICT` reference raises `ProtectedError` or `RestrictedError`
+before anything is deleted. The exception's objects are complete instances of the registered models; the driver
+reads the referencing rows again with every field. The transaction stays usable, as in Django:
 
 ```python
 async with adorm.atomic():
@@ -303,10 +310,10 @@ async with adorm.atomic():
 
 ## Transactions and savepoints
 
-`begin()` enters an outermost Django `transaction.atomic()` block and `commit()` / `rollback()` leave it, so the
-operations inside `adorm.atomic()` run in one database transaction on the transaction's slot, and Django code that
-runs on the driver side (a `save()` override, `get_or_create()`, a signal receiver) sees an atomic block as it would
-in a Django view. A nested `adorm.atomic()` is a Django savepoint in that block:
+`begin()` enters an outermost Django `transaction.atomic()` block; `commit()` / `rollback()` leave it. The
+operations inside `adorm.atomic()` run in one database transaction on the transaction's slot. Django code on the
+driver side (a `save()` override, `get_or_create()`, a signal receiver) sees an atomic block, as in a Django view. A
+nested `adorm.atomic()` is a Django savepoint in that block:
 
 ```python
 async with adorm.atomic():
@@ -320,8 +327,8 @@ async with adorm.atomic():
 # COMMIT: the member is stored
 ```
 
-A database error inside a savepoint (an `IntegrityError`, a cancelled statement) is rolled back to the savepoint, which
-clears Django's mark for rollback, so the enclosing block goes on and commits:
+A database error inside a savepoint (an `IntegrityError`, a cancelled statement) rolls back to the savepoint and
+clears Django's rollback mark. The enclosing block continues and can commit:
 
 ```python
 async with adorm.atomic():
@@ -337,17 +344,16 @@ async with adorm.atomic():
 `begin()` on a [direct](/topics/drivers#execution-mode) connection whose thread is already inside a Django atomic
 block raises `TransactionManagementError`.
 
-A commit that the database refuses (a deferred foreign key, which is how Django creates foreign keys on PostgreSQL,
-checked at `COMMIT`) raises its error, here `IntegrityError` with SQLSTATE `23503`, and the transaction is rolled back.
-A transaction that failed on the driver side without the core seeing the error (Django marked it for rollback, or
-PostgreSQL aborted it) is rolled back by `commit()`, which raises `TransactionManagementError`, so the commit is never
-reported for it.
+A commit the database refuses raises its error and rolls the transaction back. Example: a deferred foreign key
+(Django creates foreign keys on PostgreSQL as deferred, checked at `COMMIT`) raises `IntegrityError` with SQLSTATE
+`23503`. A transaction that failed on the driver side without the core seeing the error (Django marked it for
+rollback, or PostgreSQL aborted it) is rolled back by `commit()`, which raises `TransactionManagementError`.
 
 ### Row locks
 
-`select_for_update()` becomes Django's `select_for_update()` with `nowait`, `skip_locked`, `of` (adorm paths, `"self"`)
-and `no_key`. A read of rows with `select_for_update()` outside a transaction raises `TransactionManagementError`
-in the core, as Django does:
+`select_for_update()` becomes Django's `select_for_update()` with `nowait`, `skip_locked`, `of` (adorm paths,
+`"self"`) and `no_key`. Reading rows with `select_for_update()` outside a transaction raises
+`TransactionManagementError` in the core, as in Django:
 
 ```python
 async with adorm.atomic():
@@ -360,17 +366,17 @@ async with adorm.atomic():
 ```
 
 `nowait` on a locked row raises `OperationalError` with SQLSTATE `55P03`. Django's `update_or_create()` locks the row
-it updates the same way, and `get_or_create()` retries its read after a concurrent insert of the same unique key, so
-two flows creating the same row create it once.
+it updates the same way. `get_or_create()` retries its read after a concurrent insert of the same unique key, so two
+flows creating the same row create it once.
 
 ### Django's `on_commit()` callbacks
 
-Code that runs on the driver side may register Django `on_commit()` callbacks, typically a signal receiver or a
-`save()` override that queues a job. Inside an adorm transaction they run once the commit's outcome is delivered, on
-the slot's thread, in registration order, and before the slot's next request; the callbacks registered with
+Code on the driver side, such as a signal receiver or a `save()` override, may register Django `on_commit()`
+callbacks. Inside an adorm transaction they run after the commit's outcome is delivered, on the slot's thread, in
+registration order, before the slot's next request. Callbacks registered with
 [`tx.on_commit()`](/topics/transactions#running-code-after-the-commit) run on the client when the slot delivers
-`CallbackEvent("on_commit")`, which does not wait for Django's. Cancelling the client task while Django's callbacks
-run cancels neither them nor the commit:
+`CallbackEvent("on_commit")`, without waiting for Django's. Cancelling the client task while Django's callbacks run
+cancels neither them nor the commit:
 
 ```python
 def queue_welcome(sender, instance, created, **kwargs):           # a Django post_save receiver
@@ -383,17 +389,17 @@ async with adorm.atomic() as tx:
 # after COMMIT: send_welcome.delay() on the slot's thread, cache.invalidate() on the client
 ```
 
-A callback registered in a savepoint that rolls back, or in a transaction that rolls back, does not run. A callback
-that raises after the commit is logged on the `adorm.drivers.django` logger and does not undo the commit; one
-registered without `robust=True` stops the callbacks after it, as in Django. Outside an adorm transaction Django runs
-a callback at once, inside the write that registers it.
+- A callback registered in a savepoint or transaction that rolls back does not run.
+- A callback that raises after the commit is logged on the `adorm.drivers.django` logger and does not undo the
+  commit. One registered without `robust=True` stops the callbacks after it, as in Django.
+- Outside an adorm transaction Django runs a callback immediately, inside the write that registers it.
 
 ### Signals
 
-Django's signals (`pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` …) fire on the driver side,
-on the slot's thread, in a copy of the context of the task that awaits the write, so a receiver reads the caller's
-context variables and Django's active language. adorm has no signals of its own and the client does not see Django's:
-they produce no event. Reads build no Django model instances, so `pre_init` and `post_init` fire only for writes.
+Django's signals (`pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` …) fire on the slot's thread,
+in a copy of the awaiting task's context; a receiver reads the caller's context variables and Django's active
+language. adorm has no signals of its own, and Django's produce no event on the client. Reads build no Django model
+instances, so `pre_init` and `post_init` fire only for writes.
 
 ## Errors
 
@@ -411,21 +417,23 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | `django.db` errors | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01`; an [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs) carries the constraint, table, columns and values from the psycopg error's `diag`, the model of the table and its adorm field names of the columns |
 | anything else (Django's `ValueError` for a value of the wrong type) | `DatabaseError` with the original exception in `original` |
 
-An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is
-dropped by its slot; the next request gets a new one. Other errors leave the connection in the pool.
+An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is dropped
+by its slot; the next request gets a new one. Other errors leave the connection in the pool.
 
 ## Custom SQL
 
-Code that Django runs inside an operation can execute SQL of its own: a `post_save` receiver, a manager's `create()`
-or `delete()` override, a model's `save()`, or an `on_commit()` callback. When such code runs a statement through
-the connection's cursor that does not come from Django's query compiler or database backend, the driver marks the
-connection ([`mark_custom_sql()`](/ref/drivers#mark-custom-sql)), and its slot closes the connection when the lease
-ends, also after a commit: the statement may have changed the connection's state.
+Django code inside an operation can execute its own SQL: a `post_save` receiver, a manager's `create()` or `delete()`
+override, a model's `save()`, an `on_commit()` callback. When such code runs a statement through the connection's
+cursor that does not come from Django's query compiler or database backend, the driver marks the connection
+([`mark_custom_sql()`](/ref/drivers#mark-custom-sql)). The slot closes a marked connection when the lease ends, also
+after a commit, as the statement may have changed the connection's state.
 
-The driver looks at the callers of Django's cursor wrapper. The nearest one in Django's query compiler or in a
-database backend (Django's, or the package of the alias's own backend, such as PostGIS) makes the statement ORM SQL;
-code between them, such as instrumentation that wraps the cursor (Sentry, tracers, django-debug-toolbar), does not
-change that. A signal receiver or an `on_commit()` callback reached first makes it custom SQL.
+The driver inspects the callers of Django's cursor wrapper:
+
+- The nearest caller in Django's query compiler or in a database backend (Django's, or the package of the alias's
+  own backend, such as PostGIS) makes the statement ORM SQL. Instrumentation that wraps the cursor in between
+  (Sentry, tracers, django-debug-toolbar) does not change that.
+- A signal receiver or an `on_commit()` callback reached first makes it custom SQL.
 
 | On the slot's thread, inside an operation | Custom SQL |
 |---|---|
@@ -461,11 +469,11 @@ Not detected:
 
 ## Schema checks
 
-The driver's [`schema_hash()`](/ref/drivers#schema-hash-label) is the hash of the installed Django model, so an
-operation on a generated model that is out of date with it raises `SchemaMismatchError` before it runs. It executes
-`check_table` for [`adorm.check_schema()`](/topics/schema-checks) with one catalogue query per table, the columns'
-types from Django's `db_type()` for the alias. A `check_table` operation reads the catalogue through a cursor of the thread's connection outside the execute
-wrappers, so it is not custom SQL.
+The driver's [`schema_hash()`](/ref/drivers#schema-hash-label) is the hash of the installed Django model. An
+operation on a generated model that is out of date with it raises `SchemaMismatchError` before it runs. The driver
+executes `check_table` for [`adorm.check_schema()`](/topics/schema-checks) with one catalogue query per table, with
+the columns' types from Django's `db_type()` for the alias. `check_table` reads the catalogue through a cursor of the
+thread's connection outside the execute wrappers; it is not custom SQL.
 
 ```python
 await adorm.check_schema([Club, Member])   # () while the tables match the models
@@ -485,29 +493,31 @@ with adorm.connection_options(lock_timeout=2):
 
 ## Cancellation
 
-Cancelling the task that awaits an operation cancels the running statement: the driver calls psycopg's `cancel_safe()`
-(`cancel()` on psycopg 2) from another thread, the statement ends with `57014`, the task gets
-`asyncio.CancelledError` and the connection stays in the pool. The `CancelledError` carries
-`CancellationOutcome.UNKNOWN` for a statement the database cancelled. A statement that completed on the connection's
-thread before the cancellation reached the database delivers its outcome to the slot: the task still gets
-`CancelledError`, with `CancellationOutcome.SUCCEEDED`, or `FAILED` for an error, and a commit is
-`TransactionOutcome.COMMITTED`; a read's rows are discarded. See [cancellation](/topics/cancellation).
+Cancelling the task that awaits an operation cancels the running statement. The driver calls psycopg's
+`cancel_safe()` (`cancel()` on psycopg 2) from another thread; the statement ends with `57014`, the task gets
+`asyncio.CancelledError`, and the connection stays in the pool.
+
+- A statement the database cancelled: the `CancelledError` carries `CancellationOutcome.UNKNOWN`.
+- A statement that completed on the connection's thread before the cancellation reached the database: the task gets
+  `CancelledError` with `CancellationOutcome.SUCCEEDED`, or `FAILED` for an error. A commit is
+  `TransactionOutcome.COMMITTED`; a read's rows are discarded.
+
+See [cancellation](/topics/cancellation).
 
 ```python
 task = asyncio.create_task(Report.objects.filter(year=2026).count())
 task.cancel()          # the database stops the statement
 ```
 
-A cancelled write inside a transaction, such as one waiting for a row lock, rolls the transaction back: the writes
-before it are undone with it, and the slot returns to the pool. Inside a nested `adorm.atomic()` only that savepoint is
-rolled back and the enclosing block goes on. A write outside a transaction that completes just before the
-cancellation arrives stays written.
+A cancelled write inside a transaction, such as one waiting for a row lock, rolls the transaction back, including the
+writes before it; the slot returns to the pool. Inside a nested `adorm.atomic()` only that savepoint is rolled back
+and the enclosing block continues. A write outside a transaction that completes just before the cancellation arrives
+stays written.
 
 ## In Django's tests
 
 Inside Django's `TestCase` the slots share the test's connection, and a transaction is a savepoint in the test's
-transaction; inside `TransactionTestCase` they open connections of their own. [Testing](/topics/testing) describes
-both.
+transaction. Inside `TransactionTestCase` they open their own connections. See [Testing](/topics/testing).
 
 ```python
 class MemberTests(TestCase):
@@ -517,16 +527,17 @@ class MemberTests(TestCase):
 
 ## Events
 
-Each operation reports its outcome as the result of the call, which the slot delivers as a `ResultEvent` or
-`ErrorEvent` (`CancelledEvent` for a cancelled operation). The slot delivers `CallbackEvent("on_commit")` after a
-successful `commit()`, and `CallbackEvent("on_rollback")` after a rollback; the transaction's own `on_commit()`
-callbacks run on that event. Django's `on_commit()` callbacks run on the slot's thread after the commit's outcome,
-before the slot's next request. Django's signals and `on_commit()` callbacks stay on the driver side and produce no
-event. The driver consumes no events.
+- The slot delivers each operation's outcome as a `ResultEvent` or `ErrorEvent` (`CancelledEvent` for a cancelled
+  operation).
+- The slot delivers `CallbackEvent("on_commit")` after a successful `commit()` and `CallbackEvent("on_rollback")`
+  after a rollback; the transaction's own `on_commit()` callbacks run on that event.
+- Django's `on_commit()` callbacks run on the slot's thread after the commit's outcome, before the slot's next
+  request. Django's signals and `on_commit()` callbacks produce no event.
+- The driver consumes no events.
 
-With psycopg 3 each connection emits three [backend events](/topics/events#backend-events), from handlers it adds to
-the psycopg connection. A connection that does not listen does not notice that the server ended it until its next
-call fails:
+With psycopg 3 each connection emits three [backend events](/topics/events#backend-events) from handlers it adds to
+the psycopg connection. A connection that does not listen detects that the server ended it only when its next call
+fails:
 
 | Event | Source | When |
 |---|---|---|
@@ -534,13 +545,15 @@ call fails:
 | `BackendEvent("notify", channel, payload)` | psycopg's notify handler | a notification on a channel an [`adorm.listen()`](/topics/events#listening-for-notifications) block listens on. While the connection listens and no call runs, its thread waits on the connection's socket and reads notifications as they arrive; a call queued meanwhile wakes it at once. A `direct` driver has the event loop watch the socket |
 | `BackendEvent("connection_lost", None, reason)` | the thread's wait on the socket | reading the socket failed or libpq reports the connection bad while the connection listens; the connection is unusable from then on |
 
-`LISTEN` and `UNLISTEN` run on the wrapper's cursor and do not count as custom SQL. With psycopg 2 the driver emits no
-backend events: `DjangoDriver.capabilities` is then
+`LISTEN` and `UNLISTEN` run on the wrapper's cursor and are not custom SQL.
+
+With psycopg 2 the driver emits no backend events: `DjangoDriver.capabilities` is
 [`PSYCOPG2_CAPABILITIES`](/ref/drivers#adorm-drivers-django-psycopg2-capabilities), and `adorm.listen()` raises
-`NotSupportedError` before it takes a slot. On the shared connection of Django's `TestCase` the
-connection that holds it emits the notices of its statements, and `adorm.listen()` raises `NotSupportedError`:
-PostgreSQL delivers notifications when a transaction commits, which the test's transaction never does; a test that
-listens uses `TransactionTestCase`.
+`NotSupportedError` before it takes a slot.
+
+On the shared connection of Django's `TestCase`, the connection that holds it emits the notices of its statements,
+and `adorm.listen()` raises `NotSupportedError`: PostgreSQL delivers notifications on commit, and the test's
+transaction never commits. A test that listens uses `TransactionTestCase`.
 
 ```python
 pool.events.subscribe(BackendEvent, lambda e: print(e.channel, e.payload["message"]), name="notice")

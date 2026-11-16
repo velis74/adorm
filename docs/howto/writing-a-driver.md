@@ -1,10 +1,10 @@
 # Writing a driver
 
-A driver executes adorm operations on another ORM or database library. It implements the contract described in
-the [drivers topic](/topics/drivers) and the [drivers reference](/ref/drivers). This guide builds a threaded
-driver for Python's `sqlite3` module and outlines a native async driver.
+A driver executes adorm operations on another ORM or database library and implements the contract of the
+[drivers topic](/topics/drivers) and the [drivers reference](/ref/drivers). This guide builds a threaded driver for
+Python's `sqlite3` module and outlines a native async driver.
 
-The examples execute a minimal operation type of their own, `RawSQL`, so that they run as shown:
+The examples execute a minimal operation type, `RawSQL`:
 
 ```python
 from dataclasses import dataclass
@@ -20,20 +20,19 @@ class RawSQL:
         return ()
 ```
 
-Any object with a `kind` and a `constructs()` method satisfies the [`Operation`](/ref/drivers#adorm-drivers-operation)
+An object with a `kind` and a `constructs()` method satisfies the [`Operation`](/ref/drivers#adorm-drivers-operation)
 protocol.
 
 ## 1. Choose the execution mode
 
-A synchronous library gets `mode = "threaded"`: subclass `ThreadedDriver` and `ThreadedConnection`, and every
-call of a connection runs on that connection's own thread. `sqlite3` connections refuse use from another thread
-by default, like Django's, so this is the mode for it.
+- A synchronous library: `mode = "threaded"`. Subclass `ThreadedDriver` and `ThreadedConnection`; every call of a
+  connection runs on that connection's own thread. `sqlite3` connections, like Django's, refuse use from another
+  thread by default, so `sqlite3` takes this mode.
+- A library with native coroutines: `mode = "async"`. Subclass `Driver` and `DriverConnection`
+  ([step 6](#_6-a-native-async-driver)).
 
-A library with native coroutines gets `mode = "async"`: subclass `Driver` and `DriverConnection` directly
-([step 6](#_6-a-native-async-driver)).
-
-A threaded driver also runs direct, on the event loop's own thread, when `direct = True` is set on it: for one
-task per event loop, such as a Celery task. The driver's code is the same in both cases.
+A threaded driver with `direct = True` runs on the event loop's own thread, for one task per event loop such as a
+Celery task. The driver's code is the same in both cases.
 
 ## 2. Implement the synchronous methods
 
@@ -105,16 +104,16 @@ class SQLiteConnection(ThreadedConnection):
 - `connect_sync()` uses the profile's `connect` hook when it is set, on the connection's thread.
 - `target` is the `sqlite3.Connection`; the profile's `on_acquire` and `on_release` hooks receive it on the
   connection's thread.
-- `cancel_sync()` runs on another thread while a call runs, possibly while `connect_sync()` runs. It must return
-  without waiting for the call.
-- `map_error()` runs on the connection's thread. The default, `wrap_driver_error`, already maps
-  `sqlite3.IntegrityError` to `IntegrityError` by its PEP 249 class name. The override gives the cancelled
-  statement SQLSTATE `57014`, the code adorm uses for a cancelled statement.
+- `cancel_sync()` runs on another thread while a call runs, possibly during `connect_sync()`. It must return without
+  waiting for the call.
+- `map_error()` runs on the connection's thread. The default, `wrap_driver_error`, maps `sqlite3.IntegrityError` to
+  `IntegrityError` by its PEP 249 class name. The override gives a cancelled statement SQLSTATE `57014`, adorm's code
+  for a cancelled statement.
 - `is_connection_lost()` decides which errors leave the connection unusable. The default,
   [`is_connection_error`](/ref/drivers#adorm-drivers-is-connection-error-exc), follows PostgreSQL and treats every
-  `OperationalError` without a SQLSTATE as a lost connection; for `sqlite3` that would discard the connection on a
-  misspelt table name. The override counts only I/O and file errors and `InterfaceError`.
-- `close_sync()` also runs after a failed `connect_sync()`, so it checks what exists.
+  `OperationalError` without a SQLSTATE as a lost connection; with `sqlite3` a misspelt table name would discard the
+  connection. The override counts only I/O and file errors and `InterfaceError`.
+- `close_sync()` also runs after a failed `connect_sync()` and checks what exists.
 
 ## 3. Declare the driver and its capabilities
 
@@ -128,10 +127,9 @@ class SQLiteDriver(ThreadedDriver):
     capabilities = Capabilities(operations={"raw"}, savepoints=True, cancellation=True)
 ```
 
-`Capabilities` lists every operation kind and construct the driver executes and every connection option it
-accepts, and whether it implements savepoints and cancellation (both `False` unless declared). The connection
-checks every call against it before the driver's code runs. This driver accepts no options, so `set_options()`
-raises `NotSupportedError`:
+`Capabilities` lists the operation kinds, constructs and connection options the driver supports, and whether it
+implements savepoints and cancellation (both `False` by default). The connection checks every call against it before
+the driver's code runs. This driver accepts no options, so `set_options()` raises `NotSupportedError`:
 
 ```python
 await connection.set_options({"statement_timeout": 5}, local=False)
@@ -163,11 +161,11 @@ class PostgresConnection(ThreadedConnection):
 
 ## 4. Report events
 
-A connection reports events by calling `self.emit(event)`; on a threaded connection it may be called from any
-thread, including the connection's, and the event reaches the slot before the result of the call that emitted it. Add the
-names of the backend events to `capabilities.backend_events`. Emit only `CallbackEvent` and `BackendEvent` values,
-and never `CallbackEvent("on_commit")` or `CallbackEvent("on_rollback")`: the slot delivers the outcome of each call
-and those two callbacks itself, and drops anything else a connection emits.
+A connection reports events with `self.emit(event)`. On a threaded connection any thread may call it; the event
+reaches the slot before the result of the call that emitted it. The names of backend events go in
+`capabilities.backend_events`. A connection emits only `CallbackEvent` and `BackendEvent` values, never
+`CallbackEvent("on_commit")` or `CallbackEvent("on_rollback")`: the slot delivers the outcome of each call and those
+two callbacks itself, and drops anything else a connection emits.
 
 ```python
 from adorm.events import BackendEvent
@@ -180,9 +178,9 @@ class NotifyingConnection(SQLiteConnection):
 ```
 
 A driver whose target delivers notifications declares `notify` and implements listening. An async connection
-implements `_listen()` and `_unlisten()`; a threaded one `listen_sync()` and `unlisten_sync()`, and, when the target
-only reads its socket during a call, `idle_fileno()` and `idle_sync()`: the connection's thread then waits for that
-socket between calls and reads what arrived. An exception from `idle_sync()` makes the connection unusable and is
+implements `_listen()` and `_unlisten()`; a threaded one `listen_sync()` and `unlisten_sync()`. When the target
+reads its socket only during a call, a threaded connection also implements `idle_fileno()` and `idle_sync()`: the
+connection's thread waits for that socket between calls and reads what arrived. An exception from `idle_sync()` makes the connection unusable and is
 emitted as `BackendEvent("connection_lost")`, which ends an `adorm.listen()` block.
 
 ```python
@@ -190,7 +188,7 @@ from adorm.drivers.postgresql import listen_sql, unlisten_sql
 from adorm.events import BackendEvent, NOTIFY
 
 
-class ListeningConnection(PostgresConnection):       # psycopg 3 under the hood
+class ListeningConnection(PostgresConnection):       # self.db is a psycopg 3 connection
     channels = frozenset()
 
     def listen_sync(self, channel):
@@ -216,7 +214,7 @@ class ListeningDriver(PostgresDriver):
 
 ## 5. Use the connection
 
-The slot drives a connection; the same calls work in a test or a script:
+The slot calls a connection; a test or a script makes the same calls:
 
 ```python
 import asyncio
@@ -247,7 +245,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Cancelling the awaiting task interrupts the statement, and the connection remains usable:
+Cancelling the awaiting task interrupts the statement; the connection stays usable:
 
 ```python
 task = asyncio.create_task(connection.execute(RawSQL(long_query)))
@@ -258,11 +256,10 @@ assert connection.is_usable()
 
 ## 6. A native async driver
 
-An async driver implements `DriverConnection` directly. `DriverConnection` checks operations, options and
-savepoint calls against the capabilities and then calls `_execute()`, `_set_options()` and the `_savepoint()`
-family. The driver maps errors itself and keeps the statement that `cancel()` must stop. This one runs the
-`RawSQL` operations on asyncpg; adorm's own driver for adorm queries on asyncpg is
-[`AsyncpgDriver`](/topics/postgresql-driver).
+An async driver subclasses `DriverConnection`, which checks operations, options and savepoint calls against the
+capabilities and then calls `_execute()`, `_set_options()` and the `_savepoint()` family. The driver maps errors
+itself and keeps a reference to the statement that `cancel()` stops. This example runs `RawSQL` on asyncpg; adorm's
+driver for adorm queries on asyncpg is [`AsyncpgDriver`](/topics/postgresql-driver).
 
 ```python
 import asyncio
@@ -337,16 +334,19 @@ class RawSQLDriver(Driver):
         return RawSQLConnection(self, conn, emit)
 ```
 
-Cancelling the task that awaits `execute()` needs no code: the cancellation reaches asyncpg, which sends a cancel
-request to the server and waits for the statement to end.
+Cancelling the task that awaits `execute()` needs no driver code: asyncpg sends a cancel request to the server and
+waits for the statement to end.
 
 ### Report database sessions
 
-[`wait_for_lock()`](/ref/testing#adorm-testing-wait-for-lock-task-none-session-none-timeout-10-0-interval-0-01) needs two
-things of a driver: the database session of each connection ([`backend_pid`](/ref/drivers#backend-pid)) and a monitor
-that reads what the database reports about sessions on a connection of its own
-([`open_monitor()`](/ref/drivers#async-open-monitor-profile)). A driver over PostgreSQL runs
-[`activity_sql()`](/ref/drivers#adorm-drivers-postgresql-activity-sql-parameter):
+[`wait_for_lock()`](/ref/testing#adorm-testing-wait-for-lock-task-none-session-none-timeout-10-0-interval-0-01) needs
+from a driver:
+
+- the database session of each connection ([`backend_pid`](/ref/drivers#backend-pid));
+- a monitor that reads the database's session activity on a connection of its own
+  ([`open_monitor()`](/ref/drivers#async-open-monitor-profile)).
+
+A driver over PostgreSQL runs [`activity_sql()`](/ref/drivers#adorm-drivers-postgresql-activity-sql-parameter):
 
 ```python
 class RawSQLConnection(DriverConnection):
@@ -376,18 +376,20 @@ Without them `wait_for_lock()` raises `NotSupportedError`; `wait_for_operation()
 
 ### Schema checks
 
-A driver whose target knows the models takes part in the [schema checks](/topics/schema-checks). `schema_hash(label)`
-returns the target's hash of a model, computed as `adorm generate` computes it, and raises `LookupError` for a model
-the target lacks; [`check()`](/ref/drivers#check-operation-schema-hashes-none) then compares it with the hash the
-client expects of every model an operation reaches and raises `SchemaMismatchError` on a difference. The driver
-computes a label's hash once and keeps it. The client's hashes come from the model registry of the process by default;
-a driver that executes operations for clients in other processes receives each client's hashes when the client
-connects (the client sends [`registry.schema_hashes()`](/ref/models#adorm-models-registry)) and passes them as
-`check(operation, schema_hashes=...)`.
+A driver whose target knows the models takes part in the [schema checks](/topics/schema-checks):
 
-The operation `check_table` lists what a model expects of the database and compares it with the catalogue. A
-PostgreSQL driver builds [`ExpectedTable`](/ref/drivers#adorm-drivers-postgresql-expectedtable-name-regclass-columns)
-values and leaves the comparison to the helpers of `adorm.drivers.postgresql`:
+- `schema_hash(label)` returns the target's hash of a model, computed as `adorm generate` computes it, and raises
+  `LookupError` for a model the target lacks. The driver computes a label's hash once and keeps it.
+- [`check()`](/ref/drivers#check-operation-schema-hashes-none) compares it with the hash the client expects for
+  every model an operation reaches and raises `SchemaMismatchError` on a difference.
+- The client's hashes come from the process's model registry by default. A driver that executes operations for
+  clients in other processes receives each client's hashes when the client connects (the client sends
+  [`registry.schema_hashes()`](/ref/models#adorm-models-registry)) and passes them as
+  `check(operation, schema_hashes=...)`.
+
+The operation `check_table` compares what a model expects of the database with the catalogue. A PostgreSQL driver
+builds [`ExpectedTable`](/ref/drivers#adorm-drivers-postgresql-expectedtable-name-regclass-columns) values and uses
+the comparison helpers of `adorm.drivers.postgresql`:
 
 ```python
 from adorm import SchemaMismatchError
@@ -418,17 +420,16 @@ class RawSQLConnection(DriverConnection):
 ```
 
 A `check_table` of a model the target lacks raises `SchemaMismatchError` (with `actual` `None` and a `reason`) before
-any statement, so a transaction it is raised in stays usable and `check_schema()` reports it as a `schema_hash`
-problem.
+any statement; the transaction stays usable and `check_schema()` reports it as a `schema_hash` problem.
 
-Reading the catalogue is SQL the driver generates: it does not call `mark_custom_sql()`.
+Reading the catalogue is SQL the driver generates and does not call `mark_custom_sql()`.
 
 ## 7. Run the conformance suite
 
 The repository's [driver conformance suite](/topics/conformance) runs every bundled driver over the demo's schema and
-data set. A driver joins it with an entry in `tests/conformance/drivers.py`: a factory that returns an instance over
-the seeded PostgreSQL test database, and a `Blocker` that makes one of its operations wait in the database. A driver
-over that database reuses `TableLock`:
+data. A driver joins it with an entry in `tests/conformance/drivers.py`: a factory that returns an instance over the
+seeded PostgreSQL test database, and a `Blocker` that makes one of its operations wait in the database. A driver
+over that database uses `TableLock`:
 
 ```python
 DRIVERS = (
@@ -437,13 +438,13 @@ DRIVERS = (
 )
 ```
 
-A driver over another store loads the seeded data into it in its factory, as the memory driver does, and brings a
-`Blocker` subclass of its own.
+A driver over another store loads the seeded data into it in its factory, as the memory driver does, and has its
+own `Blocker` subclass.
 
-The driver must also be one of the demo's drivers (`demo.api.drivers.DRIVERS`), which a test checks. Each case of
-the catalogue then runs on it: a case whose operation kinds and constructs the driver declares must return the
-catalogue's result, any other case must raise `NotSupportedError` naming only names the driver lacks. A construct
-the driver declares but gets wrong fails the case; one it does not declare cannot reach its code.
+The driver must also be in the demo's drivers (`demo.api.drivers.DRIVERS`); a test checks this. Every case of the
+catalogue runs on it: a case whose operation kinds and constructs the driver declares must return the catalogue's
+result, any other case must raise `NotSupportedError` naming only names the driver lacks. A declared construct the
+driver executes wrongly fails the case; an undeclared one does not reach its code.
 
 ```console
 $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycopg
@@ -479,7 +480,7 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
 - A connection that shares its database session with other connections and takes it per call reports
   `holds_session` and `session_holds` ([driver contract](/ref/drivers#holds-session-session-holds)).
 - A cancelled statement reports SQLSTATE `57014`, not a connection error. When the cancellation can leave the
-  server connection with an open transaction or locks, `is_usable()` returns `False` so that the slot closes it.
+  server connection with an open transaction or locks, `is_usable()` returns `False` and the slot closes it.
 - A request method cancelled after its statement finished returns that result or raises that error, which the
   caller's `CancelledError` reports as `CancellationOutcome.SUCCEEDED` or `FAILED` (`COMMITTED` for a commit); it
   raises `asyncio.CancelledError` only when the statement's effect is unknown, which reports `UNKNOWN`
@@ -488,7 +489,7 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
   target reports statement errors as `OperationalError` without a SQLSTATE. The slot closes a connection whose
   request failed with such an error.
 - Code the driver runs for an operation that executes SQL of its own (application code of the target ORM) calls
-  `mark_custom_sql()`, so that the slot closes the connection when the lease ends; work handed to `after_call_sync()`
+  `mark_custom_sql()`, and the slot closes the connection when the lease ends; work handed to `after_call_sync()`
   is part of the call it came from ([custom SQL](/ref/drivers#mark-custom-sql)).
 - `schema_hash()` returns the target's hash of a model as `adorm generate` computes it, or `None` when the driver
   cannot tell; with `check_table` declared, the operation returns the problems of `table_problems()` or the same dicts

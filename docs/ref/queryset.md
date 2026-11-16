@@ -14,10 +14,9 @@ qs = Member.objects.filter(active=True)          # QuerySet on the current sessi
 qs = reports.Member.order_by("name")             # QuerySet on reports
 ```
 
-A query set is immutable: a copy and a deep copy are the same object, and it pickles when its executor does (a
-session does). Building methods return a new query set and do no I/O; terminal methods are coroutines
-that run one operation each on `executor`, followed by the prefetch operations of
-[`prefetch_related()`](#prefetch-related-lookups).
+A query set is immutable: a copy and a deep copy are the same object. It pickles when its executor does (a session
+does). Building methods return a new query set and do no I/O. Terminal methods are coroutines that run one operation
+each on `executor`, then the prefetch operations of [`prefetch_related()`](#prefetch-related-lookups).
 
 | Attribute | Meaning |
 |---|---|
@@ -26,7 +25,7 @@ that run one operation each on `executor`, followed by the prefetch operations o
 | `query` | the [`Query`](./query) |
 | `prefetch_lookups` | the [`Prefetch`](#adorm-prefetch-lookup-queryset-none-to-attr-none) lookups of `prefetch_related()`, a tuple |
 
-Because `query` is a `Query`, a query set stands wherever a query is accepted:
+A query set is accepted wherever a query is:
 
 ```python
 Member.objects.filter(club_id__in=Club.objects.filter(name__startswith="A").values("id"))
@@ -34,10 +33,10 @@ Member.objects.filter(club_id__in=Club.objects.filter(name__startswith="A").valu
 
 ### Subclasses
 
-A subclass adds methods: client-side methods that build on the building methods, and
+A subclass adds client-side methods built on the building methods, and
 [driver methods](./models#adorm-driver-method-func-queryset-only-false). Building methods return an instance of the
-subclass, and a copy pickles as one. A manager's `queryset_class` names the subclass (see the
-[managers topic](/topics/managers)).
+subclass, and a copy pickles as one. A manager's `queryset_class` names the subclass
+([managers topic](/topics/managers)).
 
 ```python
 class LoanQuerySet(QuerySet):
@@ -64,8 +63,8 @@ class Loan(Model):
 
 ## Building methods
 
-Each method applies the [`Query`](./query) method of the same name and returns a new query set on the same
-executor:
+Each method applies the [`Query`](./query) method of the same name and returns a new query set on the same executor.
+Combining query sets of different executors raises `TypeError`.
 
 | Method | Query method |
 |---|---|
@@ -93,18 +92,18 @@ recent = (
 )[:20]
 ```
 
-Combining query sets of different executors raises `TypeError`.
-
 ### Set operations
 
 `union(*others, all=False)`, `intersection(*others)` and `difference(*others)` apply the
-[`Query` set operations](./query#union-others-all-false) to the queries of the query set and of the query sets
-`others`, which run on the same executor (otherwise, and for an argument that is not a query set, `TypeError`). The
-result is a query set of the first query set's class, whose rows are those of the combined query, in the row format
-of the first query. Where the `Query` method returns another query, the method returns that query's query set, which
-may be of another class: `union()` on an empty query set (`none()`, or a slice that leaves no rows) with a single
-other query set that is not empty returns that query set, and `intersection()` with an empty query set among
-`others` returns it. Empty query sets are combined by the [rules for empty queries](./query#empty-queries).
+[`Query` set operations](./query#union-others-all-false) to the query of the query set and of each of `others`.
+
+- `others` are query sets on the same executor; anything else raises `TypeError`.
+- The result is a query set of the first query set's class with the rows of the combined query, in the row format of
+  the first query.
+- Where the `Query` method returns one of its operands, the method returns that operand's query set, which may be of
+  another class: `union()` on an empty query set (`none()`, or a slice that leaves no rows) with one non-empty query
+  set returns that query set; `intersection()` with an empty query set among `others` returns the empty one.
+- Empty query sets combine by the [rules for empty queries](./query#empty-queries).
 
 ```python
 advanced = Member.objects.filter(level="advanced")
@@ -116,25 +115,26 @@ await advanced.union(coaches, all=True).count()
 await advanced.union(coaches).order_by("first_name").first()
 ```
 
-After a set operation the building methods `order_by()`, slicing, `values()`, `values_list()`, `none()` and the set
-operations apply, and so do the terminal methods `async for`, `get()` without conditions, `first()`, `last()`,
-`count()` and `exists()`. The other building methods, `prefetch_related()`, `get()` with conditions, `aggregate()`,
-`in_bulk()`, `update()`, `delete()`, `get_or_create()` and `update_or_create()` raise `NotSupportedError` without
-running an operation, as in Django. `first()` and `last()` without `order_by()` order the combined rows by the
-primary key, as in Django; when the combined rows do not include the primary key column (`values()` /
-`values_list()` without it), the driver raises `DatabaseError` (`ORDER BY term does not match any column in the
-result set.`).
+After a set operation, as in Django:
+
+- The building methods `order_by()`, slicing, `values()`, `values_list()`, `none()` and the set operations apply.
+- The terminal methods `async for`, `get()` without conditions, `first()`, `last()`, `count()` and `exists()` apply.
+- The other building methods, `prefetch_related()`, `get()` with conditions, `aggregate()`, `in_bulk()`, `update()`,
+  `delete()`, `get_or_create()` and `update_or_create()` raise `NotSupportedError` without running an operation.
+- `first()` and `last()` without `order_by()` order the combined rows by the primary key. Rows without the primary
+  key column (`values()` / `values_list()` without it) make the driver raise `DatabaseError` (`ORDER BY term does not
+  match any column in the result set.`).
 
 ### `prefetch_related(*lookups)`
 
-Load the related objects of the relation paths `lookups` for every instance the query set returns, with separate
+Loads the related objects of the relation paths `lookups` for every instance the query set returns, with separate
 operations after the query's own ([`prefetch_related_objects()`](#adorm-prefetch-related-objects-instances-lookups-executor-none)
 runs them). A lookup is a relation path (`"memberships__member"`) or a [`Prefetch`](#adorm-prefetch-lookup-queryset-none-to-attr-none).
-The lookups are kept in `qs.prefetch_lookups`; they add up over calls, a path given again is kept once, every
-building method keeps them and `prefetch_related(None)` clears them.
 
-`async for`, `get()`, `first()`, `last()` and [`in_bulk()`](#async-in-bulk-id-list-none-field-name-pk) run the
-prefetches on the instances they return; no instances, no prefetch operation.
+- The lookups are kept in `qs.prefetch_lookups`. They add up over calls; a path given again is kept once.
+- Every building method keeps them; `prefetch_related(None)` clears them.
+- `async for`, `get()`, `first()`, `last()` and [`in_bulk()`](#async-in-bulk-id-list-none-field-name-pk) run the
+  prefetches on the instances they return. No instances, no prefetch operation.
 
 ```python
 clubs = Club.objects.order_by("slug").prefetch_related("memberships__member", "activities")
@@ -142,24 +142,26 @@ async for club in clubs:            # 4 Select operations: clubs, memberships, m
     members = [(await m.member).first_name async for m in club.memberships]   # no operation
 ```
 
-A `Prefetch` with a query set or `to_attr` whose path (with `to_attr`) is already given raises `ValueError`;
-`prefetch_related()` after `values()` or `values_list()`, and `values()` or `values_list()` after it, raise
-`TypeError`; after a set operation it raises `NotSupportedError`.
+Errors:
+
+- `ValueError`: a `Prefetch` with a query set or `to_attr` whose path (with `to_attr`) is already given.
+- `TypeError`: `prefetch_related()` after `values()` or `values_list()`, and `values()` or `values_list()` after it.
+- `NotSupportedError`: `prefetch_related()` after a set operation.
 
 ### `adorm.Prefetch(lookup, queryset=None, to_attr=None)`
 
 A prefetch lookup: the relation path `lookup`, with the related rows of its last relation read from `queryset` and
 stored in `to_attr`.
 
-- `queryset` is a `QuerySet` (or a [`Query`](./query) on a registered model) on the last relation's target model; it
-  filters, orders and selects the related rows (`only()`, `defer()`, `select_related()`; the join column is loaded
-  even when `only()` leaves it out). Its own `prefetch_related()` lookups continue from the rows it returns. Its
-  operations run on the executor of the instances prefetched for, not the query set's. A query set with `values()`
-  or a slice raises `ValueError`; one on another model raises `ValueError` when the prefetch runs.
-- `to_attr` stores the related rows of the last relation as an extra value of each instance (a list for a
-  `ReverseForeignKey` or `ManyToMany`, an instance or `None` otherwise) and leaves the relation's cache alone. A
-  later path may continue from it (`"attended__member"`). It names no attribute of the model (`ValueError` when the
-  prefetch runs).
+- `queryset` is a `QuerySet` (or a [`Query`](./query) on a registered model) on the last relation's target model.
+  It filters, orders and selects the related rows (`only()`, `defer()`, `select_related()`); the join column is
+  loaded even when `only()` leaves it out. Its own `prefetch_related()` lookups continue from the rows it returns.
+  Its operations run on the executor of the instances prefetched for, not on the query set's. A query set with
+  `values()` or a slice raises `ValueError`; one on another model raises `ValueError` when the prefetch runs.
+- `to_attr` stores the related rows of the last relation as an extra value of each instance: a list for a
+  `ReverseForeignKey` or `ManyToMany`, an instance or `None` otherwise. The relation's cache is not set. A later
+  path may continue from it (`"attended__member"`). A `to_attr` that names an attribute of the model raises
+  `ValueError` when the prefetch runs.
 - `prefetch_through` is `lookup`; `prefetch_to` is `lookup` with `to_attr` in place of its last segment. Two prefetches
   are equal when their `prefetch_to` is.
 
@@ -176,9 +178,9 @@ async for activity in activities:
 ### `adorm.GenericPrefetch(lookup, querysets, to_attr=None)`
 
 A prefetch lookup whose last relation is a [`GenericForeignKey`](./models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true),
-with a query set per related model: the related rows of a content type are read from the query set on its model, the
-plain rows of models without one. Two query sets on the same model raise `ValueError`. A plain `Prefetch` with a query
-set on a generic foreign key raises `ValueError`, and so does a `GenericPrefetch` on another relation.
+with a query set per related model. The related rows of a content type are read from the query set on its model;
+models without one give their plain rows. `ValueError` for two query sets on the same model, for a plain `Prefetch`
+with a query set on a generic foreign key, and for a `GenericPrefetch` on another relation.
 
 ```python
 lines = InvoiceLine.objects.prefetch_related(
@@ -188,7 +190,7 @@ lines = InvoiceLine.objects.prefetch_related(
 
 ### `adorm.prefetch_related_objects(instances, *lookups, executor=None)`
 
-Coroutine: load the related objects of `lookups` (relation paths or `Prefetch` objects) for `instances`, model
+Coroutine: loads the related objects of `lookups` (relation paths or `Prefetch` objects) for `instances`, model
 instances of one or more models, and cache them on the instances.
 
 | Relation | Operations | Cached |
@@ -199,42 +201,46 @@ instances of one or more models, and cache them on the instances.
 | `ManyToMany` | `Select` of the links (`values(source_column, target_column)`), then of the targets from the `objects` manager by `pk__in` | the rows |
 | `GenericForeignKey` | the content types [`content_types`](./models#adorm-contenttypes) has not cached (a `Get` for one, a `Select` for several), then one `Select` per model by `pk__in` | the relation's cache; `None` for a missing row |
 
-Each relation on a path is read once for all the instances of its level, and the rows of a generic foreign key, of
-several models, continue on each model's relation of the next segment. An instance whose relation is already cached
-(by `select_related()` or an earlier prefetch), or that has the prefetch's `to_attr`, is skipped. The operations run
-one after another on `executor`, by default the first instance's, so inside a transaction they use its slot and see
-its writes; outside one each operation takes a slot and returns it. Each operation filters on at most
-[`BATCH_SIZE`](#adorm-models-prefetch-batch-size) keys; more keys run the operations of a relation once per batch
-(for a many-to-many relation, the targets of a group of owners with at most `BATCH_SIZE` targets in all, in the
-order of the query set; an owner with more gets them in that order per batch). A cancelled prefetch caches nothing
-for the relation it was reading. A generic foreign key's object is cached for the content type and object id read before its operations ran.
+- Each relation on a path is read once for all the instances of its level. The rows of a generic foreign key, of
+  several models, continue on each model's relation of the next segment.
+- An instance whose relation is already cached (by `select_related()` or an earlier prefetch), or that has the
+  prefetch's `to_attr`, is skipped.
+- The operations run one after another on `executor`, by default the first instance's. Inside a transaction they
+  use its slot and see its writes; outside one each operation takes a slot and returns it.
+- Each operation filters on at most [`BATCH_SIZE`](#adorm-models-prefetch-batch-size) keys; more keys run the
+  operations of a relation once per batch. For a many-to-many relation a batch is the targets of a group of owners
+  with at most `BATCH_SIZE` targets in all, in the order of the query set; an owner with more gets them in that
+  order per batch.
+- A cancelled prefetch caches nothing for the relation it was reading.
+- A generic foreign key's object is cached for the content type and object id read before its operations ran.
 
 ```python
 members = [m async for m in Member.objects.filter(level="advanced")]
 await adorm.prefetch_related_objects(members, "memberships__club")
 ```
 
-A segment that names nothing on a model raises `AttributeError`; one that names a field or anything else that is not
-a relation raises `ValueError`.
+A segment that names nothing on a model raises `AttributeError`; one that names anything but a relation raises
+`ValueError`.
 
 ### `adorm.models.prefetch.BATCH_SIZE`
 
-`10_000`: the most keys one `Select` of a prefetch filters on, within the parameters a statement can carry on every
-driver.
+`10_000`: the most keys one `Select` of a prefetch filters on. It is within the parameter limit of a statement on
+every driver.
 
 ## Terminal methods
 
 Each terminal method builds one [operation](./operations), awaits `executor.execute(operation)` and shapes the
-result. On a query set built with `none()`, `async for`, `get()`, `first()`, `last()`, `count()`, `exists()`,
-`in_bulk()` (`{}`), `update()` and `delete()` return an empty result (`get()` raises `DoesNotExist`) without running
-an operation;
-`aggregate()` does so when the result over no rows is known without the database (see
-[`aggregate()`](#async-aggregate-args-kwargs)); `create()`, `bulk_create()`, `get_or_create()` and
-`update_or_create()` run their operation.
+result. On a query set built with `none()`:
 
-A generic `ObjectDoesNotExist` or `MultipleObjectsReturned` from the executor (not a model's own) is raised as the
-model's `DoesNotExist` or `MultipleObjectsReturned`, with the original as `__cause__`. A model's own exception, also
-another model's, passes unchanged.
+- `async for`, `get()`, `first()`, `last()`, `count()`, `exists()`, `in_bulk()` (`{}`), `update()` and `delete()`
+  return an empty result without running an operation; `get()` raises `DoesNotExist`.
+- `aggregate()` runs no operation when the result over no rows is known without the database (see
+  [`aggregate()`](#async-aggregate-args-kwargs)).
+- `create()`, `bulk_create()`, `get_or_create()` and `update_or_create()` run their operation.
+
+A generic `ObjectDoesNotExist` or `MultipleObjectsReturned` from the executor is raised as the model's
+`DoesNotExist` or `MultipleObjectsReturned`, with the original as `__cause__`. A model's own exception, of this or
+another model, passes unchanged.
 
 ### Rows
 
@@ -303,11 +309,13 @@ if not await Invoice.objects.filter(pk=pk, status="open").exists():
 
 The instances whose field `field_name` holds one of `id_list` (every instance for `None`), as a dict keyed by that
 field's value, with one [`InBulk`](./operations#adorm-operations-inbulk-query-field-name-pk-ids-none) operation, then
-the prefetches of `prefetch_related()`. `field_name` is `"pk"` or a field that is unique on its own (or the only
-field of `distinct()`); the driver raises `ProgrammingError` for another field. The name of a unique
-[`ForeignKey`](./models#adorm-foreignkey-target-column-none) (a one-to-one relation) stands for its column: the
-operation names the column and the dict is keyed by the related primary key. An empty `id_list` returns `{}` without
-an operation.
+the prefetches of `prefetch_related()`.
+
+- `field_name` is `"pk"`, a field that is unique on its own, or the only field of `distinct()`; for another field
+  the driver raises `ProgrammingError`.
+- The name of a unique [`ForeignKey`](./models#adorm-foreignkey-target-column-none) (a one-to-one relation) stands
+  for its column; the dict is keyed by the related primary key.
+- An empty `id_list` returns `{}` without an operation.
 
 ```python
 clubs = await Club.objects.in_bulk([1, 2, 99])                     # {1: <Club>, 2: <Club>}
@@ -320,13 +328,16 @@ query set with `select_for_update()` raises `TransactionManagementError`.
 
 #### `async aggregate(*args, **kwargs)`
 
-The values of aggregate expressions over the rows, with one [`Aggregate`](./operations#adorm-operations-aggregate-query-aggregations)
-operation; returns a dict by name. A keyword argument names its expression; a positional argument is an aggregate of
-one field and takes its [`default_alias`](./expressions#default-alias) (`Sum("fee")` → `"fee__sum"`). A positional
-argument that is not an aggregate, or an aggregate without a default name (`Count("*")`, `Sum(F("a") * 2)`), raises
-`TypeError`; a name given twice, positional or keyword, `ValueError`; a query set distinct on fields
-(`distinct("role")`) `TypeError`. Without arguments the result is `{}` and no operation runs. An expression may combine
-aggregates (`Max("fee") - Min("fee")`) and refer to annotations and aliases.
+The values of aggregate expressions over the rows, as a dict by name, with one
+[`Aggregate`](./operations#adorm-operations-aggregate-query-aggregations) operation.
+
+- A keyword argument names its expression. A positional argument is an aggregate of one field named by its
+  [`default_alias`](./expressions#default-alias) (`Sum("fee")` → `"fee__sum"`).
+- An expression may combine aggregates (`Max("fee") - Min("fee")`) and refer to annotations and aliases.
+- Without arguments the result is `{}` and no operation runs.
+- `TypeError`: a positional argument that is not an aggregate or has no default name (`Count("*")`,
+  `Sum(F("a") * 2)`); a query set distinct on fields (`distinct("role")`).
+- `ValueError`: a name given twice, positional or keyword.
 
 ```python
 await Membership.objects.aggregate(Sum("fee"), rows=Count("*"))
@@ -348,25 +359,26 @@ await Membership.objects.values("club_id").annotate(n=Count("*")).aggregate(larg
 ```
 
 Over no rows `Count` gives `0` and the other aggregates their `default`, or `None`. On a query set built with
-`none()` (or a slice that leaves no rows) whose expressions are all plain aggregates with no `default` or a
-[`Value`](./expressions#adorm-value-value-output-type-none) `default`, the result is computed without an operation;
-otherwise the operation runs.
+`none()` (or a slice that leaves no rows), the result is computed without an operation when every expression is a
+plain aggregate with no `default` or a [`Value`](./expressions#adorm-value-value-output-type-none) `default`.
 
 ### Writes
 
 #### `async create(**values)`
 
-A new instance validated from `values` by the model constructor (a relation name takes an instance and sets its
-column), inserted with a `Create` operation of the fields given (the primary key only when it is not `None`). The
-instance gets the values the target returns (primary key, defaults) and is bound to `executor`. Invalid values raise
-pydantic's `ValidationError` before any operation runs. A [generic foreign key](./models#generic-assignment) keyword
-whose content type is not cached has it read on `executor` first.
+A new instance validated from `values` by the model constructor, inserted with a `Create` operation of the fields
+given.
 
-When the query carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), the
-operation carries it too and the values that are not fields go along, so the target manager's `create()` receives
-them; an override of it may take such arguments (on the Django driver; the native PostgreSQL driver raises
-`NotSupportedError` for a manager or query set that overrides `create()`). Without one, those values stay extra
-values of the instance.
+- A relation name takes an instance and sets its column.
+- The primary key is inserted only when it is not `None`.
+- The instance gets the values the target returns (primary key, defaults) and is bound to `executor`.
+- Invalid values raise pydantic's `ValidationError` before any operation runs.
+- A [generic foreign key](./models#generic-assignment) keyword whose content type is not cached has it read on
+  `executor` first.
+- When the query carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), the
+  operation carries it, and values that are not fields are passed to the target manager's `create()`, whose
+  override may take them. On the native PostgreSQL driver, a manager or query set that overrides `create()` raises
+  `NotSupportedError`. Without an ORM manager, such values stay extra values of the instance.
 
 ```python
 member = await Member.objects.create(name="Ana", club=club)
@@ -379,27 +391,29 @@ reader = await Reader.objects.create(name="Ann", username="ann")   # Create(...,
 
 Inserts the model instances `objs` (any iterable) with one
 [`BulkCreate`](./operations#adorm-operations-bulkcreate-model-rows-batch-size-none-ignore-conflicts-false-update-conflicts-false-update-fields-none-unique-fields-none-manager-none)
-operation and returns them as a list, in order. Each instance writes its loaded and assigned fields
-(`model_fields_set`; a primary key of `None` is left to the target), so the instances may set different fields and
-take the target's defaults for the rest. After the operation each instance has the values the target set, such as a
-generated primary key, and is bound to `executor`; a failing operation leaves the instances unchanged. As Django's
-`bulk_create()`, it calls no `save()` and sends no signals. The content types that
-[generic foreign key assignments](./models#generic-assignment) left unset are read on `executor` first.
+operation and returns them as a list, in order.
 
+- Each instance writes its loaded and assigned fields (`model_fields_set`); a primary key of `None` is left to the
+  target. Instances may set different fields; the rest take the target's defaults.
+- After the operation each instance has the values the target set, such as a generated primary key, and is bound
+  to `executor`. A failing operation leaves the instances unchanged.
+- It calls no `save()` and sends no signals, as Django's `bulk_create()`.
+- The content types that [generic foreign key assignments](./models#generic-assignment) left unset are read on
+  `executor` first.
 - `batch_size`: the most rows one statement inserts. The statements of one call run in one transaction, or in the
   open transaction without a savepoint of their own: a failing row inserts none of the rows.
-- `ignore_conflicts=True`: a row that violates a unique constraint is skipped. The database returns no primary keys
-  then, so a generated one stays `None`, also for the rows it inserted.
-- `update_conflicts=True`: a row that conflicts on `unique_fields` updates `update_fields` of the stored row instead,
-  and an instance without a primary key gets that row's.
+- `ignore_conflicts=True`: a row that violates a unique constraint is skipped. The database returns no primary keys,
+  so a generated one stays `None`, also for the inserted rows.
+- `update_conflicts=True`: a row that conflicts on `unique_fields` updates `update_fields` of the stored row, and an
+  instance without a primary key gets that row's.
+- When the query carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), that
+  manager's `bulk_create()` inserts the rows. An override runs on the Django driver; the native PostgreSQL driver
+  raises `NotSupportedError`.
 
-An object that is not an instance of the model raises `TypeError` and a `batch_size` that is not a positive integer
-`ValueError`, also for an empty `objs`; the other argument combinations `BulkCreate` refuses raise `ValueError` when
-there are instances, as in Django. With no instances it returns `[]` without an operation, so the driver's checks do
-not run either: a multi-table inheritance child, which Django refuses also with no instances, returns `[]`. When the query
-carries an ORM manager ([`Query.manager`](./query#adorm-query-query-model-manager-none)), that manager's
-`bulk_create()` inserts the rows (an override runs on the Django driver; the native PostgreSQL driver raises
-`NotSupportedError`).
+`TypeError` for an object that is not an instance of the model and `ValueError` for a `batch_size` that is not a
+positive integer, also for an empty `objs`. The other argument combinations `BulkCreate` refuses raise `ValueError`
+when there are instances, as in Django. With no instances it returns `[]` without an operation and without the
+driver's checks, also for a multi-table inheritance child, which Django refuses.
 
 ```python
 tags = await Tag.objects.bulk_create([Tag(name="night"), Tag(name="dawn")])
@@ -436,10 +450,13 @@ competition = await Competition.objects.create_from_parent(crag, discipline="Cli
 competition.name, competition.capacity     # ("Crag day", 15), the parent's values
 ```
 
-Raises `TypeError` for a model that is not a multi-table inheritance child and for a parent of another model,
-`ValueError` for a parent without a primary key value and for a value of an inherited or unknown field or one its
-type rejects, the parent model's `DoesNotExist` when the parent has no row and `IntegrityError` when the child already
-has one.
+Errors:
+
+- `TypeError`: a model that is not a multi-table inheritance child; a parent of another model.
+- `ValueError`: a parent without a primary key value; a value of an inherited or unknown field, or one its type
+  rejects.
+- The parent model's `DoesNotExist`: the parent has no row.
+- `IntegrityError`: the child already has a row.
 
 #### `async get_or_create(defaults=None, **lookups)`
 
@@ -453,7 +470,7 @@ member, created = await Member.objects.get_or_create(name="Ana", defaults={"fee"
 
 #### `async update_or_create(defaults=None, create_defaults=None, **lookups)`
 
-Set `defaults` on the instance matching `lookups`, or create one from the lookups without `__` and
+Sets `defaults` on the instance matching `lookups`, or creates one from the lookups without `__` and
 `create_defaults` (`defaults` when `create_defaults` is `None`), with an `UpdateOrCreate` operation. Returns
 `(instance, created)`; the instance has the row as stored. A [generic foreign key](./models#generic-assignment) in
 `defaults` or `create_defaults` takes a stored instance, as for `get_or_create()`.
@@ -468,7 +485,7 @@ member, created = await Member.objects.update_or_create(
 
 #### `async update(**values)`
 
-Set `values` (field name → value or expression) on the rows with an `Update` operation; returns the number of rows.
+Sets `values` (field name → value or expression) on the rows with an `Update` operation; returns the number of rows.
 No values, a sliced query set, one distinct on fields or a value containing an aggregate raises `TypeError`; a field
 name with `__` raises `ValueError`.
 
@@ -478,13 +495,14 @@ await Member.objects.filter(active=False).update(fee=F("fee") * 0)
 
 #### `async delete()`
 
-Delete the rows and the rows that cascade from them with a `Delete` operation; returns `(total, {label: count})`. A
-sliced query set, one distinct on fields or one after `values()` raises `TypeError`. A reference that forbids the
-delete (`on_delete=PROTECT` or `RESTRICT`) raises [`ProtectedError`](./exceptions) or `RestrictedError`; their
-`protected_objects` / `restricted_objects` are instances of the registered models, bound to the query set's executor
-(a row of a model that is not registered stays a [`ModelRow`](./operations#adorm-operations-modelrow-model-row)).
-The refusal comes before any row is deleted, so a transaction that catches it goes on. No model's own `delete()` runs;
-[`Model.delete()`](./models#delete) runs it for one instance.
+Deletes the rows and the rows that cascade from them with a `Delete` operation; returns `(total, {label: count})`.
+
+- A sliced query set, one distinct on fields or one after `values()` raises `TypeError`.
+- A reference with `on_delete=PROTECT` or `RESTRICT` raises [`ProtectedError`](./exceptions) or `RestrictedError`
+  before any row is deleted; a transaction that catches it stays usable. `protected_objects` /
+  `restricted_objects` are instances of the registered models, bound to the query set's executor; a row of a model
+  that is not registered stays a [`ModelRow`](./operations#adorm-operations-modelrow-model-row).
+- No model's own `delete()` runs; [`Model.delete()`](./models#delete) runs it for one instance.
 
 ```python
 total, per_model = await Member.objects.filter(active=False).delete()
