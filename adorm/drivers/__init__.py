@@ -15,6 +15,7 @@ from adorm.drivers.base import (
     is_connection_error,
     is_refusal,
     Operation,
+    operation_models,
     Profile,
     ThreadedConnection,
     ThreadedDriver,
@@ -34,4 +35,5 @@ __all__ = [
     "check_channel",
     "is_connection_error",
     "is_refusal",
+    "operation_models",
 ]

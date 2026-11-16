@@ -27,6 +27,7 @@ from adorm.exceptions import (
     NotSupportedError,
     ProtectedError,
     RestrictedError,
+    SchemaMismatchError,
     TransactionClosed,
     TransactionManagementError,
 )
@@ -175,6 +176,8 @@ def _leaves_transaction_failed(exc: BaseException) -> bool:
         return False  # the delete's check of the references, before any statement changed data
     if isinstance(exc, FieldError) and exc.sqlstate is None:
         return False  # a field path or lookup key the driver could not resolve while building the statement
+    if isinstance(exc, SchemaMismatchError) and exc.sqlstate is None:
+        return False  # the driver's schema hash check, before any statement
     return isinstance(exc, (DatabaseError, InterfaceError))
 
 

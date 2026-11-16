@@ -127,6 +127,7 @@ def test_submodule_public_names_are_documented(module, name):
 
 
 SUBMODULES = (
+    "adorm.checks",
     "adorm.cli",
     "adorm.codegen.files",
     "adorm.codegen.render",
@@ -138,6 +139,7 @@ SUBMODULES = (
     "adorm.drivers.asyncpg.writes",
     "adorm.drivers.base",
     "adorm.drivers.django.driver",
+    "adorm.drivers.django.schema",
     "adorm.drivers.django.translation",
     "adorm.drivers.postgresql",
     "adorm.drivers.sql",

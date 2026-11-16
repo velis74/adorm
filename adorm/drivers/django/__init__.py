@@ -19,6 +19,7 @@ from adorm.drivers.django.driver import (
     PSYCOPG2_CAPABILITIES,
     READ_CAPABILITIES,
 )
+from adorm.drivers.django.schema import expected_tables, model_schema_hash
 
 __all__ = [
     "CAPABILITIES",
@@ -31,7 +32,9 @@ __all__ = [
     "backend_pid",
     "clear_content_types_on_migrate",
     "database_key",
+    "expected_tables",
     "map_django_error",
     "model_row",
+    "model_schema_hash",
     "notice_event",
 ]

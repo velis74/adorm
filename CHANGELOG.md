@@ -527,3 +527,20 @@
   (`PSYCOPG2_CAPABILITIES`); inside Django's `TestCase` it refuses to listen before a slot is taken. A slot closes a
   connection that still listens when its lease ends (`CloseReason.LISTENING`). The demo's memory driver listens too
   (`MemoryDatabase.notify()`).
+- Schema checks: before an operation waits for a slot, a driver compares the schema hash the client expects of every
+  model the operation reaches (its own, those of subqueries and `union()` parts, and those its relation paths lead to;
+  `adorm.drivers.operation_models()`) with its own (`Driver.schema_hash()`, `Driver.check_schema_hash(label,
+  expected)`), and raises `SchemaMismatchError` (with `reason` when the driver has no hash) for a mismatched model
+  only. The client's hashes come from the model registry (`ModelRegistry.schema_hashes()`) or are passed as
+  `Driver.check(operation, schema_hashes=...)`. The Django and the native PostgreSQL drivers compute the hash of the
+  installed Django model (`adorm.drivers.django.model_schema_hash()`, `adorm.codegen.django.schema_hash(model,
+  warn=False)`) once per label. `adorm.check_schema()` compares models with the database through the operation
+  `CheckTable` (`adorm.checks.table_check()`, `adorm.checks.check_models()`), which both PostgreSQL drivers execute
+  from `adorm.drivers.django.expected_tables()` by reading the catalogue: missing tables and columns, column types and
+  nullability, `NOT NULL` columns without a default the model does not set, automatic many-to-many link tables, as
+  `SchemaProblem` values (`adorm.checks.SchemaProblemKind`), or `SchemaCheckError` with `raise_on_problems=True`. The
+  pool setting `check_schema` (`"warn"` or `"raise"`, also in `ADORM["pool"]`) runs the check once before a pool
+  serves its first acquisition. `adorm check-schema` runs it from the command line with the profiles of the Django
+  settings or of `--configure` modules (exit status 1 on problems; `adorm.contrib.django.ensure_configured()`), and the
+  demo answers it at `GET /api/data/schema`. The comparison helpers are `adorm.drivers.postgresql.ExpectedTable`,
+  `ExpectedColumn`, `columns_sql()`, `normalize_type()` and `table_problems()`.

@@ -378,6 +378,17 @@ A statement error leaves the connection in the pool; a connection error or a can
 ([`is_connection_error()`](/ref/drivers#adorm-drivers-is-connection-error-exc)), and the next request gets a new
 connection.
 
+## Schema checks
+
+The driver's [`schema_hash()`](/ref/drivers#schema-hash-label) is the hash of the installed Django model, so an
+operation on a generated model that is out of date with it raises `SchemaMismatchError` before it runs. It executes
+`check_table` for [`adorm.check_schema()`](/topics/schema-checks) with one catalogue query per table, the columns'
+types from Django's `db_type()` for the alias.
+
+```python
+await adorm.check_schema([Club, Member])   # () while the tables match the models
+```
+
 ## Connection options
 
 The driver declares the [connection options](/topics/options) `statement_timeout`, `lock_timeout` and

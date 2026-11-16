@@ -15,6 +15,7 @@ from dataclasses import replace
 from typing import Any
 
 from adorm.drivers.base import BackendActivity, Capabilities, DatabaseMonitor, ThreadedConnection, ThreadedDriver
+from adorm.drivers.django.schema import expected_tables, model_schema_hash
 from adorm.drivers.django.translation import (
     AGGREGATES,
     aggregation,
@@ -42,11 +43,13 @@ from adorm.drivers.django.translation import (
 from adorm.drivers.postgresql import (
     activity_sql,
     backend_activity,
+    columns_sql,
     integrity_details,
     listen_sql,
     MAX_IDENTIFIER_LENGTH,
     notice_payload,
     references_key,
+    table_problems,
     unlisten_sql,
 )
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
@@ -150,6 +153,7 @@ CAPABILITIES = Capabilities(
         "get_or_create",
         "update_or_create",
         "full_clean",
+        "check_table",
     },
     constructs=READ_CAPABILITIES.constructs
     | {
@@ -441,8 +445,19 @@ class DjangoConnection(ThreadedConnection):
         return execute(sql, params, many, context)
 
     def execute_sync(self, operation: Any) -> Any:
+        if operation.kind == "check_table":
+            return self._check_table(operation)
         with self.db.execute_wrapper(self._watch_sql):
             return self._execute_operation(operation)
+
+    def _check_table(self, operation: Any) -> list[dict[str, Any]]:
+        """The problems of a `CheckTable`, read from the catalogue; not custom SQL."""
+        tables, problems = expected_tables(operation, self.db, self.driver.name)
+        with self.db.cursor() as cursor:
+            for table in tables:
+                cursor.execute(columns_sql("%s"), [table.regclass])
+                problems.extend(table_problems(table, cursor.fetchall()))
+        return problems
 
     def _execute_operation(self, operation: Any) -> Any:
         from django.core.exceptions import ValidationError as DjangoValidationError
@@ -1006,6 +1021,10 @@ class DjangoDriver(ThreadedDriver):
     def database_key(self, profile: Any) -> Any:
         """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""
         return database_key(profile)
+
+    def schema_hash(self, label: str) -> str:
+        """The schema hash of the installed Django model ``label`` (`adorm.drivers.django.model_schema_hash()`)."""
+        return model_schema_hash(label)
 
     async def open_connection(self, profile: Any, emit: Any) -> ThreadedConnection:
         """Open a ``connection_class`` connection; inside a Django test, `adorm.testing.django.django_connection()`

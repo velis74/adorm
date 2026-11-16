@@ -272,6 +272,7 @@ def test_pool_settings_defaults_and_kwargs():
         "commit_timeout": 60.0,
         "release_timeout": 30.0,
         "purge_stale_connections_at": 300.0,
+        "check_schema": False,
     }
     assert PoolSettings(commit_timeout=None).commit_timeout is None
     assert PoolSettings(purge_stale_connections_at=None).purge_stale_connections_at is None

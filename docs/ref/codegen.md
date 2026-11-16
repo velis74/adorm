@@ -37,7 +37,8 @@ generated) go to standard error as `warning: <message>`; `--ignore-third-party` 
 ### `adorm.cli.main(argv=None)`
 
 Runs the `adorm` command with `argv` (default: `sys.argv[1:]`) and returns its exit status; a usage error raises
-`SystemExit(2)`. The `adorm` console script calls it.
+`SystemExit(2)`. The `adorm` console script calls it. Its commands are `generate` and
+[`check-schema`](/ref/checks#adorm-check-schema).
 
 ```python
 from adorm.cli import main
@@ -366,15 +367,18 @@ exposed_methods()      # {"auth.User.objects": {"create_user"}}
 The `FieldSpec` of a concrete Django field, by the rules in the
 [how-to guide](/howto/generating-models#fields).
 
-### `adorm.codegen.django.schema_hash(model)`
+### `adorm.codegen.django.schema_hash(model, *, warn=True)`
 
 The schema hash of a Django model class, the value `adorm generate` writes into `_meta.schema_hash`, managers included.
-It does not depend on which other models are generated. A model it cannot describe raises `CodegenError`.
+It does not depend on which other models are generated. A model it cannot describe raises `CodegenError`. Describing
+the model issues the `CodegenWarning`s generating it would; with `warn=False` it issues none, through a context
+variable of its own, so the process's warning filters are not touched and other threads see no change.
 
 ```python
 from django.apps import apps
 
-schema_hash(apps.get_model("clubs.Member"))   # "4b133aa8953d898b"
+schema_hash(apps.get_model("clubs.Member"))               # "4b133aa8953d898b"
+schema_hash(apps.get_model("clubs.Member"), warn=False)   # the same, without warnings
 ```
 
 ## Declarations in the ORM's code

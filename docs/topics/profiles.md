@@ -72,6 +72,7 @@ configuring adorm imports no ORM.
 | `commit_timeout` | seconds a slot inside a transaction waits for the next request before it rolls back; `None` for no limit |
 | `release_timeout` | seconds the `on_release` hook may run before the slot leaves the pool, and the time a released slot waits for its connection to settle |
 | `purge_stale_connections_at` | seconds an idle slot stays in the pool before its connection closes (default 300); `None` keeps idle slots until the pool closes |
+| `check_schema` | `"warn"` or `"raise"` runs the [schema check](/topics/schema-checks#at-pool-start-up) before the pool serves its first acquisition; `False` (the default) does not |
 
 `acquire_timeout` and `commit_timeout` are also the profile layer of the [connection options](/topics/options) of
 the same names, which a session or a `connection_options()` block can override.

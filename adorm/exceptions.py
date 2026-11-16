@@ -28,6 +28,8 @@ __all__ = [
     "ProgrammingError",
     "ProtectedError",
     "RestrictedError",
+    "SchemaCheckError",
+    "SchemaMismatchError",
     "SessionTimeout",
     "TimeoutPhase",
     "TransactionClosed",
@@ -279,6 +281,46 @@ class NotSupportedError(DatabaseError):
         super().__init__(message, **kwargs)
         self.driver = driver
         self.unsupported = tuple(unsupported)
+
+
+class SchemaMismatchError(ProgrammingError):
+    """The adorm model ``model`` (a label) was generated from another schema than the driver's target has: its schema
+    hash ``expected`` differs from the driver's ``actual``. ``actual`` is ``None`` when the driver has no hash for the
+    model, and ``reason`` then says why (the target has no such model, or the error computing the hash). ``driver``
+    names the driver. Raised before the operation reaches the database."""
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        model: str | None = None,
+        expected: str | None = None,
+        actual: str | None = None,
+        driver: str | None = None,
+        reason: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if message is None:
+            message = f"the adorm model {model} does not match the model of the {driver} driver"
+        super().__init__(message, **kwargs)
+        self.model = model
+        self.expected = expected
+        self.actual = actual
+        self.driver = driver
+        self.reason = reason
+
+
+class SchemaCheckError(ProgrammingError):
+    """`adorm.check_schema()` found ``problems`` (`adorm.SchemaProblem` values) between the models and the database."""
+
+    def __init__(self, message: str | None = None, *, problems: Iterable[Any] = (), **kwargs: Any) -> None:
+        problems = tuple(problems)
+        if message is None:
+            count = len(problems)
+            lines = "".join(f"\n  {problem}" for problem in problems)
+            message = f"the database does not match the models ({count} problem{'' if count == 1 else 's'}):{lines}"
+        super().__init__(message, **kwargs)
+        self.problems = problems
 
 
 class TransactionManagementError(ProgrammingError):

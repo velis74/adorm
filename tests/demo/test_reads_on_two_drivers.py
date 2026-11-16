@@ -12,6 +12,7 @@ import adorm
 from adorm.settings import default_router
 from demo.api import data, drivers, main
 from demo.api.main import app
+from demo.models import MODELS
 
 REPEAT = range(3)
 DRIVERS = ("django", "asyncpg")
@@ -156,6 +157,16 @@ async def test_the_reads_match_the_database(client, database):
         missing = await client.get("/api/data/members/999999", headers=on(driver))
         assert missing.status_code == 404
         assert missing.json() == {"detail": "Member matching query does not exist."}
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+async def test_the_schema_matches_on_both_drivers(client, driver):
+    response = await client.get("/api/data/schema", headers={data.DRIVER_HEADER: driver})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["driver"] == driver
+    assert body["result"]["problems"] == []
+    assert body["result"]["models"] == [model._meta.label for model in MODELS]
 
 
 async def test_compare_reads_the_page_on_both_drivers(client, database):

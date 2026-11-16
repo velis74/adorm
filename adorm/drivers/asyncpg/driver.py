@@ -24,6 +24,7 @@ from adorm.drivers.django.driver import (
     database_key,
     map_django_error,
 )
+from adorm.drivers.django.schema import expected_tables, model_schema_hash
 from adorm.drivers.django.translation import (
     aggregation,
     check_in_bulk_field,
@@ -31,7 +32,14 @@ from adorm.drivers.django.translation import (
     translate,
     validation_error,
 )
-from adorm.drivers.postgresql import activity_sql, backend_activity, MAX_IDENTIFIER_LENGTH, notice_payload
+from adorm.drivers.postgresql import (
+    activity_sql,
+    backend_activity,
+    columns_sql,
+    MAX_IDENTIFIER_LENGTH,
+    notice_payload,
+    table_problems,
+)
 from adorm.drivers.sql import POSTGRESQL_OPTIONS, set_options_sql
 from adorm.events import BackendEvent, CONNECTION_LOST, Emit, NOTICE, NOTIFY
 from adorm.exceptions import (
@@ -326,6 +334,8 @@ class AsyncpgConnection(DriverConnection):
             )
         self._statement_failed = False
         try:
+            if operation.kind == "check_table":
+                return await self._check_table(operation)
             write = WRITES.get(operation.kind)
             if write is not None:
                 return await write(Writer(self), operation)
@@ -344,6 +354,14 @@ class AsyncpgConnection(DriverConnection):
             if mapped is exc:
                 raise
             raise mapped from exc
+
+    async def _check_table(self, operation: Any) -> list[dict[str, Any]]:
+        """The problems of a `CheckTable`, read from the catalogue."""
+        tables, problems = expected_tables(operation, self.compiler.connection, self.driver.name)
+        for table in tables:
+            rows = await self._run(self.conn.fetch(columns_sql("$1"), table.regclass))
+            problems.extend(table_problems(table, rows))
+        return problems
 
     async def _read(self, operation: Any) -> Any:
         kind = operation.kind
@@ -568,6 +586,11 @@ class AsyncpgDriver(Driver):
     def database_key(self, profile: Profile) -> Any:
         """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""
         return database_key(profile)
+
+    def schema_hash(self, label: str) -> str:
+        """The schema hash of the installed Django model ``label``, which the driver compiles queries for
+        (`adorm.drivers.django.model_schema_hash()`)."""
+        return model_schema_hash(label)
 
     async def open_connection(self, profile: Profile, emit: Emit) -> AsyncpgConnection:
         """Open ``profile``'s connection: ``profile.connect(profile)`` when the profile has a ``connect`` hook (its

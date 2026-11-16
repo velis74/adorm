@@ -26,7 +26,13 @@ from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Literal, Protocol, runtime_checkable
 
 from adorm.events import BackendEvent, CONNECTION_LOST, Emit, Event, NOTIFY
-from adorm.exceptions import InterfaceError, NotSupportedError, OperationalError, wrap_driver_error
+from adorm.exceptions import (
+    InterfaceError,
+    NotSupportedError,
+    OperationalError,
+    SchemaMismatchError,
+    wrap_driver_error,
+)
 
 __all__ = [
     "BackendActivity",
@@ -42,6 +48,7 @@ __all__ = [
     "check_channel",
     "is_connection_error",
     "is_refusal",
+    "operation_models",
 ]
 
 logger = logging.getLogger("adorm.drivers")
@@ -171,6 +178,8 @@ def _on(driver: str | None) -> str:
     return "" if driver is None else f" (driver {driver!r})"
 
 
+_schema_hashes_lock = threading.Lock()
+
 _QUERY_CANCELED = "57014"
 _CONNECTION_LOST_SQLSTATES = frozenset({"57P01", "57P02", "57P03"})
 
@@ -215,6 +224,67 @@ def _check_keys(operation: Operation) -> None:
     query = getattr(operation, "query", None)
     if isinstance(query, Query) and query.where:
         check_lookups(query, query.where)
+
+
+def operation_models(operation: Any) -> tuple[str, ...]:
+    """The labels of the models whose tables ``operation`` reads or writes: its ``model``, the model of every query
+    inside it (subqueries, ``pk__in=queryset``, the parts of a ``union()``) and every model a relation path of those
+    queries reaches (lookups and ``F()`` references of filters, annotations, ordering and written values,
+    ``values()``, ``only()``, ``defer()``, ``distinct()`` and ``select_related()`` paths), as far as the model
+    registry resolves them. A path of an ``OuterRef()`` is resolved in the query it refers to. Empty for an operation
+    without a ``model``."""
+    from adorm.models.registry import registry
+    from adorm.query.expressions import F, OuterRef
+    from adorm.query.query import Query
+
+    label = getattr(operation, "model", None)
+    if not isinstance(label, str):
+        return ()
+    labels = [label]
+
+    def add(start: str, path: str) -> None:
+        current: str | None = start
+        for segment in path.split("__"):
+            schema = registry.model_schema(current) if current is not None else None
+            current = None if schema is None else schema.relations.get(segment)
+            if current is None:
+                return
+            if current not in labels:
+                labels.append(current)
+
+    # (node, the models of the enclosing queries, innermost last)
+    nodes = getattr(operation, "nodes", None)
+    pending: list[tuple[Any, tuple[str, ...]]] = [(node, (label,)) for node in (nodes() if callable(nodes) else ())]
+    while pending:
+        node, owners = pending.pop()
+        if isinstance(node, Query):
+            if node.model not in labels:
+                labels.append(node.model)
+            owners = (*owners, node.model)
+            paths = (*node.select, *node.distinct_fields, *(node.only_fields or ()), *node.deferred_fields)
+            if isinstance(node.select_related_fields, tuple):
+                paths += node.select_related_fields
+            for path in paths:
+                add(node.model, path)
+        elif isinstance(node, OuterRef):
+            if len(owners) > 1:
+                add(owners[-2], node.name)
+            continue
+        elif isinstance(node, F):
+            add(owners[-1], node.name)
+            continue
+        pending.extend((child, owners) for child in node.get_source_expressions())
+    return tuple(labels)
+
+
+def _registered_schema_hash(label: str) -> str | None:
+    from adorm.models.registry import registry
+
+    try:
+        meta = registry.get(label)._meta
+    except LookupError:
+        return None
+    return None if meta is None else meta.schema_hash
 
 
 def _check_call(operation: Operation) -> None:
@@ -447,13 +517,17 @@ class Driver(ABC):
         if mode is not None and mode not in _MODES:
             raise TypeError(f"{cls.__name__}.mode must be one of {_MODES}, not {mode!r}")
 
-    def check(self, operation: Operation) -> None:
+    def check(self, operation: Operation, *, schema_hashes: Mapping[str, str | None] | None = None) -> None:
         """Raise `NotSupportedError` when this driver does not support ``operation``: its kind or a construct it uses
         is missing from `capabilities`, or it is an `adorm.operations.Call` of a method the registered model does not
         declare (`adorm.models.find_driver_method()`). Does no I/O.
 
         When a construct is missing and a lookup of the operation's query does not resolve against the model registry
-        (`adorm.query.check_lookups()`), raises that `adorm.FieldError` instead.
+        (`adorm.query.check_lookups()`), raises that `adorm.FieldError` instead. Then compares the schema hash the
+        client expects of every model of `operation_models()` with the driver's (`check_schema_hash()`), which raises
+        `SchemaMismatchError`. ``schema_hashes`` holds the client's hashes by label, as a client sends them when it
+        connects (`adorm.models.ModelRegistry.schema_hashes()`); ``None`` takes them from the model registry of this
+        process. A label it does not hold is not checked.
         """
         try:
             self.capabilities.check(operation, self.name)
@@ -462,6 +536,54 @@ class Driver(ABC):
             raise
         if operation.kind == "call":
             _check_call(operation)
+        expected = _registered_schema_hash if schema_hashes is None else schema_hashes.get
+        for label in operation_models(operation):
+            self.check_schema_hash(label, expected(label))
+
+    def schema_hash(self, label: str) -> str | None:  # noqa: ARG002 - subclasses use it
+        """The schema hash of the model ``label`` as the driver's target defines it, computed as `adorm generate`
+        computes the hash it writes into a generated model's `adorm.ModelMeta`. ``None`` (the default) when the driver
+        does not compute schema hashes: its models are not checked. Raises ``LookupError`` when the target has no model
+        ``label``. Does no I/O."""
+        return None
+
+    def check_schema_hash(self, label: str, expected: str | None) -> None:
+        """Raise `SchemaMismatchError` when ``expected``, the schema hash the client's model ``label`` was generated
+        with, differs from `schema_hash()` of ``label``, or the target has no such model or its hash cannot be computed
+        (the error's ``reason`` says which). An ``expected`` of ``None`` and a driver whose `schema_hash()` is ``None``
+        pass. The driver's hash of a label is computed once and kept, an error of `schema_hash()` too; callable from
+        any thread. Does no I/O."""
+        if expected is None:
+            return
+        actual, reason = self._target_schema_hash(label)
+        if actual == expected or (actual is None and reason is None):
+            return
+        if reason is None:
+            message = (
+                f"the adorm model {label} was generated with schema hash {expected}, the {self.name} driver's model has"
+                f" {actual}: run adorm generate"
+            )
+        else:
+            message = f"the adorm model {label} cannot be checked against the {self.name} driver: {reason}"
+        raise SchemaMismatchError(
+            message, model=label, expected=expected, actual=actual, driver=self.name, reason=reason
+        )
+
+    def _target_schema_hash(self, label: str) -> tuple[str | None, str | None]:
+        """`schema_hash()` of ``label``, kept per driver: ``(hash, None)``, or ``(None, reason)`` when it failed."""
+        known = self.__dict__.get("_schema_hashes")
+        if known is not None and label in known:
+            return known[label]
+        with _schema_hashes_lock:
+            known = self.__dict__.setdefault("_schema_hashes", {})
+            if label not in known:
+                try:
+                    known[label] = (self.schema_hash(label), None)
+                except LookupError:
+                    known[label] = (None, f"the target has no model {label}")
+                except Exception as exc:  # noqa: BLE001 - reported as the reason of the mismatch
+                    known[label] = (None, f"{type(exc).__name__}: {exc}")
+            return known[label]
 
     async def check_listen(self, profile: Profile) -> None:  # noqa: ARG002 - subclasses use it
         """Raise `NotSupportedError` when a connection for ``profile`` cannot listen for notifications. Defaults to

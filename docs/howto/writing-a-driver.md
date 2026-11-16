@@ -374,6 +374,55 @@ class RawSQLDriver(Driver):
 
 Without them `wait_for_lock()` raises `NotSupportedError`; `wait_for_operation()` works on every driver.
 
+### Schema checks
+
+A driver whose target knows the models takes part in the [schema checks](/topics/schema-checks). `schema_hash(label)`
+returns the target's hash of a model, computed as `adorm generate` computes it, and raises `LookupError` for a model
+the target lacks; [`check()`](/ref/drivers#check-operation-schema-hashes-none) then compares it with the hash the
+client expects of every model an operation reaches and raises `SchemaMismatchError` on a difference. The driver
+computes a label's hash once and keeps it. The client's hashes come from the model registry of the process by default;
+a driver that executes operations for clients in other processes receives each client's hashes when the client
+connects (the client sends [`registry.schema_hashes()`](/ref/models#adorm-models-registry)) and passes them as
+`check(operation, schema_hashes=...)`.
+
+The operation `check_table` lists what a model expects of the database and compares it with the catalogue. A
+PostgreSQL driver builds [`ExpectedTable`](/ref/drivers#adorm-drivers-postgresql-expectedtable-name-regclass-columns)
+values and leaves the comparison to the helpers of `adorm.drivers.postgresql`:
+
+```python
+from adorm import SchemaMismatchError
+from adorm.drivers.postgresql import columns_sql, ExpectedColumn, ExpectedTable, table_problems
+
+
+class RawSQLDriver(Driver):
+    capabilities = Capabilities(operations={"raw", "check_table"})
+
+    def schema_hash(self, label):
+        return SCHEMA_HASHES[label]          # KeyError is a LookupError: the target has no such model
+
+
+class RawSQLConnection(DriverConnection):
+    async def _execute(self, operation):
+        if operation.kind == "check_table":
+            table = TABLES.get(operation.model)  # {"name": ..., "columns": {orm_name: (column, type, nullable)}}
+            if table is None:
+                reason = f"the target has no model {operation.model}"
+                raise SchemaMismatchError(reason, model=operation.model, driver=self.driver.name, reason=reason)
+            columns = tuple(
+                ExpectedColumn(*table["columns"][name], field=name) for name in operation.fields
+            )
+            expected = ExpectedTable(table["name"], f'"{table["name"]}"', columns)
+            rows = await self.conn.fetch(columns_sql("$1"), expected.regclass)
+            return table_problems(expected, rows)
+        ...
+```
+
+A `check_table` of a model the target lacks raises `SchemaMismatchError` (with `actual` `None` and a `reason`) before
+any statement, so a transaction it is raised in stays usable and `check_schema()` reports it as a `schema_hash`
+problem.
+
+Reading the catalogue is SQL the driver generates: it does not call `mark_custom_sql()`.
+
 ## 7. Run the conformance suite
 
 The repository's [driver conformance suite](/topics/conformance) runs every bundled driver over the demo's schema and
@@ -441,6 +490,9 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
 - Code the driver runs for an operation that executes SQL of its own (application code of the target ORM) calls
   `mark_custom_sql()`, so that the slot closes the connection when the lease ends; work handed to `after_call_sync()`
   is part of the call it came from ([custom SQL](/ref/drivers#mark-custom-sql)).
+- `schema_hash()` returns the target's hash of a model as `adorm generate` computes it, or `None` when the driver
+  cannot tell; with `check_table` declared, the operation returns the problems of `table_problems()` or the same dicts
+  ([schema checks](#schema-checks)).
 - Nothing in the driver closes or pings a connection on a schedule of its own: the slot decides its lifetime
   (`purge_stale_connections_at`).
 - `close()` never raises and can be called twice.

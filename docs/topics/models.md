@@ -37,7 +37,8 @@ adorm generate --settings myproject.settings --output myproject/adorm_models clu
 ```
 
 A generated model is an ordinary adorm model. It also carries the hash of the Django model's schema in
-`_meta.schema_hash`, and a field whose name clashes with pydantic (`json`, `copy`, `model_dump` …) gets a `_` suffix
+`_meta.schema_hash`, which a driver compares with its own model's at use ([schema checks](/topics/schema-checks)), and a
+field whose name clashes with pydantic (`json`, `copy`, `model_dump` …) gets a `_` suffix
 and an alias with the original name: code and queries use `json_`, JSON and the JSON schema use `json`.
 
 ```python

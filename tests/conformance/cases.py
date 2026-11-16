@@ -2637,3 +2637,15 @@ async def full_clean_runs_the_model_clean_and_constraints():
         unique = exc.message_dict
         unique_codes = [(e.code, e.params["unique_check"]) for e in exc.error_dict["__all__"]]
     return clean, clean_codes, unique, unique_codes, await copy.full_clean(exclude=["member"])
+
+
+# The schema check
+
+
+@case("check_table", expected=((), ()))
+async def check_table_finds_the_demo_tables_as_the_models_expect():
+    from adorm.checks import table_check
+
+    club = await adorm.create_session().execute(table_check(Club))
+    membership = await adorm.create_session().execute(table_check(Membership))
+    return tuple(club), tuple(membership)

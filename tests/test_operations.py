@@ -87,6 +87,8 @@ OPERATION_EXAMPLES = [
     Delete(MEMBERS.filter(pk=5)),
     operations.DeleteInstance("club.Member", 5),
     operations.DeleteInstance("club.Payment", uuid.UUID(int=9)),
+    operations.CheckTable("club.Member", ("id", "name", "club_id"), ("payments",)),
+    operations.CheckTable("club.Payment"),
     GetOrCreate(MEMBERS.filter(club_id=3), {"name": "Ann", "club__name": "Chess"}, {"age": 30}),
     GetOrCreate(MEMBERS, {"token": uuid.UUID(int=2), "club": None}, defaults={"fee": decimal.Decimal(1)}),
     GetOrCreate(
@@ -126,6 +128,7 @@ def test_registry():
         "in_bulk": operations.InBulk,
         "create_from_parent": operations.CreateFromParent,
         "full_clean": operations.FullClean,
+        "check_table": operations.CheckTable,
     }
     for kind, cls in OPERATIONS.items():
         assert cls.kind == kind
@@ -685,3 +688,21 @@ def test_bulk_create_decoding_errors(change, message):
     data = {**operations.BulkCreate("club.Member", [{"name": "Ann"}]).to_dict(), **change}
     with pytest.raises(ValueError, match=message):
         Operation.from_dict(data)
+
+
+def test_check_table_names():
+    check = operations.CheckTable("club.Member", ["id", "name", "id"], iter(["payments"]))
+    assert (check.fields, check.many_to_many) == (("id", "name"), ("payments",))
+    assert check.to_dict() == {
+        "operation": "check_table",
+        "model": "club.Member",
+        "fields": ["id", "name"],
+        "many_to_many": ["payments"],
+    }
+    assert set(check.constructs()) == set()
+    with pytest.raises(TypeError, match="fields is an iterable of field names"):
+        operations.CheckTable("club.Member", "id")
+    with pytest.raises(ValueError, match="'club__name' is not a field name"):
+        operations.CheckTable("club.Member", ["club__name"])
+    with pytest.raises(ValueError, match="fields and many_to_many are lists of names"):
+        Operation.from_dict({"operation": "check_table", "model": "club.Member", "fields": "id", "many_to_many": []})

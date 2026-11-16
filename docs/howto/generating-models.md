@@ -476,9 +476,11 @@ note.model_dump()["json"]      # "{}"
 `_meta.schema_hash` is 16 hexadecimal digits of a SHA-256 over the model's label, primary key, parents, every
 concrete field (name, Django name, type, nullability, constraints; inherited fields included), its forward
 relations and its managers with an ORM name or driver methods (names and the methods' parameters). Defaults,
-descriptions, return types and reverse relations do not take part. A server computes the same hash from the
-Django model with [`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model) and
-compares it with the client's:
+descriptions, return types and reverse relations do not take part. A driver computes the same hash from the
+Django model with [`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model-warn-true) and
+compares it with the generated model's when the model is used; a model generated from another version of the Django
+model raises [`SchemaMismatchError`](/topics/schema-checks#the-schema-hash-at-use) until the modules are generated
+again:
 
 ```python
 from django.apps import apps

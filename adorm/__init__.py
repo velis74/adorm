@@ -1,5 +1,6 @@
 """adorm: an asynchronous ORM interface."""
 
+from adorm.checks import check_schema, SchemaProblem
 from adorm.exceptions import (
     AdormError,
     DatabaseError,
@@ -18,6 +19,8 @@ from adorm.exceptions import (
     ProgrammingError,
     ProtectedError,
     RestrictedError,
+    SchemaCheckError,
+    SchemaMismatchError,
     SessionTimeout,
     TransactionClosed,
     TransactionManagementError,
@@ -150,6 +153,9 @@ __all__ = [
     "RestrictedError",
     "ReverseForeignKey",
     "ReverseOneToOne",
+    "SchemaCheckError",
+    "SchemaMismatchError",
+    "SchemaProblem",
     "Session",
     "SessionTimeout",
     "Subquery",
@@ -175,6 +181,7 @@ __all__ = [
     "When",
     "atomic",
     "cancellation_outcome",
+    "check_schema",
     "client_base",
     "configure",
     "connection_options",

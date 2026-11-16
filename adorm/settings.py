@@ -20,12 +20,14 @@ from adorm.executor.debug import set_debug
 from adorm.executor.options import check_profile_options
 from adorm.executor.pool import (
     check_hook,
+    check_schema_mode,
     check_timeout,
     DEFAULT_ACQUIRE_TIMEOUT,
     DEFAULT_COMMIT_TIMEOUT,
     DEFAULT_PURGE_STALE_CONNECTIONS_AT,
     DEFAULT_RELEASE_TIMEOUT,
     Router,
+    SchemaCheckMode,
 )
 
 if TYPE_CHECKING:
@@ -64,6 +66,7 @@ class PoolSettings:
     commit_timeout: float | None = DEFAULT_COMMIT_TIMEOUT
     release_timeout: float = DEFAULT_RELEASE_TIMEOUT
     purge_stale_connections_at: float | None = DEFAULT_PURGE_STALE_CONNECTIONS_AT
+    check_schema: SchemaCheckMode = False
 
     def __post_init__(self) -> None:
         value = self.max_connections
@@ -75,6 +78,7 @@ class PoolSettings:
         check_timeout(self.release_timeout, "release_timeout")
         if self.purge_stale_connections_at is not None:
             check_timeout(self.purge_stale_connections_at, "purge_stale_connections_at")
+        check_schema_mode(self.check_schema)
 
     @classmethod
     def coerce(cls, value: PoolSettings | Mapping[str, Any]) -> PoolSettings:

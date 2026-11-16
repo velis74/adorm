@@ -314,3 +314,120 @@ def test_generated_demo_models_match_the_demo_django_models(tmp_path):
     )
     assert checked.returncode == 0, checked.stderr
     assert checked.stdout.strip() == "11 []"
+
+
+@pytest.fixture
+def adorm_configuration():
+    """adorm's configuration, emptied after the test."""
+    import adorm
+
+    yield
+    adorm.configure()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("adorm_configuration")
+def test_check_schema_passes_when_the_database_matches(capsys):
+    assert main(["check-schema", "-m", "tests.generated", "library", "auth.User"]) == 0
+    assert capsys.readouterr().out == "15 models checked, no problems found.\n"
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("adorm_configuration")
+def test_check_schema_reports_problems_with_status_1(capsys, monkeypatch):
+    from dataclasses import replace
+
+    from tests.generated.library import Author
+
+    monkeypatch.setattr(Author, "_meta", replace(Author._meta, schema_hash="0000000000000000"))
+    assert main(["check-schema", "--models", "tests.generated", "--using", "default", "library.Author"]) == 1
+    out, err = capsys.readouterr()
+    assert out == ""
+    lines = err.splitlines()
+    assert lines[0].startswith("library.Author: generated with schema hash 0000000000000000, the driver's model has ")
+    assert lines[1:] == ["1 problem in 1 model."]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.usefixtures("adorm_configuration")
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["library.Nothing"], "adorm check-schema: no adorm model is registered as 'library.Nothing'\n"),
+        (["nothing"], "adorm check-schema: no adorm model of the app 'nothing' is registered\n"),
+        (["--using", "missing", "library.Tag"], "adorm check-schema: InterfaceError: "),
+    ],
+)
+def test_check_schema_errors_exit_with_status_2(capsys, args, message):
+    assert main(["check-schema", "-m", "tests.generated", *args]) == 2
+    assert capsys.readouterr().err.startswith(message)
+
+
+def test_check_schema_needs_a_models_module(capsys):
+    with pytest.raises(SystemExit) as raised:
+        main(["check-schema", "library"])
+    assert raised.value.code == 2
+    assert "the following arguments are required: -m/--models" in capsys.readouterr().err
+
+
+def test_missing_django_names_the_check_schema_command(monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "django", None)
+    monkeypatch.delitem(sys.modules, "adorm.codegen.django", raising=False)
+    assert main(["check-schema", "--settings", "tests.djangoproject.settings", "-m", "tests.generated"]) == 2
+    assert "adorm check-schema needs Django: install adorm[django]" in capsys.readouterr().err
+
+
+CHECK_CONFIGURATION = """
+import adorm
+from tests.test_schema_check import HashDriver
+
+driver = HashDriver()
+driver.tables = {tables!r}
+adorm.configure(profiles={{"default": {{"driver": driver}}}})
+"""
+
+
+@pytest.mark.usefixtures("adorm_configuration")
+@pytest.mark.parametrize("problems", [False, True])
+def test_check_schema_without_django_uses_the_configure_modules(tmp_path, monkeypatch, capsys, problems):
+    import adorm.cli
+
+    def no_django(*args):
+        raise AssertionError(f"Django set up for {args}")
+
+    monkeypatch.setattr(adorm.cli, "_source", no_django)
+    monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    missing = {
+        "kind": "missing_table",
+        "table": "club",
+        "column": None,
+        "field": None,
+        "expected": None,
+        "actual": None,
+    }
+    tables = {"schemacheck.Club": [missing]} if problems else {}
+    name = f"check_configuration_{problems}"
+    (tmp_path / f"{name}.py").write_text(CHECK_CONFIGURATION.format(tables=tables))
+    monkeypatch.delitem(sys.modules, name, raising=False)
+    args = ["check-schema", "--pythonpath", str(tmp_path), "--configure", name, "-m", "tests.test_schema_check"]
+    status = main([*args, "schemacheck.Club"])
+    out, err = capsys.readouterr()
+    if problems:
+        assert status == 1
+        assert err == "schemacheck.Club: the table club does not exist\n1 problem in 1 model.\n"
+    else:
+        assert status == 0, err
+        assert out == "1 model checked, no problems found.\n"
+
+
+@pytest.mark.usefixtures("adorm_configuration")
+def test_check_schema_needs_a_configuration(monkeypatch, capsys):
+    import adorm
+
+    adorm.configure()
+    monkeypatch.delenv("DJANGO_SETTINGS_MODULE", raising=False)
+    assert main(["check-schema", "-m", "tests.test_schema_check"]) == 2
+    assert capsys.readouterr().err == (
+        "adorm check-schema: no connection profile is configured: pass --settings or --configure\n"
+    )

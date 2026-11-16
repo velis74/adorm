@@ -83,6 +83,15 @@ class ModelRegistry:
                 return model
         raise LookupError(f"no model is registered for the content type {app_label}.{model_name}")
 
+    def schema_hashes(self) -> dict[str, str]:
+        """The schema hash of every registered model that has one (``_meta.schema_hash``), by label."""
+        hashes = {}
+        for label, model in list(self._models.items()):
+            meta = model._meta
+            if meta is not None and meta.schema_hash is not None:
+                hashes[label] = meta.schema_hash
+        return hashes
+
     def model_schema(self, label: str) -> ModelSchema | None:
         """The `ModelSchema` of the model registered under ``label``, ``None`` for an unknown label. It is cached
         once the model class is complete (its forward references resolved)."""

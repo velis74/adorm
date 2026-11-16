@@ -119,12 +119,13 @@ A class method: `value` when it is a profile named `name` (`ValueError` for anot
 
 ### `adorm.PoolSettings`
 
-`PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0)`
+`PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0, check_schema=False)`
 
-The settings of a profile's pool, frozen; see [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0)
+The settings of a profile's pool, frozen; see [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)
 for their meaning. `max_connections` is a non-negative integer; the timeouts and `purge_stale_connections_at` are
-positive, finite numbers of seconds, and `commit_timeout` and `purge_stale_connections_at` may be `None`. Other values
-raise `ValueError`.
+positive, finite numbers of seconds, and `commit_timeout` and `purge_stale_connections_at` may be `None`.
+`check_schema` is `False`, `"warn"` or `"raise"`: the pool's [start-up schema check](/topics/schema-checks#at-pool-start-up).
+Other values raise `ValueError`.
 
 | Method | Returns |
 |---|---|
@@ -134,8 +135,9 @@ raise `ValueError`.
 ```python
 PoolSettings(max_connections=10, commit_timeout=None).as_kwargs()
 # {'max_connections': 10, 'acquire_timeout': 30.0, 'commit_timeout': None, 'release_timeout': 30.0,
-#  'purge_stale_connections_at': 300.0}
+#  'purge_stale_connections_at': 300.0, 'check_schema': False}
 PoolSettings(purge_stale_connections_at=None)     # idle connections stay until the pool closes
+adorm.configure(profiles={...}, pool={"check_schema": "raise"})    # every profile's pool checks the schema first
 ```
 
 ## Run-time profiles
@@ -280,7 +282,7 @@ ADORM = {
         },
     },
     "providers": ["myapp.tenants:tenant_profile"],
-    "pool": {"max_connections": 10, "acquire_timeout": 10, "commit_timeout": 30},
+    "pool": {"max_connections": 10, "acquire_timeout": 10, "commit_timeout": 30, "check_schema": "raise"},
 }
 ```
 
@@ -310,7 +312,13 @@ INSTALLED_APPS = [..., "adorm.contrib.django"]
 ```
 
 ```python
-from adorm.contrib.django import configure_from_settings, DEFAULT_DRIVER, default_profiles, settings_configuration
+from adorm.contrib.django import (
+    configure_from_settings,
+    DEFAULT_DRIVER,
+    default_profiles,
+    ensure_configured,
+    settings_configuration,
+)
 ```
 
 ### `adorm.contrib.django.apps.AdormConfig`
@@ -330,6 +338,17 @@ Raises `ImproperlyConfigured`, and then changes nothing. For a process that sets
 ```python
 django.setup()
 configure_from_settings()
+```
+
+### `adorm.contrib.django.ensure_configured()`
+
+Calls [`configure_from_settings()`](#adorm-contrib-django-configure-from-settings) unless the app
+`adorm.contrib.django` is installed, whose `ready()` has configured adorm when Django was set up. Needs a set-up
+Django. [`adorm check-schema`](/ref/checks#adorm-check-schema) calls it.
+
+```python
+django.setup()
+ensure_configured()   # adorm has the profiles of ADORM and DATABASES, with or without the app
 ```
 
 ### `adorm.contrib.django.settings_configuration()`

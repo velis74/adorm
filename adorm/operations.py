@@ -25,6 +25,7 @@ __all__ = [
     "Aggregate",
     "BulkCreate",
     "Call",
+    "CheckTable",
     "Count",
     "Create",
     "CreateFromParent",
@@ -1028,6 +1029,38 @@ class UpdateOrCreate(_LookupWrite):
             with decoder.scope(query.model):
                 create_defaults = _decode_values(decoder, raw, "create defaults")
         return cls(query, lookups, defaults, create_defaults)
+
+
+@dataclass(frozen=True, eq=False)
+class CheckTable(Operation):
+    """Compare the database tables of ``model`` with what the model expects of them; it reads the database's catalogue
+    and changes nothing. ``fields`` are the target ORM's names of the model's fields, ``many_to_many`` those of its
+    many-to-many relations, whose automatic link tables are checked too.
+
+    Result: a list of problems, each a dict with the keys ``kind`` (an `adorm.checks.SchemaProblemKind`), ``table``,
+    ``column``, ``field`` (an ORM name of ``fields`` or ``many_to_many``), ``expected`` and ``actual``, ``None`` where
+    they do not apply. The list is empty when the tables match.
+    """
+
+    kind: ClassVar[str] = "check_table"
+    model: str
+    fields: tuple[str, ...] = ()
+    many_to_many: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        check_model_label(self.model)
+        object.__setattr__(self, "fields", _names(self.fields, "fields") or ())
+        object.__setattr__(self, "many_to_many", _names(self.many_to_many, "many_to_many") or ())
+
+    def _encode(self, encoder: Encoder) -> dict[str, Any]:  # noqa: ARG002 - names only
+        return {"model": self.model, "fields": list(self.fields), "many_to_many": list(self.many_to_many)}
+
+    @classmethod
+    def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:  # noqa: ARG003 - names only
+        fields, many_to_many = _get(data, "fields"), _get(data, "many_to_many")
+        if not isinstance(fields, list) or not isinstance(many_to_many, list):
+            raise ValueError("fields and many_to_many are lists of names")
+        return cls(check_model_label(_get(data, "model")), tuple(fields), tuple(many_to_many))
 
 
 @dataclass(frozen=True)

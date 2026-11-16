@@ -418,6 +418,15 @@ async def test_a_registration_waiting_for_a_slot_times_out_in_that_phase(databas
     assert len(database.rows("activities.Attendance")) == 1
 
 
+async def test_the_schema_check_is_refused_by_the_memory_driver_with_501(database, client):  # noqa: ARG001
+    response = await client.get("/api/data/schema")
+    assert response.status_code == 501
+    body = response.json()
+    assert body["error"] == "NotSupportedError"
+    assert "'check_table'" in body["detail"]
+    assert _pool().in_use == 0
+
+
 async def test_lock_timeout_is_refused_by_the_memory_driver_with_501(database, client):
     response = await client.post("/api/data/activities/2/registrations?lock_timeout=1", json={"member_ids": [2]})
     assert response.status_code == 501
@@ -675,7 +684,7 @@ def _pool(using="default"):
 async def test_openapi_documents_the_data_endpoints(client):
     paths = (await client.get("/openapi.json")).json()["paths"]
     data_paths = [path for path in paths if path.startswith("/api/data/")]
-    assert len(data_paths) == 10
+    assert len(data_paths) == 11
     for path in ("/api/data/activities/{pk}/registrations", "/api/data/invoices/settlements"):
         responses = paths[path]["post"]["responses"]
         assert {"409", "501", "503", "504"} <= set(responses), path

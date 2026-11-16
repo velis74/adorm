@@ -44,16 +44,22 @@ class RawSQLDriver(Driver):
         return RawSQLConnection(self, conn, emit)
 ```
 
-#### `check(operation)`
+#### `check(operation, *, schema_hashes=None)`
 
 Raises `NotSupportedError` when the driver does not support `operation`: its kind or a construct it uses is missing
 from `capabilities` ([`Capabilities.check()`](#check-operation-driver-none) with the driver's `name`), or it is a
 `Call` of a method the registered model does not declare. When a construct is missing and a lookup of the operation's
 query does not resolve against the model registry ([`check_lookups()`](/ref/lookups#resolving-keys)), it raises that
 [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
-instead, so an unresolvable key is a `FieldError` on every driver. Does no I/O. The
-[router](/ref/pool) calls it before it acquires a slot for an operation outside a transaction, so an unsupported
-operation neither waits for a slot nor opens one, and
+instead, so an unresolvable key is a `FieldError` on every driver. Then it compares the schema hash the client expects
+of every model of [`operation_models(operation)`](#adorm-drivers-operation-models-operation) with the driver's
+([`check_schema_hash()`](#check-schema-hash-label-expected)), which raises
+[`SchemaMismatchError`](/ref/exceptions#adorm-schemamismatcherror-message-none-model-none-expected-none-actual-none-driver-none-reason-none).
+`schema_hashes` holds the client's hashes by label, as a client sends them when it connects
+([`registry.schema_hashes()`](/ref/models#adorm-models-registry)); `None` (the default) takes each model's
+`_meta.schema_hash` from the model registry of this process. A label `schema_hashes` does not hold is not checked.
+Does no I/O. The [router](/ref/pool) calls it before it acquires a slot for an operation outside a transaction, so an
+unsupported operation or a mismatched model neither waits for a slot nor opens one, and
 [`DriverConnection.execute()`](#adorm-drivers-driverconnection) calls it before every execution.
 
 ```python
@@ -65,6 +71,43 @@ driver = DjangoDriver()
 driver.check(Select(Member.objects.filter(first_name="Ana").query))   # supported: returns None
 driver.check(Select(Member.objects.annotate(n=Unaccent("first_name")).query))
 # NotSupportedError: 'select' operation needs unsupported function.Unaccent (driver 'django')
+
+# a driver executing operations for a client of another process, with the hashes the client sent
+driver.check(operation, schema_hashes=client_hashes)
+```
+
+#### `schema_hash(label)`
+
+Returns the schema hash of the model `label` as the driver's target defines it, computed as
+[`adorm generate`](/ref/codegen#adorm-generate) computes the hash it writes into a generated model's
+[`ModelMeta`](/ref/models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none), or `None`
+(the default) when the driver does not compute schema hashes, so its models are not checked. Raises `LookupError`
+when the target has no model `label`. Does no I/O.
+[`DjangoDriver`](#adorm-drivers-django-djangodriver) and [`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver)
+return [`model_schema_hash(label)`](#adorm-drivers-django-model-schema-hash-label) of the installed Django model.
+
+```python
+class AppDriver(Driver):
+    def schema_hash(self, label):
+        return self.registry.hash_of(label)   # raises LookupError for a model the target lacks
+```
+
+#### `check_schema_hash(label, expected)`
+
+Raises [`SchemaMismatchError`](/ref/exceptions#adorm-schemamismatcherror-message-none-model-none-expected-none-actual-none-driver-none-reason-none)
+when `expected`, the schema hash the client's model `label` was generated with, differs from
+[`schema_hash(label)`](#schema-hash-label), or the target has no such model or its hash cannot be computed (`actual`
+is then `None` and the error's `reason` says which). It passes for an `expected` of `None` (a model written by hand,
+a label the client did not register) and a driver whose `schema_hash()` returns `None`. The driver's hash of a label
+is computed at the label's first check and kept for the driver's lifetime; an error of `schema_hash()` is kept too and
+reported in every later mismatch. `expected` is compared at every check. Callable from any thread; concurrent first
+checks of one label compute its hash once. Does no I/O. [`check()`](#check-operation-schema-hashes-none) calls it for
+every model of an operation.
+
+```python
+driver.check_schema_hash("clubs.Club", Club._meta.schema_hash)
+# SchemaMismatchError: the adorm model clubs.Club was generated with schema hash e8c2eed312ab7b68, the django
+# driver's model has 51f0c9a4b2d71e03: run adorm generate
 ```
 
 #### `async check_listen(profile)`
@@ -81,7 +124,7 @@ await DjangoDriver().check_listen(profile)   # with psycopg 2: NotSupportedError
 #### `is_refusal(exc)`
 
 Returns whether `exc`, an adorm exception `open_connection()` raised, means the database refuses more connections.
-A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0) with `max_connections=0` then stops opening connections and queues the
+A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false) with `max_connections=0` then stops opening connections and queues the
 request. Defaults to [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc). A driver whose library reports a refused
 connection without a SQLSTATE overrides it:
 
@@ -270,6 +313,26 @@ is_connection_error(OperationalError(sqlstate="08006"))   # True
 is_connection_error(OperationalError(sqlstate="57014"))   # False
 ```
 
+### `adorm.drivers.operation_models(operation)`
+
+The labels of the models whose tables `operation` reads or writes, without repeats: its `model`, the model of every
+query inside it (a `Subquery`, `Exists`, `pk__in=queryset`, the parts of a `union()`), and every model a relation path
+of those queries reaches, as far as the model registry resolves it. The paths are those of lookups and `F()`
+references in filters, annotations, ordering and written values, and those of `values()`, `only()`, `defer()`,
+`distinct()` and `select_related()`; a many-to-many path reaches the related model. An `OuterRef()` path is resolved
+in the query it refers to. Empty for an operation without a `model`. `select_related()` without fields adds no labels.
+
+```python
+from adorm.drivers import operation_models
+
+operation_models(Select(Membership.objects.select_related("club", "member").query))
+# ('clubs.Membership', 'clubs.Club', 'clubs.Member')
+operation_models(Select(Club.objects.filter(Exists(Membership.objects.filter(club=OuterRef("pk")))).query))
+# ('clubs.Club', 'clubs.Membership')
+operation_models(Select(Member.objects.filter(memberships__club__city="Koper").query))
+# ('clubs.Member', 'clubs.Membership', 'clubs.Club')
+```
+
 ### `adorm.drivers.check_channel(channel)`
 
 Returns `channel`, a notification channel name, when it is a non-empty string without NUL; raises `TypeError` for a
@@ -330,7 +393,7 @@ The contract the slot calls:
 | `settled`, `async settle()` | whether, and until when, the connection still works for its last call after the call's outcome ([below](#settled)) |
 
 A failed check raises `NotSupportedError` before the subclass is called: `execute()` runs
-[`Driver.check()`](#check-operation), and the savepoint calls and `set_options()` check `savepoints` and
+[`Driver.check()`](#check-operation-schema-hashes-none), and the savepoint calls and `set_options()` check `savepoints` and
 `connection_options`, each error naming the driver. What a subclass
 implements:
 
@@ -605,10 +668,15 @@ instance or import path.
 outside Django's test environment that is a `connection_class` connection; inside a Django `TestCase` it is one that
 shares the test's connection ([test mode](/topics/testing)).
 
+`schema_hash(label)` is [`model_schema_hash(label)`](#adorm-drivers-django-model-schema-hash-label): the hash of the
+installed Django model, as `adorm generate` computes it ([`Driver.check_schema_hash()`](#check-schema-hash-label-expected)
+compares it with the generated model's).
+
 ```python
 adorm.configure(profiles={"default": {"driver": "adorm.drivers.django.DjangoDriver", "alias": "default"}})
 driver = DjangoDriver()
 pool = Pool(driver, ConnectionProfile("default", driver), max_connections=10)
+driver.schema_hash("clubs.Club")   # 'e8c2eed312ab7b68'
 ```
 
 ### `adorm.drivers.django.DjangoConnection`
@@ -660,6 +728,14 @@ since the commit stands; one registered without `robust=True` stops the callback
 of a rolled-back savepoint or transaction do not run. Outside a transaction Django runs a callback at once, inside
 the operation that registers it.
 
+A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation reads the
+catalogue through the wrapper's cursor outside the execute wrapper, so it is not custom SQL: the expected tables come
+from [`expected_tables(operation, self.db, driver.name)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none), each table's
+columns from [`columns_sql("%s")`](#adorm-drivers-postgresql-columns-sql-parameter), and the result is the
+[`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field`
+problems. A label without an installed Django model raises `SchemaMismatchError` before any statement, so a
+transaction it is raised in stays usable.
+
 `target`, what profile hooks receive, is the wrapper (`self.db`). `alias` is `profile.alias`. `is_usable()` is also
 false once the `TestCase` atomic blocks on the test's connection differ from those open when the connection was opened
 ([`TestDatabase.current()`](/ref/testing#adorm-testing-django-testdatabase)): a connection opened in a `TestCase` test
@@ -705,7 +781,7 @@ The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver`:
 
 | Field | Value |
 |---|---|
-| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean` |
+| `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean`, `check_table` |
 | `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` |
@@ -804,6 +880,44 @@ entry, a backend other than PostgreSQL and a `NAME` that is not hashable. The da
 ```python
 database_key(ConnectionProfile("reports", DjangoDriver(), alias="default", on_acquire=set_role))
 # ("postgresql", "localhost", "5432", "club"), the same as for the profile "default"
+```
+
+### `adorm.drivers.django.model_schema_hash(label)`
+
+The schema hash of the installed Django model `label`:
+[`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model-warn-true) with
+`warn=False`, so it issues no `CodegenWarning` and leaves the process's warning filters alone; safe to call from any
+thread. Raises `LookupError` when no such model is installed and `CodegenError` for a model the generator cannot
+describe. Defined in `adorm.drivers.django.schema`; the `schema_hash()` of `DjangoDriver` and
+`AsyncpgDriver`.
+
+```python
+from adorm.drivers.django import model_schema_hash
+
+model_schema_hash("clubs.Club") == Club._meta.schema_hash   # True while the generated module is up to date
+```
+
+### `adorm.drivers.django.expected_tables(operation, connection, driver=None)`
+
+What the [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) `operation` expects of
+the database, for the Django database wrapper `connection`: a list of
+[`ExpectedTable`](#adorm-drivers-postgresql-expectedtable-name-regclass-columns) values, and a list of
+`unknown_field` problem dicts for the names in `operation.fields` that are no concrete field of the model (looked up by
+name or attname) and in `operation.many_to_many` that are no many-to-many relation of it (a reverse one named by its
+accessor name).
+
+A column belongs to the table of the model that declares its field: an inherited field of a multi-table inheritance
+child is in the parent's table. Each column's type is the field's `db_type(connection)`, which does not connect; it
+takes `NULL` when the field has `null=True` and is not the primary key. A many-to-many relation adds its automatic
+link table with every column, the primary key without a type (adorm neither reads nor writes it); a link model of its
+own is checked as a model of its own. The table names are quoted with `connection.ops.quote_name()`. Raises
+[`SchemaMismatchError`](/ref/exceptions#adorm-schemamismatcherror-message-none-model-none-expected-none-actual-none-driver-none-reason-none)
+with `actual` `None` when no such model is installed, naming `driver` in it. Defined in `adorm.drivers.django.schema`.
+
+```python
+tables, problems = expected_tables(CheckTable("library.Book", ("isbn", "title"), ("authors",)), connection)
+[table.name for table in tables]   # ['library_book', 'library_book_authors']
+tables[0].columns[1]               # ExpectedColumn(name='title', type='varchar(200)', nullable=False, field='title')
 ```
 
 ### `adorm.drivers.django.translation.translate(query)`
@@ -1165,10 +1279,14 @@ Inside a Django `TestCase` ([`find_test_database()`](/ref/testing#adorm-testing-
 transaction. In another Django test the connection's `is_usable()` becomes false once a `TestCase` transaction is open
 on the test's connection.
 
+`schema_hash(label)` is [`model_schema_hash(label)`](#adorm-drivers-django-model-schema-hash-label): the hash of the
+installed Django model the driver compiles queries for.
+
 ```python
 adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDriver", "alias": "default"}})
 driver = AsyncpgDriver()
 pool = Pool(driver, ConnectionProfile("default", driver, params={"USER": "reports"}), max_connections=10)
+driver.schema_hash("clubs.Club")   # 'e8c2eed312ab7b68'
 ```
 
 ### `adorm.drivers.asyncpg.AsyncpgConnection`
@@ -1179,6 +1297,7 @@ also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `
 | Method | Does |
 |---|---|
 | `_execute(operation)` | a read: [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`; for a combined query, whether its first row exists), `aggregate` → a dict by name ([`compile_aggregate()`](#compile-aggregate-query-aggregates) of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations); no statement runs when the query matches no rows), `in_bulk` → list of rows ([`check_in_bulk_field()`](#adorm-drivers-django-translation-check-in-bulk-field-operation), then one statement per [`IN_BULK_BATCH_SIZE`](#adorm-drivers-asyncpg-in-bulk-batch-size) ids). A write: the [`WRITES`](#adorm-drivers-asyncpg-writes-writes) method of a new [`Writer`](#adorm-drivers-asyncpg-writes-writer-connection), with the results of the Django driver. Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while a query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement, or a cancellation inside a transaction the write opened, can make the connection unusable. While the transaction is rollback-only (a write failed after its first statement, outside a savepoint of its own) every operation raises `TransactionManagementError` |
+| `_execute(CheckTable)` | [`expected_tables(operation, compiler.connection, driver.name)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none), then one [`columns_sql("$1")`](#adorm-drivers-postgresql-columns-sql-parameter) statement per table; the result is the [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field` problems. A label without an installed Django model raises `SchemaMismatchError` before any statement |
 | `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)); inside a transaction `TransactionManagementError` |
 | `commit()`, `rollback()` | `COMMIT`, `ROLLBACK`; a `COMMIT` whose status is `ROLLBACK` (the transaction failed earlier) raises `TransactionManagementError`, and so does `commit()` of a rollback-only transaction, after sending `ROLLBACK` instead |
 | `savepoint(name)`, `release_savepoint(name)`, `rollback_to_savepoint(name)` | `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` with `name` quoted. Outside a transaction, for a savepoint name already open (`savepoint`) and for one that is not open (the others) `TransactionManagementError`. Releasing a savepoint releases those opened after it; rolling back to one discards those opened after it and keeps it open, and ends the rollback-only state of a write that failed after it was opened |
@@ -1228,8 +1347,8 @@ async with await AsyncpgDriver().open_monitor(profile) as monitor:
 ### `adorm.drivers.asyncpg.CAPABILITIES`
 
 The [`Capabilities`](#adorm-drivers-capabilities) of `AsyncpgDriver`: the `operations` and `constructs` of the
-Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (every read, `aggregate` included, the writes
-and every construct listed there), `savepoints`, `cancellation` and the `connection_options` of
+Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (every read, `aggregate` included, the writes,
+`check_table` and every construct listed there), `savepoints`, `cancellation` and the `connection_options` of
 [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options). `backend_events`: `notify`, `notice`,
 `connection_lost`; `max_channel_length`: [`MAX_IDENTIFIER_LENGTH`](#adorm-drivers-postgresql-max-identifier-length).
 
@@ -1540,6 +1659,82 @@ constraint's `table_name`.
 ```python
 references_key('Key (id)=(1) is still referenced from table "clubs_membership".')   # True
 references_key('Key (club_id)=(9) is not present in table "clubs_club".')           # False
+```
+
+## Table checks
+
+`adorm.drivers.postgresql` also compares a table's columns in PostgreSQL's catalogue with what a model expects. A
+driver turns a [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation into
+`ExpectedTable` values (the Django and the native PostgreSQL drivers with
+[`expected_tables()`](#adorm-drivers-django-expected-tables-operation-connection-driver-none)), runs `columns_sql()` for each and
+returns the `table_problems()`.
+
+```python
+from adorm.drivers.postgresql import columns_sql, ExpectedColumn, ExpectedTable, normalize_type, table_problems
+```
+
+### `adorm.drivers.postgresql.ExpectedColumn(name, type, nullable, field=None)`
+
+A column a model expects: its `name`, its `type` as the ORM declares it (`"varchar(100)"`; `None` leaves the type
+unchecked), whether it takes `NULL`, and the ORM name of its `field` (`None` for a column of an automatic link table).
+
+### `adorm.drivers.postgresql.ExpectedTable(name, regclass, columns)`
+
+A table a model expects: its `name` as the ORM names it, the same name quoted for `to_regclass()` (`regclass`, e.g.
+`'"clubs_club"'`) and its `columns`, a tuple of `ExpectedColumn`.
+
+### `adorm.drivers.postgresql.columns_sql(parameter)`
+
+The query of the columns of the table whose quoted name is bound to `parameter` (`"%s"` for psycopg, `"$1"` for
+asyncpg), resolved on the connection's `search_path` with `to_regclass()`. Each row is `(table exists, column name,
+type, not null, has a default)`, in column order; the type is spelt as `format_type()` prints it, and an identity or
+generated column counts as one with a default. A missing table gives one row `(False, None, None, None, None)`.
+
+```python
+rows = await conn.fetch(columns_sql("$1"), '"clubs_club"')
+# [(True, 'id', 'bigint', True, True), (True, 'name', 'character varying(100)', True, False), ...]
+```
+
+### `adorm.drivers.postgresql.normalize_type(type_name)`
+
+`type_name`, a PostgreSQL type as an ORM declares it or `format_type()` prints it, in `format_type()`'s spelling:
+lower case, aliases spelt out, no spaces inside parentheses, array dimensions without a size. Two types match when
+their normalised forms are equal.
+
+| Declared | Normalised |
+|---|---|
+| `varchar(100)`, `char(3)` | `character varying(100)`, `character(3)` |
+| `int`, `serial`, `int8`, `bigserial`, `int2`, `bool` | `integer`, `integer`, `bigint`, `bigint`, `smallint`, `boolean` |
+| `numeric(8, 2)`, `decimal(8,2)` | `numeric(8,2)` |
+| `float8`, `float4` | `double precision`, `real` |
+| `timestamptz`, `timestamp`, `time`, `timetz` | `timestamp with time zone`, `timestamp without time zone`, `time without time zone`, `time with time zone` |
+| `varchar(30)[10]` | `character varying(30)[]` |
+
+```python
+normalize_type("varchar(30)[10]") == normalize_type("character varying(30)[]")   # True
+```
+
+### `adorm.drivers.postgresql.table_problems(table, rows)`
+
+The differences between the `ExpectedTable` `table` and the `rows` of `columns_sql()` for it, as the problem dicts of
+a `CheckTable` result (keys `kind`, `table`, `column`, `field`, `expected`, `actual`):
+
+| `kind` | When |
+|---|---|
+| `missing_table` | the table does not exist; it is the only problem of the table |
+| `missing_column` | an expected column does not exist |
+| `column_type` | an expected column's type differs (`normalize_type()`); `expected` is the declared type, `actual` the catalogue's |
+| `nullability` | an expected column takes `NULL` and the model expects `NOT NULL`, or the other way round; `expected` and `actual` are `"NULL"` or `"NOT NULL"` |
+| `required_column` | a column the model does not expect is `NOT NULL` without a default, identity or generation, so an insert of the model fails; `actual` is its type |
+
+The problems follow the expected columns' order, `required_column` problems last. A column the model does not expect
+that takes `NULL` or has a default is not a problem.
+
+```python
+table = ExpectedTable("clubs_club", '"clubs_club"', (ExpectedColumn("name", "varchar(100)", False, "name"),))
+table_problems(table, [(True, "name", "character varying(50)", True, False)])
+# [{'kind': 'column_type', 'table': 'clubs_club', 'column': 'name', 'field': 'name',
+#   'expected': 'varchar(100)', 'actual': 'character varying(50)'}]
 ```
 
 ## Django's compiler for asyncpg

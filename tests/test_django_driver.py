@@ -191,6 +191,7 @@ def test_capabilities():
         "delete_instance",
         "get_or_create",
         "update_or_create",
+        "check_table",
     }
     assert {
         "lookup.in",

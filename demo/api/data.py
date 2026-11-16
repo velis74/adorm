@@ -33,6 +33,7 @@ from adorm.exceptions import TimeoutPhase
 from adorm.settings import default_router
 from demo.api import memory, operations
 from demo.api.schemas import Id, Level, MemberChanges, PaymentIn, Slug
+from demo.models import MODELS
 from demo.models.activities import Activity, Attendance
 from demo.models.billing import Invoice, Payment
 from demo.models.clubs import Club, Member, Membership
@@ -225,6 +226,33 @@ class PoolState(BaseModel):
     idle: int = Field(description="Slots not assigned to a session.")
     in_use: int = Field(description="Slots assigned to a session or returning to the pool.")
     waiting: int = Field(description="Requests waiting for a slot.")
+
+
+class SchemaProblemOut(BaseModel):
+    """A difference between a demo model and the database or the driver's model (`adorm.SchemaProblem`)."""
+
+    model: str = Field(description="Label of the model.")
+    kind: str = Field(
+        description=(
+            "`schema_hash`, `missing_table`, `missing_column`, `column_type`, `nullability`, `unknown_field` or "
+            "`required_column`."
+        )
+    )
+    table: str | None = Field(description="Database table; `null` where it does not apply.")
+    column: str | None = Field(description="Database column; `null` where it does not apply.")
+    field: str | None = Field(
+        description="adorm name of the model's field or relation; `null` where it does not apply."
+    )
+    expected: str | None = Field(description="What the model expects; `null` where it does not apply.")
+    actual: str | None = Field(description="What the database or the driver has; `null` where it does not apply.")
+    message: str = Field(description="The problem in one line.")
+
+
+class SchemaReport(BaseModel):
+    """The result of `adorm.check_schema()` over the demo's models."""
+
+    models: list[str] = Field(description="Labels of the models checked, in order.")
+    problems: list[SchemaProblemOut] = Field(description="The differences found; empty when everything matches.")
 
 
 class ExecutorState(BaseModel):
@@ -738,6 +766,37 @@ async def club_summary(
         except Club.DoesNotExist as exc:
             raise not_found(exc) from None
     return traced(summary, target, session_name, calls)
+
+
+@router.get(
+    "/schema",
+    summary="Check the database schema",
+    responses=EXECUTOR_ERRORS
+    | {501: {"model": ExecutorError, "description": "The driver does not check tables (the memory driver)."}},
+    openapi_extra=UNKNOWN_DRIVER,
+)
+async def check_schema(target: ReadTarget, session_name: SessionName = "default") -> Traced[SchemaReport]:
+    """Every demo model compared with the driver's database by `adorm.check_schema()`: one `check_table` per model,
+    which also compares the model's schema hash with the driver's model. Nothing is changed."""
+    with run(target, session_name) as calls:
+        problems = await adorm.check_schema(MODELS)
+    report = SchemaReport(
+        models=[model._meta.label for model in MODELS],
+        problems=[
+            SchemaProblemOut(
+                model=problem.model,
+                kind=problem.kind,
+                table=problem.table,
+                column=problem.column,
+                field=problem.field,
+                expected=problem.expected,
+                actual=problem.actual,
+                message=str(problem),
+            )
+            for problem in problems
+        ],
+    )
+    return traced(report, target, session_name, calls)
 
 
 @router.get("/outbox", summary="Messages queued on commit", responses=NO_DRIVER)

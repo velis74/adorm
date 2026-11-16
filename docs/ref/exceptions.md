@@ -30,6 +30,8 @@ AdormError
 │       ├── NotSupportedError
 │       └── ProgrammingError
 │           ├── FieldError
+│           ├── SchemaMismatchError
+│           ├── SchemaCheckError
 │           └── TransactionManagementError
 │               ├── TransactionClosed
 │               └── TransactionOverlapError
@@ -320,7 +322,7 @@ reports the error without them leaves them `None`.
 [`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) and
 [`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) raise it
 before any operation runs; every driver raises it for a path it cannot resolve while it builds the statement, and
-[`Driver.check()`](/ref/drivers#check-operation) raises it in place of `NotSupportedError` for an operation that also
+[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) raises it in place of `NotSupportedError` for an operation that also
 uses a construct the driver lacks. A
 `FieldError` without a SQLSTATE does not affect the [transaction](/topics/transactions#a-failed-operation) it is
 raised in.
@@ -338,7 +340,7 @@ except adorm.FieldError as exc:
 `NotSupportedError(message=None, *, driver=None, unsupported=(), original=None, sqlstate=None)`
 
 The database or the driver does not support the requested feature (SQLSTATE class `0A`). A driver's capability
-check ([`Driver.check()`](/ref/drivers#check-operation), [`Capabilities`](/ref/drivers#adorm-drivers-capabilities))
+check ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none), [`Capabilities`](/ref/drivers#adorm-drivers-capabilities))
 sets `driver` to the driver's name and `unsupported` to the tuple of names it lacks: an operation kind, construct
 names, connection option names or `"savepoints"`. It raises before anything reaches the connection, so a
 transaction it is raised in stays usable. Otherwise `driver` is `None` and `unsupported` is empty.
@@ -353,6 +355,46 @@ try:
 except adorm.NotSupportedError as exc:
     exc.driver          # 'django'
     exc.unsupported     # ('function.Unaccent',)
+```
+
+### `adorm.SchemaMismatchError(message=None, *, model=None, expected=None, actual=None, driver=None, reason=None)`
+
+A [`ProgrammingError`](#adorm-programmingerror): the adorm model `model` (a label) was generated from another schema
+than the driver's target has. `expected` is the model's schema hash (`_meta.schema_hash`), `actual` the driver's,
+`None` when the target has no such model or the driver could not compute it; `reason` then says which (`"the target
+has no model clubs.Club"`, or the error's type and message). `driver` is the driver's name.
+[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) raises it for an operation on the mismatched
+model, or on any model the operation reaches ([`operation_models()`](/ref/drivers#adorm-drivers-operation-models-operation)),
+before the operation waits for a slot or reaches the connection; every other model keeps working, and a transaction it
+is raised in stays usable. A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) of
+a model the target lacks raises it too, before any statement. The [schema checks topic](/topics/schema-checks)
+explains when it is raised.
+
+```python
+try:
+    await Club.objects.count()
+except adorm.SchemaMismatchError as exc:
+    exc.model, exc.expected, exc.actual   # ('clubs.Club', 'e8c2eed312ab7b68', '51f0c9a4b2d71e03')
+    str(exc)
+    # the adorm model clubs.Club was generated with schema hash e8c2eed312ab7b68, the django driver's model has
+    # 51f0c9a4b2d71e03: run adorm generate
+```
+
+### `adorm.SchemaCheckError(message=None, *, problems=())`
+
+A [`ProgrammingError`](#adorm-programmingerror) that
+[`check_schema(raise_on_problems=True)`](/ref/checks#adorm-check-schema-models-none-session-none-raise-on-problems-false)
+raises when it finds problems, and every acquisition of a pool whose
+[start-up check](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false) with `check_schema="raise"` found problems. `problems` is the tuple of [`SchemaProblem`](/ref/checks#adorm-schemaproblem) values;
+the default message names their number and lists one per line.
+
+```python
+try:
+    await adorm.check_schema(raise_on_problems=True)
+except adorm.SchemaCheckError as exc:
+    str(exc)
+    # the database does not match the models (1 problem):
+    #   clubs.Club.city: the column clubs_club.city does not exist
 ```
 
 ### `adorm.TransactionManagementError`

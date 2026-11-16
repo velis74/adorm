@@ -7,7 +7,14 @@ from adorm.contrib.django.config import (
     configure_from_settings,
     DEFAULT_DRIVER,
     default_profiles,
+    ensure_configured,
     settings_configuration,
 )
 
-__all__ = ["DEFAULT_DRIVER", "configure_from_settings", "default_profiles", "settings_configuration"]
+__all__ = [
+    "DEFAULT_DRIVER",
+    "configure_from_settings",
+    "default_profiles",
+    "ensure_configured",
+    "settings_configuration",
+]

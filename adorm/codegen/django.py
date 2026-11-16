@@ -12,6 +12,7 @@ that are neither exposed nor ported are reported as `CodegenWarning`, one per me
 
 from __future__ import annotations
 
+import contextvars
 import enum
 import importlib
 import inspect
@@ -114,8 +115,12 @@ _SLUG_PATTERNS = {False: r"^[-a-zA-Z0-9_]+$", True: r"^[-\w]+$"}
 _END_OF_TEXT = re.compile(r"(?<!\\)((?:\\\\)*)\\Z")
 
 
+_silent: contextvars.ContextVar[bool] = contextvars.ContextVar("adorm_codegen_silent", default=False)
+
+
 def _warn(message: str, category: type[CodegenWarning] = CodegenWarning) -> None:
-    warnings.warn(message, category, stacklevel=3)
+    if not _silent.get():
+        warnings.warn(message, category, stacklevel=3)
 
 
 def _where(field: Any) -> str:
@@ -798,18 +803,23 @@ def _invalid(model: type[models.Model], exc: ValueError) -> CodegenError:
     return CodegenError(f"{model._meta.label}: {exc}")
 
 
-def schema_hash(model: type[models.Model]) -> str:
+def schema_hash(model: type[models.Model], *, warn: bool = True) -> str:
     """The schema hash of the Django model ``model``, the one `adorm generate` writes into ``_meta``: it covers the
     label, primary key, parents, every concrete field (inherited ones included), the forward relations it generates
-    and the managers with an ORM name or driver methods.
+    and the managers with an ORM name or driver methods. With ``warn`` false it issues no `CodegenWarning`, without
+    touching the process-wide warning filters.
 
     Raises `CodegenError` for a model it cannot describe (a composite primary key, a name no Python name maps to).
     """
     _check_model(model)
+    token = _silent.set(True) if not warn else None
     try:
         return _schema_hash(model)
     except ValueError as exc:
         raise _invalid(model, exc) from exc
+    finally:
+        if token is not None:
+            _silent.reset(token)
 
 
 def _schema_hash(model: type[models.Model]) -> str:
@@ -832,9 +842,7 @@ def model_spec(model: type[models.Model], *, included: Collection[str] | None = 
     and reported as `CodegenWarning`. ``None`` includes every model. Raises `CodegenError` for a model it cannot
     describe.
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", CodegenWarning)
-        hashed = schema_hash(model)
+    hashed = schema_hash(model, warn=False)
     try:
         return _model_spec(model, hashed, included)
     except ValueError as exc:

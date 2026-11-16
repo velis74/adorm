@@ -93,7 +93,7 @@ and `cancellation` default to `False`, so a driver declares only what it impleme
 `DriverConnection` checks every call against the declaration before the driver sees it: an operation that uses an
 unsupported kind or construct, an unsupported connection option, or a savepoint call on a driver without
 savepoints raises `NotSupportedError` and nothing is executed. The router checks an operation outside a
-transaction with [`Driver.check()`](/ref/drivers#check-operation) before it acquires a slot, so an unsupported
+transaction with [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none) before it acquires a slot, so an unsupported
 operation does not wait for a slot of a full pool. Inside a transaction the check in `execute()` refuses before
 anything reaches the database, so the transaction stays usable. The error names the driver and the missing names
 (`NotSupportedError.driver`, `.unsupported`). The checks live in the concrete `execute()`,

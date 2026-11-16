@@ -1,10 +1,20 @@
-"""PostgreSQL's description of a violated constraint, read from psycopg's and asyncpg's errors."""
+"""PostgreSQL's description of a violated constraint, read from psycopg's and asyncpg's errors, and the comparison of
+a table's columns in the catalogue with what a model expects."""
 
 import pytest
 
 from django.db import IntegrityError as DjangoIntegrityError
 
-from adorm.drivers.postgresql import integrity_details, parse_key_detail, references_key
+from adorm.drivers.postgresql import (
+    columns_sql,
+    ExpectedColumn,
+    ExpectedTable,
+    integrity_details,
+    normalize_type,
+    parse_key_detail,
+    references_key,
+    table_problems,
+)
 from adorm.exceptions import DataError, IntegrityError, wrap_driver_error
 
 
@@ -160,3 +170,115 @@ def test_wrap_with_integrity_details_describes_only_integrity_errors():
         FakeAsyncpgError("23505", constraint_name="c", detail="Key (id)=(1) already exists."), integrity_details
     )
     assert (wrapped.constraint_name, wrapped.key) == ("c", {"id": "1"})
+
+
+@pytest.mark.parametrize(
+    ("declared", "printed"),
+    [
+        ("integer", "integer"),
+        ("serial", "integer"),
+        ("bigserial", "bigint"),
+        ("int8", "bigint"),
+        ("smallint", "smallint"),
+        ("bool", "boolean"),
+        ("varchar(100)", "character varying(100)"),
+        ("VARCHAR", "character varying"),
+        ("char(3)", "character(3)"),
+        ("numeric(8, 2)", "numeric(8,2)"),
+        ("decimal(8,2)", "numeric(8,2)"),
+        ("float8", "double precision"),
+        ("double precision", "double precision"),
+        ("timestamp with time zone", "timestamp with time zone"),
+        ("timestamptz", "timestamp with time zone"),
+        ("timestamp", "timestamp without time zone"),
+        ("timestamp(3)", "timestamp(3) without time zone"),
+        ("time", "time without time zone"),
+        ("time without time zone", "time without time zone"),
+        ("varchar(30)[10]", "character varying(30)[]"),
+        ("integer[]", "integer[]"),
+        ("time[]", "time without time zone[]"),
+        ("jsonb", "jsonb"),
+        ("interval", "interval"),
+        ("uuid", "uuid"),
+    ],
+)
+def test_normalize_type_spells_types_as_format_type(declared, printed):
+    assert normalize_type(declared) == printed
+    assert normalize_type(printed) == printed
+
+
+@pytest.mark.parametrize(("one", "other"), [("integer", "bigint"), ("varchar(10)", "varchar(11)"), ("text", "jsonb")])
+def test_normalize_type_keeps_different_types_apart(one, other):
+    assert normalize_type(one) != normalize_type(other)
+
+
+def test_columns_sql_binds_the_table_name():
+    assert "to_regclass($1::text)" in columns_sql("$1")
+    assert "to_regclass(%s::text)" in columns_sql("%s")
+
+
+TABLE = ExpectedTable(
+    "club",
+    '"club"',
+    (
+        ExpectedColumn("id", "bigint", False, "id"),
+        ExpectedColumn("name", "varchar(100)", False, "name"),
+        ExpectedColumn("note", "text", True, "note"),
+        ExpectedColumn("owner_id", None, True, "owner_id"),
+        ExpectedColumn("gone", "text", False, "gone"),
+    ),
+)
+
+
+def test_table_problems():
+    rows = [
+        (True, "id", "bigint", True, True),
+        (True, "name", "character varying(80)", True, False),
+        (True, "note", "text", True, False),
+        (True, "owner_id", "uuid", False, False),
+        (True, "required", "integer", True, False),
+        (True, "defaulted", "integer", True, True),
+        (True, "optional", "integer", False, False),
+    ]
+    assert table_problems(TABLE, rows) == [
+        {
+            "kind": "column_type",
+            "table": "club",
+            "column": "name",
+            "field": "name",
+            "expected": "varchar(100)",
+            "actual": "character varying(80)",
+        },
+        {
+            "kind": "nullability",
+            "table": "club",
+            "column": "note",
+            "field": "note",
+            "expected": "NULL",
+            "actual": "NOT NULL",
+        },
+        {
+            "kind": "missing_column",
+            "table": "club",
+            "column": "gone",
+            "field": "gone",
+            "expected": None,
+            "actual": None,
+        },
+        {
+            "kind": "required_column",
+            "table": "club",
+            "column": "required",
+            "field": None,
+            "expected": None,
+            "actual": "integer",
+        },
+    ]
+
+
+def test_a_missing_table_is_one_problem():
+    missing = [
+        {"kind": "missing_table", "table": "club", "column": None, "field": None, "expected": None, "actual": None}
+    ]
+    assert table_problems(TABLE, [(False, None, None, None, None)]) == missing
+    assert table_problems(TABLE, []) == missing

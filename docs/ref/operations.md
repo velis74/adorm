@@ -6,8 +6,8 @@ connection: one read or write, described without I/O, models by their label and 
 ```python
 from adorm import F, Now, Q
 from adorm.models import registry
-from adorm.operations import Aggregate, BulkCreate, Call, Count, Create, CreateFromParent, Delete, FullClean, Get
-from adorm.operations import GetOrCreate, InBulk, ModelRow, Save, Select, Update, UpdateOrCreate
+from adorm.operations import Aggregate, BulkCreate, Call, CheckTable, Count, Create, CreateFromParent, Delete, FullClean
+from adorm.operations import Get, GetOrCreate, InBulk, ModelRow, Save, Select, Update, UpdateOrCreate
 from adorm.query import Query
 ```
 
@@ -38,6 +38,7 @@ expressions.
 | `qs.update_or_create(defaults=..., create_defaults=..., **lookups)` | `UpdateOrCreate(query, lookups, defaults, create_defaults)` |
 | `Child.objects.create_from_parent(parent, **values)` | `CreateFromParent(label, parent_pk, values)` |
 | `obj.full_clean(exclude=...)` | `FullClean(label, pk, values, exclude, validate_unique, validate_constraints, adding)` |
+| [`adorm.check_schema(models)`](./checks) | `CheckTable(label, fields, many_to_many)`, one per model |
 | `qs.archive(...)`, `Model.objects.lend(...)` (driver methods) | `Call(query, "archive", "queryset", ...)`, `Call(Query(label, manager=...), "lend", "manager", ...)` |
 
 `filter()`, `exclude()`, `annotate()`, `alias()`, `order_by()`, `distinct()`, slicing, `values()`, `values_list()`,
@@ -99,6 +100,7 @@ A read-only mapping of kind to operation class:
 | `delete_instance` | `DeleteInstance` | `(total, {label: count})` |
 | `get_or_create` | `GetOrCreate` | `(row, created)` |
 | `update_or_create` | `UpdateOrCreate` | `(row, created)` |
+| `check_table` | `CheckTable` | a list of problem dicts |
 
 A row is a dict keyed by adorm field names and annotation names, for every `row_format`: the core builds model
 instances, tuples and named tuples from it.
@@ -435,6 +437,29 @@ label raises `ValueError`, a `row` that is not a mapping `TypeError`.
 
 ```python
 ModelRow("library.Loan", {"id": 9, "reader_id": 7, "book_id": "9780000000001", "due": date(2026, 3, 4)})
+```
+
+## Schema
+
+### `adorm.operations.CheckTable(model, fields=(), many_to_many=())`
+
+Compare the database tables of `model` (a label) with what the model expects of them; it reads the database's
+catalogue and changes nothing. `fields` are the target ORM's names of the model's fields, `many_to_many` those of its
+many-to-many relations, whose automatic link tables are checked too; both are iterables of names (not a string), kept
+without repeats. [`adorm.checks.table_check(model)`](./checks#adorm-checks-table-check-model) builds it from a model
+class.
+
+Result: a list of problem dicts with the keys `kind` (a
+[`SchemaProblemKind`](./checks#adorm-checks-schemaproblemkind)), `table`, `column`, `field` (an ORM name of `fields`
+or `many_to_many`), `expected` and `actual`, `None` where they do not apply; an empty list when the tables match. The
+[Django and native PostgreSQL drivers](./drivers#table-checks) execute it.
+
+```python
+await session.execute(CheckTable("clubs.Club", ("id", "name", "slug", "founded", "city"), ()))
+# [] or, for a table without the column city:
+# [{'kind': 'missing_column', 'table': 'clubs_club', 'column': 'city', 'field': 'city', 'expected': None, 'actual': None}]
+CheckTable("clubs.Club", ("id",)).to_dict()
+# {'operation': 'check_table', 'model': 'clubs.Club', 'fields': ['id'], 'many_to_many': []}
 ```
 
 ## Events

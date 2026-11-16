@@ -26,7 +26,7 @@ from adorm.executor import (
 
 ## Pool
 
-### `adorm.executor.Pool(driver, profile, *, max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0)`
+### `adorm.executor.Pool(driver, profile, *, max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0, check_schema=False)`
 
 The slots of one connection profile. `driver` is a [`Driver`](/ref/drivers#adorm-drivers-driver), `profile` a
 [`Profile`](/ref/drivers#adorm-drivers-profile), usually a [`ConnectionProfile`](/ref/settings#adorm-connectionprofile);
@@ -40,6 +40,7 @@ with profiles creates its pools itself.
 | `commit_timeout` | the default number of seconds a slot inside a transaction waits for its lease's next request before it rolls the transaction back, ends the lease and leaves the pool; positive and finite (default 60), or `None` for no limit; the profile layer of the `commit_timeout` connection option |
 | `release_timeout` | the number of seconds the profile's `on_release` hook may run before it is cancelled and the slot leaves the pool, and the number of seconds a released slot waits for its connection to settle ([`DriverConnection.settle()`](/ref/drivers#async-settle)); positive and finite (default 30) |
 | `purge_stale_connections_at` | the number of seconds a slot may stay idle; then it closes its connection and leaves the pool ([`CloseReason.STALE`](#adorm-executor-closereason)). Positive and finite (default 300), or `None`: idle slots stay until the pool closes |
+| `check_schema` | the start-up schema check: `False` (the default) none, `"warn"` or `"raise"` (below); any other value raises `ValueError` |
 
 The profile's `on_acquire` and `on_release` attributes, when present and not `None`, are its
 [hooks](/topics/profiles#hooks); a profile without them has none. A hook or `connect` that is not callable raises
@@ -60,15 +61,26 @@ of the queue. Taking an idle slot does nothing to its connection: no query, no c
 instead. Since requests take the slot returned last, the slots a smaller load no longer needs stay idle and age
 out. A pool serves one event loop and is used through a [`Router`](#adorm-executor-router-pools-profiles-none).
 
+With `check_schema`, the pool's first acquisition starts
+[`check_models()`](/ref/checks#adorm-checks-check-models-models-execute) on every registered model, in a task of its
+own on one slot of the pool, and no acquisition is served before it ends; the check runs once per pool. Acquisitions
+wait for it within their own timeout (`SessionTimeout` when it does not end in time); a cancelled or timed-out
+acquisition leaves it running. With `"warn"` the problems are logged as one warning on the `adorm.executor` logger and
+the acquisitions are served; with `"raise"` every acquisition of the pool raises
+[`SchemaCheckError`](/ref/exceptions#adorm-schemacheckerror-message-none-problems) with the problems, until the profile
+is replaced. A check that fails with an error (a driver without `check_table`, a lost connection) raises that error
+from the acquisitions waiting for it, and the next acquisition checks again.
+
 ```python
 pool = Pool(DjangoDriver(), profile, max_connections=10, acquire_timeout=5, commit_timeout=60)
 pool = Pool(AsyncpgDriver(), profile, purge_stale_connections_at=60)     # idle connections live a minute
+pool = Pool(AsyncpgDriver(), profile, check_schema="raise")              # refuse to work on drifted tables
 ```
 
 | Member | Meaning |
 |---|---|
 | `name` | the profile name |
-| `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout`, `purge_stale_connections_at` | the constructor arguments |
+| `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout`, `purge_stale_connections_at`, `check_schema` | the constructor arguments |
 | `on_acquire`, `on_release` | the profile's hooks, `None` when it has none |
 | `options` | the profile's database connection options, checked, as a read-only mapping |
 | `limit` | the current maximum number of slots: the lower of `max_connections` and the slot count at the last refusal, `None` when neither applies |
@@ -214,7 +226,7 @@ current task (the default), those of `held_leases()`.
 Acquires a slot for `session`, executes `operation`, releases the slot and returns the result; the slot is released
 also after an error or a cancellation. An operation the pool's driver does not support, and a database connection
 option in effect ([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)) that it does
-not declare, raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation)) before a slot is acquired.
+not declare, raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none)) before a slot is acquired.
 The operation's request carries the database options in effect, which the slot sets before it executes the
 operation. Enclosing [`adorm.timeout()`](/ref/options#adorm-timeout-delay) blocks see the operation in the phase
 `"waiting_for_slot"` until the slot is acquired, then `"executing"`. A cancellation raises `CancelledError` with

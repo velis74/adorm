@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import inspect
 import itertools
 import logging
@@ -12,10 +13,10 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
-from typing import Any, cast, TYPE_CHECKING
+from typing import Any, cast, Literal, TYPE_CHECKING
 
 from adorm.events import EventBus
-from adorm.exceptions import DeadlockError, InterfaceError, SessionTimeout
+from adorm.exceptions import DeadlockError, InterfaceError, SchemaCheckError, SessionTimeout
 from adorm.executor.options import check_profile_options, check_timeout, resolve_options, ResolvedOptions, tracking
 from adorm.executor.slot import (
     CancellationOutcome,
@@ -28,12 +29,17 @@ from adorm.executor.slot import (
 )
 
 if TYPE_CHECKING:
+    from adorm.checks import SchemaProblem
     from adorm.drivers.base import Driver, DriverConnection, Profile
     from adorm.executor.sessions import Session
     from adorm.operations import Operation
     from adorm.settings import ConnectionProfile, ProfileRegistry
 
 __all__ = ["Pool", "Router", "held_leases", "holding"]
+
+SchemaCheckMode = Literal[False, "warn", "raise"]
+"""What a pool does with its start-up schema check: ``False`` none, ``"warn"`` log the problems, ``"raise"`` refuse
+every acquisition with `adorm.SchemaCheckError` while problems are found."""
 
 logger = logging.getLogger("adorm.executor")
 
@@ -84,6 +90,18 @@ def check_hook(hook: Any, what: str, profile_name: str, mode: str | None) -> Non
         )
 
 
+def check_schema_mode(value: Any) -> SchemaCheckMode:
+    """``value`` when it is a `SchemaCheckMode`, else raise `ValueError`."""
+    if value is False or (isinstance(value, str) and value in ("warn", "raise")):
+        return value
+    raise ValueError(f"check_schema is False, 'warn' or 'raise', not {value!r}")
+
+
+def _retrieve(task: asyncio.Task) -> None:
+    if not task.cancelled():
+        task.exception()
+
+
 _OPEN = object()  # handed to a waiter instead of a slot: it may open a connection, the capacity is reserved
 _sequence = itertools.count()
 
@@ -111,6 +129,13 @@ class Pool:
     a first-in, first-out queue for a slot to be returned. ``acquire_timeout`` is the default number of seconds a
     request waits. ``commit_timeout`` is the number of seconds a slot inside a transaction waits for its lease's next
     request before it rolls the transaction back and leaves the pool; ``None`` sets no limit.
+
+    ``check_schema`` (`SchemaCheckMode`) runs `adorm.checks.check_models()` on every registered model before the
+    pool's first acquisition is served, on one slot of the pool, once per pool: concurrent first acquisitions wait for
+    it within their timeouts. ``"warn"`` logs the problems on the ``adorm.executor`` logger and serves the
+    acquisitions, ``"raise"`` raises `adorm.SchemaCheckError` from every acquisition when there are problems. A check
+    that fails with an error (a driver without ``check_table``, a lost connection) raises it from the acquisitions
+    waiting for it, and the next acquisition checks again.
 
     ``purge_stale_connections_at`` is the number of seconds a slot may stay idle: then it closes its connection and
     leaves the pool (``None``: idle slots stay until the pool closes). A request takes the idle slot returned last, so
@@ -141,6 +166,7 @@ class Pool:
         commit_timeout: float | None = DEFAULT_COMMIT_TIMEOUT,
         release_timeout: float = DEFAULT_RELEASE_TIMEOUT,
         purge_stale_connections_at: float | None = DEFAULT_PURGE_STALE_CONNECTIONS_AT,
+        check_schema: SchemaCheckMode = False,
     ) -> None:
         if isinstance(max_connections, bool) or not isinstance(max_connections, int) or max_connections < 0:
             raise ValueError(f"max_connections is a non-negative integer, not {max_connections!r}")
@@ -155,6 +181,9 @@ class Pool:
             if purge_stale_connections_at is None
             else check_timeout(purge_stale_connections_at, "purge_stale_connections_at")
         )
+        self.check_schema = check_schema_mode(check_schema)
+        self._schema_check: asyncio.Task[tuple[SchemaProblem, ...]] | None = None
+        self._schema_problems: tuple[SchemaProblem, ...] | None = None
         check_hook(getattr(profile, "connect", None), "connect", profile.name, driver.mode)
         self.on_acquire = self._hook(profile, "on_acquire")
         self.on_release = self._hook(profile, "on_release")
@@ -533,12 +562,65 @@ class Router:
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             try:
+                await self._schema_checked(pool, session, deadline, timeout)
                 return await self._acquire_from(pool, session, deadline, timeout, options)
             except InterfaceError:
                 if not pool.retired:
                     raise
             pool = await self.get_pool(session.using)
             options = resolve_options(session, pool)
+
+    async def _schema_checked(self, pool: Pool, session: Session, deadline: float, timeout: float) -> None:
+        """Wait for the start-up schema check of ``pool`` (`Pool`), starting it when none runs or has passed."""
+        if pool.check_schema is False:
+            return
+        problems = pool._schema_problems
+        if problems is None:
+            task = pool._schema_check
+            if task is None:
+                # A context of its own: the check holds no lease of the flow that started it.
+                task = asyncio.get_running_loop().create_task(
+                    self._check_schema(pool, session), context=contextvars.Context()
+                )
+                task.add_done_callback(_retrieve)
+                pool._schema_check = task
+            waiting = asyncio.timeout_at(deadline)
+            try:
+                async with waiting:
+                    problems = await asyncio.shield(task)
+            except TimeoutError:
+                if not waiting.expired():
+                    raise
+                message = f"the schema check of pool {pool.name!r} did not finish within {timeout:g} s"
+                raise self._timeout(session, timeout, message) from None
+        if problems and pool.check_schema == "raise":
+            raise SchemaCheckError(problems=problems)
+
+    async def _check_schema(self, pool: Pool, session: Session) -> tuple[SchemaProblem, ...]:
+        from adorm.checks import check_models
+        from adorm.models.registry import registry
+
+        try:
+            options = resolve_options(session, pool)
+            timeout = options.acquire_timeout
+            deadline = asyncio.get_running_loop().time() + timeout
+            lease = await self._acquire_from(pool, session, deadline, timeout, options)
+            try:
+
+                async def execute(operation: Operation) -> Any:
+                    pool.driver.check(operation)
+                    return await lease.call("execute", operation, options=options.database)
+
+                problems = await check_models(list(registry), execute)
+            finally:
+                await lease.release()
+        except BaseException:
+            pool._schema_check = None
+            raise
+        pool._schema_problems = problems
+        if problems:
+            logger.warning("pool %r: %s", pool.name, SchemaCheckError(problems=problems))
+        return problems
 
     async def _acquire_from(
         self, pool: Pool, session: Session, deadline: float, timeout: float, options: ResolvedOptions

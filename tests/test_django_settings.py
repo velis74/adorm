@@ -22,7 +22,13 @@ import adorm
 import adorm.settings
 
 from adorm import ConnectionProfile, create_session, PoolSettings
-from adorm.contrib.django import configure_from_settings, DEFAULT_DRIVER, default_profiles, settings_configuration
+from adorm.contrib.django import (
+    configure_from_settings,
+    DEFAULT_DRIVER,
+    default_profiles,
+    ensure_configured,
+    settings_configuration,
+)
 from adorm.contrib.django.apps import AdormConfig
 from adorm.drivers.django import DjangoDriver
 from adorm.executor import debug_enabled, set_debug, set_runner
@@ -98,6 +104,17 @@ def test_without_the_setting_every_database_alias_is_a_django_driver_profile():
     }
     assert registry.providers == ()
     assert registry.pool == PoolSettings()
+
+
+def test_ensure_configured_configures_unless_the_app_is_installed(monkeypatch):
+    from django.apps import apps
+
+    monkeypatch.setattr(apps, "is_installed", lambda name: name == "adorm.contrib.django")
+    ensure_configured()
+    assert list(adorm.settings.profiles) == []
+    monkeypatch.setattr(apps, "is_installed", lambda _name: False)
+    ensure_configured()
+    assert [profile.name for profile in adorm.settings.profiles] == ["default", "second"]
 
 
 @override_settings(ADORM=None)

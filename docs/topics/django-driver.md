@@ -459,6 +459,18 @@ Not detected:
 - SQL embedded in ORM expressions (`RawSQL`, `extra()`, a `Func` with its own template), and SQL that a custom field
   or expression runs while Django compiles or executes a query: it counts as the compiler's.
 
+## Schema checks
+
+The driver's [`schema_hash()`](/ref/drivers#schema-hash-label) is the hash of the installed Django model, so an
+operation on a generated model that is out of date with it raises `SchemaMismatchError` before it runs. It executes
+`check_table` for [`adorm.check_schema()`](/topics/schema-checks) with one catalogue query per table, the columns'
+types from Django's `db_type()` for the alias. A `check_table` operation reads the catalogue through a cursor of the thread's connection outside the execute
+wrappers, so it is not custom SQL.
+
+```python
+await adorm.check_schema([Club, Member])   # () while the tables match the models
+```
+
 ## Connection options
 
 The driver declares the [connection options](/topics/options) `statement_timeout`, `lock_timeout` and

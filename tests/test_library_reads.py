@@ -4,6 +4,7 @@ names, Django's field types, inheritance and proxies, generic relations and the 
 import asyncio
 import datetime
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -659,10 +660,12 @@ class LanguageManager(django_models.Manager):
 
 
 @pytest.fixture
-def by_language():
+def by_language(monkeypatch):
     """``library.Reader`` gets the Django manager ``by_language`` for the test."""
     manager = LanguageManager()
     manager.contribute_to_class(dj.Reader, "by_language")
+    # The added manager changes the Django model's schema hash; the generated model is not checked against it.
+    monkeypatch.setattr(Reader, "_meta", replace(Reader._meta, schema_hash=None))
     try:
         yield
     finally:
@@ -702,10 +705,12 @@ class ExistingAuthorManager(django_models.Manager):
 
 
 @pytest.fixture
-def named_like_authors():
+def named_like_authors(monkeypatch):
     """``library.Reader`` gets the Django manager ``named_like_authors`` for the test."""
     manager = ExistingAuthorManager()
     manager.contribute_to_class(dj.Reader, "named_like_authors")
+    # The added manager changes the Django model's schema hash; the generated model is not checked against it.
+    monkeypatch.setattr(Reader, "_meta", replace(Reader._meta, schema_hash=None))
     try:
         yield
     finally:

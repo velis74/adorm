@@ -13,7 +13,13 @@ import adorm
 from adorm.exceptions import NotSupportedError
 from adorm.settings import ConnectionProfile, import_object, PoolSettings
 
-__all__ = ["DEFAULT_DRIVER", "configure_from_settings", "default_profiles", "settings_configuration"]
+__all__ = [
+    "DEFAULT_DRIVER",
+    "configure_from_settings",
+    "default_profiles",
+    "ensure_configured",
+    "settings_configuration",
+]
 
 DEFAULT_DRIVER = "adorm.drivers.django.DjangoDriver"
 """The driver of the profiles `default_profiles()` builds."""
@@ -118,3 +124,12 @@ def configure_from_settings() -> None:
         adorm.configure(**configuration)
     except _ERRORS as exc:
         raise ImproperlyConfigured(f"ADORM: {exc}") from exc
+
+
+def ensure_configured() -> None:
+    """Configure adorm from the Django settings (`configure_from_settings()`) unless the app ``adorm.contrib.django``
+    is installed, which has configured it when Django was set up. Needs a set-up Django."""
+    from django.apps import apps
+
+    if not apps.is_installed("adorm.contrib.django"):
+        configure_from_settings()

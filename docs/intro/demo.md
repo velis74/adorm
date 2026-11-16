@@ -268,11 +268,12 @@ profile of the driver named by the header `X-Adorm-Driver`; the name comes from 
 | `GET /api/data/clubs/{slug}/summary` | three `count` in an `asyncio.TaskGroup` | tasks inherit the session; with `atomic=true` also the transaction and its slot |
 | `GET /api/data/compare/members` | one `select` per available driver, in concurrent tasks | the same query set on several profiles at once (see [below](#choosing-the-driver-of-a-read)) |
 | `GET /api/data/outbox` | nothing | the messages the `on_commit` callbacks queued |
+| `GET /api/data/schema` | one `check_table` per demo model | [`adorm.check_schema()`](/topics/schema-checks): every model's schema hash against the driver's and its tables and columns against the database; `result` is `models` (the labels checked) and `problems` (each with `model`, `kind`, `table`, `column`, `field`, `expected`, `actual` and `message`), empty when they match; 501 on the memory driver |
 
 Errors of the executor and the database answer an `ExecutorError` body (`detail`, `error`, `session`,
 `held_sessions`, `sqlstate`, `phase`, `operation`, `outcome`), declared on every endpoint above that executes
 operations; the `55P03` case of 409, 504 and 501 are declared only on `POST /api/data/activities/{pk}/registrations`
-and `POST /api/data/invoices/settlements`:
+and `POST /api/data/invoices/settlements`, and 501 also on `GET /api/data/schema`:
 
 | Status | Error | When |
 |---|---|---|
@@ -280,7 +281,7 @@ and `POST /api/data/invoices/settlements`:
 | 503 | `DeadlockError` | as `SessionTimeout`, while the flow held slots; `held_sessions` names their sessions |
 | 409 | `OperationalError` | the database detected a deadlock (SQLSTATE `40P01`), or a row lock was not available to `nowait` or within `lock_timeout` (SQLSTATE `55P03`); the transaction is rolled back, retry it |
 | 504 | `OperationTimeout` | the request's `timeout` expired; the transaction is rolled back, unless `operation` is `commit`: then `outcome` tells whether the commit took effect (`succeeded`, `unknown`) |
-| 501 | `NotSupportedError` | the active driver does not support what the request needs (the memory driver and `lock_timeout`) |
+| 501 | `NotSupportedError` | the active driver does not support what the request needs (the memory driver and `lock_timeout` or `check_table`) |
 
 ```json
 {
@@ -475,7 +476,7 @@ curl -X POST 'http://127.0.0.1:8000/api/data/invoices/settlements?limit=2' -H 'X
 
 ### Choosing the driver of a read
 
-The read endpoints (`GET /api/data/members`, `/members/{pk}`, `/invoices/{pk}` and `/clubs/{slug}/summary`) take the
+The read endpoints (`GET /api/data/members`, `/members/{pk}`, `/invoices/{pk}`, `/clubs/{slug}/summary` and `/schema`) take the
 header `X-Adorm-Driver`: the name of an available driver, as `GET /api/drivers` lists it. The request then runs in
 the session `(<driver>, <session name>)` on that driver's profile and pool; without the header it runs on `default`.
 A name that is not an available driver answers 422 with the header in `loc`. The writing endpoints ignore the header
