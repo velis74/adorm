@@ -23,7 +23,13 @@ class Author(models.Model):
 
 
 class Book(models.Model):
+    class Genre(models.TextChoices):
+        FICTION = "fiction", "Fiction"
+        POETRY = "poetry", "Poetry"
+        SCIENCE = "science", "Science"
+
     title = models.CharField(max_length=200)
+    genre = models.CharField(max_length=20, choices=Genre.choices, default=Genre.FICTION)
     author = models.ForeignKey(Author, on_delete=models.CASCADE, related_name="books")
     published = models.DateField()
     copies = models.PositiveIntegerField(default=1)
@@ -60,17 +66,20 @@ class Author(Model):
 
 
 class Book(Model):
-    _meta = ModelMeta("library.Book", schema_hash="1820a538fa801396")
+    _meta = ModelMeta("library.Book", schema_hash="c6b06aa3a5dc4a7a")
     id: int | None = None
     title: str = Field(max_length=200)
+    genre: Literal["fiction", "poetry", "science"] = "fiction"
     author_id: int
     published: datetime.date
     copies: int = Field(default=1, ge=0)
     author = ForeignKey("library.Author")
 ```
 
-The models are pydantic models: `Book.model_json_schema()` and FastAPI response models work on them. `author` and
-`books` are relations: `await book.author` loads the author, `author.books` is a query.
+The models are pydantic models: `Book.model_json_schema()` and FastAPI response models work on them. Django's
+field options become pydantic types and constraints: `choices` a `Literal`, `max_length` and validators `Field`
+constraints, so `Book(genre="drama", ...)` raises a validation error before anything reaches the database. `author`
+and `books` are relations: `await book.author` loads the author, `author.books` is a query.
 
 ## Set up
 
