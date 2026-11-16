@@ -155,7 +155,8 @@ class Session:
             _current.reset(token)
 
     def atomic(self) -> Atomic:
-        """An `Atomic` block on this session: ``async with session.atomic() as tx:``."""
+        """An `Atomic` block on this session: ``async with session.atomic() as tx:``, or ``@session.atomic()`` on a
+        coroutine function."""
         return Atomic(self)
 
     @property

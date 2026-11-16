@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import enum
+import functools
 import inspect
 import itertools
 import logging
@@ -98,10 +99,13 @@ def bind_transaction(session: Session, transaction: Transaction) -> Iterator[Tra
 
 
 def atomic() -> Atomic:
-    """An `Atomic` block on the current session: ``async with adorm.atomic() as tx:``."""
+    """An `Atomic` block on the current session: ``async with adorm.atomic() as tx:``. As a decorator
+    (``@adorm.atomic()``) every call runs in a block of the session current at the call."""
     from adorm.executor.sessions import current_session
 
-    return Atomic(current_session())
+    block = Atomic(current_session())
+    block._current = True
+    return block
 
 
 async def on_commit(func: Callback, *, robust: bool = False, session: Session | None = None) -> None:
@@ -210,6 +214,7 @@ class Atomic:
         "_child",
         "_commit_error",
         "_committed",
+        "_current",
         "_drained",
         "_end_error",
         "_ended",
@@ -235,6 +240,7 @@ class Atomic:
         if not isinstance(session, Session):
             raise TypeError(f"an atomic block needs a Session, not {type(session).__name__}")
         self.session = session
+        self._current = False
         self.parent: Atomic | None = None
         self.savepoint: str | None = None
         self._state = _NEW
@@ -429,6 +435,22 @@ class Atomic:
         return asyncio.get_running_loop().create_task(_run_callbacks(callbacks), context=context)
 
     # Entering
+
+    def __call__(self, func: Callable[..., Any]) -> Callable[..., Any]:
+        """Decorate a coroutine function: every call runs in a new block, of the session current at the call when
+        this block came from `atomic()`, else of this block's session. The block itself is never entered."""
+        if not inspect.iscoroutinefunction(func):
+            raise TypeError(f"atomic() decorates a coroutine function, not {func!r}")
+        session = None if self._current else self.session
+
+        @functools.wraps(func)
+        async def run_atomic(*args: Any, **kwargs: Any) -> Any:
+            from adorm.executor.sessions import current_session
+
+            async with Atomic(current_session() if session is None else session):
+                return await func(*args, **kwargs)
+
+        return run_atomic
 
     async def __aenter__(self) -> Atomic:
         if self._state != _NEW:

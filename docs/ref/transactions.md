@@ -19,13 +19,24 @@ when `atomic()` is called). [`Session.atomic()`](/ref/sessions#atomic) returns o
 ```python
 async with adorm.atomic() as tx:
     await Member.objects.filter(pk=1).update(active=False)
+
+
+@adorm.atomic()
+async def deactivate(pk: int) -> None:
+    await Member.objects.filter(pk=pk).update(active=False)
 ```
+
+As a decorator it runs every call in a new block on the session current at that call.
 
 ### `adorm.Atomic` {#atomic-class}
 
 A transaction block on one session, used with `async with`. `Atomic(session)` takes a
 [`Session`](/ref/sessions#adorm-session) (`TypeError` otherwise); `atomic()` and `Session.atomic()` create it. A
 block is entered once; entering it again raises `TransactionManagementError`.
+
+**Decorating** (`__call__(func)`): `func` is a coroutine function (`TypeError` otherwise). Every call of the returned
+function runs `func` in a new `Atomic` block: on the session current at the call when the block came from
+`adorm.atomic()`, else on the block's session. The decorating block itself is never entered.
 
 **Entering** (`__aenter__`, returns the block itself):
 

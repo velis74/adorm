@@ -123,7 +123,7 @@ import datetime
 
 import adorm
 
-from adorm import Count, F, Q, Sum
+from adorm import Count, Q, Sum
 
 from mysite.adorm_models.library import Author, Book
 
@@ -147,18 +147,20 @@ async def author_overview(name: str) -> dict:
     }
 
 
+@adorm.atomic()                                                  # each call is one transaction
 async def lend(book_id: int) -> Book:
-    async with adorm.atomic():                                   # one transaction
-        book = await Book.objects.select_for_update().get(pk=book_id)
-        if book.copies == 0:
-            raise LookupError(f"no copy of {book.title!r} left")
-        await Book.objects.filter(pk=book.pk).update(copies=F("copies") - 1)
-    return await Book.objects.get(pk=book_id)
+    book = await Book.objects.select_for_update().get(pk=book_id)
+    if book.copies == 0:
+        raise LookupError(f"no copy of {book.title!r} left")
+    book.copies -= 1
+    await book.save(update_fields=["copies"])
+    return book
 ```
 
 - Building a query (`filter()`, `order_by()`, `select_related()`) does no I/O. `await` runs it: `get()`, `first()`,
   `count()`, `aggregate()`, `update()`; `async for` iterates the rows.
-- `async with adorm.atomic()` is a transaction: it commits when the block ends and rolls back on an exception.
+- `@adorm.atomic()` runs each call of `lend()` in a transaction: it commits when the function returns and rolls back
+  when it raises. `async with adorm.atomic():` does the same for a block.
 - `select_for_update()` locks the row until the transaction ends: two concurrent `lend()` calls for the last copy
   run one after the other, and the second raises `LookupError`.
 

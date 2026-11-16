@@ -21,10 +21,28 @@ async with adorm.atomic():
 # committed here; an exception inside the block would have rolled both writes back
 ```
 
+As a decorator, `atomic()` runs every call of a coroutine function in a transaction of its own:
+
+```python
+@adorm.atomic()
+async def lend(book_id: int) -> Book:
+    book = await Book.objects.select_for_update().get(pk=book_id)
+    if book.copies == 0:
+        raise LookupError(f"no copy of {book.title!r} left")
+    book.copies -= 1
+    await book.save(update_fields=["copies"])
+    return book
+```
+
+Concurrent calls run in separate transactions. A call inside an open transaction of the same session runs in a
+savepoint, as a nested `async with` block does.
+
 ## Choosing the session
 
 `adorm.atomic()` opens a transaction on the current session, `session.atomic()` on the given one, as
-[`objects`](/topics/sessions#bound-models) chooses its session. The session is fixed when `atomic()` is called.
+[`objects`](/topics/sessions#bound-models) chooses its session. The session is fixed when `atomic()` is called; a
+function decorated with `@adorm.atomic()` uses the session current at each call, one decorated with
+`@session.atomic()` always uses `session`.
 
 ```python
 reports = adorm.create_session(using="reports", session_name="nightly")

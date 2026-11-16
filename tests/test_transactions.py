@@ -126,6 +126,142 @@ def test_atomic_needs_a_session():
         Atomic("default")
 
 
+# As a decorator
+
+
+async def test_a_decorated_function_runs_each_call_in_a_block_that_commits(setup):
+    pool, driver = setup.pool()
+    session = unique_session()
+
+    @session.atomic()
+    async def write(value):
+        assert active_transaction(session) is not None
+        return await session.execute(Op(value))
+
+    assert await write("a") == "a"
+    assert await write("b") == "b"
+    assert active_transaction(session) is None
+    assert calls(driver) == [
+        ("begin", None),
+        ("execute", "a"),
+        ("commit", None),
+        ("begin", None),
+        ("execute", "b"),
+        ("commit", None),
+    ]
+    assert pool.idle == 1
+
+
+async def test_an_exception_in_a_decorated_function_rolls_back_and_propagates(setup):
+    pool, driver = setup.pool()
+    session = unique_session()
+
+    @session.atomic()
+    async def fail():
+        await session.execute(Op("a"))
+        raise LookupError("gone")
+
+    with pytest.raises(LookupError, match="gone"):
+        await fail()
+    assert [c[0] for c in calls(driver)] == ["begin", "execute", "rollback"]
+    assert pool.idle == 1
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_concurrent_calls_of_a_decorated_function_get_blocks_of_their_own(setup, attempt):  # noqa: ARG001
+    pool, driver = setup.pool(max_connections=2)
+    session = unique_session()
+    inside = asyncio.Barrier(2)
+    blocks = []
+
+    @session.atomic()
+    async def work(value):
+        blocks.append(active_transaction(session))
+        await inside.wait()
+        return await session.execute(Op(value))
+
+    assert await asyncio.gather(work("a"), work("b")) == ["a", "b"]
+    assert blocks[0] is not blocks[1]
+    assert {c.calls[0][0] for c in driver.connections} == {"begin"}
+    assert sorted(c.calls[-1][0] for c in driver.connections) == ["commit", "commit"]
+    assert pool.idle == 2
+
+
+async def test_adorm_atomic_as_a_decorator_uses_the_session_current_at_the_call(setup):
+    _, driver = setup.pool()
+    defined, called = unique_session(), unique_session()
+    with defined.activate():
+
+        @adorm.atomic()
+        async def work():
+            return active_transaction(called), active_transaction(defined)
+
+    with called.activate():
+        tx, other = await work()
+    assert tx is not None
+    assert tx.session is called
+    assert other is None
+
+
+async def test_session_atomic_as_a_decorator_keeps_its_session(setup):
+    _, driver = setup.pool()
+    session, current = unique_session(), unique_session()
+
+    @session.atomic()
+    async def work():
+        return active_transaction(session)
+
+    with current.activate():
+        tx = await work()
+    assert tx is not None
+    assert tx.session is session
+
+
+async def test_a_decorated_function_called_inside_a_block_runs_in_a_savepoint(setup):
+    _, driver = setup.pool(max_connections=1)
+    session = unique_session()
+
+    @session.atomic()
+    async def inner():
+        return active_transaction(session)
+
+    async with session.atomic() as outer:
+        tx = await inner()
+    assert tx.parent is outer
+    assert [c[0] for c in calls(driver)] == ["begin", "savepoint", "release_savepoint", "commit"]
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_cancelling_a_call_of_a_decorated_function_rolls_back_and_frees_the_slot(setup, attempt):  # noqa: ARG001
+    pool, driver = setup.pool(max_connections=1)
+    session = unique_session()
+    started = asyncio.Event()
+
+    @session.atomic()
+    async def wait_forever():
+        await session.execute(Op("a"))
+        started.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(wait_forever())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert [c[0] for c in calls(driver)] == ["begin", "execute", "rollback"]
+    assert active_transaction(session) is None
+    assert pool.idle == 1
+    assert await session.execute(Op("b")) == "b"
+
+
+def test_atomic_decorates_only_coroutine_functions():
+    with pytest.raises(TypeError, match="coroutine function"):
+
+        @unique_session().atomic()
+        def plain():
+            pass
+
+
 async def test_operations_of_bound_models_find_the_transaction(setup):
     _, driver = setup.pool(max_connections=1)
     session = unique_session()
