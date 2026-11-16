@@ -4,6 +4,8 @@ turn, over the demo's data set in the test database: transactions with savepoint
 
 import asyncio
 
+from decimal import Decimal
+
 import asyncpg
 import httpx
 import pytest
@@ -11,7 +13,7 @@ import pytest
 import adorm
 
 from adorm.settings import default_router
-from demo.api import data, drivers, main
+from demo.api import data, drivers, instances, main
 from demo.api.main import app
 
 REPEAT = range(3)
@@ -361,4 +363,198 @@ async def test_concurrent_settlements_pay_every_invoice_at_most_once(client, dat
     assert duplicates == 0
     still_open = {pk for pk, _ in await open_invoices(database)}
     assert still_open == set(before) - set(paid)
+    await no_slot_in_use()
+
+
+# Invoice lines: a generic foreign key written in a transaction that locks the invoice
+
+LINE = {"description": "Extra session", "quantity": 2, "unit_price": "12.50"}
+
+
+async def open_invoice(database) -> tuple[int, Decimal]:
+    row = await database.sql.fetchrow("SELECT id, total FROM billing_invoice WHERE status = 'open' ORDER BY id LIMIT 1")
+    return row["id"], row["total"]
+
+
+async def test_adding_a_line_stores_the_content_type_and_raises_the_total(active, client, database):
+    invoice, total = await open_invoice(database)
+    activity = await database.sql.fetchval("SELECT min(id) FROM activities_activity")
+    body = {**LINE, "item": {"model": "activities.Activity", "id": activity}}
+    response = await client.post(f"/api/data/invoices/{invoice}/lines", json=body)
+    assert response.status_code == 201, response.text
+    result = response.json()["result"]
+    assert result["invoice"]["total"] == str(total + Decimal("25.00"))
+    row = await database.sql.fetchrow(
+        "SELECT ct.app_label, ct.model, l.object_id FROM billing_invoiceline l"
+        " JOIN django_content_type ct ON ct.id = l.content_type_id WHERE l.id = $1",
+        result["line"]["id"],
+    )
+    assert tuple(row) == ("activities", "activity", activity)
+    assert await database.sql.fetchval("SELECT total FROM billing_invoice WHERE id = $1", invoice) == total + 25
+    lines = (await client.get(f"/api/data/invoices/{invoice}/lines", headers={data.DRIVER_HEADER: active})).json()
+    assert (lines["result"][-1]["model"], lines["result"][-1]["item"]["id"]) == ("activities.Activity", activity)
+    await no_slot_in_use()
+
+
+async def test_a_line_of_a_missing_item_stores_nothing(client, database):
+    invoice, total = await open_invoice(database)
+    before = await database.sql.fetchval("SELECT count(*) FROM billing_invoiceline")
+    body = {**LINE, "item": {"model": "clubs.Membership", "id": 999999}}
+    response = await client.post(f"/api/data/invoices/{invoice}/lines", json=body)
+    assert response.status_code == 404
+    assert await database.sql.fetchval("SELECT count(*) FROM billing_invoiceline") == before
+    assert await database.sql.fetchval("SELECT total FROM billing_invoice WHERE id = $1", invoice) == total
+    await no_slot_in_use()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_concurrent_lines_of_one_invoice_add_up(client, database, attempt):  # noqa: ARG001
+    """The invoice's row lock orders the transactions: no raise of the total is lost."""
+    invoice, total = await open_invoice(database)
+    membership = await database.sql.fetchval("SELECT min(id) FROM clubs_membership")
+    body = {**LINE, "item": {"model": "clubs.Membership", "id": membership}}
+    responses = await asyncio.gather(
+        *(
+            bounded(
+                client.post(f"/api/data/invoices/{invoice}/lines", json=body, headers={data.SESSION_HEADER: f"l{n}"}),
+                {},
+            )
+            for n in range(6)
+        )
+    )
+    assert [response.status_code for response in responses] == [201] * 6, [r.text for r in responses]
+    totals = sorted(Decimal(r.json()["result"]["invoice"]["total"]) for r in responses)
+    assert totals == [total + 25 * n for n in range(1, 7)]
+    assert await database.sql.fetchval("SELECT total FROM billing_invoice WHERE id = $1", invoice) == total + 150
+    await no_slot_in_use()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_line_waiting_for_the_invoice_lock_is_cancelled_with_its_statement(client, database, attempt):  # noqa: ARG001
+    invoice, total = await open_invoice(database)
+    await database.hold("SELECT id FROM billing_invoice WHERE id = $1 FOR UPDATE", invoice)
+    membership = await database.sql.fetchval("SELECT min(id) FROM clubs_membership")
+    body = {**LINE, "item": {"model": "clubs.Membership", "id": membership}}
+    request = asyncio.create_task(client.post(f"/api/data/invoices/{invoice}/lines", json=body))
+    try:
+        await database.waiting(1)
+    finally:
+        request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await database.waiting(0)
+    await database.release()
+    await no_slot_in_use()
+    assert await database.sql.fetchval("SELECT total FROM billing_invoice WHERE id = $1", invoice) == total
+
+
+PRICE = Decimal("999999.99")
+
+
+@pytest.mark.parametrize(
+    ("quantity", "status"), [(2**31, 422), (1000, 409)], ids=["quantity_beyond_column", "total_beyond_digits"]
+)
+async def test_a_line_the_columns_cannot_hold_stores_nothing(client, database, quantity, status):
+    invoice, total = await open_invoice(database)
+    before = await database.sql.fetchval("SELECT count(*) FROM billing_invoiceline")
+    membership = await database.sql.fetchval("SELECT min(id) FROM clubs_membership")
+    body = {
+        **LINE,
+        "quantity": quantity,
+        "unit_price": str(PRICE),
+        "item": {"model": "clubs.Membership", "id": membership},
+    }
+    response = await client.post(f"/api/data/invoices/{invoice}/lines", json=body)
+    assert response.status_code == status, response.text
+    assert await database.sql.fetchval("SELECT count(*) FROM billing_invoiceline") == before
+    assert await database.sql.fetchval("SELECT total FROM billing_invoice WHERE id = $1", invoice) == total
+    if status == 409:  # a 422 answers before any operation
+        await no_slot_in_use()
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_concurrent_lines_never_raise_the_total_beyond_its_digits(client, database, attempt):  # noqa: ARG001
+    """Each line fits the total alone, two do not: under the invoice's lock exactly one is stored."""
+    invoice, total = await open_invoice(database)
+    before = await database.sql.fetchval("SELECT count(*) FROM billing_invoiceline")
+    quantity = int((instances.MAX_TOTAL - total) // PRICE)
+    membership = await database.sql.fetchval("SELECT min(id) FROM clubs_membership")
+    body = {
+        **LINE,
+        "quantity": quantity,
+        "unit_price": str(PRICE),
+        "item": {"model": "clubs.Membership", "id": membership},
+    }
+    responses = await asyncio.gather(
+        *(
+            bounded(
+                client.post(f"/api/data/invoices/{invoice}/lines", json=body, headers={data.SESSION_HEADER: f"o{n}"}),
+                {},
+            )
+            for n in range(2)
+        )
+    )
+    assert sorted(response.status_code for response in responses) == [201, 409], [r.text for r in responses]
+    assert await database.sql.fetchval("SELECT count(*) FROM billing_invoiceline") == before + 1
+    stored = await database.sql.fetchval("SELECT total FROM billing_invoice WHERE id = $1", invoice)
+    assert stored == total + quantity * PRICE
+    await no_slot_in_use()
+
+
+# full_clean(): Django's validation of an instance, on the session's slot
+
+
+async def test_validating_invoice_changes_reports_django_errors_and_stores_nothing(active, client, database):
+    invoice = await database.sql.fetchrow("SELECT id, number, issued FROM billing_invoice ORDER BY id LIMIT 1")
+    other = await database.sql.fetchval("SELECT number FROM billing_invoice WHERE id <> $1 LIMIT 1", invoice["id"])
+    changes = {"number": other, "due": "2000-01-01", "total": "123456789012.50"}
+    response = await client.post(f"/api/data/invoices/{invoice['id']}/validation", json=changes)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["driver"] == active
+    result = body["result"]
+    assert result["valid"] is False
+    assert {name: [(e["code"], e["message"]) for e in errors] for name, errors in result["errors"].items()} == {
+        "number": [("unique", "Invoice with this Number already exists.")],
+        "total": [("max_digits", "Ensure that there are no more than 10 digits in total.")],
+        "due": [(None, "The due date cannot be before the issue date.")],
+    }
+    assert result["errors"]["total"][0]["params"] == {"max": 10, "value": 123456789012.5}
+    assert result["instance"]["number"] == other
+    assert (
+        await database.sql.fetchval("SELECT number FROM billing_invoice WHERE id = $1", invoice["id"])
+        == (invoice["number"])
+    )
+    excluded = await client.post(
+        f"/api/data/invoices/{invoice['id']}/validation", params={"exclude": ["number", "total"]}, json=changes
+    )
+    assert list(excluded.json()["result"]["errors"]) == ["due"]
+    valid = (await client.post(f"/api/data/invoices/{invoice['id']}/validation", json={})).json()["result"]
+    assert (valid["valid"], valid["errors"]) == (True, {})
+    await no_slot_in_use()
+
+
+async def test_validating_a_membership_checks_the_constraint_and_the_fee(client, database):
+    existing = await database.sql.fetchrow("SELECT club_id, member_id FROM clubs_membership ORDER BY id LIMIT 1")
+    body = {**dict(existing), "since": "2026-01-01", "fee": "-1"}
+    result = (await client.post("/api/data/memberships/validation", json=body)).json()["result"]
+    assert result["valid"] is False
+    assert {name: [e["code"] for e in errors] for name, errors in result["errors"].items()} == {
+        "fee": ["min_value"],
+        "__all__": ["unique_together"],
+    }
+    assert result["errors"]["__all__"][0]["params"]["unique_check"] == ["club", "member"]
+    free = await database.sql.fetchval(
+        "SELECT min(id) FROM clubs_member WHERE id NOT IN (SELECT member_id FROM clubs_membership WHERE club_id = $1)",
+        existing["club_id"],
+    )
+    fine = {**body, "member_id": free, "fee": "10.00"}
+    result = (await client.post("/api/data/memberships/validation", json=fine)).json()["result"]
+    assert (result["valid"], result["errors"]) == (True, {})
+    assert (
+        await database.sql.fetchval(
+            "SELECT count(*) FROM clubs_membership WHERE member_id = $1 AND club_id = $2", free, existing["club_id"]
+        )
+        == 0
+    )
     await no_slot_in_use()

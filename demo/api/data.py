@@ -61,6 +61,7 @@ DriverName = Annotated[
 ]
 
 T = TypeVar("T")
+M = TypeVar("M", bound=adorm.Model)
 
 
 @dataclass(frozen=True)
@@ -340,6 +341,13 @@ EXECUTOR_ERRORS = {
     },
 }
 """Error responses of every endpoint that executes operations; extends `NO_DRIVER`."""
+NOT_SUPPORTED = {
+    501: {
+        "model": ExecutorError,
+        "description": "The driver does not support an operation or construct the request needs (`NotSupportedError`).",
+    }
+}
+"""Error response of the endpoints that need operations or constructs the memory driver refuses."""
 UNKNOWN_DRIVER = {
     "responses": {
         "422": {
@@ -450,6 +458,13 @@ def member_page(
     if search:
         members = members.filter(adorm.Q(first_name__icontains=search) | adorm.Q(last_name__icontains=search))
     return members.order_by(*operations.MEMBER_ORDERING[ordering])[offset : offset + limit]
+
+
+def without_extras(instance: M) -> M:
+    """A copy of ``instance`` without its extra values (annotations, the ``to_attr`` of a prefetch)."""
+    copy = instance.model_copy()
+    copy.__pydantic_extra__ = {}
+    return copy
 
 
 def not_found(exc: adorm.ObjectDoesNotExist) -> HTTPException:

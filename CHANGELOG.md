@@ -544,3 +544,14 @@
   settings or of `--configure` modules (exit status 1 on problems; `adorm.contrib.django.ensure_configured()`), and the
   demo answers it at `GET /api/data/schema`. The comparison helpers are `adorm.drivers.postgresql.ExpectedTable`,
   `ExpectedColumn`, `columns_sql()`, `normalize_type()` and `table_problems()`.
+- Demo aggregates and related objects: `/api/data` read endpoints for annotations, `aggregate()` and grouping
+  (`demo.api.aggregates`: club reports with a condition on an aggregate, fee totals, the activity schedule,
+  outstanding invoices by club and invoices by month; the query sets of the club report, the schedule and the
+  outstanding invoices are those the operation endpoints encode), and for `prefetch_related()` with `Prefetch` and
+  `to_attr`, `in_bulk()` by primary key and by slug, invoice lines read through their generic foreign key with or
+  without a prefetch (a line whose item is gone has none), an invoice line written through it under the invoice's row
+  lock (409 when the total would exceed its digits), and `full_clean()` of invoice
+  changes and of a new membership (`demo.api.instances`). The memory driver answers those it does not support with
+  501. The end-to-end test runs them on every available driver; in-process tests compare them on the Django and
+  asyncpg drivers with the database and cover cancelled prefetches, concurrent lines of one invoice (never beyond the
+  total's digits) and slots left in use.

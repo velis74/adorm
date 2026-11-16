@@ -303,8 +303,11 @@ def _check_data_endpoints(driver, base, database, url):
         payments = database.execute("SELECT count(*) FROM billing_payment WHERE invoice_id = %s", (invoice,)).fetchone()
         assert len(detail["payments"]) == payments[0]
 
+        _check_aggregates_and_instances(driver, http, database)
+
         writes = "create" in operations
         if writes:
+            _check_invoice_lines(driver, http, database)
             enrolment = {"first_name": "Mia", "last_name": "Kos", "email": "mia@example.com", "fee": "50.00"}
             enrolled = http.post("/api/data/clubs/koper-sailing/members", json=enrolment)
             assert enrolled.status_code == 201, enrolled.text
@@ -342,6 +345,101 @@ def _check_data_endpoints(driver, base, database, url):
         assert count(database, "clubs_member") == members_before + 1
         assert count(database, "billing_payment") == payments_before + 3
         assert status == ("paid",)
+
+
+AGGREGATE_READS = [
+    ("/api/data/clubs/reports", {"min_active_members": 1}),
+    ("/api/data/clubs/koper-sailing/report", {}),
+    ("/api/data/memberships/fees", {}),
+    ("/api/data/activities/schedule", {"kind": "training"}),
+    ("/api/data/invoices/outstanding", {"today": "2026-03-01"}),
+    ("/api/data/invoices/months", {}),
+]
+
+
+def _check_aggregates_and_instances(driver, http, database):
+    """The aggregation endpoints, prefetching, rows by key and generic foreign keys; the memory driver refuses
+    annotations, aggregates, ``in_bulk()`` by slug and ``full_clean()`` with 501."""
+    refused = [*AGGREGATE_READS, ("/api/data/clubs/in-bulk", {"slug": ["koper-sailing", "nowhere"]})]
+    first, member = database.execute("SELECT min(i.id), min(m.id) FROM billing_invoice i, clubs_member m").fetchone()
+    if driver == "memory":
+        for path, params in refused:
+            response = http.get(path, params=params)
+            assert (response.status_code, response.json()["error"]) == (501, "NotSupportedError"), path
+        response = http.post(f"/api/data/invoices/{first}/validation", json={})
+        assert (response.status_code, response.json()["error"]) == (501, "NotSupportedError")
+        club = database.execute("SELECT min(id) FROM clubs_club").fetchone()[0]
+        body = {"club_id": club, "member_id": member, "since": "2026-01-01", "fee": "1.00"}
+        response = http.post("/api/data/memberships/validation", json=body)
+        assert (response.status_code, response.json()["error"]) == (501, "NotSupportedError")
+    else:
+        answers = {}
+        for path, params in refused:
+            response = http.get(path, params=params)
+            assert response.status_code == 200, (path, response.text)
+            answers[path] = response.json()["result"]
+        expected = database.execute(
+            "SELECT c.slug, (SELECT count(*) FROM clubs_membership m WHERE m.club_id = c.id AND m.active) AS n"
+            " FROM clubs_club c ORDER BY n DESC, c.slug"
+        ).fetchall()
+        assert [(r["club"]["slug"], r["active_members"]) for r in answers["/api/data/clubs/reports"]] == expected
+        fees = database.execute("SELECT count(*), sum(fee) FROM clubs_membership WHERE active").fetchone()
+        totals = answers["/api/data/memberships/fees"]
+        assert (totals["memberships"], Decimal(totals["total"])) == fees
+        invoices = database.execute("SELECT count(*) FROM billing_invoice").fetchone()[0]
+        assert sum(month["invoices"] for month in answers["/api/data/invoices/months"]) == invoices
+        assert answers["/api/data/clubs/in-bulk"]["missing"] == ["nowhere"]
+        number = database.execute("SELECT number FROM billing_invoice ORDER BY id LIMIT 1 OFFSET 1").fetchone()[0]
+        checked = http.post(f"/api/data/invoices/{first}/validation", json={"number": number, "due": "2000-01-01"})
+        assert checked.status_code == 200, checked.text
+        assert sorted(checked.json()["result"]["errors"]) == ["due", "number"]
+        membership = database.execute("SELECT club_id, member_id FROM clubs_membership LIMIT 1").fetchone()
+        body = {"club_id": membership[0], "member_id": membership[1], "since": "2026-01-01", "fee": "1.00"}
+        checked = http.post("/api/data/memberships/validation", json=body).json()["result"]
+        assert [error["code"] for error in checked["errors"]["__all__"]] == ["unique_together"]
+
+    roster = http.get("/api/data/clubs/ljubljana-rowing/roster", params={"atomic": True}).json()["result"]
+    active = database.execute(
+        "SELECT count(*) FROM clubs_membership m JOIN clubs_club c ON c.id = m.club_id"
+        " WHERE c.slug = 'ljubljana-rowing' AND m.active"
+    ).fetchone()[0]
+    assert len(roster["members"]) == active
+    assert http.get("/api/data/clubs/ljubljana-rowing/roster").json()["result"] == roster
+    found = http.get("/api/data/members/in-bulk", params={"id": [member, 999999]}).json()["result"]
+    assert (list(found["found"]), found["missing"]) == ([str(member)], [999999])
+    invoice = database.execute("SELECT min(invoice_id) FROM billing_invoiceline").fetchone()[0]
+    lines = http.get(f"/api/data/invoices/{invoice}/lines").json()["result"]
+    assert lines == http.get(f"/api/data/invoices/{invoice}/lines", params={"prefetch": False}).json()["result"]
+    stored = database.execute(
+        "SELECT ct.app_label || '.' || ct.model FROM billing_invoiceline l"
+        " JOIN django_content_type ct ON ct.id = l.content_type_id WHERE l.invoice_id = %s ORDER BY l.id",
+        (invoice,),
+    ).fetchall()
+    assert [line["model"].lower() for line in lines] == [row[0] for row in stored]
+    database.rollback()
+
+
+def _check_invoice_lines(driver, http, database):
+    """A line billing an activity added to the last open invoice: its content type and the invoice's new total."""
+    invoice, total = database.execute(
+        "SELECT id, total FROM billing_invoice WHERE status = 'open' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    database.rollback()
+    activity = database.execute("SELECT min(id) FROM activities_activity").fetchone()[0]
+    line = {"item": {"model": "activities.Activity", "id": activity}, "description": "Extra", "unit_price": "7.50"}
+    response = http.post(f"/api/data/invoices/{invoice}/lines", json=line)
+    assert response.status_code == 201, response.text
+    result = response.json()["result"]
+    assert Decimal(result["invoice"]["total"]) == total + Decimal("7.50")
+    content_type = database.execute(
+        "SELECT id FROM django_content_type WHERE app_label = 'activities' AND model = 'activity'"
+    ).fetchone()[0]
+    assert result["line"]["content_type_id"] == content_type
+    lines = http.get(f"/api/data/invoices/{invoice}/lines").json()["result"]
+    assert (lines[-1]["model"], lines[-1]["item"]["id"]) == ("activities.Activity", activity)
+    stored = database.execute("SELECT total FROM billing_invoice WHERE id = %s", (invoice,)).fetchone()[0]
+    database.rollback()
+    assert stored == (total if driver == "memory" else total + Decimal("7.50"))
 
 
 def _check_registrations(driver, http, database, url):

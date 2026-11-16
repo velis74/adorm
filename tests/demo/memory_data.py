@@ -75,6 +75,29 @@ def tables() -> dict[str, list[dict]]:
     }  # fmt: skip
 
 
+def generic_tables() -> dict[str, list[dict]]:
+    """`tables()` with the content types of memberships and activities and two lines of the open invoice 1: one
+    billing membership 1, one billing activity 2."""
+    data = tables()
+    data["contenttypes.ContentType"] = [
+        {"id": 7, "app_label": "clubs", "model": "membership"},
+        {"id": 8, "app_label": "activities", "model": "activity"},
+    ]
+    line = {"invoice_id": 1, "quantity": 1}
+    data["billing.InvoiceLine"] = [
+        {"id": 1, "content_type_id": 7, "object_id": 1, "description": "Fee", "unit_price": Decimal("120.00"), **line},
+        {
+            "id": 2,
+            "content_type_id": 8,
+            "object_id": 2,
+            "description": "Regatta",
+            "unit_price": Decimal("0.00"),
+            **line,
+        },
+    ]
+    return data
+
+
 @asynccontextmanager
 async def executor(database: memory.MemoryDatabase, **pool):
     """adorm configured with the profile ``default`` on a `MemoryDriver` of ``database``; pools closed on exit."""

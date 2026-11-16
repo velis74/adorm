@@ -2,6 +2,9 @@
 demo's data set in the test database: the ``X-Adorm-Driver`` header chooses the driver of a read."""
 
 import asyncio
+import datetime
+
+from decimal import Decimal
 
 import asyncpg
 import httpx
@@ -124,7 +127,29 @@ async def read_paths(database) -> list[tuple[str, dict]]:
         (f"/api/data/invoices/{invoice}", {}),
         ("/api/data/clubs/ljubljana-rowing/summary", {}),
         ("/api/data/clubs/ljubljana-rowing/summary", {"atomic": True}),
+        *AGGREGATE_PATHS,
+        ("/api/data/clubs/ljubljana-rowing/roster", {}),
+        ("/api/data/clubs/maribor-climbing/roster", {"atomic": True}),
+        ("/api/data/members/in-bulk", {"id": [member, member + 1, 999999]}),
+        ("/api/data/clubs/in-bulk", {"slug": ["koper-sailing", "nowhere", "ljubljana-rowing"]}),
+        (f"/api/data/invoices/{invoice}/lines", {}),
+        (f"/api/data/invoices/{invoice}/lines", {"prefetch": False}),
     ]
+
+
+AGGREGATE_PATHS = [
+    ("/api/data/clubs/reports", {}),
+    ("/api/data/clubs/reports", {"min_active_members": 4}),
+    ("/api/data/clubs/koper-sailing/report", {}),
+    ("/api/data/memberships/fees", {}),
+    ("/api/data/memberships/fees", {"club": "maribor-climbing"}),
+    ("/api/data/memberships/fees", {"club": "nowhere"}),
+    ("/api/data/activities/schedule", {}),
+    ("/api/data/activities/schedule", {"kind": "training", "starts_after": "2026-03-03T00:00:00Z"}),
+    ("/api/data/invoices/outstanding", {"today": "2026-03-01"}),
+    ("/api/data/invoices/months", {}),
+    ("/api/data/invoices/months", {"club": "koper-sailing"}),
+]
 
 
 async def test_every_read_answers_the_same_on_both_drivers(client, database):
@@ -256,4 +281,156 @@ async def test_concurrent_reads_on_both_drivers_leave_no_slot_behind(client, dat
         results.setdefault(f"{path} {sorted(params.items())}", []).append(response.json()["result"])
     for key, found in results.items():
         assert all(result == found[0] for result in found), key
+    assert_no_slot_in_use()
+
+
+# Aggregates and related objects
+
+
+async def test_every_read_runs_on_the_profile_the_header_names(real_drivers, database):  # noqa: ARG001
+    """Only the named driver's pool is created: no operation of a read runs on the session that was current when the
+    request arrived."""
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://demo", timeout=30) as http:
+            for path, params in await read_paths(database):
+                response = await http.get(path, params=params, headers=on("asyncpg"))
+                assert response.status_code == 200, (path, response.text)
+                assert [p.name for p in default_router(create=False).pools] == ["asyncpg"], path
+            assert_no_slot_in_use()
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+async def test_the_aggregates_match_the_database(client, database, driver):
+    reports = (await client.get("/api/data/clubs/reports", headers=on(driver))).json()["result"]
+    expected = await database.fetch(
+        "SELECT c.slug,"
+        " (SELECT count(*) FROM clubs_membership m WHERE m.club_id = c.id AND m.active) AS active,"
+        " (SELECT coalesce(sum(fee), 0) FROM clubs_membership m WHERE m.club_id = c.id AND m.active) AS fees,"
+        " (SELECT count(*) FROM billing_invoice i WHERE i.club_id = c.id AND i.status = 'open') AS open,"
+        " EXISTS (SELECT 1 FROM activities_activity a WHERE a.club_id = c.id AND a.kind = 'competition') AS comp"
+        " FROM clubs_club c ORDER BY active DESC, c.slug"
+    )
+    assert [
+        (r["club"]["slug"], r["active_members"], Decimal(r["fees"]), r["open_invoices"], r["has_competitions"])
+        for r in reports
+    ] == [tuple(row) for row in expected]
+    assert [r["size"] for r in reports] == [
+        "large" if row["active"] >= 5 else "medium" if row["active"] >= 3 else "small" for row in expected
+    ]
+    having = (await client.get("/api/data/clubs/reports", params={"min_active_members": 4}, headers=on(driver))).json()
+    assert [r["club"]["slug"] for r in having["result"]] == [row["slug"] for row in expected if row["active"] >= 4]
+
+    fees = (await client.get("/api/data/memberships/fees", headers=on(driver))).json()["result"]
+    row = await database.fetchrow(
+        "SELECT count(*), count(DISTINCT club_id), count(*) FILTER (WHERE fee > 0), sum(fee), avg(fee), min(fee),"
+        " max(fee) FROM clubs_membership WHERE active"
+    )
+    assert (fees["memberships"], fees["clubs"], fees["paying"]) == tuple(row[:3])
+    assert [Decimal(fees[name]) for name in ("total", "average", "lowest", "highest")] == list(row[3:])
+    assert Decimal(fees["spread"]) == row[6] - row[5]
+
+    months = (await client.get("/api/data/invoices/months", headers=on(driver))).json()["result"]
+    rows = await database.fetch(
+        "SELECT date_trunc('month', issued)::date, count(*), sum(total), count(*) FILTER (WHERE status = 'open'),"
+        " coalesce(sum(total) FILTER (WHERE status = 'paid'), 0) FROM billing_invoice GROUP BY 1 ORDER BY 1"
+    )
+    assert [
+        (datetime.date.fromisoformat(m["month"]), m["invoices"], Decimal(m["billed"]), m["open"], Decimal(m["paid"]))
+        for m in months
+    ] == [tuple(row) for row in rows]
+
+    schedule = (await client.get("/api/data/activities/schedule", headers=on(driver))).json()["result"]
+    rows = await database.fetch(
+        "SELECT a.id, c.name, a.capacity - count(t.id) FILTER (WHERE t.status <> 'cancelled')"
+        " FROM activities_activity a JOIN clubs_club c ON c.id = a.club_id"
+        " LEFT JOIN activities_attendance t ON t.activity_id = a.id GROUP BY a.id, c.name ORDER BY a.starts_at, a.id"
+    )
+    assert [(s["activity"]["id"], s["club"], s["free_places"]) for s in schedule] == [tuple(row) for row in rows]
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+async def test_the_related_objects_match_the_database(client, database, driver):
+    roster = (await client.get("/api/data/clubs/ljubljana-rowing/roster", headers=on(driver))).json()["result"]
+    members = await database.fetch(
+        "SELECT m.member_id FROM clubs_membership m JOIN clubs_club c ON c.id = m.club_id"
+        " WHERE c.slug = 'ljubljana-rowing' AND m.active ORDER BY m.since, m.id"
+    )
+    assert [m["member"]["id"] for m in roster["members"]] == [row[0] for row in members]
+    participants = await database.fetch(
+        "SELECT a.id, count(t.id) FROM activities_activity a JOIN clubs_club c ON c.id = a.club_id"
+        " LEFT JOIN activities_attendance t ON t.activity_id = a.id WHERE c.slug = 'ljubljana-rowing'"
+        " GROUP BY a.id, a.starts_at ORDER BY a.starts_at, a.id"
+    )
+    assert [(a["activity"]["id"], len(a["participants"])) for a in roster["activities"]] == [
+        tuple(row) for row in participants
+    ]
+
+    lines = await database.fetch(
+        "SELECT l.invoice_id, l.id, ct.app_label || '.' || ct.model, l.object_id FROM billing_invoiceline l"
+        " JOIN django_content_type ct ON ct.id = l.content_type_id ORDER BY l.invoice_id, l.id LIMIT 6"
+    )
+    for invoice in sorted({row[0] for row in lines}):
+        for prefetch in (True, False):
+            body = await client.get(
+                f"/api/data/invoices/{invoice}/lines", params={"prefetch": prefetch}, headers=on(driver)
+            )
+            assert [(b["line"]["id"], b["model"].lower(), b["item"]["id"]) for b in body.json()["result"]] == [
+                (row[1], row[2], row[3]) for row in lines if row[0] == invoice
+            ]
+    clubs = await client.get(
+        "/api/data/clubs/in-bulk", params={"slug": ["nowhere", "koper-sailing"]}, headers=on(driver)
+    )
+    assert list(clubs.json()["result"]["found"]) == ["koper-sailing"]
+    assert clubs.json()["result"]["missing"] == ["nowhere"]
+    assert_no_slot_in_use()
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+async def test_a_line_whose_item_is_gone_answers_null(client, database, driver):
+    invoice, content_type = await database.fetchrow(
+        "SELECT invoice_id, content_type_id FROM billing_invoiceline ORDER BY id LIMIT 1"
+    )
+    gone = await database.fetchval(
+        "INSERT INTO billing_invoiceline (invoice_id, content_type_id, object_id, description, quantity, unit_price)"
+        " VALUES ($1, $2, 999999, 'Gone', 1, 1) RETURNING id",
+        invoice,
+        content_type,
+    )
+    answers = []
+    for prefetch in (True, False):
+        response = await client.get(
+            f"/api/data/invoices/{invoice}/lines", params={"prefetch": prefetch}, headers=on(driver)
+        )
+        assert response.status_code == 200, response.text
+        answers.append(response.json()["result"])
+    assert answers[0] == answers[1]
+    dangling = next(line for line in answers[0] if line["line"]["id"] == gone)
+    assert (dangling["model"], dangling["item"], dangling["club"]) == (None, None, None)
+    assert all(line["item"] is not None for line in answers[0] if line["line"]["id"] != gone)
+    assert_no_slot_in_use()
+
+
+@pytest.mark.parametrize("driver", DRIVERS)
+@pytest.mark.parametrize("atomic", [False, True])
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_roster_cancelled_while_a_prefetch_waits_frees_its_slot(client, member_lock, driver, atomic, attempt):  # noqa: ARG001
+    """The prefetch of the members waits for the table lock, after the club and its memberships are read; the client
+    goes away. The waiting statement is cancelled while the lock is still held and no slot stays in use."""
+    request = asyncio.create_task(
+        client.get("/api/data/clubs/ljubljana-rowing/roster", params={"atomic": atomic}, headers=on(driver))
+    )
+    try:
+        await member_lock.waiting(1)
+    finally:
+        request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    await member_lock.waiting(0)
+    async with asyncio.timeout(10):
+        while pool(driver).in_use:
+            await asyncio.sleep(0.01)
+    await member_lock.release()
+    response = await client.get("/api/data/clubs/ljubljana-rowing/roster", headers=on(driver))
+    assert response.status_code == 200
     assert_no_slot_in_use()

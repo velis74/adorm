@@ -6,11 +6,11 @@ import datetime
 import decimal
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from adorm import Case, Coalesce, Count, Exists, F, OuterRef, Q, Subquery, Sum, TruncMonth, Value, When
 from adorm.operations import Create, Delete, Get, GetOrCreate, Save, Select, Update
-from adorm.query import Query
+from adorm.query import Query, QuerySet
 from demo.models.activities import Activity, Attendance
 from demo.models.billing import Invoice, Payment
 from demo.models.clubs import Club, Member, Membership
@@ -22,6 +22,10 @@ MEMBER_ORDERING: Mapping[str, tuple[str, ...]] = {
     "joined": ("joined",),
     "-joined": ("-joined",),
 }
+
+
+Rows = TypeVar("Rows", Query, QuerySet)
+"""A `Query` or a `QuerySet`: both have the same building methods."""
 
 
 def label(model: Any) -> str:
@@ -58,7 +62,12 @@ def member_search(
 
 
 def club_report(slug: str) -> Get:
-    """One club with aggregates over its memberships, invoices and activities.
+    """One club with aggregates over its memberships, invoices and activities (`club_report_rows()`)."""
+    return Get(club_report_rows(Query(label(Club)).filter(slug=slug)))
+
+
+def club_report_rows(clubs: Rows) -> Rows:
+    """``clubs`` with aggregates over their memberships, invoices and activities.
 
     Only the active members are counted over a join; the fee and invoice totals are subqueries, since a second
     multi-valued join would repeat each membership row once per invoice.
@@ -79,57 +88,64 @@ def club_report(slug: str) -> Get:
     )
     competitions = Query(label(Activity)).filter(club=OuterRef("pk"), kind="competition")
     next_activity = Query(label(Activity)).filter(club=OuterRef("pk")).order_by("starts_at").values("name")[:1]
-    query = (
-        Query(label(Club))
-        .filter(slug=slug)
-        .annotate(
-            active_members=Count("memberships", filter=Q(memberships__active=True)),
-            fees=Coalesce(Subquery(fees), Value(decimal.Decimal(0))),
-            open_invoices=Coalesce(Subquery(open_invoices), Value(0)),
-            has_competitions=Exists(competitions),
-            next_activity=Subquery(next_activity),
-        )
-        .annotate(
-            size=Case(
-                When(active_members__gte=5, then=Value("large")),
-                When(active_members__gte=3, then=Value("medium")),
-                default=Value("small"),
-            )
+    return clubs.annotate(
+        active_members=Count("memberships", filter=Q(memberships__active=True)),
+        fees=Coalesce(Subquery(fees), Value(decimal.Decimal(0))),
+        open_invoices=Coalesce(Subquery(open_invoices), Value(0)),
+        has_competitions=Exists(competitions),
+        next_activity=Subquery(next_activity),
+    ).annotate(
+        size=Case(
+            When(active_members__gte=5, then=Value("large")),
+            When(active_members__gte=3, then=Value("medium")),
+            default=Value("small"),
         )
     )
-    return Get(query)
 
 
 def activity_schedule(
     *, club: str | None = None, kind: str | None = None, starts_after: datetime.datetime | None = None
 ) -> Select:
-    """Activities with their club and coach, attendance counts, free places and month: ordered by start."""
+    """Activities with their club and coach, attendance counts, free places and month (`activity_schedule_rows()`)."""
+    return Select(activity_schedule_rows(Query(label(Activity)), club=club, kind=kind, starts_after=starts_after))
+
+
+def activity_schedule_rows(
+    activities: Rows,
+    *,
+    club: str | None = None,
+    kind: str | None = None,
+    starts_after: datetime.datetime | None = None,
+) -> Rows:
+    """``activities`` with their club and coach, attendance counts, free places and month: ordered by start."""
     not_cancelled = ~Q(attendances__status="cancelled")
-    query = Query(label(Activity)).select_related("club", "coach")
+    activities = activities.select_related("club", "coach")
     if club is not None:
-        query = query.filter(club__slug=club)
+        activities = activities.filter(club__slug=club)
     if kind is not None:
-        query = query.filter(kind=kind)
+        activities = activities.filter(kind=kind)
     if starts_after is not None:
-        query = query.filter(starts_at__gte=starts_after)
-    query = (
-        query.annotate(attendees=Count("attendances", filter=not_cancelled), month=TruncMonth("starts_at"))
+        activities = activities.filter(starts_at__gte=starts_after)
+    return (
+        activities.annotate(attendees=Count("attendances", filter=not_cancelled), month=TruncMonth("starts_at"))
         .annotate(free_places=F("capacity") - F("attendees"))
-        .order_by("starts_at")
+        .order_by("starts_at", "id")
     )
-    return Select(query)
 
 
 def outstanding_by_club(today: datetime.date) -> Select:
-    """Overdue open invoices grouped by club: the sum and number per club, largest first."""
-    query = (
-        Query(label(Invoice))
-        .filter(status="open", due__lt=today)
+    """Overdue open invoices grouped by club (`outstanding_rows()`)."""
+    return Select(outstanding_rows(Query(label(Invoice)), today))
+
+
+def outstanding_rows(invoices: Rows, today: datetime.date) -> Rows:
+    """Overdue open ``invoices`` grouped by club: the sum and number per club, largest first."""
+    return (
+        invoices.filter(status="open", due__lt=today)
         .values("club__name")
         .annotate(outstanding=Sum("total"), invoices=Count("id"))
-        .order_by("-outstanding")
+        .order_by("-outstanding", "club__name")
     )
-    return Select(query)
 
 
 def create_member(member: Member) -> Create:

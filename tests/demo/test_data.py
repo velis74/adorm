@@ -684,7 +684,21 @@ def _pool(using="default"):
 async def test_openapi_documents_the_data_endpoints(client):
     paths = (await client.get("/openapi.json")).json()["paths"]
     data_paths = [path for path in paths if path.startswith("/api/data/")]
-    assert len(data_paths) == 11
+    assert len(data_paths) == 23
+    refused_by_memory = [
+        ("/api/data/clubs/reports", "get"),
+        ("/api/data/clubs/{slug}/report", "get"),
+        ("/api/data/memberships/fees", "get"),
+        ("/api/data/activities/schedule", "get"),
+        ("/api/data/invoices/outstanding", "get"),
+        ("/api/data/invoices/months", "get"),
+        ("/api/data/clubs/in-bulk", "get"),
+        ("/api/data/invoices/{pk}/validation", "post"),
+        ("/api/data/memberships/validation", "post"),
+    ]
+    for path, method in refused_by_memory:
+        response = paths[path][method]["responses"]["501"]
+        assert response["content"]["application/json"]["schema"]["$ref"].endswith("/ExecutorError"), path
     for path in ("/api/data/activities/{pk}/registrations", "/api/data/invoices/settlements"):
         responses = paths[path]["post"]["responses"]
         assert {"409", "501", "503", "504"} <= set(responses), path

@@ -28,7 +28,7 @@ from adorm.drivers import Driver
 from adorm.models import registry
 from adorm.operations import Operation
 from adorm.settings import close_pools
-from demo.api import data, drivers, operations
+from demo.api import aggregates, data, drivers, instances, operations
 from demo.api.schemas import AttendanceIn, Id, Kind, Level, MemberChanges, PaymentIn, Slug
 from demo.models import MODELS
 from demo.models.clubs import Member
@@ -109,6 +109,8 @@ app = FastAPI(
     description="Clubs, members, activities and billing on adorm models.",
     lifespan=lifespan,
 )
+app.include_router(aggregates.router)
+app.include_router(instances.router)
 app.include_router(data.router)
 app.include_router(data.executor_router)
 data.install_error_handlers(app)
