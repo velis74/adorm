@@ -33,8 +33,8 @@ await reports.Member.objects.filter(active=True).count()       # a slot of "repo
 
 [`adorm.configure()`](/ref/settings#adorm-configure-profiles-none-providers-pool-none-debug-none) replaces the whole
 configuration: the profiles, the [profile providers](#profiles-created-at-run-time), the default pool settings and
-the executor's debug switch. A profile is a [`ConnectionProfile`](/ref/settings#adorm-connectionprofile) or a
-mapping of its arguments.
+the executor's [debug switch](/ref/transactions#debug-mode). A profile is a
+[`ConnectionProfile`](/ref/settings#adorm-connectionprofile) or a mapping of its arguments.
 
 - Every value is checked before anything changes; an invalid configuration leaves the previous one in place.
 - Profiles, providers and pool settings are replaced in one step. An operation in another thread or event loop sees

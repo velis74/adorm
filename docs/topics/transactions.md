@@ -243,8 +243,16 @@ When another task ends the block with `tx.commit()` or `tx.rollback()`, the exit
 it failed, a normal exit raises its error.
 
 In debug mode the end of a block warns with a `RuntimeWarning` about tasks that ran operations in it and are still
-running. `adorm.executor.set_debug(True)` turns debug mode on, `set_debug(False)` off; by default it follows asyncio's
-debug mode (`asyncio.run(..., debug=True)` or `PYTHONASYNCIODEBUG=1`).
+running. Debug mode is the executor's [debug switch](/ref/transactions#debug-mode). `True` turns it on and `False`
+off, set with any of:
+
+- [`adorm.configure(debug=...)`](/ref/settings#adorm-configure-profiles-none-providers-pool-none-debug-none);
+- the `debug` key of the [`ADORM`](/ref/settings#adorm) Django setting, which the Django app passes to
+  `adorm.configure()`;
+- [`adorm.executor.set_debug()`](/ref/transactions#adorm-executor-set-debug-value).
+
+`None`, the default, follows asyncio's debug mode (`asyncio.run(..., debug=True)` or `PYTHONASYNCIODEBUG=1`). An
+`adorm.configure()` call without `debug`, and an `ADORM` setting without the key, set the switch to `None`.
 
 ## Cancellation
 
