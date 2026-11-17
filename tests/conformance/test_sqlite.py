@@ -342,6 +342,31 @@ async def test_a_cancelled_write_in_a_nested_block_rolls_back_the_whole_transact
     assert not await in_thread(lambda: other_writer_is_refused(sqlite.path))
 
 
+@pytest.mark.parametrize("repeat", range(3))
+async def test_select_for_update_in_a_transaction_makes_other_writers_wait(sqlite, repeat):  # noqa: ARG001
+    """``BEGIN IMMEDIATE`` holds the write lock: a write of another flow waits for the commit of the transaction that
+    read rows with ``select_for_update()``."""
+    pool = sqlite()
+    assert await Club.objects.count() == 3
+    write = None
+    async with adorm.atomic():
+        club = await Club.objects.select_for_update(of=["self"]).get(slug="koper-sailing")
+        assert await in_thread(lambda: other_writer_is_refused(sqlite.path))
+        write = asyncio.create_task(
+            Club.objects.filter(slug="koper-sailing").update(city="Second"), context=contextvars.Context()
+        )
+        async with asyncio.timeout(10):
+            while not any(connection.waiting_for_write_lock for connection in list(pool.driver.connections)):
+                await asyncio.sleep(0.01)
+        assert not write.done()
+        await Club.objects.filter(pk=club.pk).update(city="First")
+    async with asyncio.timeout(10):
+        assert await write == 1
+    assert await Club.objects.filter(slug="koper-sailing").values_list("city", flat=True).get() == "Second"
+    with pytest.raises(TransactionManagementError, match="outside of a transaction"):
+        await Club.objects.select_for_update().get(slug="koper-sailing")
+
+
 async def test_errors_leave_the_slot_in_the_pool(sqlite):
     pool = sqlite()
     assert await Club.objects.count() == 3

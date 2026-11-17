@@ -72,9 +72,13 @@ def test_other_databases_declare_no_postgresql_features(capabilities):
     assert capabilities.cancellation
 
 
-def test_sqlite_has_no_row_locks_and_no_case_sensitive_like():
+def test_sqlite_locks_rows_without_nowait_or_skip_locked_and_has_no_case_sensitive_like():
     constructs = SQLITE_CAPABILITIES.constructs
-    assert not {name for name in constructs if name.startswith("clause.select_for_update")}
+    assert {name for name in constructs if name.startswith("clause.select_for_update")} == {
+        "clause.select_for_update",
+        "clause.select_for_update.of",
+        "clause.select_for_update.no_key",
+    }
     assert not {"lookup.contains", "lookup.startswith", "lookup.endswith"} & constructs
     assert {"lookup.icontains", "lookup.istartswith", "lookup.iendswith", "lookup.regex"} <= constructs
     assert {"clause.on_conflict.ignore", "clause.on_conflict.update", "clause.intersection"} <= constructs
@@ -217,7 +221,8 @@ async def test_what_sqlite_cannot_do_is_refused_before_a_slot_is_taken(sqlite_po
     pool = sqlite_pool()
     assert pool.capabilities == SQLITE_CAPABILITIES
     refused = [
-        (Club.objects.select_for_update().count(), "clause.select_for_update"),
+        (Club.objects.select_for_update(nowait=True).count(), "clause.select_for_update.nowait"),
+        (Club.objects.select_for_update(skip_locked=True).count(), "clause.select_for_update.skip_locked"),
         (Club.objects.order_by("city").distinct("city").count(), "clause.distinct_on"),
         (Club.objects.filter(disciplines__overlap=["Dinghy"]).count(), "lookup.overlap"),
         (Club.objects.filter(name__contains="Klub").count(), "lookup.contains"),

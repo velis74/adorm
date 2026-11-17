@@ -162,6 +162,12 @@ the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`, custom options
 PSYCOPG2_CAPABILITIES = replace(CAPABILITIES, backend_events=frozenset())
 """What `DjangoDriver` supports on PostgreSQL with psycopg 2: `CAPABILITIES` without backend events."""
 
+_WRITE_LOCKED_ROWS = frozenset(
+    {"clause.select_for_update", "clause.select_for_update.of", "clause.select_for_update.no_key"}
+)
+"""The row locks a SQLite transaction gives by holding the database's write lock from ``BEGIN IMMEDIATE`` on; Django
+sends no ``FOR UPDATE``."""
+
 SQLITE_CAPABILITIES = Capabilities(
     operations=CAPABILITIES.operations,
     constructs=(
@@ -169,11 +175,13 @@ SQLITE_CAPABILITIES = Capabilities(
         - POSTGRESQL_ONLY
         - {"lookup.contains", "lookup.startswith", "lookup.endswith", "clause.combinator.slice"}
     )
-    | _ON_CONFLICT,
+    | _ON_CONFLICT
+    | _WRITE_LOCKED_ROWS,
     savepoints=True,
     cancellation=True,
 )
-"""What `DjangoDriver` supports on SQLite: `CAPABILITIES` without row locks, connection options, backend events,
+"""What `DjangoDriver` supports on SQLite: `CAPABILITIES` without ``nowait`` and ``skip_locked`` row locks, connection
+options, backend events,
 the constructs of `POSTGRESQL_ONLY`, a sliced query in a set operation (``clause.combinator.slice``) and the
 case-sensitive pattern lookups ``contains``, ``startswith`` and ``endswith``, which SQLite's ``LIKE`` matches without
 regard to case."""

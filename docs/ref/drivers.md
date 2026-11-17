@@ -1153,7 +1153,9 @@ table and column of `ORA-01400`. Untested.
 
 #### `adorm.drivers.django.vendors.SQLITE_CAPABILITIES`
 
-`CAPABILITIES` without `clause.select_for_update` (and its options), the [`POSTGRESQL_ONLY`](#adorm-drivers-django-vendors-postgresql-only)
+`CAPABILITIES` without `clause.select_for_update.nowait` and `.skip_locked` (a transaction holds the write lock from
+`BEGIN IMMEDIATE` on, which keeps other writers off the rows `select_for_update()` reads; Django sends no
+`FOR UPDATE`), the [`POSTGRESQL_ONLY`](#adorm-drivers-django-vendors-postgresql-only)
 constructs, `clause.combinator.slice` (Django refuses a sliced query in a set operation), `lookup.contains`, `lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII
 letters), connection options and backend events. It has `clause.on_conflict.ignore` and `.update`, the set
 operations, savepoints and cancellation.

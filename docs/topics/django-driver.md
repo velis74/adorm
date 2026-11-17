@@ -126,7 +126,7 @@ takes a slot, so what the database cannot do raises `NotSupportedError` before a
 | | PostgreSQL | SQLite | MySQL, MariaDB | Oracle |
 |---|---|---|---|---|
 | capabilities | [`CAPABILITIES`](/ref/drivers#adorm-drivers-django-capabilities) | [`SQLITE_CAPABILITIES`](/ref/drivers#adorm-drivers-django-vendors-sqlite-capabilities) | [`MYSQL_CAPABILITIES`](/ref/drivers#adorm-drivers-django-vendors-mysql-capabilities) | [`ORACLE_CAPABILITIES`](/ref/drivers#adorm-drivers-django-vendors-oracle-capabilities) |
-| `select_for_update()` | with `nowait`, `skip_locked`, `of`, `no_key` | no | with `nowait`, `skip_locked` | with `nowait`, `skip_locked`, `of` |
+| `select_for_update()` | with `nowait`, `skip_locked`, `of`, `no_key` | in a transaction, with `of` and `no_key`, without `nowait` and `skip_locked`: `BEGIN IMMEDIATE` holds the write lock | with `nowait`, `skip_locked` | with `nowait`, `skip_locked`, `of` |
 | `distinct(*fields)`, `overlap` | yes | no | no | no |
 | `contains`, `startswith`, `endswith` | yes | no: `LIKE` ignores the case of ASCII letters (the `i...` lookups remain) | yes | yes |
 | `intersection()`, `difference()` | yes | yes | no | yes |
@@ -148,8 +148,8 @@ SQL runs: adorm raises `NotSupportedError`, and an enclosing transaction goes on
 ```python
 pool = Pool(driver, ConnectionProfile("local", driver, alias="local"))   # DATABASES["local"] is SQLite
 pool.capabilities is SQLITE_CAPABILITIES                                  # True
-await Member.objects.select_for_update().get(pk=1)
-# NotSupportedError: 'get' operation needs unsupported clause.select_for_update (driver 'django')
+await Member.objects.select_for_update(nowait=True).get(pk=1)
+# NotSupportedError: 'get' operation needs unsupported clause.select_for_update.nowait (driver 'django')
 ```
 
 Results follow the database: SQLite and MySQL sort `NULL` first in ascending order and last in descending order,
@@ -434,8 +434,9 @@ rollback, or PostgreSQL aborted it) is rolled back by `commit()`, which raises `
 ### Row locks
 
 `select_for_update()` becomes Django's `select_for_update()` with `nowait`, `skip_locked`, `of` (adorm paths,
-`"self"`) and `no_key` (PostgreSQL only); SQLite has no row locks ([databases](#databases)). Reading rows with `select_for_update()` outside a transaction raises
-`TransactionManagementError` in the core, as in Django:
+`"self"`) and `no_key` (PostgreSQL only). On SQLite the transaction's write lock stands in for the row locks, and
+`nowait` and `skip_locked` are refused ([databases](#databases)). Reading rows with `select_for_update()` outside a
+transaction raises `TransactionManagementError` in the core, as in Django:
 
 ```python
 async with adorm.atomic():
