@@ -86,6 +86,28 @@ on its existing models and migrations.
 - **Tests unchanged.** Code that uses adorm is tested with Django's test classes; slots use the test's connection
   ([testing](/topics/testing)).
 
+### Future design considerations
+
+The following directions shape the current design but are not implemented yet.
+
+- **A standalone ORM.** With a native driver adorm needs no Django: it has its own schema definition, SQL
+  generation and migrations, the migrations not necessarily versioned as in Django. The Django driver remains for
+  projects and packages that move from the Django ORM.
+- **A separate server.** The pool and the drivers run in a server process (for example one per PostgreSQL server)
+  that every application connects to. In the application a remote driver sends adorm's operation descriptions to the
+  server over [muxws](:muxws:/) or HTTP; the server executes them with an ORM driver. The remote driver sends only the
+  profile name: database credentials are the server's configuration, and the server authenticates the applications
+  that connect to it (plugins; built in: a shared secret and Ed25519 key pairs). The core has no special case for it:
+  the remote driver implements the same driver contract.
+- **A TypeScript client.** The same API in the browser: a TypeScript client builds the same operation descriptions
+  and sends them to a server (FastAPI or similar) that executes them through adorm. GraphQL serves a similar purpose
+  with a standard query language and schema of its own; adorm's client instead uses the API and models of the Python
+  side, so a query reads the same on the backend and the frontend. The server decides which operations a client may
+  run.
+- **Rust and Go ports.** The operation descriptions and their encoding are language-neutral JSON. Clients in Rust and
+  Go send them to the separate server; a port of the server itself (pool, slots, router) is considered where its
+  throughput or memory use matters.
+
 ## What adorm is not
 
 - adorm does not patch Django and does not wrap the Django ORM's async methods. A task uses either adorm or
