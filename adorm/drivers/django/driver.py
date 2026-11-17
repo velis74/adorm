@@ -829,7 +829,6 @@ _LOCKING_KINDS = frozenset(
         "delete_instance",
         "get_or_create",
         "update_or_create",
-        "call",
     }
 )
 """The operations that may write: on SQLite they take the write lock when they begin."""

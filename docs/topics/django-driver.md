@@ -165,8 +165,8 @@ SQLite has one writer at a time beside any number of readers.
 - A slot's connection switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file): readers
   run while a transaction writes and see the last committed state.
 - Every transaction begins with `BEGIN IMMEDIATE` (`OPTIONS["transaction_mode"]`): it holds the write lock from its
-  start to its end, whether it writes or not. A write or a [driver method](/topics/managers#driver-methods) outside a
-  transaction runs in a transaction of its own that begins the same way.
+  start to its end, whether it writes or not. A write outside a transaction runs in a transaction of its own that
+  begins the same way.
 - A transaction or write that finds the lock taken waits for it in the slot, for as long as the busy timeout
   (`OPTIONS["timeout"]`, 5 seconds by default), then raises `OperationalError` `database is locked`. The slot stays in
   the pool. Cancelling the task ends the wait at once.
