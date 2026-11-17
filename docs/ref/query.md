@@ -344,8 +344,8 @@ Raises `NotSupportedError` (`cannot call <action>() after <combinator>()`) when 
 - for the clauses in use: `clause.annotate` (an annotation that is not an alias), `clause.alias`, `clause.group_by`,
   `clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`,
   `clause.manager` and the names of `for_update`;
-- for a set operation: `clause.union`, `clause.intersection` or `clause.difference`, followed by the construct names
-  of the combined queries;
+- for a set operation: `clause.union`, `clause.intersection` or `clause.difference`, `clause.combinator.slice` when a
+  combined query is sliced, followed by the construct names of the combined queries;
 - [`path.nested`](#adorm-query-nested-path) when a field of `values()`, `values_list()`, `group_by`, `only()`,
   `defer()` or `distinct()` has several segments.
 
@@ -385,7 +385,8 @@ The construct names of `Query` clauses and set operations, `ForUpdate` options a
 a tuple: `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`,
 `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` and
 `clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`, `clause.on_conflict.ignore`,
-`clause.on_conflict.update`, `clause.union`, `clause.intersection` and `clause.difference`.
+`clause.on_conflict.update`, `clause.union`, `clause.intersection`, `clause.difference` and
+`clause.combinator.slice`.
 
 ### `adorm.query.COMBINATORS`
 

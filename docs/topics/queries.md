@@ -431,4 +431,4 @@ sorted(set(query.constructs()))
 ```
 
 A set operation adds `clause.union`, `clause.intersection` or `clause.difference` to the construct names of its
-queries.
+queries, and `clause.combinator.slice` when one of them is sliced.

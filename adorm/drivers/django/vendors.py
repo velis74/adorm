@@ -99,6 +99,7 @@ READ_CAPABILITIES = Capabilities(
         "clause.union",
         "clause.intersection",
         "clause.difference",
+        "clause.combinator.slice",
         "function.Trunc",
         "aggregate.distinct",
         "aggregate.filter",
@@ -164,15 +165,18 @@ PSYCOPG2_CAPABILITIES = replace(CAPABILITIES, backend_events=frozenset())
 SQLITE_CAPABILITIES = Capabilities(
     operations=CAPABILITIES.operations,
     constructs=(
-        READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - {"lookup.contains", "lookup.startswith", "lookup.endswith"}
+        READ_CAPABILITIES.constructs
+        - POSTGRESQL_ONLY
+        - {"lookup.contains", "lookup.startswith", "lookup.endswith", "clause.combinator.slice"}
     )
     | _ON_CONFLICT,
     savepoints=True,
     cancellation=True,
 )
 """What `DjangoDriver` supports on SQLite: `CAPABILITIES` without row locks, connection options, backend events,
-the constructs of `POSTGRESQL_ONLY` and the case-sensitive pattern lookups ``contains``, ``startswith`` and
-``endswith``, which SQLite's ``LIKE`` matches without regard to case."""
+the constructs of `POSTGRESQL_ONLY`, a sliced query in a set operation (``clause.combinator.slice``) and the
+case-sensitive pattern lookups ``contains``, ``startswith`` and ``endswith``, which SQLite's ``LIKE`` matches without
+regard to case."""
 
 MYSQL_CAPABILITIES = Capabilities(
     operations=CAPABILITIES.operations,
@@ -207,10 +211,11 @@ _FEATURE_CONSTRUCTS: tuple[tuple[str, str], ...] = (
     ("supports_select_union", "clause.union"),
     ("supports_select_intersection", "clause.intersection"),
     ("supports_select_difference", "clause.difference"),
+    ("supports_slicing_ordering_in_compound", "clause.combinator.slice"),
 )
 """The Django feature flags that decide constructs of a backend without a `Vendor` of its own."""
 
-_COMBINATORS = frozenset({"clause.union", "clause.intersection", "clause.difference"})
+_COMBINATORS = frozenset({"clause.union", "clause.intersection", "clause.difference", "clause.combinator.slice"})
 
 
 def features_capabilities(features: type) -> Capabilities:

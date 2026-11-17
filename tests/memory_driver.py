@@ -171,6 +171,7 @@ CAPABILITIES = Capabilities(
         "clause.union",
         "clause.intersection",
         "clause.difference",
+        "clause.combinator.slice",
         "clause.select_for_update",
         "clause.select_for_update.nowait",
         "clause.select_for_update.skip_locked",

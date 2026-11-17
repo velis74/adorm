@@ -74,6 +74,7 @@ CLAUSES: tuple[str, ...] = (
     "clause.union",
     "clause.intersection",
     "clause.difference",
+    "clause.combinator.slice",
 )
 """The construct names of `Query` clauses and set operations, `ForUpdate` options and the conflict handling of
 `adorm.operations.BulkCreate`."""
@@ -620,6 +621,8 @@ class Query(Node):
     def _own_constructs(self) -> Iterable[str]:
         if self.combinator is not None:
             yield f"clause.{self.combinator}"
+            if any(part.is_sliced for part in self.combined_queries):
+                yield "clause.combinator.slice"
         if len(self.annotations) > len(self.aliases):
             yield "clause.annotate"
         if self.aliases:

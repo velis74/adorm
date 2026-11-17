@@ -82,9 +82,6 @@ class Case:
 
 CASES: list[Case] = []
 
-COMPOUND_SLICES = "LIMIT/OFFSET not allowed in subqueries of compound statements"
-"""SQLite's refusal of a sliced query in a set operation, which Django raises before the query runs."""
-
 
 def case(
     *uses: str,
@@ -671,13 +668,13 @@ def _django_union_reduced_to_one_query():
 @case(
     "select",
     "clause.union",
+    "clause.combinator.slice",
     expected=(
         ["beginner", "advanced"],
         ["beginner", "beginner", "advanced", "advanced", "advanced"],
         ["intermediate"] * 4 + ["beginner"] * 4 + ["advanced"] * 4,
     ),
     django=_django_union_reduced_to_one_query,
-    refusals={"django": COMPOUND_SLICES},
 )
 async def union_reduced_to_one_query():
     levels = Member.objects.order_by("level").values_list("level", flat=True)
@@ -703,13 +700,13 @@ def _django_set_operations_of_one_query():
     "clause.intersection",
     "clause.difference",
     "clause.union",
+    "clause.combinator.slice",
     expected=(
         ["advanced"] * 4 + ["beginner"] * 4 + ["intermediate"] * 4,
         ["advanced"] * 4 + ["beginner"] * 4 + ["intermediate"] * 4,
         ["advanced", "beginner", "intermediate"],
     ),
     django=_django_set_operations_of_one_query,
-    refusals={"django": COMPOUND_SLICES},
 )
 async def set_operations_of_one_query():
     levels = Member.objects.values_list("level", flat=True)

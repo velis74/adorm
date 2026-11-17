@@ -528,7 +528,7 @@ async def test_a_query_django_refuses_before_any_sql_leaves_the_transaction_usab
     sqlite()
     async with adorm.atomic():
         await Club.objects.filter(slug="koper-sailing").update(city="Kept")
-        with pytest.raises(adorm.NotSupportedError, match="compound statements") as raised:
+        with pytest.raises(adorm.NotSupportedError, match="clause.combinator.slice") as raised:
             await Club.objects.order_by("name")[:1].union(Club.objects.all()).count()
         assert raised.value.original is None
         assert await Club.objects.filter(city="Kept").count() == 1

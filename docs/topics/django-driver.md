@@ -155,8 +155,8 @@ await Member.objects.select_for_update().get(pk=1)
 Results follow the database: SQLite and MySQL sort `NULL` first in ascending order and last in descending order,
 PostgreSQL and Oracle the other way round; on SQLite `Lower()`, `Upper()` and the case-insensitive lookups fold ASCII
 letters only; on MySQL a case-insensitive collation makes `exact` case-insensitive; Oracle stores an empty string as
-`NULL`. Django refuses a sliced or ordered query inside a set operation on SQLite: adorm raises `NotSupportedError`
-when the query runs.
+`NULL`. On SQLite a sliced query inside a set operation (`clause.combinator.slice`) raises `NotSupportedError` before
+it takes a slot.
 
 ### SQLite
 
@@ -498,7 +498,6 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 | `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |
 | `django.db` errors on PostgreSQL | by the SQLSTATE of the psycopg error they carry: an invalid regular expression is `DataError` with SQLSTATE `2201B`, a cancelled statement `OperationalError` with `57014`, a terminated connection `OperationalError` with `57P01`; an [`IntegrityError`](/ref/exceptions#adorm-integrityerror-message-none-constraint-name-none-table-name-none-schema-name-none-columns-values-detail-none-model-none-fields-kwargs) carries the constraint, table, columns and values from the psycopg error's `diag`, the model of the table and its adorm field names of the columns |
 | `django.db` errors on other databases | by the PEP 249 class of Django's exception, `sqlstate` `None`: on SQLite `IntegrityError` with the table, columns, model and fields of a `UNIQUE` or `NOT NULL` violation and the name of a `CHECK` constraint, no values; a lock held past the busy timeout `OperationalError` `database is locked`. MySQL and Oracle: the key, constraint and columns their messages name ([vendors](/ref/drivers#adorm-drivers-django-vendors)) |
-| a sliced or ordered query in a set operation on SQLite, which Django refuses before sending it | `NotSupportedError` |
 | anything else (Django's `ValueError` for a value of the wrong type) | `DatabaseError` with the original exception in `original` |
 
 An unknown model label or manager raises `ProgrammingError`. A connection that reports a lost connection is dropped

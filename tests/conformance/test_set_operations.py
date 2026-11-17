@@ -12,8 +12,9 @@ from adorm import DatabaseError, Exists, NotSupportedError, OuterRef, Programmin
 from adorm.drivers import is_connection_error
 from adorm.query import Count
 from tests.clubmodels.clubs import Club, Member, Membership
-from tests.conformance.cases import COMPOUND_SLICES
 from tests.conformance.drivers import on_sqlite
+
+COMBINATOR_SLICE = "needs unsupported clause.combinator.slice"
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -303,7 +304,7 @@ async def test_empty_slices_follow_the_rules_of_empty_queries(router):  # noqa: 
     with pytest.raises(TypeError, match="slice"):
         beginners.intersection(advanced[1:1]).order_by("first_name")
     if on_sqlite():
-        with pytest.raises(NotSupportedError, match=COMPOUND_SLICES):
+        with pytest.raises(NotSupportedError, match=COMBINATOR_SLICE):
             await _sorted(beginners.union(advanced[3:3])[:10])
         return
     assert [name async for name in beginners.intersection(advanced[1:1])] == []
@@ -315,7 +316,7 @@ async def test_a_set_operation_of_one_sliced_query_keeps_its_clauses_apart(route
     (beginners,) = _levels("beginner")
     first_two = beginners.order_by("first_name")[:2]
     if on_sqlite():
-        with pytest.raises(NotSupportedError, match=COMPOUND_SLICES):
+        with pytest.raises(NotSupportedError, match=COMBINATOR_SLICE):
             await _sorted(first_two.difference(Member.objects.none()))
         return
     with pytest.raises(ProgrammingError, match="multiple ORDER BY clauses not allowed"):
