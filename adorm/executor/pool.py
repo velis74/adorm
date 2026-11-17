@@ -862,25 +862,32 @@ class Router:
         is the newest stuck one that holds a slot of a pool a stuck task waits for, so that its release lets the
         others proceed.
         """
-        stuck = {task: waiter for task, waiter in self._waiting.items() if not waiter.future.done()}
+        by_pool: dict[Pool, list[asyncio.Task]] = {}
+        for task, waiter in self._waiting.items():
+            if not waiter.future.done():
+                by_pool.setdefault(waiter.pool, []).append(task)
+        # Per pool, the owners of its leases when no slot can free up but by their release; None otherwise.
+        owners: dict[Pool, set] = {}
+        for pool in by_pool:
+            if pool._can_open() or pool._opening or pool._idle:
+                continue
+            leases = pool.leases()
+            if len(leases) < len(pool._slots) or any(not lease._bound for lease in leases):
+                continue
+            owners[pool] = {lease.owner for lease in leases}
+        stuck = {task for pool in owners for task in by_pool[pool]}
         changed = True
         while changed and stuck:
             changed = False
-            for task, waiter in list(stuck.items()):
-                pool = waiter.pool
-                leases = pool.leases()
-                if (
-                    pool._can_open()
-                    or pool._opening
-                    or pool._idle
-                    or len(leases) < len(pool._slots)
-                    or any(not lease._bound or lease.owner not in stuck for lease in leases)
-                ):
-                    del stuck[task]
+            for pool in list(owners):
+                if not owners[pool] <= stuck:
+                    stuck.difference_update(by_pool[pool])
+                    del owners[pool]
                     changed = True
         if not stuck:
             return
-        holders = {lease.owner for pool in {w.pool for w in stuck.values()} for lease in pool.leases()}
+        stuck = {task: self._waiting[task] for task in stuck}
+        holders = set().union(*owners.values())
         candidates = [item for item in stuck.items() if item[0] in holders]
         if not candidates:
             return
