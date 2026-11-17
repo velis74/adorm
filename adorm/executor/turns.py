@@ -82,14 +82,14 @@ class Turn:
 
     def release(self) -> None:
         """Give up the turn; the next waiting turns that fit are granted. A second call does nothing. Called from
-        another thread, the release is scheduled on the turn's event loop."""
+        another thread, the release is scheduled on the turn's event loop, unless that loop is closed."""
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
-        if running is self._loop:
+        if running is self._loop or self._loop.is_closed():
             self._turns._release(self)
-        elif not self._loop.is_closed():
+        else:
             self._loop.call_soon_threadsafe(self._turns._release, self)
 
 
@@ -112,6 +112,7 @@ class TransactionTurns:
         self._granted: list[Turn] = []
         self._queue: deque[Turn] = deque()
         self._check: asyncio.TimerHandle | None = None
+        self._check_loop: asyncio.AbstractEventLoop | None = None
         self._held: dict[Turn, Callable[[asyncio.Task | None], tuple[Any, ...]]] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -138,6 +139,13 @@ class TransactionTurns:
             for turn in (getattr(lease, "_turn", None) for lease in held_leases())
         )
 
+    def _prune(self) -> None:
+        """Drop the turns of closed event loops: nothing can release or grant them any more (a ``TestCase`` test runs
+        each ``async_to_sync()`` call on a loop of its own)."""
+        self._granted = [turn for turn in self._granted if not turn._loop.is_closed()]
+        if any(turn._loop.is_closed() for turn in self._queue):
+            self._queue = deque(turn for turn in self._queue if not turn._loop.is_closed())
+
     def _fits(self, turn: Turn) -> bool:
         if turn.exclusive:
             return not self._granted
@@ -163,6 +171,7 @@ class TransactionTurns:
         self, turn: Turn, deadline: float, held_sessions: Callable[[asyncio.Task | None], tuple[Any, ...]]
     ) -> Turn:
         self._loop = turn._loop
+        self._prune()
         if not self._queue and self._fits(turn):
             self._granted.append(turn)
             turn._future.set_result(None)
@@ -240,6 +249,7 @@ class TransactionTurns:
         self._grant()
 
     def _grant(self) -> None:
+        self._prune()
         queue = self._queue
         while queue:
             head = queue[0]
@@ -276,10 +286,21 @@ class TransactionTurns:
                     break
 
     def _schedule_check(self) -> None:
-        if self._check is None:
-            self._check = asyncio.get_running_loop().call_later(DEADLOCK_CHECK_INTERVAL, self._periodic_check)
+        loop = asyncio.get_running_loop()
+        if self._check is not None and self._check_loop is loop:
+            return
+        stale, stale_loop = self._check, self._check_loop
+        if stale is not None and stale_loop is not None and not stale_loop.is_closed():
+            try:
+                stale_loop.call_soon_threadsafe(stale.cancel)
+            except RuntimeError:
+                pass  # closed meanwhile
+        self._check_loop = loop
+        self._check = loop.call_later(DEADLOCK_CHECK_INTERVAL, self._periodic_check, loop)
 
-    def _periodic_check(self) -> None:
+    def _periodic_check(self, loop: asyncio.AbstractEventLoop) -> None:
+        if self._check_loop is not loop:
+            return  # replaced by a check on another loop
         self._check = None
         if not self.waiting:
             return

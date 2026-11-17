@@ -228,6 +228,54 @@ async def test_a_turn_granted_to_a_transaction_that_then_awaits_a_waiting_flow_f
     assert turns.waiting == 0
 
 
+def test_the_periodic_check_runs_on_each_event_loop_the_turns_serve():
+    """A ``TestCase`` test runs each ``async_to_sync()`` call on a loop of its own: a check left scheduled on a closed
+    loop does not stop the checks on the next one."""
+    turns = TransactionTurns("test")
+
+    async def short_wait():
+        holder = await take(turns, True)
+        waiter = asyncio.create_task(take(turns, False, "waiter"))
+        await until(lambda: turns.waiting == 1)
+        holder.release()
+        (await waiter).release()
+
+    async def late_await():
+        loop = asyncio.get_running_loop()
+        holder = await take(turns, True)
+        waiter = asyncio.create_task(take(turns, False, "waiter"))
+        await until(lambda: turns.waiting == 1)
+        started = loop.time()
+        async with asyncio.timeout(GUARD):
+            with pytest.raises(DeadlockError):
+                await waiter
+        holder.release()
+        return loop.time() - started
+
+    for _ in range(3):
+        asyncio.run(short_wait())
+        assert asyncio.run(late_await()) < 1
+
+
+def test_a_turn_left_held_on_a_closed_loop_does_not_block_the_next_loop():
+    turns = TransactionTurns("test")
+
+    async def leave_held():
+        return await take(turns, True)
+
+    abandoned = asyncio.run(leave_held())
+
+    async def next_transaction():
+        async with asyncio.timeout(GUARD):
+            turn = await take(turns, True)
+        abandoned.release()
+        assert turns.holders == (turn,)
+        turn.release()
+        assert turns.holders == ()
+
+    asyncio.run(next_transaction())
+
+
 async def test_awaits_follows_tasks_and_gather():
     blocker = asyncio.Event()
 

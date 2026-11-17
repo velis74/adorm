@@ -313,7 +313,9 @@ from adorm.executor.turns import awaits, DEADLOCK_CHECK_INTERVAL, TransactionTur
 The turns of one shared database session. A transaction holds the turn alone; operations outside a transaction hold
 it together. Turns are granted in the order they were asked for: an operation asked for after a waiting transaction
 waits for it. `name` describes the session in error messages; `advice`, when not empty, ends the message of every
-`DeadlockError` raised for a wait.
+`DeadlockError` raised for a wait. One object serves turns on several event loops one after another (the
+`async_to_sync()` calls of a `TestCase` test): the turns of a closed loop are dropped, and the periodic check runs on
+the loop of the latest wait.
 
 | Member | Meaning |
 |---|---|
@@ -361,7 +363,7 @@ A flow's turn on a `TransactionTurns`.
 | `exclusive` | `True` for a transaction's turn |
 | `session`, `task`, `timeout` | the session, the task that asked for the turn and the acquisition's timeout; `session` and `task` are `None` for a turn of `take_blocking()` |
 | `held` | whether the turn is granted and not released |
-| `release()` | gives up the turn; the next waiting turns that fit are granted. A second call does nothing. From another thread, the release is scheduled on the turn's event loop |
+| `release()` | gives up the turn; the next waiting turns that fit are granted. A second call does nothing. From another thread, the release is scheduled on the turn's event loop, unless that loop is closed |
 
 ### `adorm.executor.turns.awaits(task, target)`
 
