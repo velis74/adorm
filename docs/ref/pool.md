@@ -352,7 +352,8 @@ From a thread other than the event loop's: blocks until a shared turn is granted
 when no turn has been taken on a running event loop yet, or when called on that loop's thread. `timeout` defaults to
 the longest timeout of the transactions that hold or wait for the turn, else 30 seconds; past it the wait raises
 `DeadlockError`. The task of the transaction that holds the turn is not followed to the thread, so a deadlock with a
-thread is raised at the timeout.
+thread is raised at the timeout. When the event loop does not answer within a second past the timeout, the wait raises `DeadlockError`
+too; a turn the loop grants at that moment is released.
 
 ### `adorm.executor.turns.Turn`
 

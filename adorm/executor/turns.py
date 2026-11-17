@@ -221,7 +221,9 @@ class TransactionTurns:
         try:
             return future.result(seconds + _STALLED_LOOP_GRACE)
         except concurrent.futures.TimeoutError:
-            future.cancel()
+            if not future.cancel() and not future.cancelled() and future.exception() is None:
+                # Granted as the wait timed out.
+                future.result().release()
             raise DeadlockError(
                 f"the event loop of the turns on {self.name} stopped answering while a {what} waited",
                 session=None,

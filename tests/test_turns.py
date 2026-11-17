@@ -2,6 +2,7 @@
 deadline, a transaction that awaits the flow waiting for it, and the router taking and giving up turns."""
 
 import asyncio
+import concurrent.futures
 import contextvars
 import threading
 
@@ -356,6 +357,40 @@ async def test_a_thread_waiting_past_the_timeout_raises_deadlock_error():
         await in_thread(lambda: turns.take_blocking("statement", timeout=0.01))
     assert turns.waiting == 0
     holder.release()
+
+
+async def test_a_turn_granted_as_the_threads_wait_times_out_is_released(monkeypatch):
+    """The thread's wait ends with `DeadlockError` at the moment the loop grants the turn: the turn is given up."""
+    turns = TransactionTurns("test")
+    run = asyncio.run_coroutine_threadsafe
+
+    class LateFuture:
+        """Times out only once the loop has finished the wait."""
+
+        def __init__(self, future):
+            self.future = future
+            self.timed_out = False
+
+        def result(self, timeout=None):
+            if self.timed_out:
+                return self.future.result(timeout)
+            self.timed_out = True
+            concurrent.futures.wait([self.future], GUARD)
+            raise concurrent.futures.TimeoutError
+
+        def __getattr__(self, name):
+            return getattr(self.future, name)
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", lambda coro, loop: LateFuture(run(coro, loop)))
+    for _ in range(5):
+        holder = await take(turns, True)
+        thread = asyncio.create_task(in_thread(lambda: turns.take_blocking("statement")))
+        await until(lambda: turns.waiting == 1)
+        holder.release()
+        with pytest.raises(DeadlockError, match="stopped answering"):
+            await thread
+        await until(lambda: turns.holders == ())
+        assert turns.waiting == 0
 
 
 async def test_a_thread_cannot_wait_without_a_loop_or_on_the_loop_thread():
