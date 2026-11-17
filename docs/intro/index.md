@@ -1,39 +1,19 @@
 # What is adorm
 
-adorm (asynchronous database ORM, pronounced "adore") is an asynchronous ORM for Python. Applications build
-queries and model operations with adorm's API, and a **driver** executes them: natively on PostgreSQL (asyncpg) or
-through an existing ORM (Django).
+adorm (asynchronous database ORM, pronounced "adore") is a **pure async ORM** for Python. Every call that touches
+the database is a coroutine or returns an awaitable; the API has no synchronous form. Only configuration is
+synchronous.
 
-[Quick start](/intro/quickstart) sets up a project and shows the API in one page.
+adorm itself does not talk to a database. Two parts stand between the application and the database:
 
-::: info Status
-adorm is pre-release. The [API reference](/ref/) lists what the installed version provides.
-:::
+- A **driver** executes adorm's operations on its target: a database library or an existing ORM. The native
+  PostgreSQL driver runs on asyncpg; the Django driver runs on the Django ORM.
+- A **pool** of **slots** per connection profile hands the driver's connections to the application. An async
+  driver runs on the event loop. A threaded driver runs a **synchronous** library on a thread owned by one slot,
+  with that slot's connection: the event loop awaits the slot and never runs synchronous database code.
 
-## Why adorm
-
-adorm's API is modelled on the Django ORM: querysets, lookups, `Q` and `F`, managers and model instances work as in
-Django, without the `a` prefix. With the Django driver an existing Django project moves to adorm one task at a time,
-on its existing models and migrations.
-
-Django's ORM is synchronous. Its `a`-prefixed methods (`aget`, `acreate`, …) run the synchronous ORM in a thread
-through `sync_to_async`, one call at a time. Forward relation access and transactions have no async form.
-An async application on Django's ORM therefore mixes two styles, wraps blocks of ORM code in threads, or moves business
-logic into Celery workers because the ORM cannot run on the event loop.
-
-adorm provides one async API for every driver:
-
-- Every call that touches the database is a coroutine or returns an awaitable. Only configuration is synchronous.
-- The names are the Django ORM's, without the `a` prefix: `get`, `save`, `count`, `await member.club`, `async for`
-  over a queryset.
-- `Q`, `F`, aggregates and lookups are adorm's own. Building a query needs no connection and produces an adorm
-  operation description.
-- A driver executes that description on its target. The Django ORM driver calls only the synchronous Django ORM, on
-  a thread owned by one slot. The native PostgreSQL driver runs every database call on the event loop through
-  asyncpg, without threads; it uses Django only without I/O: Django's compiler builds the SQL, and Django's models
-  supply the field, relation and deletion metadata and the schema hash.
-- adorm manages the connections: a pool of slots per connection profile, logical sessions, transactions that hold one
-  slot, acquisition timeouts and deadlock detection.
+The application uses the same async API on every driver. A synchronous database library serves an async application
+without `sync_to_async` wrappers, thread-pool executors or worker processes in application code.
 
 ```python
 import adorm
@@ -52,6 +32,59 @@ async def rename_member(member_id: int, name: str) -> None:
 async def active_names() -> list[str]:
     return [m.name async for m in Member.objects.filter(active=True).order_by("name")]
 ```
+
+[Quick start](/intro/quickstart) sets up a project and shows the API in one page.
+
+::: info Status
+adorm is pre-release. The [API reference](/ref/) lists what the installed version provides.
+:::
+
+## Rationale
+
+Async Python applications (FastAPI, Starlette, Django's ASGI views) serve requests on an event loop. Many database
+libraries and ORMs, the Django ORM among them, are synchronous: a call blocks its thread, and on the event loop it
+blocks every other request with it. The Django ORM's async methods (`aget`, `acreate`, …) run the synchronous ORM in
+a thread through `sync_to_async`, one call at a time; forward relation access and transactions have no async form.
+An async application on such an ORM mixes two styles, wraps blocks of ORM code in threads, or moves business logic
+into Celery workers because the ORM cannot run on the event loop.
+
+adorm gives such an application one async database API and takes the synchronous code out of it:
+
+- The application describes queries and model operations and awaits them. Whether a driver runs them on the event
+  loop or on a slot's thread does not change the application's code.
+- Connection handling (pooling, transactions that hold a connection, timeouts, deadlock detection, cancellation of a
+  running query) is in adorm, the same for every driver, not in each application.
+- An existing synchronous ORM remains usable as a driver, with its models, migrations and database support.
+
+adorm's API is modelled on the Django ORM: querysets, lookups, `Q` and `F`, managers and model instances work as in
+Django, without the `a` prefix. With the Django driver an existing Django project moves to adorm one task at a time,
+on its existing models and migrations.
+
+## Design goals
+
+- **Pure async.** Everything that executes is a coroutine or returns an awaitable: `get`, `save`, `count`,
+  `await member.club`, `async for` over a queryset. The application has one async API whether it runs in a web
+  process, a task handler or a Celery task.
+- **Queries without I/O.** `Q`, `F`, aggregates and lookups are adorm's own. Building a query needs no connection and
+  produces an [operation](/ref/operations): a description of the read or write, encodable as JSON.
+- **A core independent of the target.** Queries, models, sessions and the pool import no ORM and no database library;
+  they reach a target only through the [driver contract](/topics/drivers). A driver declares its capabilities, and an
+  operation it does not support raises `NotSupportedError`. Two drivers on different targets, the Django ORM and
+  asyncpg, implement the same contract and pass the same [conformance suite](/topics/conformance).
+- **Synchronous libraries as drivers.** A threaded driver runs its library only on its slots' threads; a library
+  whose connections are bound to a thread (the Django ORM) keeps one connection per slot.
+- **adorm owns the connections.** A pool of slots per [connection profile](/topics/profiles), logical
+  [sessions](/topics/sessions), [transactions](/topics/transactions) that hold one slot, layered
+  [connection options](/topics/options), acquisition timeouts and [deadlock detection](/topics/pool#deadlocks).
+  adorm, not the ORM, decides how long a connection lives.
+- **Failures that say what happened.** Exceptions are adorm's own, modelled on Django's (`DoesNotExist`,
+  `IntegrityError`, …). A timeout says whether the operation waited for a slot or was executing; a
+  [cancellation](/topics/cancellation) says whether the operation took effect.
+- **One schema.** Generated [models](/topics/models) are pydantic `BaseModel` subclasses: the same schema serves the
+  database layer, validation and serialisation, for example in
+  [fastapi-viewsets](:fastapi_viewsets:/).
+- **Tests unchanged.** Code that uses adorm is tested with Django's test classes; slots use the test's connection
+  ([testing](/topics/testing)).
 
 ## What adorm is not
 
