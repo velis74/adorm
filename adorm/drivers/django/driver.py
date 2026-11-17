@@ -69,6 +69,7 @@ from adorm.drivers.postgresql import (
 from adorm.drivers.sql import set_options_sql
 from adorm.events import BackendEvent, NOTICE, NOTIFY
 from adorm.exceptions import (
+    DataError,
     FieldError,
     InterfaceError,
     MultipleObjectsReturned,
@@ -167,8 +168,8 @@ def map_django_error(exc: BaseException, vendor: Vendor | None = None) -> BaseEx
     library reports one, else by the PEP 249 class of Django's exception. An `IntegrityError` carries the violation
     ``vendor`` reports (`adorm.drivers.django.vendors.Vendor.integrity_details()`), the label of the model whose table
     it names as ``model`` and that model's adorm field names of the key's columns as ``fields``. The objects of Django's
-    ``ProtectedError`` and ``RestrictedError`` become `model_row()` values. The result carries ``exc`` as
-    ``__cause__``."""
+    ``ProtectedError`` and ``RestrictedError`` become `model_row()` values. On SQLite an ``OverflowError`` (an integer
+    outside the 64-bit range) is a `DataError`. The result carries ``exc`` as ``__cause__``."""
     from django.core import exceptions as django_exceptions
     from django.db import transaction
     from django.db.models import deletion
@@ -190,6 +191,9 @@ def map_django_error(exc: BaseException, vendor: Vendor | None = None) -> BaseEx
         mapped = TransactionManagementError(str(exc), original=exc)
     elif isinstance(exc, django_exceptions.SynchronousOnlyOperation):
         mapped = InterfaceError(str(exc), original=exc)
+    elif isinstance(exc, OverflowError) and vendor is not None and vendor.name == "sqlite":
+        # sqlite3 refuses an integer outside SQLite's 64-bit range while binding it; Django does not wrap the error.
+        mapped = DataError(str(exc), original=exc)
     else:
         source = _POSTGRESQL if vendor is None else vendor
         return wrap_driver_error(exc, details=lambda error: _violation(error, source))

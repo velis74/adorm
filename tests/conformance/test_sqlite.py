@@ -23,6 +23,7 @@ from adorm import (
     cancellation_outcome,
     CancellationOutcome,
     ConnectionProfile,
+    DataError,
     IntegrityError,
     OperationalError,
     TransactionManagementError,
@@ -365,6 +366,15 @@ async def test_select_for_update_in_a_transaction_makes_other_writers_wait(sqlit
     assert await Club.objects.filter(slug="koper-sailing").values_list("city", flat=True).get() == "Second"
     with pytest.raises(TransactionManagementError, match="outside of a transaction"):
         await Club.objects.select_for_update().get(slug="koper-sailing")
+
+
+async def test_an_integer_outside_sqlites_range_is_a_data_error(sqlite):
+    pool = sqlite()
+    with pytest.raises(DataError) as raised:
+        await Club.objects.create(pk=2**70, name="Big", slug="big", city="Ptuj", founded=FOUNDED)
+    assert isinstance(raised.value.original, OverflowError)
+    assert (pool.size, pool.in_use) == (1, 0)
+    assert await Club.objects.count() == 3
 
 
 async def test_errors_leave_the_slot_in_the_pool(sqlite):

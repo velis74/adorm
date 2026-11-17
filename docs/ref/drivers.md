@@ -950,6 +950,7 @@ Returns the adorm exception for `exc`, raised by Django or its database library 
 | `django.db.transaction.TransactionManagementError` | `TransactionManagementError` |
 | `SynchronousOnlyOperation` | `InterfaceError` |
 | `django.db.models.ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with Django's message and the objects as [`model_row()`](#adorm-drivers-django-model-row-instance) values (`protected_objects`, `restricted_objects`) |
+| `OverflowError` with `vendor` SQLite (an integer outside SQLite's 64-bit range, raised by `sqlite3` while binding) | `DataError` |
 | anything else | [`wrap_driver_error(exc, details)`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): the SQLSTATE of the psycopg error a `django.db` error carries, then the PEP 249 class name of Django's exception (SQLite, MySQL and Oracle report no SQLSTATE: `sqlstate` is `None`), else `DatabaseError`; an `IntegrityError` with the violation `vendor.integrity_details(exc)` reads (on PostgreSQL [`integrity_details(exc)`](#adorm-drivers-postgresql-integrity-details-exc)), the label of the model whose table it names as `model` ([`table_model()`](#adorm-drivers-django-translation-table-model-table)) and that model's adorm field names of the key's columns as `fields` ([`column_fields()`](#adorm-drivers-django-translation-column-fields-model-columns)), except for the key of a referenced row ([`references_key()`](#adorm-drivers-postgresql-references-key-detail)) |
 
 ```python
