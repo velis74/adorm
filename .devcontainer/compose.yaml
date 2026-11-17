@@ -1,0 +1,21 @@
+# The demo's container and its PostgreSQL server; the demo connects as `adorm`, a role with CREATEDB.
+services:
+  app:
+    image: mcr.microsoft.com/devcontainers/python:3.13-bookworm
+    volumes:
+      - ../..:/workspaces:cached
+    command: sleep infinity
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

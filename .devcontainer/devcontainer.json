@@ -1,0 +1,37 @@
+{
+  // The demo (`demo.py`): the FastAPI server on 8000 and the Vite dev server on 5173, which proxies the
+  // server, so the browser needs only 5173. PostgreSQL runs in the `db` service of compose.yaml.
+  "name": "adorm demo",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+  "hostRequirements": { "cpus": 2 },
+  // ADORM_DEMO_VITE_HOST: Vite listens on all interfaces; `localhost` resolves to `::1` only in the container.
+  "containerEnv": {
+    "UV_LINK_MODE": "copy",
+    "ADORM_DEMO_VITE_HOST": "1",
+    "ADORM_DEMO_DATABASE_URL": "postgres://adorm:adorm@db:5432/adorm_demo",
+    "ADORM_TEST_DATABASE_URL": "postgres://adorm:adorm@db:5432/adorm_test"
+  },
+  "postCreateCommand": "pipx install uv && uv sync --locked && npm ci",
+  "postAttachCommand": "curl -sf -o /dev/null localhost:5173 && echo 'The demo is already running.' || uv run python demo.py",
+  // No forwardPorts: the ports are forwarded when the demo starts listening, and onAutoForward opens the frontend.
+  "portsAttributes": {
+    "5173": { "label": "Demo", "onAutoForward": "openBrowserOnce" },
+    "8000": { "label": "Demo API", "onAutoForward": "silent" }
+  },
+  // No venv activation in terminals: it types into the demo's terminal and interrupts the demo; uv run needs none.
+  "customizations": {
+    "codespaces": { "openFiles": [".devcontainer/README.md"] },
+    "vscode": {
+      "settings": {
+        "python.terminal.activateEnvironment": false,
+        "python-envs.terminal.autoActivationType": "off"
+      },
+      "extensions": ["ms-python.python", "Vue.volar"]
+    }
+  }
+}

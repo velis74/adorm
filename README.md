@@ -62,6 +62,10 @@ uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
 `demo.py` runs the demo application, a library on PostgreSQL: every example and concurrency scenario on every
 available driver, with the adorm code, the SQL each driver sent, the result and the time side by side.
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/adorm?quickstart=1)
+
+The codespace runs the demo with a PostgreSQL server of its own.
+
 - `demo/backend`: a Django project with the app `library`;
 - `demo/models`: the adorm models generated from it;
 - `demo/api`: a FastAPI app running the examples and scenarios;

@@ -15,7 +15,13 @@ switched in the title bar. Both settings are stored in the browser.
 
 ## Running it
 
-The demo needs PostgreSQL and a dedicated database user with `CREATEDB`, not a superuser. `ADORM_DEMO_DATABASE_URL`
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/adorm?quickstart=1)
+
+The codespace starts the demo with a PostgreSQL server of its own and opens it in a new browser tab.
+
+To run it locally:
+
+It needs PostgreSQL and a dedicated database user with `CREATEDB`, not a superuser. `ADORM_DEMO_DATABASE_URL`
 names the user and the demo database; it is read from the environment or from `.env` in the repository root (ignored
 by git), the environment taking precedence.
 
