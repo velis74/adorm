@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from django.db import connections
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 
 import adorm
 
@@ -24,7 +24,9 @@ from adorm import (
     cancellation_outcome,
     CancellationOutcome,
     ConnectionProfile,
+    create_session,
     DataError,
+    DeadlockError,
     IntegrityError,
     OperationalError,
     TransactionManagementError,
@@ -623,6 +625,54 @@ class SharedConnectionOnSQLiteTests(TestCase):
 
         await self.run_on_pool(test, max_connections=1)
 
+    async def test_overlapping_transactions_wait_for_the_open_one(self):
+        """A transaction, and an operation outside one, of another flow wait until the open transaction ends; a wait
+        that cannot end raises `DeadlockError`."""
+
+        async def test(pool):
+            turns = await pool.driver.transaction_turns(pool.profile)
+            for attempt in REPEAT:
+                first = create_session("default", f"first-{attempt}")
+                second = create_session("default", f"second-{attempt}")
+                entered, finish = asyncio.Event(), asyncio.Event()
+                seen = []
+
+                async def hold(first=first, entered=entered, finish=finish, attempt=attempt):
+                    async with first.atomic():
+                        await first.bind(Club).objects.filter(slug="c0").update(city=f"First {attempt}")
+                        entered.set()
+                        await finish.wait()
+
+                async def follow(second=second, seen=seen, attempt=attempt):
+                    async with second.atomic():
+                        seen.append(await second.bind(Club).objects.filter(city=f"First {attempt}").count())
+                        await second.bind(Club).objects.filter(slug="c1").update(city=f"Second {attempt}")
+
+                holder = asyncio.create_task(hold())
+                try:
+                    async with asyncio.timeout(10):
+                        await entered.wait()
+                    waiter = asyncio.create_task(follow())
+                    count = asyncio.create_task(second.bind(Club).objects.filter(city__istartswith="First").count())
+                    async with asyncio.timeout(10):
+                        while turns.waiting < 2:
+                            await asyncio.sleep(0.005)
+                    assert not waiter.done()
+                    assert not count.done()
+                finally:
+                    finish.set()
+                async with asyncio.timeout(10):
+                    await asyncio.gather(holder, waiter)
+                assert seen == [1]
+                assert await count == 1
+                async with first.atomic():
+                    with pytest.raises(DeadlockError, match="awaits"):
+                        await asyncio.create_task(second.bind(Club).objects.count(), context=contextvars.Context())
+            assert turns.waiting == 0
+            assert await Club.objects.filter(city__istartswith="Second").count() == 1
+
+        await self.run_on_pool(test, max_connections=2)
+
     async def test_data_is_intact_after_the_cancelled_writes(self):
         """Runs after the test above: the class's data of setUpTestData() is still there."""
 
@@ -631,6 +681,53 @@ class SharedConnectionOnSQLiteTests(TestCase):
             assert await Member.objects.filter(last_name="0").count() == 1
 
         await self.run_on_pool(test, max_connections=1)
+
+
+class OwnConnectionsOnSQLiteTests(TransactionTestCase):
+    """Django's ``TransactionTestCase`` on SQLite: the slots open connections of their own to the test database file;
+    a second transaction waits for the first one's write lock and sees its commit."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not on_sqlite():
+            raise unittest.SkipTest("the test database is not SQLite")
+        super().setUpClass()
+
+    async def test_transactions_on_connections_of_their_own(self):
+        driver = TrackedDjangoDriver()
+        pool = Pool(driver, ConnectionProfile("default", driver), max_connections=2, acquire_timeout=5)
+        router = Router([pool])
+        previous = set_runner(router)
+        try:
+            for attempt in REPEAT:
+                entered, finish = asyncio.Event(), asyncio.Event()
+
+                async def first(entered=entered, finish=finish, attempt=attempt):
+                    async with adorm.atomic():
+                        await Club.objects.create(name=f"A{attempt}", slug=f"a{attempt}", city="X", founded=FOUNDED)
+                        entered.set()
+                        await finish.wait()
+
+                async def second(attempt=attempt):
+                    async with adorm.atomic():
+                        return await Club.objects.filter(slug=f"a{attempt}").count()
+
+                holder = asyncio.create_task(first(), context=contextvars.Context())
+                async with asyncio.timeout(10):
+                    await entered.wait()
+                waiter = asyncio.create_task(second(), context=contextvars.Context())
+                async with asyncio.timeout(10):
+                    while not any(c.waiting_for_write_lock for c in list(driver.connections)):
+                        await asyncio.sleep(0.005)
+                finish.set()
+                async with asyncio.timeout(10):
+                    await holder
+                    assert await waiter == 1
+            assert {c.db.connection is not None for c in driver.connections} == {True}
+            assert len(list(driver.connections)) == 2
+        finally:
+            set_runner(previous)
+            await router.close()
 
 
 def drop_pause_trigger() -> None:
