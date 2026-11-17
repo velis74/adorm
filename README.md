@@ -1,4 +1,4 @@
-# <img src="https://raw.githubusercontent.com/velis74/adorm/main/adorm-icon.svg" alt="" width="40" height="40"> adorm
+# <img src="adorm-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> adorm
 
 adorm (asynchronous database ORM, pronounced "adore") is an asynchronous ORM for Python. Applications build
 queries and model operations with adorm's API; a driver executes them natively on PostgreSQL (asyncpg) or through
