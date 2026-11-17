@@ -166,10 +166,12 @@ transaction.
 
 [Connection options](/topics/options) are per slot: a slot's options are set with `SET LOCAL` before each of its
 operations, and the options another slot set return to those the connection starts with (the `role` of
-`OPTIONS["assume_role"]`, [`Driver.connection_defaults()`](/ref/drivers#connection-defaults-profile)); Django code of the test runs with these.
-They do not leak between flows or out of a transaction. The
-options an `on_acquire` hook returns, such as a `role` or a custom option for row-level security, are applied the
-same way, so a profile with such a hook runs under `TestCase` as in production.
+`OPTIONS["assume_role"]`, [`Driver.connection_defaults()`](/ref/drivers#connection-defaults-profile)); Django code of
+the test runs with these, also after the last slot has closed. They do not leak between flows or out of a
+transaction. The options an `on_acquire` hook returns, such as a `role` or a custom option for row-level security, are
+applied the same way, so a profile with such a hook runs under `TestCase` as in production. Each `SET LOCAL` runs in a
+savepoint of its own: a value the database refuses (a role that does not exist) fails the acquisition or the request
+that sets it, as on a connection of its own, and the test's transaction stays usable.
 
 ```python
 with adorm.connection_options(statement_timeout=2):

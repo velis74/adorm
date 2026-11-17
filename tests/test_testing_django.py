@@ -791,6 +791,41 @@ class SharedConnectionTests(TestCase):
         assert seen["alice"] == ["alice"] * 2 * len(REPEAT)
         assert seen["plain"] == ["base"] * 8 * len(REPEAT)
 
+    async def test_a_hook_option_the_database_refuses_fails_that_acquisition_only(self):
+        """As on a connection of its own: the acquisition fails and the slot leaves the pool; the test's transaction,
+        other sessions and Django code of the test go on."""
+        user = contextvars.ContextVar("test_user", default=None)
+
+        def on_acquire(_db, _profile, _session):
+            return {"role": "adorm_test_no_such_role"} if user.get() == "ghost" else None
+
+        async def as_ghost():
+            token = user.set("ghost")
+            try:
+                return await tags(create_session("default", "ghost")).count()
+            finally:
+                user.reset(token)
+
+        async with executor(on_acquire=on_acquire) as pool:
+            before = await tags().count()
+            for _ in REPEAT:
+                with pytest.raises(adorm.DatabaseError, match="adorm_test_no_such_role"):
+                    await as_ghost()
+                assert await tags(create_session("default", "other")).count() == before
+                assert len(await sync_to_async(names_on_test_thread)()) == before
+            assert all(not slot.connection.ran_custom_sql for slot in pool._slots)
+
+    async def test_django_code_runs_with_the_defaults_once_the_last_slot_closes(self):
+        def on_acquire(_db, _profile, _session):
+            return {APP_USER: "alice"}
+
+        for _ in REPEAT:
+            async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire):
+                ShowingConnection.seen = {}
+                await tags().filter(name="opt-hook").count()
+                assert ShowingConnection.seen["hook"] == ["alice"]
+            assert await sync_to_async(seen_on_test_connection)() in (None, "")
+
     async def test_sql_a_hook_runs_on_the_shared_connection_is_refused(self):
         def hook(db, _profile, _session):
             with db.cursor() as cursor:
@@ -1444,14 +1479,25 @@ def test_options_are_set_locally_and_only_when_they_differ():
     shared.apply_options({"statement_timeout": 5})
     shared.apply_options({"statement_timeout": 5})
     shared.apply_options({"lock_timeout": 1})
-    assert statements == [
+    set_options = [statement for statement in statements if "SAVEPOINT" not in statement]
+    assert set_options == [
         "SET LOCAL statement_timeout = 5000",
         "SET LOCAL lock_timeout = 1000; SET LOCAL statement_timeout TO DEFAULT",
+    ]
+    # Each in a savepoint of its own, which a refused value rolls back.
+    assert statements[:3] == [
+        "SAVEPOINT adorm_options",
+        "SET LOCAL statement_timeout = 5000",
+        "RELEASE SAVEPOINT adorm_options",
     ]
     statements.clear()
     shared.forget_options()
     shared.apply_options({})
-    assert statements == ["SET LOCAL lock_timeout TO DEFAULT; SET LOCAL statement_timeout TO DEFAULT"]
+    assert statements == [
+        "SAVEPOINT adorm_options",
+        "SET LOCAL lock_timeout TO DEFAULT; SET LOCAL statement_timeout TO DEFAULT",
+        "RELEASE SAVEPOINT adorm_options",
+    ]
 
 
 # manage.py test --parallel: every worker's slots use that worker's test database.

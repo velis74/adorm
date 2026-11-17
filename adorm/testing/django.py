@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
 import sys
 import threading
 import weakref
@@ -45,6 +46,8 @@ __all__ = [
     "shared_transaction_turns",
 ]
 
+logger = logging.getLogger("adorm.testing")
+
 QUERY_CANCELED = "57014"
 """The SQLSTATE of a call cancelled while it waited for the shared test connection, as of a cancelled statement."""
 
@@ -56,6 +59,9 @@ NO_NOTIFICATIONS = (
 
 _STATEMENT_CALLS = frozenset({"execute_sync"})
 """The calls that run with the connection options in effect."""
+
+_OPTIONS_SAVEPOINT = "adorm_options"
+"""The savepoint the ``SET LOCAL`` of the connection options runs in on the shared connection."""
 
 _UNHELD_CALLS = frozenset({"connect_sync"})
 """The calls that do not use the database connection, so they run without holding it."""
@@ -257,10 +263,25 @@ class SharedTestConnection:
         }
         if changes:
             self._options = None
-            with self.wrapper.cursor() as cursor:
-                cursor.execute(set_options_sql(changes, local=True))
+            self.run_in_savepoint(set_options_sql(changes, local=True))
             self._touched |= changes.keys()
         self._options = dict(desired)
+
+    def run_in_savepoint(self, sql: str, *, keep: bool = True) -> None:
+        """Run ``sql`` in a savepoint of its own on the wrapper: a statement the database refuses rolls back only that
+        savepoint, and the test's transaction stays usable. Without ``keep`` the savepoint is rolled back after a
+        statement that succeeds as well."""
+        with self.wrapper.cursor() as cursor:
+            cursor.execute(f"SAVEPOINT {_OPTIONS_SAVEPOINT}")
+            try:
+                cursor.execute(sql)
+            except BaseException:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT {_OPTIONS_SAVEPOINT}")
+                cursor.execute(f"RELEASE SAVEPOINT {_OPTIONS_SAVEPOINT}")
+                raise
+            if not keep:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT {_OPTIONS_SAVEPOINT}")
+            cursor.execute(f"RELEASE SAVEPOINT {_OPTIONS_SAVEPOINT}")
 
     def add_defaults(self, defaults: Mapping[str, Any]) -> None:
         """Record the options a connection of the alias starts with; until a ``SET LOCAL`` is sent they are the
@@ -279,14 +300,26 @@ class SharedTestConnection:
                 self.wrapper.execute_wrappers.insert(0, self._guard_wrapper)
 
     def detach(self) -> None:
-        """Undo `attach()`; the last one removes the guard."""
+        """Undo `attach()`; the last one removes the guard and, during the test, sets the options back to
+        ``defaults`` for the test's own statements."""
         with self._condition:
             self._attached -= 1
-            if self._attached == 0:
+            last = self._attached == 0
+            if last:
                 try:
                     self.wrapper.execute_wrappers.remove(self._guard_wrapper)
                 except ValueError:
                     pass
+        if last and self.test.current():
+            try:
+                if getattr(self._holding, "active", False):
+                    self.apply_options(self.defaults)
+                else:
+                    with self.hold(_Foreign()):
+                        self.apply_options(self.defaults)
+            except Exception:
+                self.forget_options()
+                logger.warning("restoring the connection options of the TestCase connection failed", exc_info=True)
 
     def _guard(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
         """Run a statement of a thread that does not hold the shared connection as a call of its own; while a
@@ -743,8 +776,12 @@ class SharedConnectionMixin:
     # Connection options
 
     def set_options_sync(self, options: Mapping[str, Any], local: bool) -> None:
-        """Record the options; `SharedTestConnection.apply_options()` sets them before each operation."""
-        set_options_sql(options, local)  # validates them
+        """Record the options; `SharedTestConnection.apply_options()` sets them before each operation. A value the
+        database refuses (a role that does not exist) raises here, as on a connection of its own: the options are
+        tried with ``SET LOCAL`` in a savepoint that is rolled back."""
+        sql = set_options_sql(options, local)  # validates them
+        if sql and any(value is not None for value in options.values()):
+            self._shared.run_in_savepoint(set_options_sql(options, local=True), keep=False)
         if local:
             self._local_options.update(options)
             return
