@@ -1,5 +1,7 @@
 """adorm: an asynchronous database ORM."""
 
+from importlib.metadata import version as _distribution_version
+
 from adorm.checks import check_schema, SchemaProblem
 from adorm.exceptions import (
     AdormError,
@@ -98,7 +100,7 @@ from adorm.query import (
 )
 from adorm.settings import configure, ConnectionProfile, PoolSettings
 
-__version__ = "0.0.1"
+__version__ = _distribution_version("adorm")
 
 __all__ = [
     "AdormError",

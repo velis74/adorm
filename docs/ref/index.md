@@ -7,7 +7,7 @@ and may change without notice.
 
 ### `adorm.__version__`
 
-The installed version as a string, matching `version` in `pyproject.toml`.
+The installed version as a string, read from the package metadata.
 
 ```python
 import adorm

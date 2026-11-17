@@ -67,7 +67,6 @@ source-include = ["LICENSE"]
 
 [tool.publish]
 tests = "pytest"
-additional_files = ["adorm/__init__.py"]
 
 [tool.ruff]
 extend-exclude = ["docs", "dist", "build", "*/migrations/*"]
