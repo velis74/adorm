@@ -601,9 +601,10 @@ Cancelling the task that awaits an operation cancels the running statement from 
 | Oracle | the driver's `cancel()` | `ORA-01013` |
 | another backend | nothing: the call runs on, and after the driver's `cancel_grace` seconds the slot gives up its connection | |
 
-A statement that the cancelled call starts after the cancellation, other than a `ROLLBACK`, raises the database's
-cancellation error before it runs, on every database: a cancellation between two statements of one operation (the
-`SELECT` and the `INSERT` of `get_or_create()`, the batches of `bulk_create()`) stops the operation.
+A statement that the cancelled call starts after the cancellation, other than `ROLLBACK` and `RELEASE SAVEPOINT`,
+raises the database's cancellation error before it runs, on every database: a cancellation between two statements of
+one operation (the `SELECT` and the `INSERT` of `get_or_create()`, the batches of `bulk_create()`) stops the
+operation.
 
 - A statement the database cancelled: the `CancelledError` carries `CancellationOutcome.UNKNOWN`.
 - A statement that completed on the connection's thread before the cancellation reached the database: the task gets

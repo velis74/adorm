@@ -525,8 +525,8 @@ class DjangoConnection(ThreadedConnection):
 
     def _cancelled(self) -> bool:
         """Whether the running call is cancelled (``cancel_sync()``): the check before each statement and SQLite's
-        progress handler. A statement of a cancelled call but ``ROLLBACK`` raises `Vendor.cancelled_error()` before it
-        runs."""
+        progress handler. A statement of a cancelled call but ``ROLLBACK`` and ``RELEASE SAVEPOINT`` raises
+        `Vendor.cancelled_error()` before it runs."""
         call = self._cancelled_call
         return call is not None and call is self._current
 
@@ -819,7 +819,7 @@ _COMPOUND_REFUSAL = "not allowed in subqueries of compound statements"
 """The end of the message of Django's refusal of ``LIMIT``, ``OFFSET`` or ``ORDER BY`` in a query of a set operation,
 on a database without ``supports_slicing_ordering_in_compound`` (SQLite)."""
 
-_AFTER_CANCELLATION = ("ROLLBACK",)
+_AFTER_CANCELLATION = ("ROLLBACK", "RELEASE")
 """The statements a cancelled call still runs: those that end its transaction or savepoint."""
 
 _LOCKING_KINDS = frozenset(
