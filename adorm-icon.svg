@@ -1,13 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
-<rect width="512" height="512" rx="92" fill="#0b2258"/>
-<g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="18">
-<path stroke="#159ff5" d="M208 256h70q22 0 22-22v-76h38"/>
-<path stroke="#62dc7a" d="M208 256h70q22 0 22 22v76h38"/>
-<path stroke="#fff" d="M88 216v80c0 17 27 30 60 30s60-13 60-30v-80m-120 40c0 17 27 30 60 30s60-13 60-30"/>
-<ellipse cx="148" cy="216" rx="60" ry="30" stroke="#fff"/>
-<rect x="338" y="112" width="86" height="92" rx="20" stroke="#159ff5"/>
-<rect x="338" y="308" width="86" height="92" rx="20" stroke="#62dc7a"/>
-<path stroke="#159ff5" stroke-width="12" d="M364 143h34m-34 29h21"/>
-<path stroke="#62dc7a" stroke-width="12" d="M364 339h34m-34 29h21"/>
-</g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0b2258" rx="92"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="18">
+    <path stroke="#159ff5" d="M208 256h70q22 0 22-22v-76h38"/>
+    <path stroke="#62dc7a" d="M208 256h70q22 0 22 22v76h38"/>
+    <path stroke="#fff" d="M88 216v80c0 17 27 30 60 30s60-13 60-30v-80M88 256c0 17 27 30 60 30s60-13 60-30"/>
+    <ellipse cx="148" cy="216" stroke="#fff" rx="60" ry="30"/>
+    <rect width="86" height="92" x="338" y="112" stroke="#159ff5" rx="20"/>
+    <rect width="86" height="92" x="338" y="308" stroke="#62dc7a" rx="20"/>
+    <path stroke="#159ff5" stroke-width="12" d="M364 143h34m-34 29h21"/>
+    <path stroke="#62dc7a" stroke-width="12" d="M364 339h34m-34 29h21"/>
+  </g>
 </svg>
