@@ -1115,9 +1115,9 @@ diagnostics; column types compared, the columns read with [`columns_sql()`](#ado
 SQLite allows one writer at a time beside any number of readers.
 
 - `slot_settings()` sets `OPTIONS["transaction_mode"]` to `IMMEDIATE` (an `EXCLUSIVE` one stays): every transaction
-  takes the write lock when it begins. `check_settings()` raises `NotSupportedError` before Django 5.1, which has no
-  `transaction_mode`, and for an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`), which has no WAL and, unless
-  it is a shared cache, is visible to its own connection only.
+  takes the write lock when it begins. `check_settings()` raises `NotSupportedError` for an in-memory database
+  (`":memory:"`, `file::memory:`, `mode=memory`), which has no WAL and, unless it is a shared cache, is visible to
+  its own connection only.
 - `connected()` switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file), so reads run
   beside the writer, and installs a progress handler that stops the statements of a
   cancelled call every [`PROGRESS_STEPS`](#adorm-drivers-django-vendors-sqlite) (1000) virtual machine instructions.

@@ -522,10 +522,6 @@ class SQLite(Vendor):
         return {**settings, "OPTIONS": options}
 
     def check_settings(self, settings: Mapping[str, Any]) -> None:
-        import django
-
-        if django.VERSION < (5, 1):
-            raise NotSupportedError("the Django driver needs Django 5.1 or newer on SQLite (transaction_mode)")
         if self.database_key(settings) is None:
             raise NotSupportedError(
                 "the Django driver needs a SQLite database file: an in-memory database has no WAL mode, and a private "

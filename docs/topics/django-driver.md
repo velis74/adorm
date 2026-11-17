@@ -174,9 +174,8 @@ SQLite has one writer at a time beside any number of readers.
   included: every further operation of the transaction and of its enclosing blocks raises
   `TransactionManagementError` (`OperationalError` `TRANSACTION_ENDED` as the cause), and the outermost block rolls
   back. A cancelled read rolls back nothing.
-- Before Django 5.1, which has no `transaction_mode`, and for an in-memory database (`":memory:"`, `file::memory:`,
-  `mode=memory`) a slot's connection raises `NotSupportedError`: a private in-memory database is visible to its own
-  connection only, and none has WAL.
+- For an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`) a slot's connection raises
+  `NotSupportedError`: a private in-memory database is visible to its own connection only, and none has WAL.
 
 ```python
 DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3",

@@ -10,7 +10,7 @@ The package is pre-release; the API reference on the documentation site lists wh
 
 - Python 3.11 or newer
 - PostgreSQL for the test suite
-- the conformance run on SQLite needs no database server (Python's `sqlite3`, Django 5.1 or newer)
+- the conformance run on SQLite needs no database server (Python's `sqlite3`)
 
 ## Development
 

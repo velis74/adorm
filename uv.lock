@@ -51,8 +51,8 @@ requires-dist = [
     { name = "asgiref", marker = "extra == 'asyncpg'", specifier = ">=3.6,<4" },
     { name = "asgiref", marker = "extra == 'django'", specifier = ">=3.6,<4" },
     { name = "asyncpg", marker = "extra == 'asyncpg'", specifier = ">=0.30" },
-    { name = "django", marker = "extra == 'asyncpg'", specifier = ">=4.2" },
-    { name = "django", marker = "extra == 'django'", specifier = ">=4.2" },
+    { name = "django", marker = "extra == 'asyncpg'", specifier = ">=5.2" },
+    { name = "django", marker = "extra == 'django'", specifier = ">=5.2" },
     { name = "psycopg", marker = "extra == 'asyncpg'", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.11" },
 ]
@@ -62,7 +62,7 @@ provides-extras = ["django", "asyncpg"]
 dev = [
     { name = "asyncpg", specifier = ">=0.30" },
     { name = "coverage" },
-    { name = "django", specifier = ">=4.2" },
+    { name = "django", specifier = ">=5.2" },
     { name = "fastapi", specifier = ">=0.163.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },

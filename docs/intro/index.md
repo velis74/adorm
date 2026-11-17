@@ -69,6 +69,7 @@ async def active_names() -> list[str]:
 ## Requirements
 
 - Python 3.11 or newer
+- Django 5.2 or newer (both drivers use it)
 - The `django` extra for the Django ORM driver
 - The `asyncpg` extra for the native PostgreSQL driver. It installs asyncpg, Django and psycopg 3: the driver compiles
   its SQL with Django's compiler.
