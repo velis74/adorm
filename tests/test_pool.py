@@ -395,6 +395,23 @@ async def test_many_tasks_share_a_bounded_pool_without_leaking_slots(attempt):  
     assert (pool.size, pool.idle, pool.in_use, pool.waiting) == (3, 3, 0, 0)
 
 
+async def test_deadlock_detection_reads_the_leases_of_a_pool_once_per_pass(monkeypatch):
+    calls = 0
+    leases = Pool.leases
+
+    def counting(self):
+        nonlocal calls
+        calls += 1
+        return leases(self)
+
+    monkeypatch.setattr(Pool, "leases", counting)
+    router, _pool, _driver = make(max_connections=4)
+    count = 500
+    await asyncio.gather(*(router.run(session(f"t{i}"), Op(f"r{i}")) for i in range(count)))
+    # one read per wait and per release at most, not one per waiting task
+    assert calls <= 2 * count
+
+
 # Timeouts
 
 
