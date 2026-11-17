@@ -7,6 +7,8 @@ The encoded forms:
   ``TypeAdapter`` of that type;
 - a value whose position the schema does not type: ``{"type": <type name>, "value": <JSON>}``, the type inferred
   from the value (`TYPES`, or a container of encoded values);
+- a value of a union whose members can have the same JSON form: ``{"branch": <member index>, "value": <JSON>}`` in
+  place of the member's JSON, at any depth of the type;
 - the values of ``in``, ``range`` and ``overlap``: ``{"items": [<node or value>, ...]}``.
 
 A position is typed by the field a value is compared with or written to (see `adorm.schema`), or by a `Value`'s
@@ -114,20 +116,190 @@ def _b64encode(value: bytes) -> str:
 _BYTES = Annotated[bytes, PlainValidator(_b64decode), PlainSerializer(_b64encode, when_used="json")]
 
 
-def _transport_type(hint: Any) -> Any:
-    """``hint`` with ``bytes`` encoded as base64 at any depth of ``Annotated``, unions and generic containers.
+_ENCODING = "adorm.codec.encoding"
+"""The validation context key under which `encode_value` validates a value before it encodes it."""
 
+
+class _NotTextError(Exception):
+    """Bytes that a model without base64 config cannot encode as UTF-8 text, raised past pydantic's validators."""
+
+
+@dataclass(frozen=True)
+class _Branch:
+    index: int
+    data: Any
+
+
+_JSON_KINDS = frozenset({"string", "number", "boolean", "array", "object", "null"})
+
+
+def _json_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int | float):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return "array" if isinstance(value, list) else "object"
+
+
+def _schema_kinds(schema: Any, defs: Mapping[str, Any]) -> tuple[frozenset[str], tuple[str, ...] | None]:
+    """The JSON kinds a JSON schema admits, and its JSON values when it is an enumeration."""
+    if not isinstance(schema, Mapping):
+        return _JSON_KINDS, None
+    if "$ref" in schema:
+        return _schema_kinds(defs.get(schema["$ref"].rsplit("/", 1)[-1]), defs)
+    if "const" in schema or "enum" in schema:
+        values = [schema["const"]] if "const" in schema else list(schema["enum"])
+        return frozenset(map(_json_kind, values)), tuple(json.dumps(value, sort_keys=True) for value in values)
+    for key in ("anyOf", "oneOf"):
+        if key in schema:
+            parts = [_schema_kinds(part, defs) for part in schema[key]]
+            values = None if any(v is None for _, v in parts) else tuple(x for _, v in parts for x in v or ())
+            return frozenset().union(*(k for k, _ in parts)), values
+    if "allOf" in schema and len(schema["allOf"]) == 1:
+        return _schema_kinds(schema["allOf"][0], defs)
+    kind = schema.get("type")
+    if kind is None:
+        return _JSON_KINDS, None
+    kinds = {kind} if isinstance(kind, str) else set(kind)
+    return frozenset("number" if k == "integer" else k for k in kinds), None
+
+
+def _member_kinds(hint: Any) -> tuple[frozenset[str], tuple[str, ...] | None]:
+    try:
+        schema = TypeAdapter(hint).json_schema(mode="serialization")
+    except Exception:  # noqa: BLE001 - a type without a JSON schema may encode as anything
+        return _JSON_KINDS, None
+    return _schema_kinds(schema, schema.get("$defs", {}))
+
+
+def _ambiguous(members: tuple[Any, ...]) -> bool:
+    """Whether the JSON forms of two of ``members`` can coincide: they share a JSON kind and are not enumerations
+    of different values."""
+    kinds = [_member_kinds(member) for member in members]
+    for i, (kinds_a, values_a) in enumerate(kinds):
+        for kinds_b, values_b in kinds[i + 1 :]:
+            if kinds_a & kinds_b and (values_a is None or values_b is None or set(values_a) & set(values_b)):
+                return True
+    return False
+
+
+_value_adapters: dict[Any, TypeAdapter] = {}
+
+
+def _value_adapter(hint: Any) -> TypeAdapter:
+    """The cached ``TypeAdapter`` of ``hint`` itself, which validates Python values without the transport forms."""
+    try:
+        adapter = _value_adapters.get(hint)
+    except TypeError:
+        return TypeAdapter(hint)
+    if adapter is None:
+        adapter = _value_adapters[hint] = TypeAdapter(hint)
+    return adapter
+
+
+def _select_branch(value: Any, members: tuple[Any, ...]) -> tuple[int, Any]:
+    """The index of the member ``value`` belongs to, and ``value`` validated by it: the first member that takes it
+    strictly with its own type, else the first that takes it strictly, else the first that takes it."""
+    strict = None
+    for index, member in enumerate(members):
+        try:
+            result = _value_adapter(member).validate_python(value, strict=True)
+        except (pydantic.ValidationError, ValueError, TypeError):
+            continue
+        if type(result) is type(value):
+            return index, result
+        if strict is None:
+            strict = index, result
+    if strict is not None:
+        return strict
+    first_error = None
+    for index, member in enumerate(members):
+        try:
+            return index, _value_adapter(member).validate_python(value)
+        except pydantic.ValidationError as exc:
+            first_error = first_error or exc
+    raise first_error  # type: ignore[misc]
+
+
+def _encode_branch(value: Any, members: tuple[Any, ...]) -> _Branch:
+    index, validated = _select_branch(value, members)
+    try:
+        return _Branch(index, adapter_for(members[index]).dump_python(validated, mode="json"))
+    except UnicodeDecodeError as exc:
+        raise _NotTextError from exc
+
+
+def _tagged_union(members: tuple[Any, ...], optional: bool) -> Any:
+    """A union whose JSON form records its member: ``{"branch": <index in members>, "value": <member's JSON>}``."""
+
+    def validate(value: Any, info: pydantic.ValidationInfo) -> Any:
+        if value is None and optional:
+            return None
+        if info.context and info.context.get(_ENCODING):
+            return _encode_branch(value, members)
+        if not isinstance(value, Mapping) or set(value) != {"branch", "value"}:
+            raise ValueError('a union value is encoded as {"branch": <index>, "value": <value>}')
+        index = value["branch"]
+        if type(index) is not int or not 0 <= index < len(members):
+            raise ValueError(f"{index!r} is not a branch of the union")
+        return adapter_for(members[index]).validate_python(value["value"])
+
+    def serialize(value: Any) -> Any:
+        if value is None:
+            return None
+        branch = value if isinstance(value, _Branch) else _encode_branch(value, members)
+        return {"branch": branch.index, "value": branch.data}
+
+    return Annotated[Any, PlainValidator(validate), PlainSerializer(serialize, when_used="json")]
+
+
+def _is_discriminator(item: Any) -> bool:
+    return isinstance(item, pydantic.Discriminator) or getattr(item, "discriminator", None) is not None
+
+
+def _tag_union(hint: Any, metadata: tuple[Any, ...]) -> Any:
+    """The tagged form of the union ``hint`` with ``metadata`` on each member, or ``None`` when its members' JSON
+    forms cannot coincide."""
+    args = get_args(hint)
+    members = tuple(arg for arg in args if arg is not type(None))
+    if len(members) < 2 or not _ambiguous(members):
+        return None
+    if metadata:
+        members = tuple(Annotated[(member, *metadata)] for member in members)
+    return _tagged_union(members, len(members) < len(args))
+
+
+def _transport_type(hint: Any, *, tag: bool = True) -> Any:
+    """``hint`` with ``bytes`` encoded as base64 at any depth of ``Annotated``, unions and generic containers, and
+    with each union whose members' JSON forms can coincide (`_ambiguous`) encoded with the member a value belongs to.
+
+    The metadata of an ``Annotated`` tagged union applies to each member; a discriminated union is not tagged.
     Bytes inside a pydantic model, dataclass or ``TypedDict`` follow that type's own config (``ser_json_bytes``).
     """
     if hint is bytes:
         return _BYTES
     origin = get_origin(hint)
     if origin is Annotated:
-        inner = _transport_type(hint.__origin__)
-        return hint if inner is hint.__origin__ else Annotated[(inner, *hint.__metadata__)]
+        inner, metadata = hint.__origin__, hint.__metadata__
+        if get_origin(inner) in (Union, types.UnionType):
+            if any(_is_discriminator(item) for item in metadata):
+                return Annotated[(_transport_type(inner, tag=False), *metadata)]
+            tagged = _tag_union(inner, metadata)
+            if tagged is not None:
+                return tagged
+        transported = _transport_type(inner)
+        return hint if transported is inner else Annotated[(transported, *metadata)]
     if origin is None or origin is Literal:
         return hint
     args = get_args(hint)
+    if tag and origin in (Union, types.UnionType):
+        tagged = _tag_union(hint, ())
+        if tagged is not None:
+            return tagged
     replaced = tuple(arg if arg is Ellipsis else _transport_type(arg) for arg in args)
     if replaced == args:
         return hint
@@ -186,10 +358,10 @@ def encode_value(value: Any, hint: Any = None) -> dict[str, Any]:
         return _check_json(_encode_inferred(value), value)
     adapter = adapter_for(hint)
     try:
-        data = adapter.dump_python(adapter.validate_python(value), mode="json")
+        data = adapter.dump_python(adapter.validate_python(value, context={_ENCODING: True}), mode="json")
     except pydantic.ValidationError as exc:
         raise ValueError(f"{value!r} is not a valid {_hint_repr(hint)}: {exc.errors()[0]['msg']}") from None
-    except UnicodeDecodeError:
+    except (UnicodeDecodeError, _NotTextError):
         raise ValueError(
             f"{value!r} holds bytes that are not UTF-8 text: give the model, dataclass or TypedDict "
             "ser_json_bytes='base64' and val_json_bytes='base64'"

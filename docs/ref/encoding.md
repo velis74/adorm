@@ -209,7 +209,13 @@ resolve_field_type(schema, "club.Guest", ["nickname"])        # None (a model th
 
 `value` encoded with the type `hint` as `{"value": ...}`, or, when `hint` is `None` or `Any`, with its inferred type
 as `{"type": ..., "value": ...}`. `bytes` are base64 strings at any depth of `Annotated`, unions and generic
-containers in the hint. Bytes inside a pydantic model, dataclass or `TypedDict` are base64 with
+containers in the hint. A union whose members can have the same JSON form (two members of the same JSON kind,
+such as `bytes | str`, `str | datetime.date` or `int | float`, unless both are enumerations of different values)
+records the member a value belongs to, as `{"branch": <index>, "value": ...}`, the index counting the members other
+than `None` in the order of the hint; the member is the first that takes the value strictly with its own type, else
+the first that takes it strictly, else the first that takes it. The metadata of an `Annotated` union, such as a length
+limit, applies to each member. `None`, the values of other unions and those of a union with a pydantic discriminator
+are encoded as the member's value. Bytes inside a pydantic model, dataclass or `TypedDict` are base64 with
 `ser_json_bytes="base64"` and `val_json_bytes="base64"` in that type's config, else UTF-8 text.
 
 Raises `ValueError` when the value is not valid for `hint`, contains NaN or infinity, or holds non-UTF-8 bytes in
@@ -219,6 +225,8 @@ list, tuple, set, frozenset or dict with string keys of such values.
 ```python
 encode_value(decimal.Decimal("1.50"), decimal.Decimal)   # {"value": "1.50"}
 encode_value(b"\x00\xff", bytes)                          # {"value": "AP8="}
+encode_value("YWJj", bytes | str)                         # {"value": {"branch": 1, "value": "YWJj"}}
+encode_value(5, int | str | None)                         # {"value": 5}
 encode_value(datetime.date(2026, 11, 14))                 # {"type": "date", "value": "2026-11-14"}
 encode_value([1, "a"])                                    # {"type": "list", "value": [{"type": "int", ...}, ...]}
 ```
@@ -247,8 +255,9 @@ The type `type_name()` names; an unknown name raises `ValueError`.
 
 ### `adorm.codec.adapter_for(hint)`
 
-The cached `TypeAdapter` that encodes and decodes values of type `hint`, with `bytes` as base64 as in
-`encode_value()`.
+The cached `TypeAdapter` that encodes and decodes values of type `hint`, with `bytes` as base64 and unions recorded
+with their member as in `encode_value()`. Its validator takes the encoded form: a recorded union validates
+`{"branch": <index>, "value": ...}` only.
 
 ### `adorm.codec.node_name(cls)`
 

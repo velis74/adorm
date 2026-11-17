@@ -667,6 +667,97 @@ def test_bytes_in_models_follow_the_model_config():
     assert decode_value(data, Base64Blob) == Base64Blob(blob=b"\xff")
 
 
+@pytest.mark.parametrize(
+    ("hint", "value"),
+    [
+        (bytes | str, b"abc"),
+        (bytes | str, "YWJj"),
+        (bytes | str, "hello"),
+        (bytes | str, ""),
+        (bytes | str, b""),
+        (str | bytes, "YWJj"),
+        (str | bytes, b"abc"),
+        (bytes | str | None, "YWJj"),
+        (bytes | str | None, b"abc"),
+        (Annotated[bytes, PydanticField(max_length=10)] | str, "YWJj"),
+        (list[bytes] | list[str], ["YWJj"]),
+        (list[bytes] | list[str], [b"abc"]),
+        (dict[str, bytes | str], {"text": "YWJj", "blob": b"abc"}),
+        (list[bytes | str], ["YWJj", b"abc", "hello"]),
+        (str | uuid.UUID, uuid.UUID(int=1)),
+        (str | uuid.UUID, str(uuid.UUID(int=1))),
+        (str | datetime.date, datetime.date(2026, 11, 14)),
+        (str | datetime.date, "2026-11-14"),
+        (str | decimal.Decimal, decimal.Decimal("1.50")),
+        (str | decimal.Decimal, "1.50"),
+        (datetime.date | datetime.datetime, datetime.datetime(2026, 1, 1)),
+        (datetime.date | datetime.datetime, datetime.date(2026, 1, 1)),
+    ],
+    ids=repr,
+)
+def test_a_union_value_keeps_its_branch(hint, value):
+    data = roundtrip(encode_value(value, hint))
+    assert same(decode_value(data, hint), value)
+
+
+def test_a_union_field_value_keeps_its_branch_in_an_operation():
+    from adorm.operations import Create, Operation
+    from adorm.schema import ModelSchema, Schema
+
+    schema = Schema([ModelSchema("club.Note", "id", {"id": int, "body": bytes | str}, {})])
+    for body in ("YWJj", b"abc", "hello"):
+        operation = Create("club.Note", {"body": body})
+        restored = Operation.from_dict(roundtrip(operation.to_dict(schema)), schema)
+        assert same(dict(restored.values)["body"], body)
+
+
+@pytest.mark.parametrize(
+    ("hint", "value", "encoded"),
+    [
+        (int | None, 5, 5),
+        (str | None, "YWJj", "YWJj"),
+        (bytes | None, b"abc", "YWJj"),
+        (Level | None, Level.MASTER, "master"),
+        (datetime.date | None, datetime.date(2026, 11, 14), "2026-11-14"),
+        (Literal["active", "left"] | None, "left", "left"),
+        (list[bytes] | None, [b"abc"], ["YWJj"]),
+    ],
+    ids=repr,
+)
+def test_unions_with_none_keep_their_encoding(hint, value, encoded):
+    assert encode_value(value, hint) == {"value": encoded}
+    assert encode_value(None, hint) == {"value": None}
+    assert same(decode_value(roundtrip({"value": encoded}), hint), value)
+
+
+class Cat(BaseModel):
+    kind: Literal["cat"] = "cat"
+
+
+class Dog(BaseModel):
+    kind: Literal["dog"] = "dog"
+
+
+def test_a_discriminated_union_keeps_its_encoding():
+    hint = Annotated[Cat | Dog, PydanticField(discriminator="kind")]
+    assert encode_value(Dog(), hint) == {"value": {"kind": "dog"}}
+    assert decode_value(roundtrip(encode_value(Dog(), hint)), hint) == Dog()
+
+
+def test_the_metadata_of_a_recorded_union_applies_to_each_member():
+    hint = Annotated[bytes | str, PydanticField(max_length=3)]
+    for value in ("YWJ", b"abc"):
+        assert same(decode_value(roundtrip(encode_value(value, hint)), hint), value)
+    for value in ("abcd", b"abcd"):
+        with pytest.raises(ValueError, match="at most 3"):
+            encode_value(value, hint)
+
+
+def test_a_text_value_is_not_read_as_base64_when_choosing_the_member():
+    hint = bytes | Annotated[str, PydanticField(max_length=2)]
+    assert decode_value(roundtrip(encode_value("YWJj", hint)), hint) == b"YWJj"
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
 @pytest.mark.parametrize("hint", [float, None, list[float]])
 def test_non_finite_floats_are_refused(value, hint):
