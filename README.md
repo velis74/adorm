@@ -58,6 +58,8 @@ uv sync
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
+npm install
+npm run lint              # eslint, markdownlint and type checks of the demo; `npm run lint -- --fix` fixes
 ```
 
 The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
@@ -96,8 +98,9 @@ uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
 
 ## Demo
 
-[`demo.py`](https://docs.velis.si/adorm/intro/demo) runs the demo application, a library on PostgreSQL: every example and concurrency scenario on every
-available driver, with the adorm code, the SQL each driver sent, the result and the time side by side.
+[`demo.py`](https://docs.velis.si/adorm/intro/demo) runs the demo application, a library on PostgreSQL: every example
+and concurrency scenario on every available driver, with the adorm code, the SQL each driver sent, the result and the
+time side by side.
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/adorm?quickstart=1)
 
