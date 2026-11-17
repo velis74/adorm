@@ -17,6 +17,7 @@ from adorm.drivers.django.vendors import (
     features_capabilities,
     is_refusal,
     LOCK_WAIT_CANCELLED,
+    MYSQL_CANCEL_CONNECT_TIMEOUT,
     MYSQL_CAPABILITIES,
     ORACLE_CAPABILITIES,
     PostgreSQL,
@@ -137,6 +138,19 @@ def test_mysql_cancels_on_a_connection_of_the_profiles_connect_hook():
     assert (opened, statements) == (["mysql"], ["KILL QUERY 42"])
 
 
+def test_mysql_cancels_on_a_connection_with_a_connect_timeout_and_loses_the_cancel_when_it_cannot_open():
+    opened = []
+
+    def unreachable(params):
+        opened.append(params)
+        raise OSError("Can't connect to MySQL server")
+
+    db = type("Wrapper", (), {"get_new_connection": staticmethod(unreachable), "get_connection_params": lambda _: {}})()
+    connection = type("Connection", (), {"db": db, "profile": None})()
+    vendor("mysql").cancel(connection, None)
+    assert opened == [{"connect_timeout": MYSQL_CANCEL_CONNECT_TIMEOUT}]
+
+
 def test_another_backend_declares_what_its_feature_flags_allow():
     class Features:
         has_select_for_update = True
@@ -241,6 +255,8 @@ def test_database_keys():
     assert database_key(sqlite_profile(NAME=":memory:")) is None
     assert database_key(sqlite_profile(NAME="file:memdb?mode=memory")) is None
     assert database_key(sqlite_profile(NAME="file:memdb?mode=memory&cache=shared")) is None
+    assert database_key(sqlite_profile(NAME="file::memory:")) is None
+    assert database_key(sqlite_profile(NAME="file::memory:?cache=shared")) is None
     assert database_key(sqlite_profile(NAME="file:/srv/data/clubs.sqlite3?mode=ro")) == (
         "sqlite",
         "file:/srv/data/clubs.sqlite3?mode=ro",

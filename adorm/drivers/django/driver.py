@@ -53,6 +53,7 @@ from adorm.drivers.django.vendors import (
     PostgreSQL,
     PSYCOPG2_CAPABILITIES,
     READ_CAPABILITIES,
+    sqlite_interrupted,
     TRANSACTION_ENDED,
     Vendor,
     vendor as vendor_named,
@@ -443,6 +444,10 @@ class DjangoConnection(ThreadedConnection):
         return super().is_usable() and (self._test is None or self._test.current())
 
     def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
+        if self._cancelled() and not str(sql).lstrip().upper().startswith("ROLLBACK"):
+            # SQLite: interrupt() reaches a running statement only, the progress handler a long one only.
+            with self.db.wrap_database_errors:
+                raise sqlite_interrupted()
         if not self.ran_custom_sql and _custom_sql_call(sys._getframe(1), self._trusted, _ENTRIES):
             self.mark_custom_sql()
         return execute(sql, params, many, context)
@@ -501,7 +506,8 @@ class DjangoConnection(ThreadedConnection):
             atomic.__enter__()
 
     def _cancelled(self) -> bool:
-        """Whether the running call is cancelled (``cancel_sync()``); SQLite's progress handler."""
+        """Whether the running call is cancelled (``cancel_sync()``): SQLite's progress handler and the check before
+        each statement."""
         call = self._cancelled_call
         return call is not None and call is self._current
 

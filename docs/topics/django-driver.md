@@ -11,8 +11,7 @@ The Django driver executes:
 - the connection options of [`POSTGRESQL_OPTIONS`](/ref/drivers#adorm-drivers-sql-postgresql-options) on PostgreSQL.
 
 It runs on PostgreSQL, SQLite, MySQL, MariaDB, Oracle and other Django backends; what a database cannot do is not
-declared ([databases](#databases)). The test suite runs on PostgreSQL and SQLite. Driver methods raise
-`NotSupportedError` before anything runs.
+declared ([databases](#databases)). The test suite runs on PostgreSQL and SQLite.
 :::
 
 [`DjangoDriver`](/ref/drivers#adorm-drivers-django-djangodriver) executes adorm operations with Django's ORM. It is
@@ -164,11 +163,9 @@ SQLite has one writer at a time beside any number of readers.
 
 - A slot's connection switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file): readers
   run while a transaction writes and see the last committed state.
-- Every transaction begins with `BEGIN IMMEDIATE` (`OPTIONS["transaction_mode"]`, Django 5.1 and newer): it holds the
-  write lock from its start to its end, whether it writes or not. A write outside a transaction runs in a transaction
-  of its own that begins the same way.
-- A [driver method](/topics/managers#driver-methods) outside a transaction also runs in a transaction of its own
-  and holds the write lock from its start to its end, whether it writes or not.
+- Every transaction begins with `BEGIN IMMEDIATE` (`OPTIONS["transaction_mode"]`): it holds the write lock from its
+  start to its end, whether it writes or not. A write or a [driver method](/topics/managers#driver-methods) outside a
+  transaction runs in a transaction of its own that begins the same way.
 - A transaction or write that finds the lock taken waits for it in the slot, for as long as the busy timeout
   (`OPTIONS["timeout"]`, 5 seconds by default), then raises `OperationalError` `database is locked`. The slot stays in
   the pool. Cancelling the task ends the wait at once.
@@ -176,7 +173,8 @@ SQLite has one writer at a time beside any number of readers.
   included: every further operation of the transaction and of its enclosing blocks raises
   `TransactionManagementError` (`OperationalError` `TRANSACTION_ENDED` as the cause), and the outermost block rolls
   back. A cancelled read rolls back nothing.
-- An in-memory database (`":memory:"`, `mode=memory`) raises `NotSupportedError`: a private one is visible to its own
+- Before Django 5.1, which has no `transaction_mode`, and for an in-memory database (`":memory:"`, `file::memory:`,
+  `mode=memory`) a slot's connection raises `NotSupportedError`: a private in-memory database is visible to its own
   connection only, and none has WAL.
 
 ```python
@@ -323,7 +321,7 @@ overrides, Django's signals and the overrides of the query's manager run as in D
 | adorm | Django |
 |---|---|
 | `Model.objects.create(**values)` | `create(**values)` of `_base_manager`, or of the manager the query names (`Query.manager`), so its `create()` override receives arguments that are not fields |
-| `Model.objects.bulk_create(objs, ...)` | `bulk_create([Model(**values), ...], batch_size=..., ignore_conflicts=..., update_conflicts=..., update_fields=..., unique_fields=...)` of `_base_manager` or of the query's manager: Django inserts the rows without `save()` and without signals, in one statement per batch (several in one atomic block), and sets the primary keys PostgreSQL returns |
+| `Model.objects.bulk_create(objs, ...)` | `bulk_create([Model(**values), ...], batch_size=..., ignore_conflicts=..., update_conflicts=..., update_fields=..., unique_fields=...)` of `_base_manager` or of the query's manager: Django inserts the rows without `save()` and without signals, in one statement per batch (several in one atomic block), and sets the primary keys the database returns (`can_return_rows_from_bulk_insert`; none on MySQL) |
 | `obj.save()` of a new instance (no primary key, or `force_insert`) | `Model(**values).save()` |
 | `obj.save()` with a primary key | the instance with the adorm instance's fields loaded and the others deferred, then `save()`: Django updates only the loaded fields |
 | `obj.save(update_fields=[...])`, `force_update=True` | `save(update_fields=[...])`, `save(force_update=True)`: a missing row raises `DatabaseError` |
@@ -596,8 +594,8 @@ Cancelling the task that awaits an operation cancels the running statement from 
 | Database | The driver | The statement ends with |
 |---|---|---|
 | PostgreSQL | psycopg's `cancel_safe()` (`cancel()` on psycopg 2) | SQLSTATE `57014` |
-| SQLite | `interrupt()`; a progress handler stops a statement the call starts after it; a wait for the write lock ends | `SQLITE_INTERRUPT`, or `LOCK_WAIT_CANCELLED` |
-| MySQL, MariaDB | `KILL QUERY` on a connection opened for each cancellation (with the profile's `connect` hook when it has one); the database may refuse it when it is at `max_connections` | error 1317 |
+| SQLite | `interrupt()`; a statement the call starts after it, other than a `ROLLBACK`, raises before it runs; a wait for the write lock ends | `SQLITE_INTERRUPT`, or `LOCK_WAIT_CANCELLED` |
+| MySQL, MariaDB | `KILL QUERY` on a connection opened for each cancellation (with the profile's `connect` hook when it has one, else with a 5-second connect timeout); a connection that cannot open, as at `max_connections`, loses the cancellation | error 1317 |
 | Oracle | the driver's `cancel()` | `ORA-01013` |
 | another backend | nothing: the call runs on, and after the driver's `cancel_grace` seconds the slot gives up its connection | |
 

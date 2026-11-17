@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 import itertools
+import logging
 import os
 import re
 import time
@@ -30,9 +31,12 @@ from adorm.drivers.sql import POSTGRESQL_OPTIONS
 from adorm.events import CONNECTION_LOST, NOTICE, NOTIFY
 from adorm.exceptions import Error, NotSupportedError, OperationalError
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "CAPABILITIES",
     "LOCK_WAIT_CANCELLED",
+    "MYSQL_CANCEL_CONNECT_TIMEOUT",
     "MYSQL_CAPABILITIES",
     "ORACLE_CAPABILITIES",
     "POSTGRESQL_ONLY",
@@ -50,6 +54,7 @@ __all__ = [
     "is_refusal",
     "sqlite_error_code",
     "sqlite_integrity_details",
+    "sqlite_interrupted",
     "vendor",
 ]
 
@@ -335,7 +340,7 @@ class Vendor:
 
     def check_types(self) -> bool:
         """Whether the schema check compares column types: the catalogue reports them as Django's ``db_type()``
-        spells them."""
+        spells them; ``False`` here."""
         return False
 
     def columns(self, db: Any, cursor: Any, table: Any) -> list[tuple[Any, ...]]:
@@ -430,6 +435,16 @@ def sqlite_error_code(exc: BaseException) -> int | None:
     return None
 
 
+def sqlite_interrupted() -> BaseException:
+    """The ``sqlite3.OperationalError`` of a statement ``interrupt()`` stopped (``SQLITE_INTERRUPT``)."""
+    import sqlite3
+
+    exc = sqlite3.OperationalError("interrupted")
+    exc.sqlite_errorcode = SQLITE_INTERRUPT  # type: ignore[attr-defined]
+    exc.sqlite_errorname = "SQLITE_INTERRUPT"  # type: ignore[attr-defined]
+    return exc
+
+
 def sqlite_integrity_details(message: str) -> dict[str, Any]:
     """The keyword arguments of `adorm.IntegrityError` that SQLite's constraint message ``message`` gives: the table
     and columns of a ``UNIQUE`` or ``NOT NULL`` violation (``"UNIQUE constraint failed: t.a, t.b"``), the
@@ -460,7 +475,8 @@ class SQLite(Vendor):
     every transaction with ``BEGIN IMMEDIATE`` (``OPTIONS["transaction_mode"]``, Django 5.1 and newer). A transaction
     and a write outside one take the write lock when they begin; `DjangoConnection` waits for it itself, for as long
     as the connection's busy timeout (``OPTIONS["timeout"]``, 5 seconds by default), and a cancellation ends the wait.
-    A running statement is cancelled with ``interrupt()``; a statement the cancelled call starts later stops at once.
+    A running statement is cancelled with ``interrupt()``; a statement the cancelled call starts later, but a
+    ``ROLLBACK``, raises `sqlite_interrupted()` before it runs.
     """
 
     name = "sqlite"
@@ -513,9 +529,12 @@ class SQLite(Vendor):
 
     def database_key(self, entry: Mapping[str, Any]) -> Any:
         name = str(entry.get("NAME") or "")
-        if name in ("", ":memory:") or "mode=memory" in name:
+        if name in ("", ":memory:"):
             return None
         if name.startswith("file:"):
+            path, _, query = name[5:].partition("?")
+            if path == ":memory:" or "mode=memory" in query:
+                return None
             return ("sqlite", name)
         return ("sqlite", os.path.realpath(name))
 
@@ -566,6 +585,10 @@ _MYSQL_FOREIGN_KEY = re.compile(
 )
 
 
+MYSQL_CANCEL_CONNECT_TIMEOUT = 5
+"""The connect timeout, in seconds, of the connection `MySQL.cancel()` opens with the wrapper's parameters."""
+
+
 class MySQL(Vendor):
     """MySQL and MariaDB: cancellation with ``KILL QUERY`` on a connection of its own, errors by MySQL's error
     numbers."""
@@ -576,11 +599,21 @@ class MySQL(Vendor):
         return MYSQL_CAPABILITIES
 
     def cancel(self, connection: Any, raw: Any) -> None:
-        """Run ``KILL QUERY`` on a connection of its own, opened with the profile's ``connect`` hook when it has one."""
+        """Run ``KILL QUERY`` on a connection of its own, opened with the profile's ``connect`` hook when it has one,
+        else with the wrapper's parameters and a connect timeout of `MYSQL_CANCEL_CONNECT_TIMEOUT`. A connection that
+        cannot open loses the cancellation: the call ends with its statement or after ``cancel_grace``."""
         db = connection.db
         profile = getattr(connection, "profile", None)
         connect = getattr(profile, "connect", None)
-        killer = connect(profile) if connect is not None else db.get_new_connection(db.get_connection_params())
+        try:
+            if connect is not None:
+                killer = connect(profile)
+            else:
+                params = {**db.get_connection_params(), "connect_timeout": MYSQL_CANCEL_CONNECT_TIMEOUT}
+                killer = db.get_new_connection(params)
+        except Exception:
+            logger.warning("MySQL: cannot open a connection to cancel a statement", exc_info=True)
+            return
         try:
             cursor = killer.cursor()
             cursor.execute(f"KILL QUERY {int(raw.thread_id())}")

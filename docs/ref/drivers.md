@@ -1007,7 +1007,7 @@ profile's database.
 | Vendor | Capabilities | Cancellation | Errors | Tested |
 |---|---|---|---|---|
 | `postgresql` | [`CAPABILITIES`](#adorm-drivers-django-capabilities) (psycopg 2: `PSYCOPG2_CAPABILITIES`) | psycopg's cancel request | SQLSTATE; psycopg's diagnostics | in CI |
-| `sqlite` | [`SQLITE_CAPABILITIES`](#adorm-drivers-django-vendors-sqlite-capabilities) | `interrupt()`, a progress handler, the end of a lock wait | `sqlite3` result codes; the table and columns of the constraint message | in CI (`tests.djangoproject.settings_sqlite`) |
+| `sqlite` | [`SQLITE_CAPABILITIES`](#adorm-drivers-django-vendors-sqlite-capabilities) | `interrupt()`, a progress handler, a check before each statement, the end of a lock wait | `sqlite3` result codes; the table and columns of the constraint message | in CI (`tests.djangoproject.settings_sqlite`) |
 | `mysql` (MySQL, MariaDB) | [`MYSQL_CAPABILITIES`](#adorm-drivers-django-vendors-mysql-capabilities) | `KILL QUERY` on a connection opened per cancellation | MySQL's error numbers; key, column and constraint from the message | no |
 | `oracle` | [`ORACLE_CAPABILITIES`](#adorm-drivers-django-vendors-oracle-capabilities) | the driver's `cancel()` | `ORA-` numbers; constraint, table and column from the message | no |
 | any other | [`features_capabilities()`](#adorm-drivers-django-vendors-features-capabilities-features) of its features class | none | PEP 249 class names; no details | no |
@@ -1053,7 +1053,7 @@ SQLite allows one writer at a time beside any number of readers.
 
 - `slot_settings()` sets `OPTIONS["transaction_mode"]` to `IMMEDIATE` (an `EXCLUSIVE` one stays): every transaction
   takes the write lock when it begins. `check_settings()` raises `NotSupportedError` before Django 5.1, which has no
-  `transaction_mode`, and for an in-memory database (`":memory:"`, `mode=memory`), which has no WAL and, unless
+  `transaction_mode`, and for an in-memory database (`":memory:"`, `file::memory:`, `mode=memory`), which has no WAL and, unless
   it is a shared cache, is visible to its own connection only.
 - `connected()` switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file), so reads run
   beside the writer, and installs a progress handler that stops the statements of a
@@ -1063,7 +1063,9 @@ SQLite allows one writer at a time beside any number of readers.
   `SQLITE_LOCKED`), until the connection's busy timeout (`PRAGMA busy_timeout`) passes, with it set to 0 meanwhile
   and restored afterwards.
 - `cancel()` ends a wait for the write lock (`OperationalError` [`LOCK_WAIT_CANCELLED`](#adorm-drivers-django-vendors-lock-wait-cancelled))
-  and calls `interrupt()`; `interrupt()` before a statement starts is lost, the progress handler stops it.
+  and calls `interrupt()`; `interrupt()` before a statement starts is lost, so a statement the cancelled call starts
+  later, other than a `ROLLBACK`, raises [`sqlite_interrupted()`](#adorm-drivers-django-vendors-sqlite-interrupted)
+  before it runs.
 - `is_cancellation()`: `SQLITE_INTERRUPT` or `LOCK_WAIT_CANCELLED`. `is_connection_lost()`: never an
   `OperationalError` (a lock, a full disk), as SQLite has no server connection. `transaction_ended()`: the
   connection is no longer in a transaction, as after an interrupted `INSERT`, `UPDATE` or `DELETE`, which rolls back
@@ -1075,7 +1077,9 @@ SQLite allows one writer at a time beside any number of readers.
 #### `adorm.drivers.django.vendors.MySQL`
 
 MySQL and MariaDB. `cancel()` opens a connection, with the profile's `connect` hook when it has one, else with the
-wrapper's `get_connection_params()`, runs `KILL QUERY <thread_id>` and closes it; `backend_pid` is the connection id. Error 1317 is a cancellation; 2006, 2013 and 2055 a
+wrapper's `get_connection_params()` and `connect_timeout` [`MYSQL_CANCEL_CONNECT_TIMEOUT`](#adorm-drivers-django-vendors-mysql-cancel-connect-timeout)
+(5 seconds), runs `KILL QUERY <thread_id>` and closes it; a connection that cannot open is logged and the cancellation
+lost; `backend_pid` is the connection id. Error 1317 is a cancellation; 2006, 2013 and 2055 a
 lost connection, other operational errors not. `integrity_details()` reads the key name and value of a duplicate
 entry (1062), the column of a null violation (1048) and the table, constraint and columns of a foreign key (1451,
 1452). Untested: no CI service runs MySQL.
@@ -1114,6 +1118,15 @@ name does not tell MariaDB apart without connecting), `clause.select_for_update.
 
 The message of the `OperationalError` a write on SQLite ends with when its call is cancelled while it waits for the
 write lock; the caller gets `CancelledError`.
+
+#### `adorm.drivers.django.vendors.MYSQL_CANCEL_CONNECT_TIMEOUT`
+
+The connect timeout, in seconds, of the connection `MySQL.cancel()` opens with the wrapper's parameters: `5`.
+
+#### `adorm.drivers.django.vendors.sqlite_interrupted()`
+
+A `sqlite3.OperationalError` with `sqlite_errorcode` `SQLITE_INTERRUPT`, the error of a statement `interrupt()`
+stopped; a statement of a cancelled call raises it, wrapped by Django, before it runs.
 
 #### `adorm.drivers.django.vendors.TRANSACTION_ENDED`
 

@@ -279,7 +279,7 @@ async def test_cancelling_a_running_statement_interrupts_it(sqlite, many_members
 
 async def test_a_cancellation_racing_the_start_of_the_statement_stops_it(sqlite, many_members):  # noqa: ARG001
     """The cancellation reaches the call at every point from its start to the statement's: interrupt() before the
-    statement runs is lost, so the progress handler stops it."""
+    statement runs is lost, and the statement raises before it runs."""
     pool = sqlite()
     pool.driver.cancel_grace = 30
     assert await Club.objects.count() == 3
@@ -293,6 +293,37 @@ async def test_a_cancellation_racing_the_start_of_the_statement_stops_it(sqlite,
                 await task
         assert (pool.size, pool.in_use) == (1, 0)
     assert await Club.objects.count() == 3
+
+
+@pytest.mark.parametrize("repeat", REPEAT)
+async def test_a_cancellation_between_the_statements_of_a_call_stops_the_next_one(sqlite, repeat):  # noqa: ARG001
+    """A short statement after the cancellation does not reach the progress handler; it does not run either."""
+    pool = sqlite()
+    assert await Club.objects.count() == 3
+    (connection,) = pool.driver.connections
+    selected = threading.Event()
+
+    def pause_after_select(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if sql.lstrip().upper().startswith("SELECT") and not selected.is_set():
+            selected.set()
+            assert connection._lock_wake.wait(10)  # set by the cancellation
+        return result
+
+    connection.db.execute_wrappers.append(pause_after_select)
+    try:
+        task = asyncio.create_task(
+            Club.objects.get_or_create(slug="new-club", defaults={"name": "New", "city": "Ptuj", "founded": FOUNDED})
+        )
+        assert await in_thread(lambda: selected.wait(10))
+        task.cancel()
+        async with asyncio.timeout(5):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    finally:
+        connection.db.execute_wrappers.remove(pause_after_select)
+    assert (pool.size, pool.in_use) == (1, 0)
+    assert await Club.objects.filter(slug="new-club").count() == 0
 
 
 @pytest.mark.parametrize("repeat", range(3))
@@ -404,7 +435,9 @@ async def test_a_deferred_foreign_key_fails_at_commit_and_rolls_back(sqlite):
     assert pool.in_use == 0
 
 
-@pytest.mark.parametrize("name", [":memory:", "file:shared?mode=memory&cache=shared"])
+@pytest.mark.parametrize(
+    "name", [":memory:", "file:shared?mode=memory&cache=shared", "file::memory:", "file::memory:?cache=shared"]
+)
 async def test_an_in_memory_database_is_refused(sqlite, name):
     pool = sqlite(NAME=name)
     with pytest.raises(adorm.NotSupportedError, match="needs a SQLite database file"):
