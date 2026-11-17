@@ -11,8 +11,10 @@ import '@dynamicforms/vuetify-inputs/styles.css';
 import '@dynamicforms/vue-grid/styles.css';
 
 import App from './app.vue';
+import { initialTheme } from './preferences';
+import './highlight.css';
 
-const vuetify = createVuetify({ components, directives, theme: { defaultTheme: 'light' } });
+const vuetify = createVuetify({ components, directives, theme: { defaultTheme: initialTheme() } });
 
 createApp(App)
   .use(vuetify)

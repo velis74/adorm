@@ -1,0 +1,49 @@
+/* highlight.js token colours for the light and the dark Vuetify theme. */
+.v-theme--light {
+  --hl-keyword: #8b1fa8;
+  --hl-string: #1a7f37;
+  --hl-number: #b35900;
+  --hl-comment: #6e7781;
+  --hl-title: #0550ae;
+  --hl-built-in: #953800;
+  --hl-meta: #6639ba;
+}
+
+.v-theme--dark {
+  --hl-keyword: #d2a8ff;
+  --hl-string: #7ee787;
+  --hl-number: #ffa657;
+  --hl-comment: #8b949e;
+  --hl-title: #79c0ff;
+  --hl-built-in: #ffa198;
+  --hl-meta: #bc8cff;
+}
+
+.hljs-tokens .hljs-keyword,
+.hljs-tokens .hljs-literal,
+.hljs-tokens .hljs-operator {
+  color: var(--hl-keyword);
+}
+.hljs-tokens .hljs-string,
+.hljs-tokens .hljs-subst {
+  color: var(--hl-string);
+}
+.hljs-tokens .hljs-number {
+  color: var(--hl-number);
+}
+.hljs-tokens .hljs-comment {
+  color: var(--hl-comment);
+  font-style: italic;
+}
+.hljs-tokens .hljs-title,
+.hljs-tokens .hljs-title.function_,
+.hljs-tokens .hljs-title.class_ {
+  color: var(--hl-title);
+}
+.hljs-tokens .hljs-built_in,
+.hljs-tokens .hljs-type {
+  color: var(--hl-built-in);
+}
+.hljs-tokens .hljs-meta {
+  color: var(--hl-meta);
+}

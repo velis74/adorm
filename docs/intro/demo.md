@@ -9,6 +9,10 @@ launcher `demo.py`. It runs every example and scenario on every available driver
 - **Concurrency**: flows in concurrent tasks, each in a session of its own, with what every flow saw and when, the SQL
   of every flow and each flow's outcome.
 
+A collapsible header under the title bar describes the demo; it is open on the first visit and closed on later ones
+unless it was left open. Code and SQL are syntax-highlighted; the theme follows the system's colour scheme until it is
+switched in the title bar. Both settings are stored in the browser.
+
 ## Running it
 
 The demo needs PostgreSQL and a dedicated database user with `CREATEDB`, not a superuser. `ADORM_DEMO_DATABASE_URL`
@@ -59,7 +63,7 @@ Setup, before serving:
 | `demo/api/capture.py` | recording of the SQL each driver sends, attributed to sessions |
 | `demo/api/drivers.py` | the drivers and their connection profiles |
 | `demo/api/main.py` | the FastAPI app |
-| `demo/frontend/` | Vite, Vue 3, Vuetify, `@dynamicforms/vue-forms`, `@dynamicforms/vue-grid` and `@dynamicforms/vuetify-inputs` (npm workspace `adorm-demo-frontend`) |
+| `demo/frontend/` | Vite, Vue 3, Vuetify, `@dynamicforms/vue-forms`, `@dynamicforms/vue-grid`, `@dynamicforms/vuetify-inputs` and highlight.js (npm workspace `adorm-demo-frontend`) |
 | `demo/e2e/` | Playwright tests of the frontend (npm workspace `adorm-demo-e2e`) |
 | `tests/demo/` | the API on every available driver, through `demo.py` |
 

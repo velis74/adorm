@@ -1,9 +1,19 @@
 <template>
-  <pre class="code-block" :data-testid="testid"><code>{{ code }}</code></pre>
+  <!-- highlight() escapes the code -->
+  <pre class="code-block hljs-tokens" :data-testid="testid"><code v-html="html" /></pre>
 </template>
 
 <script setup lang="ts">
-defineProps<{ code: string; testid?: string }>();
+import { computed } from 'vue';
+
+import { highlight, type Language } from './highlight';
+
+const props = withDefaults(defineProps<{ code: string; language?: Language; testid?: string }>(), {
+  language: 'python',
+  testid: undefined,
+});
+
+const html = computed(() => highlight(props.code, props.language));
 </script>
 
 <style scoped>

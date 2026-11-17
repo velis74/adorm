@@ -9,7 +9,8 @@
         <span>at {{ statement.at_ms.toFixed(1) }} ms</span>
         <span>· {{ statement.duration_ms.toFixed(2) }} ms</span>
       </div>
-      <pre class="sql">{{ statement.sql.trim() }}</pre>
+      <!-- highlight() escapes the SQL -->
+      <pre class="sql hljs-tokens" v-html="highlight(statement.sql.trim(), 'sql')" />
       <div v-if="statement.params.length" class="text-caption text-medium-emphasis params">
         params: {{ statement.params.map((p) => JSON.stringify(p)).join(', ') }}
       </div>
@@ -22,6 +23,7 @@
 import type { Statement } from '../api';
 
 import { sessionColor } from './colors';
+import { highlight } from './highlight';
 
 defineProps<{ statements: Statement[]; showSession?: boolean }>();
 </script>

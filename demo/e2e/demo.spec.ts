@@ -31,6 +31,33 @@ test('the header lists both drivers as available', async ({ page }) => {
   await expect(page.getByTestId('driver-asyncpg')).toContainText('async');
 });
 
+test('the introduction is open on the first visit, closed on the next, and opens again', async ({ page }) => {
+  await expect(page.getByTestId('intro-text')).toBeVisible();
+  await expect(page.getByTestId('intro-text')).toContainText('django, asyncpg');
+  await page.reload();
+  await expect(page.getByTestId('intro-text')).toBeHidden();
+  await page.getByTestId('intro-toggle').click();
+  await expect(page.getByTestId('intro-text')).toBeVisible();
+  await page.reload();
+  await expect(page.getByTestId('intro-text')).toBeVisible();
+});
+
+test('the theme switches between light and dark and stays after a reload', async ({ page }) => {
+  const app = page.locator('.v-application');
+  const light = await app.evaluate((element) => element.classList.contains('v-theme--light'));
+  await page.getByTestId('theme-toggle').click();
+  await expect(app).toHaveClass(light ? /v-theme--dark/ : /v-theme--light/);
+  await page.reload();
+  await expect(app).toHaveClass(light ? /v-theme--dark/ : /v-theme--light/);
+});
+
+test('code and SQL are highlighted', async ({ page }) => {
+  await expect(page.getByTestId('example-code').locator('.hljs-keyword').first()).toContainText(/async|def|await/);
+  await page.getByTestId('run-example').click();
+  const statement = run(page, (await availableDrivers(page))[0]).getByTestId('sql-statement').first();
+  await expect(statement.locator('.hljs-keyword').first()).toContainText(/SELECT|BEGIN/i);
+});
+
 test('every example runs on every driver with its code, SQL, result and time', async ({ page }) => {
   const drivers = await availableDrivers(page);
   const items = page.getByTestId('example-list').getByRole('listitem');

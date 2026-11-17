@@ -50,8 +50,8 @@
           <v-card variant="outlined" :data-testid="`run-${driverRun.driver}`">
             <v-card-title class="d-flex align-center ga-2 text-subtitle-1">
               <span class="font-weight-bold">{{ driverRun.driver }}</span>
-              <v-chip size="small" data-testid="run-time">{{ driverRun.ms.toFixed(1) }} ms</v-chip>
-              <v-chip size="small" variant="tonal">{{ driverRun.statements.length }} statements</v-chip>
+              <v-chip size="small" data-testid="run-time" title="Time of this run, SQL included; not a benchmark">{{ driverRun.ms.toFixed(1) }} ms</v-chip>
+              <v-chip size="small" variant="tonal">{{ driverRun.statements.length }} {{ driverRun.statements.length === 1 ? 'statement' : 'statements' }}</v-chip>
             </v-card-title>
             <v-card-text>
               <div class="text-overline">Result</div>
