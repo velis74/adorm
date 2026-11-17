@@ -630,8 +630,11 @@ Inside Django's `TestCase` the slots share the test's connection, and a transact
 transaction. Inside `TransactionTestCase` they open their own connections. See [Testing](/topics/testing).
 
 On SQLite a `TransactionTestCase` needs a test database file (`DATABASES[alias]["TEST"]["NAME"]`): Django's default
-test database is in memory, which the driver refuses ([SQLite](#sqlite)). Inside a `TestCase` on SQLite, a cancelled
-write rolls back the test's transaction, with the test data of `setUpTestData()`.
+test database is in memory, which the driver refuses ([SQLite](#sqlite)). Inside a `TestCase` on SQLite a running
+`INSERT`, `UPDATE` or `DELETE` is not interrupted by a cancellation, since SQLite would roll back the test's whole
+transaction with the data of `setUpTestData()`: it finishes, and the operation's later statements do not run. When
+the database ends the test's transaction nonetheless, the operation raises `OperationalError`
+[`TESTCASE_TRANSACTION_ENDED`](/ref/testing#adorm-testing-django-testcase-transaction-ended).
 
 ```python
 class MemberTests(TestCase):

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 __all__ = [
     "NO_NOTIFICATIONS",
     "QUERY_CANCELED",
+    "TESTCASE_TRANSACTION_ENDED",
     "SharedConnectionMixin",
     "SharedTestConnection",
     "TestDatabase",
@@ -47,6 +48,12 @@ __all__ = [
 ]
 
 logger = logging.getLogger("adorm.testing")
+
+TESTCASE_TRANSACTION_ENDED = (
+    "the database rolled back the transaction of Django's TestCase, with the data of setUpTestData(); the test and "
+    "the following tests of its class cannot run queries"
+)
+"""The message of the `OperationalError` an operation raises when the database ended the test's transaction."""
 
 QUERY_CANCELED = "57014"
 """The SQLSTATE of a call cancelled while it waited for the shared test connection, as of a cancelled statement."""
@@ -231,7 +238,11 @@ class SharedTestConnection:
 
     def _owner_cancelled(self) -> bool:
         owner = self.owner
-        return isinstance(owner, SharedConnectionMixin) and owner._cancelled()  # type: ignore[attr-defined]
+        return (
+            isinstance(owner, SharedConnectionMixin)
+            and owner._cancelled()  # type: ignore[attr-defined]
+            and not owner._running_write
+        )
 
     def _on_notice(self, diagnostic: Any) -> None:
         owner = self.owner
@@ -499,6 +510,7 @@ class SharedConnectionMixin:
         self._sharing = False
         self._attached = False
         self._previous: Any = None
+        self._running_write = False
 
     @property
     def holds_session(self) -> bool:
@@ -533,7 +545,26 @@ class SharedConnectionMixin:
         super().after_call_sync(held)  # type: ignore[misc]
 
     def cancel_sync(self) -> None:
-        self._shared.cancel(self, super().cancel_sync)  # type: ignore[misc]
+        self._shared.cancel(self, self._cancel_running)
+
+    def _cancel_running(self) -> None:
+        """On SQLite a running ``INSERT``, ``UPDATE`` or ``DELETE`` is not interrupted: SQLite would roll back the
+        test's whole transaction. It finishes, and the call's later statements are refused."""
+        if self.vendor.writes_wait_for_lock:  # type: ignore[attr-defined]
+            self._cancelled_call = self._current
+            if self._running_write:
+                return
+        super().cancel_sync()  # type: ignore[misc]
+
+    def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
+        # Set before the check of a cancellation in DjangoConnection._watch_sql(): a cancellation either sees the
+        # write or is seen by that check.
+        previous = self._running_write
+        self._running_write = _is_write(sql)
+        try:
+            return super()._watch_sql(execute, sql, params, many, context)  # type: ignore[misc]
+        finally:
+            self._running_write = previous
 
     def _watch_backend(self) -> None:
         self._shared.watch_backend()
@@ -646,8 +677,19 @@ class SharedConnectionMixin:
         from django.db import transaction
 
         self._check_isolated("operation")
-        with transaction.atomic(using=self.alias):
-            return super().execute_sync(operation)  # type: ignore[misc]
+        try:
+            with transaction.atomic(using=self.alias):
+                return super().execute_sync(operation)  # type: ignore[misc]
+        except BaseException as exc:
+            self._check_test_transaction(exc)
+            raise
+
+    def _check_test_transaction(self, exc: BaseException) -> None:
+        """Raise `OperationalError` `TESTCASE_TRANSACTION_ENDED` from ``exc`` when the database ended the test's
+        transaction (SQLite after an interrupted write)."""
+        raw = self.db.connection
+        if raw is not None and self._shared.test.current() and self.vendor.transaction_ended(raw):  # type: ignore[attr-defined]
+            raise OperationalError(TESTCASE_TRANSACTION_ENDED) from exc
 
     def _recover(self) -> None:
         """Roll back to the innermost savepoint of the failed transaction, so that the test's transaction is usable."""
@@ -796,6 +838,10 @@ class SharedConnectionMixin:
         if self._atomic is not None:
             options.update(self._local_options)
         return {name: value for name, value in options.items() if value is not None}
+
+
+def _is_write(sql: Any) -> bool:
+    return str(sql).lstrip()[:7].upper().startswith(("INSERT", "UPDATE", "DELETE", "REPLACE"))
 
 
 @functools.cache

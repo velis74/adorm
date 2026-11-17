@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from django.db import connections
 from django.test import TestCase
 
 import adorm
@@ -557,6 +558,91 @@ class SharedConnectionOnSQLiteTests(TestCase):
             assert await Club.objects.count() == 3
 
         await self.run_on_pool(test, max_connections=1)
+
+    async def test_cancelled_writes_finish_and_leave_the_test_transaction(self):
+        """SQLite rolls back the whole transaction after an interrupted write: a write on the shared connection is not
+        interrupted, outside and inside an adorm transaction. The update of 2000 rows pauses at the first one."""
+
+        async def test(pool):
+            assert await Club.objects.count() == 3
+            (slot,) = pool._slots
+            connection = slot.connection
+            raw = connection.db.connection
+            paused, cancelled = threading.Event(), threading.Event()
+
+            def pause() -> int:
+                if not paused.is_set():
+                    paused.set()
+                    assert cancelled.wait(10)
+                return 0
+
+            def install() -> None:
+                raw.create_function("adorm_pause", 0, pause)
+                with connections["default"].cursor() as cursor:
+                    cursor.execute(
+                        "CREATE TEMP TRIGGER adorm_pause_update BEFORE UPDATE ON clubs_member "
+                        "BEGIN SELECT adorm_pause(); END"
+                    )
+
+            await in_thread_sensitive(install)
+            cancel_sync = connection.cancel_sync
+
+            def cancel_and_report() -> None:
+                cancel_sync()
+                cancelled.set()
+
+            connection.cancel_sync = cancel_and_report
+
+            async def in_transaction(level):
+                async with adorm.atomic():
+                    await Member.objects.update(level=level)
+
+            try:
+                for attempt in REPEAT:
+                    for inside in (False, True):
+                        paused.clear()
+                        cancelled.clear()
+                        level = f"{'in' if inside else 'out'}-{attempt}"
+                        write = in_transaction(level) if inside else Member.objects.update(level=level)
+                        task = asyncio.create_task(write)
+                        assert await in_thread(lambda: paused.wait(10))
+                        task.cancel()
+                        async with asyncio.timeout(5):
+                            with pytest.raises(asyncio.CancelledError) as raised:
+                                await task
+                        assert (pool.size, pool.in_use) == (1, 0)
+                        if not inside:
+                            assert cancellation_outcome(raised.value) is CancellationOutcome.SUCCEEDED
+                            assert await Member.objects.filter(level=level).count() == 2000
+                        assert await in_thread_sensitive(lambda: raw.in_transaction)
+                        assert await Club.objects.count() == 3
+                        assert await Member.objects.count() == 2000
+            finally:
+                del connection.cancel_sync
+                await in_thread_sensitive(drop_pause_trigger)
+
+        await self.run_on_pool(test, max_connections=1)
+
+    async def test_data_is_intact_after_the_cancelled_writes(self):
+        """Runs after the test above: the class's data of setUpTestData() is still there."""
+
+        async def test(pool):  # noqa: ARG001
+            assert await Club.objects.count() == 3
+            assert await Member.objects.filter(last_name="0").count() == 1
+
+        await self.run_on_pool(test, max_connections=1)
+
+
+def drop_pause_trigger() -> None:
+    with connections["default"].cursor() as cursor:
+        cursor.execute("DROP TRIGGER IF EXISTS adorm_pause_update")
+
+
+async def in_thread_sensitive(fn):
+    """``fn()`` on the thread of the test's connection (Django's ``sync_to_async``)."""
+    from asgiref.sync import sync_to_async
+
+    return await sync_to_async(fn, thread_sensitive=True)()
 
 
 async def test_a_query_django_refuses_before_any_sql_leaves_the_transaction_usable(sqlite):
