@@ -411,10 +411,9 @@ class PostgreSQL(Vendor):
         return int(pid) if pid else None
 
     def cancelled_error(self, db: Any) -> BaseException:
-        if _is_psycopg3():
-            from psycopg.errors import QueryCanceled
-
-            return QueryCanceled("canceling statement due to user request")
+        errors = getattr(db.Database, "errors", None) if _is_psycopg3() else None
+        if errors is not None:
+            return errors.QueryCanceled("canceling statement due to user request")
         return super().cancelled_error(db)
 
     def is_cancellation(self, exc: BaseException) -> bool:
