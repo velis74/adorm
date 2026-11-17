@@ -13,19 +13,21 @@ import time
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 import adorm
 
 from adorm.settings import default_router
 from adorm.testing import wait_for_lock
-from demo.api.capture import CAPTURE, OBSERVER
+from demo.api.capture import CAPTURE, OBSERVER, Statement
 from demo.api.examples import source, TODAY
 from demo.models.library import Book, Edition, Loan, Reader
 
 RACE_ISBN = "9780000060002"
 OTHER_ISBN = "9780000070009"
 """Editions the scenarios lock; their ``available`` and the loans are restored after every run."""
+
+T = TypeVar("T")
 
 
 class Timeline:
@@ -36,6 +38,21 @@ class Timeline:
 
     def log(self, flow: str, text: str, kind: str = "info") -> None:
         self.events.append({"at_ms": round(CAPTURE.elapsed() * 1000, 1), "flow": flow, "kind": kind, "text": text})
+
+
+async def uninterrupted(awaitable: Awaitable[T]) -> T:
+    """Await ``awaitable`` in a task of its own until it ends, also when the current task is cancelled meanwhile; that
+    cancellation is raised once the task has ended."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if cancelled:
+        raise asyncio.CancelledError from (None if task.cancelled() else task.exception())
+    return task.result()
 
 
 def describe(exc: BaseException) -> dict[str, Any]:
@@ -432,25 +449,33 @@ async def restore(state: tuple[dict[str, int], int]) -> None:
 async def run_scenario(scenario: Scenario, driver: str) -> dict[str, Any]:
     """Run ``scenario`` on ``driver`` and return what every flow saw, the statements and the outcomes. When the
     choreography raises, or the run is cancelled, the flows still running are cancelled before the data is
-    restored."""
+    restored. Stopping the flows and the recording and restoring the data run to their end also when the run is
+    cancelled meanwhile."""
     using = f"{driver}-small" if scenario.small_pool else driver
     with adorm.create_session(driver, "setup").activate():
         state = await snapshot()
-        await Edition.objects.filter(isbn=RACE_ISBN).update(available=1)
     run = Run(using)
-    CAPTURE.start()
-    started = time.monotonic()
-    try:
-        try:
-            await scenario.choreography(run)
-        except BaseException:
+
+    async def end(failed: bool) -> list[Statement]:
+        if failed:
             await run.stop_flows()
-            raise
-    finally:
-        elapsed = time.monotonic() - started
         statements = await CAPTURE.stop()
         with adorm.create_session(driver, "setup").activate():
             await restore(state)
+        return statements
+
+    started = time.monotonic()
+    failed = True
+    try:
+        with adorm.create_session(driver, "setup").activate():
+            await Edition.objects.filter(isbn=RACE_ISBN).update(available=1)
+        CAPTURE.start()
+        started = time.monotonic()
+        await scenario.choreography(run)
+        failed = False
+    finally:
+        elapsed = time.monotonic() - started
+        statements = await uninterrupted(end(failed))
     return {
         "id": scenario.id,
         "driver": driver,

@@ -125,14 +125,15 @@ async def lend(isbn: str, reader: str) -> dict:
 | `desk_options` | a custom option from the profile's `on_acquire` hook (`SET`), overridden in a transaction by `connection_options()` (`SET LOCAL`) and reset outside one (`RESET`) |
 
 The writing examples commit; after each driver's run the demo reverts the writes with the example's `undo` coroutine,
-outside the recording.
+outside the recording. A run cancelled after the example returned still reverts its writes and ends the recording
+before the cancellation propagates.
 
 ## Concurrency scenarios
 
 Every scenario runs on each driver in turn. A flow is a coroutine function that takes `log` (records what it saw) and
 its arguments; the scenario starts the flows in tasks and lets them on at fixed points, observing the database with
 [`wait_for_lock()`](/ref/testing) and the pool's counters, so each run takes the same course. The data the scenarios
-change is restored after each run.
+change is restored after each run, also after a cancelled one.
 
 | Scenario | Flows | Outcome |
 |---|---|---|
@@ -197,10 +198,11 @@ curl -X POST http://127.0.0.1:8000/api/examples/search_books/run \
 
 `tests/demo` runs `demo.py` against the database `adorm_test_demo` on the server of `ADORM_TEST_DATABASE_URL` and
 drops it afterwards: the setup and its repetition, every example on every available driver with the same result,
-reverted writes, parameters and errors, each scenario three times per driver, and a scenario whose steering raises
-while a flow holds a lock. They skip when the user of `ADORM_TEST_DATABASE_URL` is a superuser.
-`ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated names) fails the suite when a listed driver is not available. A test
-checks that the demo's drivers include every driver class of `adorm.drivers`.
+reverted writes, parameters and errors, each scenario three times per driver, a scenario whose steering raises
+while a flow holds a lock, and example and scenario runs cancelled after their writes, which restore the data. They
+skip when the user of `ADORM_TEST_DATABASE_URL` is a superuser. `ADORM_DEMO_REQUIRED_DRIVERS` (comma-separated names)
+fails the suite when a listed driver is not available. A test checks that the demo's drivers include every driver
+class of `adorm.drivers`.
 
 The Playwright tests build the frontend and run `demo.py --frontend built` on the database `adorm_demo_e2e`, which
 they set up and drop:

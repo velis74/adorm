@@ -354,3 +354,21 @@ def test_a_failing_choreography_releases_its_flows(database):
         assert run["failed_ms"] < 5000
         assert run["flows_left"] == []
         assert run["race"] == {"A": "ok", "B": "error"}
+
+
+def test_a_cancelled_run_restores_the_data(database):
+    result = demo_module("tests.demo.cancelled_runs", database)
+    assert result.returncode == 0, result.stderr
+    runs = [json.loads(line) for line in result.stdout.splitlines()]
+    assert {run["kind"] for run in runs} == {"baseline", "example", "undo", "scenario", "setup"}
+    for run in runs:
+        assert run["outcome"] in ("cancelled", "finished"), run
+        assert not run["capture_active"], run
+        if run["kind"] in ("baseline", "scenario", "setup"):
+            assert run["restored"], run
+            assert run.get("flows_left", []) == [], run
+        else:
+            assert not run["written"], run
+    cancelled = [run for run in runs if run["hops"] == 0]
+    assert cancelled
+    assert all(run["outcome"] == "cancelled" for run in cancelled), cancelled

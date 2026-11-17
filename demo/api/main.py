@@ -14,6 +14,7 @@ import asyncio
 import os
 import time
 
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -26,9 +27,9 @@ import adorm
 
 from adorm.settings import close_pools
 from demo.api import drivers
-from demo.api.capture import CAPTURE
+from demo.api.capture import CAPTURE, Statement
 from demo.api.examples import Example, EXAMPLES
-from demo.api.scenarios import describe, run_scenario, SCENARIOS
+from demo.api.scenarios import describe, run_scenario, SCENARIOS, uninterrupted
 from demo.models.library import Book
 
 FRONTEND_ENV = "ADORM_DEMO_FRONTEND"
@@ -323,19 +324,28 @@ async def list_examples() -> list[ExampleInfo]:
 
 
 async def run_example(example: Example, driver: str, arguments: dict[str, Any]) -> ExampleRun:
-    """Run ``example`` on ``driver``'s profile in the session ``(driver, "example")``, then its ``undo``."""
+    """Run ``example`` on ``driver``'s profile in the session ``(driver, "example")``, then, when it returned, its
+    ``undo``. Stopping the recording and the ``undo`` run to their end also when the run is cancelled meanwhile."""
+
+    async def end(undo: Callable[[Any], Awaitable[None]] | None) -> list[Statement]:
+        statements = await CAPTURE.stop()
+        if undo is not None:
+            await undo(result)
+        return statements
+
     with adorm.create_session(driver, "example").activate():
         CAPTURE.start()
         started = time.monotonic()
-        result = error = None
+        result = error = undo = None
         try:
-            result = await example.function(**arguments)
-        except Exception as exc:
-            error = ErrorOut(**describe(exc))
-        elapsed = time.monotonic() - started
-        statements = await CAPTURE.stop()
-        if example.undo is not None and error is None:
-            await example.undo(result)
+            try:
+                result = await example.function(**arguments)
+                undo = example.undo
+            except Exception as exc:
+                error = ErrorOut(**describe(exc))
+        finally:
+            elapsed = time.monotonic() - started
+            statements = await uninterrupted(end(undo))
     return ExampleRun(
         driver=driver,
         ms=round(elapsed * 1000, 1),
