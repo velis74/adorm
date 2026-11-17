@@ -28,22 +28,48 @@ _STALLED_LOOP_GRACE = 1.0  # seconds a thread waits past its deadline for an eve
 
 
 def awaits(task: asyncio.Future, target: asyncio.Future) -> bool:
-    """Whether ``task`` is ``target`` or waits for it: it awaits ``target``, or a task or ``asyncio.gather()`` that
-    waits for it."""
+    """Whether ``task`` is ``target`` or waits for it: it awaits ``target``, or a future that a done callback of
+    ``target`` completes (a task awaiting it, ``asyncio.gather()``, ``asyncio.wait_for()``, ``asyncio.shield()``,
+    ``asyncio.wait()``), and so on."""
+    waiting: set[int] = set()
     pending: list[Any] = [task]
-    seen: set[int] = set()
     while pending:
         current = pending.pop()
-        if current is target:
-            return True
-        if id(current) in seen:
+        if id(current) in waiting:
             continue
-        seen.add(id(current))
+        waiting.add(id(current))
         waiter = getattr(current, "_fut_waiter", None)
         if isinstance(waiter, asyncio.Future):
             pending.append(waiter)
         pending.extend(getattr(current, "_children", None) or ())
+    seen: set[int] = set()
+    pending = [target]
+    while pending:
+        current = pending.pop()
+        if id(current) in waiting:
+            return True
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        pending.extend(_completed_by(current))
     return False
+
+
+def _completed_by(future: Any) -> list[asyncio.Future]:
+    """The futures the done callbacks of ``future`` complete: those the callbacks are bound to, take as arguments
+    (``functools.partial``) or hold in their closures."""
+    found: list[asyncio.Future] = []
+    for entry in list(getattr(future, "_callbacks", None) or ()):
+        callback = entry[0] if isinstance(entry, tuple) else entry
+        references: list[Any] = [getattr(callback, "__self__", None), *getattr(callback, "args", ())]
+        function = getattr(callback, "func", callback)
+        for cell in getattr(function, "__closure__", None) or ():
+            try:
+                references.append(cell.cell_contents)
+            except ValueError:  # an empty cell
+                continue
+        found.extend(reference for reference in references if isinstance(reference, asyncio.Future))
+    return found
 
 
 class Turn:

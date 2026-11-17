@@ -368,8 +368,10 @@ A flow's turn on a `TransactionTurns`.
 
 ### `adorm.executor.turns.awaits(task, target)`
 
-Whether `task` is `target` or waits for it: it awaits `target`, or a task or an `asyncio.gather()` that waits for it.
-A wait through a plain future (`asyncio.wait()`, a `TaskGroup`, an `Event`) is not followed.
+Whether `task` is `target` or waits for it: it awaits `target`, or a future that a done callback of `target` completes
+(a task that awaits it, `asyncio.gather()`, `asyncio.wait_for()`, `asyncio.shield()`, `asyncio.wait()`), and so on.
+A wait that no done callback of `target` completes (`asyncio.as_completed()`, a `TaskGroup`, an `Event`) is not
+followed.
 
 ```python
 async def both():

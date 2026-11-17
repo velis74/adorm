@@ -130,7 +130,7 @@ A wait for an open transaction raises [`DeadlockError`](/ref/exceptions#adorm-de
 
 | The open transaction | Raised |
 |---|---|
-| awaits the waiting flow's task, directly, through another task or through `asyncio.gather()` | at once |
+| awaits the waiting flow's task, directly, through another task or through `asyncio.gather()`, `asyncio.wait_for()`, `asyncio.shield()` or `asyncio.wait()` | at once |
 | stays open longer than the acquisition timeout (the `acquire_timeout` [connection option](/topics/options) in effect) | at the timeout |
 | waits for a Django statement that waits for it, or for a turn of another alias, or for a slot that the waiting flow holds | at the timeout |
 

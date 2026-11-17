@@ -307,6 +307,60 @@ async def test_awaits_follows_tasks_and_gather():
     await asyncio.gather(target, other, gathered, return_exceptions=True)
 
 
+@pytest.mark.parametrize(
+    "wait",
+    [
+        lambda target: asyncio.wait_for(target, LONG),
+        lambda target: asyncio.shield(target),
+        lambda target: asyncio.wait([target]),
+    ],
+    ids=["wait_for", "shield", "wait"],
+)
+async def test_awaits_follows_wait_helpers(wait):
+    blocker = asyncio.Event()
+
+    async def work():
+        await blocker.wait()
+
+    target = asyncio.create_task(work())
+    other = asyncio.create_task(work())
+
+    async def via():
+        await wait(target)
+
+    waiter = asyncio.create_task(via())
+
+    async def outer():
+        await waiter
+
+    parent = asyncio.create_task(outer())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert awaits(waiter, target)
+    assert awaits(parent, target)
+    assert not awaits(waiter, other)
+    assert not awaits(target, waiter)
+    blocker.set()
+    await asyncio.gather(target, other, waiter, parent)
+
+
+@pytest.mark.parametrize("helper", ["wait_for", "shield"])
+async def test_a_transaction_awaiting_the_waiting_flow_through_a_helper_fails_the_wait_at_once(
+    no_periodic_check,  # noqa: ARG001
+    helper,
+):
+    turns = TransactionTurns("test")
+    loop = asyncio.get_running_loop()
+    holder = await take(turns, True)
+    started = loop.time()
+    waiter = asyncio.create_task(take(turns, False, "awaited"), context=contextvars.Context())
+    wrapped = asyncio.wait_for(waiter, LONG) if helper == "wait_for" else asyncio.shield(waiter)
+    with pytest.raises(DeadlockError, match="awaits"):
+        await wrapped
+    assert loop.time() - started < 1
+    holder.release()
+
+
 async def test_the_advice_ends_every_deadlock_message():
     turns = TransactionTurns("test", advice="use separate connections")
     holder = await take(turns, True)
