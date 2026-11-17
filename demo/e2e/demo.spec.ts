@@ -54,7 +54,9 @@ test('the theme switches between light and dark and stays after a reload', async
 test('code and SQL are highlighted', async ({ page }) => {
   await expect(page.getByTestId('example-code').locator('.hljs-keyword').first()).toContainText(/async|def|await/);
   await page.getByTestId('run-example').click();
-  const statement = run(page, (await availableDrivers(page))[0]).getByTestId('sql-statement').first();
+  const statement = run(page, (await availableDrivers(page))[0])
+    .getByTestId('sql-statement')
+    .first();
   await expect(statement.locator('.hljs-keyword').first()).toContainText(/SELECT|BEGIN/i);
 });
 
