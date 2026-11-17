@@ -510,6 +510,40 @@ async def test_the_router_takes_turns_for_transactions_and_operations():
     await router.close()
 
 
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_a_task_of_a_transaction_that_ends_while_it_waits_for_a_slot_takes_a_turn(attempt):  # noqa: ARG001
+    """A task created inside the transaction takes no turn; when the transaction ends before the task has a slot, the
+    task takes its own turn, and a third flow waits for it."""
+    router, pool, driver = make(max_connections=2)
+    turns = driver.turns
+    blocker = await router.acquire(create_session("default", "blocker"))
+    child_has_lease, child_done = asyncio.Event(), asyncio.Event()
+    child = None
+
+    async def child_transaction():
+        async with router.slot(create_session("default", "child")) as lease:
+            child_has_lease.set()
+            await child_done.wait()
+            return lease._turn
+
+    async with router.slot(create_session("default", "x")):
+        child = asyncio.create_task(child_transaction())
+        await until(lambda: pool.waiting == 1)
+    await child_has_lease.wait()
+    assert len(turns.holders) == 1
+    assert turns.holders[0].exclusive
+    assert turns.holders[0].session == create_session("default", "child")
+    third = asyncio.create_task(router.run(create_session("default", "third"), Op("third")))
+    await until(lambda: turns.waiting == 1)
+    assert not third.done()
+    child_done.set()
+    assert (await child) is not None
+    assert await third == "third"
+    assert turns.holders == ()
+    await blocker.release()
+    await router.close()
+
+
 async def test_a_failed_acquisition_gives_up_its_turn():
     router, _pool, driver = make()
     driver.open_errors.append(OSError("refused"))

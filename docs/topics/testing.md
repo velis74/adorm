@@ -116,8 +116,8 @@ async with adorm.atomic():                               # session ("default", "
 - Nested work belongs to the outer transaction's savepoint and rolls back with it, also the work of another session,
   which production commits on its own connection.
 - A task created inside the block that outlives it is outside the transaction once it has ended: its operations of
-  other sessions wait for an open transaction like any other flow; those of the ended transaction's session raise
-  `TransactionClosed`.
+  other sessions wait for an open transaction like any other flow, also one that was waiting for a slot when the block
+  ended; those of the ended transaction's session raise `TransactionClosed`.
 - While a transaction begun inside it is open, an operation of the outer transaction raises
   `TransactionOverlapError`: it would run inside the inner transaction's savepoint.
 - A transaction that ends, or whose slot closes, while a transaction begun inside it is open (a task that outlives

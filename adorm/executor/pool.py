@@ -40,7 +40,7 @@ if TYPE_CHECKING:
     from adorm.checks import SchemaProblem
     from adorm.drivers.base import Driver, DriverConnection, Profile
     from adorm.executor.sessions import Session
-    from adorm.executor.turns import Turn
+    from adorm.executor.turns import TransactionTurns, Turn
     from adorm.operations import Operation
     from adorm.settings import ConnectionProfile, ProfileRegistry
 
@@ -588,44 +588,54 @@ class Router:
     ) -> SlotLease:
         """Acquire a slot of ``pool``; when ``pool`` is retired after a profile change, of the pool that serves the
         session's profile now, within the same deadline. With ``turn``, first take a turn of that kind when the
-        driver's connections share a database session (`_take_turn()`); the lease holds it until it is returned."""
+        driver's connections share a database session (`_take_turn()`); the lease holds it until it is returned. A flow
+        that took no turn because it was inside a transaction that held the turn, and finds that transaction ended
+        once it has the slot, returns the slot and acquires again with a turn."""
         timeout = options.acquire_timeout if timeout is None else check_timeout(timeout, "timeout")
         deadline = asyncio.get_running_loop().time() + timeout
-        taken = None if turn is None else await self._take_turn(pool, session, turn, deadline, timeout)
-        try:
-            while True:
-                try:
-                    await self._schema_checked(pool, session, deadline, timeout)
-                    lease = await self._acquire_from(pool, session, deadline, timeout, options)
-                    break
-                except InterfaceError:
-                    if not pool.retired:
-                        raise
-                pool = await self.get_pool(session.using)
-                options = resolve_options(session, pool)
-        except BaseException:
-            if taken is not None:
-                taken.release()
-            raise
-        lease._turn = taken
-        return lease
+        while True:
+            turns, taken = (
+                (None, None) if turn is None else await self._take_turn(pool, session, turn, deadline, timeout)
+            )
+            try:
+                while True:
+                    try:
+                        await self._schema_checked(pool, session, deadline, timeout)
+                        lease = await self._acquire_from(pool, session, deadline, timeout, options)
+                        break
+                    except InterfaceError:
+                        if not pool.retired:
+                            raise
+                    pool = await self.get_pool(session.using)
+                    options = resolve_options(session, pool)
+            except BaseException:
+                if taken is not None:
+                    taken.release()
+                raise
+            if turns is not None and taken is None and not turns.enclosed():
+                # The enclosing transaction ended while this flow waited.
+                await lease.release()
+                continue
+            lease._turn = taken
+            return lease
 
     async def _take_turn(
         self, pool: Pool, session: Session, kind: Literal["transaction", "operation"], deadline: float, timeout: float
-    ) -> Turn | None:
-        """Wait for a turn of ``kind`` on the `TransactionTurns` of ``pool``'s profile
-        (`Driver.transaction_turns()`); ``None`` when there are none or the current context is inside a transaction
-        that holds the turn."""
+    ) -> tuple[TransactionTurns | None, Turn | None]:
+        """The `TransactionTurns` of ``pool``'s profile (`Driver.transaction_turns()`) and a turn of ``kind`` waited
+        for on them; no turn when there are no turns or the current context is inside a transaction that holds the
+        turn."""
         turns = await pool.driver.transaction_turns(pool.profile)
         if turns is None or turns.enclosed():
-            return None
-        return await turns.take(
+            return turns, None
+        taken = await turns.take(
             exclusive=kind == "transaction",
             session=session,
             deadline=deadline,
             timeout=timeout,
             held_sessions=self.held_sessions,
         )
+        return turns, taken
 
     async def _schema_checked(self, pool: Pool, session: Session, deadline: float, timeout: float) -> None:
         """Wait for the start-up schema check of ``pool`` (`Pool`), starting it when none runs or has passed."""
