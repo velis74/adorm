@@ -4,7 +4,7 @@ import psycopg
 import pytest
 
 from demo.database import check_url, DatabaseSetupError, drop_database, ensure_database, role_problem, with_database
-from tests.djangoproject.settings import TEST_DATABASE_URL
+from tests.djangoproject.settings import DEMO_OWNER_DATABASE, TEST_DATABASE_URL
 
 
 @pytest.mark.parametrize(
@@ -35,7 +35,7 @@ def test_role_problem():
 
 @pytest.mark.usefixtures("demo_role")
 def test_ensure_database_creates_it_owned_by_the_user():
-    url = with_database(TEST_DATABASE_URL, "adorm_test_demo_owner")
+    url = with_database(TEST_DATABASE_URL, DEMO_OWNER_DATABASE)
     drop_database(url)
     try:
         assert ensure_database(url) is True
@@ -43,7 +43,7 @@ def test_ensure_database_creates_it_owned_by_the_user():
         with psycopg.connect(with_database(TEST_DATABASE_URL, "postgres")) as conn:
             owner, user = conn.execute(
                 "SELECT pg_get_userbyid(datdba), current_user FROM pg_database WHERE datname = %s",
-                ("adorm_test_demo_owner",),
+                (DEMO_OWNER_DATABASE,),
             ).fetchone()
         assert owner == user
     finally:

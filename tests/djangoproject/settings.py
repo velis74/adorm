@@ -29,6 +29,15 @@ def test_database_name(url: str) -> str:
 TEST_DATABASE_URL = os.environ.get("ADORM_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)
 TEST_DATABASE_NAME = test_database_name(TEST_DATABASE_URL)
 
+# The databases and roles the tests create besides the test database, named after it so that runs with different
+# test database names on one server leave each other's alone.
+LIMITED_DATABASE = f"{TEST_DATABASE_NAME}_limited"
+DEMO_DATABASE = f"{TEST_DATABASE_NAME}_demo"
+DEMO_OWNER_DATABASE = f"{TEST_DATABASE_NAME}_demo_owner"
+PARALLEL_DATABASE = f"{TEST_DATABASE_NAME}_parallel"
+ROLE_PREFIX = f"{TEST_DATABASE_NAME}_"
+AUXILIARY_DATABASES = (LIMITED_DATABASE, DEMO_DATABASE, DEMO_OWNER_DATABASE, PARALLEL_DATABASE)
+
 
 def database_from_url(url: str) -> dict:
     """Return a Django ``DATABASES`` entry for a ``postgres://`` or ``postgresql://`` URL.

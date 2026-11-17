@@ -25,9 +25,10 @@ uv run pytest
 
 The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
 `postgres://postgres@127.0.0.1:5432/adorm_test`). On that server they create and drop the database it names
-(`adorm_test` when it names `postgres` or none) and the databases `adorm_test_demo`, `adorm_test_demo_owner`,
-`adorm_test_limited`, `adorm_test_parallel` and `adorm_test_parallel_<n>` (the clones of `manage.py test --parallel`).
-Other databases and the server's roles are left untouched. Run the tests as a dedicated user with `CREATEDB`. Under a
+(`<name>`: `ADORM_TEST_DATABASE_NAME` when set, `adorm_test` when the URL names `postgres` or none) and the databases
+`<name>_demo`, `<name>_demo_owner`, `<name>_limited`, `<name>_parallel` and `<name>_parallel_<n>` (the clones of
+`manage.py test --parallel`). Other databases and the server's roles are left untouched; runs with different names
+on one server leave each other's databases alone. Run the tests as a dedicated user with `CREATEDB`. Under a
 superuser the test of the pool's refusal handling is skipped, because a database's connection limit does not apply to
 a superuser, and so are the tests of the demo, which refuses a superuser:
 
@@ -36,7 +37,7 @@ CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
 ```
 
 `ADORM_TEST_CREATE_ROLES=1` also runs the tests of the `role` connection option. They create and drop the roles
-`adorm_test_login`, `adorm_test_alice` and `adorm_test_bob` and need `CREATEROLE`. Roles belong to the whole server and
+`<name>_login`, `<name>_alice` and `<name>_bob` and need `CREATEROLE`. Roles belong to the whole server and
 outlive the test databases: set the variable only on a server dedicated to the tests. CI runs the suite with
 `CREATEDB` only, then grants `CREATEROLE` and runs these tests separately.
 

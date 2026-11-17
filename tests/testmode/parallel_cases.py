@@ -11,6 +11,7 @@ import adorm
 
 from adorm.settings import close_pools, default_router
 from tests.djangoproject.library import models as dj
+from tests.djangoproject.settings import TEST_DATABASE_NAME
 from tests.generated.library import Tag
 
 PROFILES = {"default": {"driver": "adorm.drivers.django.DjangoDriver", "pool": {"max_connections": 3}}}
@@ -42,7 +43,7 @@ class AdormInTestCase(TestCase):
         assert await Tag.objects.count() == 5
         assert await sync_to_async(tag_names)() == sorted(["seed", name, *(f"{name}-{n}" for n in range(3))])
         own = await sync_to_async(database_name)()
-        assert own.startswith("adorm_test_parallel_")
+        assert own.startswith(f"{TEST_DATABASE_NAME}_")
         assert await slot_databases() == {own}
         await close_pools()
 
@@ -61,7 +62,7 @@ class AdormInTransactionTestCase(TransactionTestCase):
         await Tag.objects.create(name=name)
         assert await sync_to_async(tag_names)() == [name]
         own = await sync_to_async(database_name)()
-        assert own.startswith("adorm_test_parallel_")
+        assert own.startswith(f"{TEST_DATABASE_NAME}_")
         assert await slot_databases() == {own}
         await close_pools()
 

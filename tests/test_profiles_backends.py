@@ -23,6 +23,7 @@ from adorm.executor import Router
 from adorm.executor.options import resolve_options
 from adorm.settings import ProfileRegistry
 from tests.contract.drivers import AsyncpgDriver, DjangoDriver, RawQuery
+from tests.djangoproject.settings import ROLE_PREFIX
 
 SETTING = "adorm_test.app_user"
 TABLE = "profile_note"
@@ -274,8 +275,7 @@ async def test_an_option_the_database_refuses_fails_the_acquisition_and_discards
 # Database roles over one login role. Roles belong to the whole cluster, so these tests run only when
 # ADORM_TEST_CREATE_ROLES=1 (and the test database user has CREATEROLE).
 
-LOGIN = "adorm_test_login"
-ROLE_PREFIX = "adorm_test_"
+LOGIN = f"{ROLE_PREFIX}login"
 USERS = (f"{ROLE_PREFIX}alice", f"{ROLE_PREFIX}bob")
 GRANTED = "profile_granted"
 

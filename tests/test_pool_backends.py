@@ -11,8 +11,9 @@ import pytest
 from adorm import create_session, OperationalError
 from adorm.executor import Pool, Router
 from tests.contract.drivers import AsyncpgDriver, DjangoDriver, Profile, RawQuery
+from tests.djangoproject.settings import LIMITED_DATABASE
 
-LIMITED = "adorm_test_limited"
+LIMITED = LIMITED_DATABASE
 
 
 class RefusalAwareDjangoDriver(DjangoDriver):

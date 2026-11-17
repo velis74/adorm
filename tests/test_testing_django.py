@@ -60,6 +60,7 @@ from adorm.testing.django import (
     TestDatabase,
 )
 from tests.djangoproject.library import models as dj
+from tests.djangoproject.settings import PARALLEL_DATABASE
 from tests.generated.library import Reader, Tag
 
 REPEAT = range(3)
@@ -1506,7 +1507,7 @@ def test_options_are_set_locally_and_only_when_they_differ():
 def test_djangos_parallel_test_runner_is_unaffected():
     env = {
         **os.environ,
-        "ADORM_TEST_DATABASE_NAME": "adorm_test_parallel",
+        "ADORM_TEST_DATABASE_NAME": PARALLEL_DATABASE,
         "DJANGO_SETTINGS_MODULE": "tests.djangoproject.settings",
         "PYTHONPATH": str(ROOT),
     }

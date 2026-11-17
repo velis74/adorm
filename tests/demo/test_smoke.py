@@ -1,4 +1,4 @@
-"""The demo end to end: ``demo.py`` sets up the database ``adorm_test_demo`` on the test server, then serves the API in
+"""The demo end to end: ``demo.py`` sets up the database ``<test database>_demo`` on the test server, then serves the API in
 a child process, and every endpoint runs on every available driver.
 
 The database is dropped afterwards. ``ADORM_DEMO_REQUIRED_DRIVERS`` (comma-separated names) fails the suite when a
@@ -18,10 +18,10 @@ import httpx
 import pytest
 
 from demo.database import drop_database, with_database
-from tests.djangoproject.settings import TEST_DATABASE_URL
+from tests.djangoproject.settings import DEMO_DATABASE, TEST_DATABASE_URL
 
 ROOT = Path(__file__).parents[2]
-DATABASE = "adorm_test_demo"
+DATABASE = DEMO_DATABASE
 URL = with_database(TEST_DATABASE_URL, DATABASE)
 REQUIRED = [name.strip() for name in os.environ.get("ADORM_DEMO_REQUIRED_DRIVERS", "").split(",") if name.strip()]
 REPEATS = 3
