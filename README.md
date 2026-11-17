@@ -1,8 +1,10 @@
 # <img src="adorm-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> adorm
 
-adorm (asynchronous database ORM, pronounced "adore") is an asynchronous ORM for Python. Applications build
-queries and model operations with adorm's API; a driver executes them natively on PostgreSQL (asyncpg) or through
-an existing ORM (Django). The API is modelled on the Django ORM.
+adorm (asynchronous database ORM, pronounced "adore") is a pure async ORM for Python: every call that touches the
+database is a coroutine or returns an awaitable. Applications build queries and model operations with adorm's API; a
+driver executes them, natively on the event loop (PostgreSQL through asyncpg) or through a synchronous database
+library or ORM (Django). adorm's pool runs a synchronous library on a thread owned by one slot, with that slot's
+connection, so the event loop never runs synchronous database code. The API is modelled on the Django ORM.
 
 The package is pre-release; the API reference on the documentation site lists what it provides.
 

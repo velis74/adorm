@@ -4,7 +4,7 @@ import { crosslinksConfig } from 'vitepress-plugin-crosslinks';
 export default defineConfig({
   title: 'adorm',
   description:
-    'Asynchronous database ORM for Python: one async API for queries and model operations, executed by pluggable drivers.',
+    'Pure async database ORM for Python: one async API, executed by drivers natively on the event loop or by synchronous database libraries on pooled threads.',
   // the directory's own README, for contributors
   srcExclude: ['readme.md'],
   // Icon and canonical URL under the `--base` given to the build; VitePress does not prefix `head` entries.
