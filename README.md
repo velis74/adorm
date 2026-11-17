@@ -28,7 +28,8 @@ The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
 (`<name>`: `ADORM_TEST_DATABASE_NAME` when set, `adorm_test` when the URL names `postgres` or none) and the databases
 `<name>_demo`, `<name>_demo_owner`, `<name>_limited`, `<name>_parallel` and `<name>_parallel_<n>` (the clones of
 `manage.py test --parallel`). Other databases and the server's roles are left untouched; runs with different names
-on one server leave each other's databases alone. Run the tests as a dedicated user with `CREATEDB`. Under a
+on one server leave each other's databases alone. A run that leaves any of these databases, or a role named
+`<name>_…`, on the server fails. Run the tests as a dedicated user with `CREATEDB`. Under a
 superuser the test of the pool's refusal handling is skipped, because a database's connection limit does not apply to
 a superuser, and so are the tests of the demo, which refuses a superuser:
 

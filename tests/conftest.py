@@ -19,6 +19,49 @@ def _forget_content_types():
     content_types.clear()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _nothing_left_on_the_server():
+    """Fail the run when the databases or roles the tests create besides the test database (named after it) are left
+    on the server afterwards. Skipped on SQLite and when the server is unreachable."""
+    yield
+    from django.conf import settings
+
+    if settings.DATABASES["default"]["ENGINE"] != "django.db.backends.postgresql":
+        return
+    import psycopg
+
+    from tests.djangoproject.settings import (
+        AUXILIARY_DATABASES,
+        PARALLEL_DATABASE,
+        ROLE_PREFIX,
+        TEST_DATABASE_NAME,
+        TEST_DATABASE_URL,
+    )
+
+    url = urlunsplit(urlsplit(TEST_DATABASE_URL)._replace(path="/postgres"))
+    try:
+        conn = psycopg.connect(url, connect_timeout=5)
+    except psycopg.OperationalError:
+        return
+    with conn:
+        databases = [
+            row[0]
+            for row in conn.execute(
+                "SELECT datname FROM pg_database WHERE datname = ANY(%s) OR starts_with(datname, %s) ORDER BY 1",
+                (list(AUXILIARY_DATABASES), f"{PARALLEL_DATABASE}_"),
+            )
+        ]
+        roles = [
+            row[0]
+            for row in conn.execute(
+                "SELECT rolname FROM pg_roles WHERE starts_with(rolname, %s) ORDER BY 1", (ROLE_PREFIX,)
+            )
+        ]
+    left = [name for name in databases if name != TEST_DATABASE_NAME] + roles
+    if left:
+        pytest.fail(f"the tests left on the server: {', '.join(left)}", pytrace=False)
+
+
 @pytest.fixture(scope="session")
 def database_url() -> str:
     """URL of the PostgreSQL server the suite runs against."""

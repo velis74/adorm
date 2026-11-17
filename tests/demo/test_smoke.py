@@ -1,5 +1,5 @@
-"""The demo end to end: ``demo.py`` sets up the database ``<test database>_demo`` on the test server, then serves the API in
-a child process, and every endpoint runs on every available driver.
+"""The demo end to end: ``demo.py`` sets up the database ``<test database>_demo`` on the test server, then serves the
+API in a child process, and every endpoint runs on every available driver.
 
 The database is dropped afterwards. ``ADORM_DEMO_REQUIRED_DRIVERS`` (comma-separated names) fails the suite when a
 listed driver is not available.
