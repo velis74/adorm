@@ -24,7 +24,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, fields
-from typing import Any, cast, ClassVar, Literal, Protocol, runtime_checkable
+from typing import Any, cast, ClassVar, Literal, Protocol, runtime_checkable, TYPE_CHECKING
 
 from adorm.events import BackendEvent, CONNECTION_LOST, Emit, Event, NOTIFY
 from adorm.exceptions import (
@@ -35,6 +35,9 @@ from adorm.exceptions import (
     SchemaMismatchError,
     wrap_driver_error,
 )
+
+if TYPE_CHECKING:
+    from adorm.executor.turns import TransactionTurns
 
 __all__ = [
     "BackendActivity",
@@ -656,6 +659,12 @@ class Driver(ABC):
         """A hashable value naming the database ``profile`` connects to, or ``None`` (the default) when the driver
         cannot tell. Profiles with equal keys share what adorm caches per database (`adorm.content_types`); a profile
         whose key is ``None`` has a cache of its own. Does no I/O."""
+        return None
+
+    async def transaction_turns(self, profile: Profile) -> TransactionTurns | None:  # noqa: ARG002 - subclasses use it
+        """The `TransactionTurns` of the database session that the connections for ``profile`` share, when they share
+        one; ``None`` (the default) when each connection is a session of its own. The router takes a turn on it before
+        it acquires a slot for a transaction or an operation outside a transaction."""
         return None
 
     @abstractmethod

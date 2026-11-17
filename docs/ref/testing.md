@@ -132,6 +132,8 @@ without a `DATABASES` entry. The wrapper is that of the thread that runs the tes
   with `sync_to_async(thread_sensitive=True)`;
 - otherwise (pytest-asyncio) the event loop's own thread, read as Django's thread-local wrapper.
 
+The `TestDatabase` found is kept per event loop while it is [`current()`](#adorm-testing-django-testdatabase).
+
 ```python
 test = await find_test_database("default")
 if test is not None and test.in_test_case:
@@ -152,6 +154,7 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `defaults` | the options a connection of the alias starts with ([`Driver.connection_defaults()`](/ref/drivers#connection-defaults-profile), such as the `role` of `OPTIONS["assume_role"]`) |
 | `add_defaults(defaults)` | adds the connecting connection's `connection_defaults()` to `defaults`; until a `SET LOCAL` is sent they are the options known to be set |
 | `transactions` | the connections with an open transaction, innermost last |
+| `turns` | the [`TransactionTurns`](/ref/pool#adorm-executor-turns-transactionturns-name-advice) of the shared connection ([`shared_transaction_turns()`](#adorm-testing-django-shared-transaction-turns-alias)): the router has a transaction, or an operation outside a transaction, of a flow that is not inside the open transaction wait until it ends |
 | `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it (counted in the connection's `session_holds`); give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the connection's `is_cancellation()` accepts on every database, so the threaded bridge reports it as a cancellation |
 | `hold(connection)` | a `with` block between `acquire()` and `release()` |
 | `cancel(connection, cancel)` | cancels `connection`'s running call: `cancel()` (the driver's statement cancel) while it holds the shared connection, else it ends its wait. The owner does not change meanwhile; a cancel never reaches another connection's statement |
@@ -159,13 +162,31 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `forget_options()` | treats the options as unknown, after a rollback to a savepoint may have undone a `SET LOCAL`; the next `apply_options()` sets every option it ever set |
 | `unwind(connection, error)` | rolls back `connection`'s transaction and those opened after it; the later ones raise `error` on their next call |
 | `watch_backend()` | adds a notice handler to the test's psycopg 3 connection, once per DB-API connection, that emits each notice as [`NOTICE`](/ref/events#adorm-events-notice) from the connection that holds the shared connection (`owner`); on SQLite instead a progress handler that stops the statements of the owner's cancelled call |
+| `overlapped()` | whether a transaction is open that the caller's context is not inside (no `atomic()` block of it is active there) |
 | `check_isolated(what)` | raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction is open that the caller's context is not inside (no `atomic()` block of it is active there) |
-| `attach()` / `detach()` | count the connections that use the shared connection. While one does, an execute wrapper, the wrapper's outermost, makes each statement that another thread runs through the wrapper (Django ORM code of the test or of the code under test) hold the shared connection, run with `defaults` as their connection options and pass `check_isolated()` first |
+| `attach()` / `detach()` | count the connections that use the shared connection. While one does, an execute wrapper, the wrapper's outermost, makes each statement that another thread runs through the wrapper (Django ORM code of the test or of the code under test) hold the shared connection, run with `defaults` as their connection options and pass `check_isolated()` first. While `overlapped()`, the statement's thread first waits for a shared turn ([`TransactionTurns.take_blocking()`](/ref/pool#take-blocking-what-timeout-none)) and holds it until the statement ends; a statement that cannot wait (no event loop has taken a turn, or it runs on that loop's thread) raises `TransactionOverlapError` |
 
 ### `adorm.testing.django.shared_test_connection(test)`
 
 The [`SharedTestConnection`](#adorm-testing-django-sharedtestconnection-test) of `test.wrapper` for the current test: the same
 object while the wrapper's `TestCase` atomic blocks are those of `test`, a new one for the next test.
+
+### `adorm.testing.django.shared_transaction_turns(alias)`
+
+A coroutine: the [`turns`](#adorm-testing-django-sharedtestconnection-test) of the shared connection of the Django
+alias `alias` inside a `TestCase` ([`find_test_database()`](#adorm-testing-django-find-test-database-alias)); `None`
+outside Django's test environment, outside a `TestCase` and for an alias without a `DATABASES` entry.
+[`DjangoDriver.transaction_turns()`](/ref/drivers#async-transaction-turns-profile) returns it for the profile's
+alias.
+
+```python
+turns = await shared_transaction_turns("default")
+async with adorm.atomic():
+    await Member.objects.create(name="ann")
+    task = asyncio.create_task(other_flow(), context=contextvars.Context())
+    while not turns.waiting:                 # other_flow() waits for this transaction
+        await asyncio.sleep(0.01)
+```
 
 ### `adorm.testing.django.SharedConnectionMixin`
 
@@ -178,7 +199,7 @@ Makes a [`DjangoConnection`](/ref/drivers#adorm-drivers-django-djangoconnection)
 | every call but `connect_sync()` | holds the shared connection ([`hold()`](#adorm-testing-django-sharedtestconnection-test)) while it runs; `execute_sync()` first applies the connection's options ([`apply_options()`](#adorm-testing-django-sharedtestconnection-test)), those an `on_acquire` hook returned included |
 | `connect_sync()` | takes the test's wrapper: Django's `inc_thread_sharing()` and `connections[alias] = wrapper` on the slot's thread, starts with the driver's `connection_defaults()` as its session options, [`add_defaults()`](#adorm-testing-django-sharedtestconnection-test) them and [`attach()`](#adorm-testing-django-sharedtestconnection-test)es. A profile with a `connect` hook or `params` that differ from the wrapper's settings raises `NotSupportedError` |
 | a profile hook | a statement the hook runs through the wrapper raises `NotSupportedError`: its effect on the session would reach every slot. A statement another thread runs meanwhile is not the hook's |
-| `begin_sync()` | enters `transaction.atomic(using=alias)`, a savepoint of the test's transaction. Raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction of another connection is open that the caller's context is not inside |
+| `begin_sync()` | enters `transaction.atomic(using=alias)`, a savepoint of the test's transaction. Raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction of another connection is open that the caller's context is not inside; through the router it waits for that transaction first ([`turns`](#adorm-testing-django-sharedtestconnection-test)) |
 | `execute_sync(operation)` | outside a transaction: raises `TransactionOverlapError` as `begin_sync()` does, else runs the operation in a savepoint of its own. Inside a transaction: raises `TransactionOverlapError` while a transaction begun inside this one is open; a failure that leaves the transaction failed rolls back to its innermost savepoint at once; after Django marked it for rollback, further operations raise `TransactionManagementError` until a rollback |
 | `savepoint_sync()`, `release_savepoint_sync()`, `rollback_to_savepoint_sync()` | as `DjangoConnection`; raise `TransactionOverlapError` while a transaction begun inside this one is open |
 | `commit_sync()`, `rollback_sync()` | leave the savepoint. Django's `on_commit()` callbacks registered inside the transaction stay on the wrapper after the commit, as after Django's nested `atomic()`: they run only when the test runs them (`captureOnCommitCallbacks(execute=True)`). While a transaction begun inside this one is open, both transactions roll back and `TransactionOverlapError` is raised; the inner one raises it on its next call (its rollback then does nothing) |

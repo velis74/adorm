@@ -178,6 +178,24 @@ class TenantDriver(DjangoDriver):
         return ("tenant", profile.params["tenant"])    # every profile of a tenant shares its content type ids
 ```
 
+#### `async transaction_turns(profile)`
+
+Returns the [`TransactionTurns`](/ref/pool#adorm-executor-turns-transactionturns-name-advice) of the database session that the
+connections for `profile` share, when they share one; `None` (the default) when each connection is a session of its
+own. The [router](/ref/pool#adorm-executor-router-pools-profiles-none) takes a turn on it before it acquires a slot for
+a transaction or an operation outside a transaction. [`DjangoDriver`](#adorm-drivers-django-djangodriver) returns
+[`shared_transaction_turns(profile.alias)`](/ref/testing#adorm-testing-django-shared-transaction-turns-alias): the
+turns of the test's connection inside Django's `TestCase`.
+
+```python
+class SharedSessionDriver(Driver):
+    def __init__(self):
+        self.turns = TransactionTurns("the one session")
+
+    async def transaction_turns(self, profile):
+        return self.turns                    # every slot of every profile uses the same session
+```
+
 #### `async open_monitor(profile)`
 
 Opens a [`DatabaseMonitor`](#adorm-drivers-databasemonitor) on a connection of its own to `profile`'s database,
@@ -725,6 +743,7 @@ profile names it by class, instance or import path. It runs on the database of a
 | `connection_defaults(profile)` | [`connection_defaults(profile)`](#adorm-drivers-django-connection-defaults-profile) |
 | `async open_monitor(profile)` | a started [`DjangoMonitor`](#adorm-drivers-django-djangomonitor-profile); `NotSupportedError` for a database other than PostgreSQL, before anything opens |
 | `async check_listen(profile)` | also `NotSupportedError` inside Django's `TestCase` |
+| `async transaction_turns(profile)` | inside Django's `TestCase` the turns of the test's connection ([`shared_transaction_turns()`](/ref/testing#adorm-testing-django-shared-transaction-turns-alias)), else `None` |
 
 `open_connection(profile, emit)` creates the connection with
 [`adorm.testing.django.django_connection()`](/ref/testing#adorm-testing-django-django-connection-driver-profile-emit) and starts it:

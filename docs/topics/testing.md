@@ -52,11 +52,11 @@ example) leaves the test's transaction usable.
 Django ORM code of the test or of the code under test uses the same connection from its own thread
 (`sync_to_async()`):
 
-- Each statement takes a turn on the connection like an operation outside a transaction, without adorm's connection
-  options.
-- While an adorm transaction is open, a Django statement outside the transaction's context raises
-  `TransactionOverlapError`; one inside it joins the transaction's savepoint and is rolled back with it.
-- A Django `atomic()` block spans several statements, and slots take turns between them. Run such a block while no
+- Each statement holds the connection while it runs, as an adorm call does, without adorm's connection options.
+- While an adorm transaction is open, a Django statement outside the transaction's context waits until it ends, as an
+  adorm operation outside a transaction does ([below](#transactions-in-a-testcase)); one inside it joins the
+  transaction's savepoint and is rolled back with it.
+- A Django `atomic()` block spans several statements, and adorm calls can run between them. Run such a block while no
   adorm operation of the test is running.
 
 ## Transactions in a `TestCase`
@@ -84,37 +84,69 @@ async def test_transfer(self):
     assert (await Account.objects.get(pk=account.pk)).balance == account.balance     # rolled back
 ```
 
-One connection cannot isolate transactions, so a transaction is exclusive. While one is open, a transaction or an
-operation outside a transaction started by another flow raises
-[`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror). Work inside the open transaction's context
-nests in it and runs, including tasks created inside the block and transactions of other sessions:
+One connection cannot isolate transactions, so a transaction runs alone. While one is open, a transaction or an
+operation outside a transaction that another flow starts waits until it ends, then runs. Flows that wait start in the
+order they came; consecutive waiting operations outside a transaction run together. Two flows that race run one after
+the other:
+
+```python
+async def signup(name):
+    async with adorm.atomic():
+        if not await Member.objects.filter(name=name).exists():
+            await Member.objects.create(name=name)
+
+
+async def test_two_signups(self):
+    await asyncio.gather(signup("ann"), signup("ann"))      # the second transaction begins after the first commits
+    assert await Member.objects.filter(name="ann").count() == 1
+```
+
+Work inside the open transaction's context nests in it and runs at once, including tasks created inside the block
+and transactions of other sessions:
 
 ```python
 async with adorm.atomic():                               # session ("default", "default")
     await Member.objects.create(name="Bob")
     audit = adorm.create_session(session_name="audit")
-    async with audit.atomic():                           # nested in the open transaction: allowed
+    async with audit.atomic():                           # nested in the open transaction
         await audit.bind(AuditEntry).create(action="created Bob")
-    await asyncio.gather(notify(1), notify(2))           # tasks inherit the transaction's context: allowed
-
-
-async with adorm.atomic():
-    await Member.objects.create(name="Cid")
-    task = asyncio.create_task(report(), context=contextvars.Context())   # not inside the transaction
-    with self.assertRaises(adorm.TransactionOverlapError):
-        await task                                       # its first operation raises
+    await asyncio.gather(notify(1), notify(2))           # tasks inherit the transaction's context
 ```
 
 - Nested work belongs to the outer transaction's savepoint and rolls back with it, also the work of another session,
   which production commits on its own connection.
+- A task created inside the block that outlives it is outside the transaction once it has ended: its operations of
+  other sessions wait for an open transaction like any other flow; those of the ended transaction's session raise
+  `TransactionClosed`.
 - While a transaction begun inside it is open, an operation of the outer transaction raises
   `TransactionOverlapError`: it would run inside the inner transaction's savepoint.
 - A transaction that ends, or whose slot closes, while a transaction begun inside it is open (a task that outlives
   the block) rolls back both and raises `TransactionOverlapError`; the inner transaction raises it on its next
   operation.
 
-A test that needs isolated concurrent transactions (two flows racing for a row, a lock that one flow waits for) uses
-`TransactionTestCase`.
+### Waits that cannot end
+
+A wait for an open transaction raises [`DeadlockError`](/ref/exceptions#adorm-deadlockerror-message-none-held-sessions-session-none-timeout-none) when it cannot end:
+
+| The open transaction | Raised |
+|---|---|
+| awaits the waiting flow's task, directly, through another task or through `asyncio.gather()` | at once |
+| stays open longer than the acquisition timeout (the `acquire_timeout` [connection option](/topics/options) in effect) | at the timeout |
+| waits for a Django statement that waits for it, or for a turn of another alias, or for a slot that the waiting flow holds | at the timeout |
+
+```python
+async with adorm.atomic():
+    await Member.objects.create(name="Cid")
+    task = asyncio.create_task(report(), context=contextvars.Context())   # not inside the transaction
+    with self.assertRaises(adorm.DeadlockError):
+        await task                                       # its first operation waits for this transaction
+```
+
+The wait counts as a wait for a slot: an enclosing [`adorm.timeout()`](/topics/options#adorm-timeout) ends it with
+`OperationTimeout` in the phase `"waiting_for_slot"`, and cancelling the flow ends it without running anything.
+
+A test that needs isolated concurrent transactions (two flows racing for a row, a lock that one flow waits for while
+the other holds it) uses `TransactionTestCase`.
 
 ## Failures and cancellation
 

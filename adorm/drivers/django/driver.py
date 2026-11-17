@@ -1186,6 +1186,13 @@ class DjangoDriver(ThreadedDriver):
         """The schema hash of the installed Django model ``label`` (`adorm.drivers.django.model_schema_hash()`)."""
         return model_schema_hash(label)
 
+    async def transaction_turns(self, profile: Any) -> Any:
+        """Inside Django's ``TestCase``, the turns of the test's connection that the slots share
+        (`adorm.testing.django.shared_transaction_turns()`); ``None`` elsewhere."""
+        from adorm.testing.django import shared_transaction_turns
+
+        return await shared_transaction_turns(profile.alias)
+
     async def open_connection(self, profile: Any, emit: Any) -> ThreadedConnection:
         """Open a ``connection_class`` connection; inside a Django test, `adorm.testing.django.django_connection()`
         chooses the connection (the shared test connection of a ``TestCase``). Connects Django's ``post_migrate`` to

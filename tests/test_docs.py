@@ -152,6 +152,7 @@ SUBMODULES = (
     "adorm.executor.sessions",
     "adorm.executor.slot",
     "adorm.executor.transactions",
+    "adorm.executor.turns",
     "adorm.models.base",
     "adorm.models.contenttypes",
     "adorm.models.inheritance",

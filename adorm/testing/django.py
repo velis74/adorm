@@ -23,6 +23,7 @@ from adorm.drivers.django.vendors import PROGRESS_STEPS
 from adorm.drivers.sql import set_options_sql
 from adorm.events import NOTIFY
 from adorm.exceptions import NotSupportedError, OperationalError, TransactionManagementError, TransactionOverlapError
+from adorm.executor.turns import TransactionTurns
 
 if TYPE_CHECKING:
     from adorm.drivers.base import Profile
@@ -41,6 +42,7 @@ __all__ = [
     "open_testcase_atomics",
     "shared_connection_class",
     "shared_test_connection",
+    "shared_transaction_turns",
 ]
 
 QUERY_CANCELED = "57014"
@@ -115,7 +117,8 @@ async def find_test_database(alias: str) -> TestDatabase | None:
     (`in_test_environment()`) and for an alias without a ``DATABASES`` entry.
 
     The wrapper is that of the thread that runs the test: the thread that waits in asgiref's ``async_to_sync()``
-    for the event loop (Django's async test methods), else the event loop's own thread (pytest-asyncio)."""
+    for the event loop (Django's async test methods), else the event loop's own thread (pytest-asyncio). The
+    `TestDatabase` found is kept per event loop while it is current (`TestDatabase.current()`)."""
     if not in_test_environment():
         return None
     from asgiref.sync import AsyncToSync, sync_to_async
@@ -123,6 +126,10 @@ async def find_test_database(alias: str) -> TestDatabase | None:
 
     if alias not in connections.settings:
         return None
+    found = _found.setdefault(asyncio.get_running_loop(), {})
+    test = found.get(alias)
+    if test is not None and test.current():
+        return test
     executor = getattr(AsyncToSync.executors, "current", None)
     if executor is None:
         executor = AsyncToSync.loop_thread_executors.get(asyncio.get_running_loop())
@@ -130,7 +137,11 @@ async def find_test_database(alias: str) -> TestDatabase | None:
         wrapper = _wrapper(alias)
     else:
         wrapper = await sync_to_async(_wrapper, thread_sensitive=True)(alias)
-    return TestDatabase(alias, wrapper, open_testcase_atomics(wrapper))
+    test = found[alias] = TestDatabase(alias, wrapper, open_testcase_atomics(wrapper))
+    return test
+
+
+_found: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, TestDatabase]] = weakref.WeakKeyDictionary()
 
 
 class SharedTestConnection:
@@ -142,9 +153,15 @@ class SharedTestConnection:
     test's transaction. ``defaults`` are the options a connection of the alias starts with
     (`Driver.connection_defaults()`, recorded by `add_defaults()`).
 
+    ``turns`` are the `TransactionTurns` the router takes before it acquires a slot of an alias of this connection: a
+    transaction, or an operation outside a transaction, of a flow that does not run inside the open transaction waits
+    until that transaction ends.
+
     While connections use it (`attach()`), statements that other threads run through the wrapper (Django ORM code of the
-    test or of the code under test) hold it too, with ``defaults`` as their connection options, and raise
-    `TransactionOverlapError` as an operation outside a transaction does (`check_isolated()`).
+    test or of the code under test) hold it too, with ``defaults`` as their connection options. While a transaction is
+    open that such a statement does not run inside (`overlapped()`), the statement's thread waits for a shared turn
+    first (`TransactionTurns.take_blocking()`); a statement that cannot wait (no event loop has taken a turn, or it
+    runs on that loop's thread) raises `TransactionOverlapError` (`check_isolated()`).
     """
 
     def __init__(self, test: TestDatabase) -> None:
@@ -159,6 +176,10 @@ class SharedTestConnection:
         self._attached = 0
         self._guard_wrapper = self._guard
         self._watched_raw: Any = None
+        self.turns = TransactionTurns(
+            f"the shared connection of Django's TestCase ({test.alias!r})",
+            advice="a test that needs concurrent transactions uses TransactionTestCase",
+        )
 
     @property
     def wrapper(self) -> Any:
@@ -268,22 +289,38 @@ class SharedTestConnection:
                     pass
 
     def _guard(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
-        """Run a statement of a thread that does not hold the shared connection as a call of its own."""
+        """Run a statement of a thread that does not hold the shared connection as a call of its own; while a
+        transaction is open that the statement does not run inside, first wait for a shared turn
+        (`TransactionTurns.take_blocking()`)."""
         if getattr(self._holding, "active", False) or not self.test.current():
             return execute(sql, params, many, context)
-        with self.hold(_Foreign()):
-            self.check_isolated("statement of Django code")
-            self.apply_options(self.defaults)
-            try:
-                return execute(sql, params, many, context)
-            except BaseException:
-                self.forget_options()
-                raise
+        turn = None
+        waited = False
+        try:
+            while True:
+                with self.hold(_Foreign()):
+                    if waited or not self.overlapped():
+                        self.check_isolated("statement of Django code")
+                        self.apply_options(self.defaults)
+                        try:
+                            return execute(sql, params, many, context)
+                        except BaseException:
+                            self.forget_options()
+                            raise
+                turn = self.turns.take_blocking("statement of Django code")
+                waited = True
+        finally:
+            if turn is not None:
+                turn.release()
+
+    def overlapped(self) -> bool:
+        """Whether a transaction is open that the caller's context is not inside."""
+        enclosing = _enclosing_connections()
+        return any(other not in enclosing for other in self.transactions)
 
     def check_isolated(self, what: str) -> None:
         """Raise `TransactionOverlapError` while a transaction is open that the caller's context is not inside."""
-        enclosing = _enclosing_connections()
-        if any(other not in enclosing for other in self.transactions):
+        if self.overlapped():
             raise TransactionOverlapError(
                 f"another transaction is open on the shared connection of Django's TestCase and this {what} does not "
                 "run inside it; what overlaps a transaction without nesting in it is not isolated there: use "
@@ -347,18 +384,29 @@ def shared_test_connection(test: TestDatabase) -> SharedTestConnection:
         return shared
 
 
+async def shared_transaction_turns(alias: str) -> TransactionTurns | None:
+    """The `TransactionTurns` of the shared connection of the Django alias ``alias`` inside a ``TestCase``
+    (`SharedTestConnection.turns`); ``None`` outside one."""
+    test = await find_test_database(alias)
+    if test is None or not test.in_test_case:
+        return None
+    return shared_test_connection(test).turns
+
+
 def _same(first: tuple[Any, ...], second: tuple[Any, ...]) -> bool:
     return len(first) == len(second) and all(a is b for a, b in zip(first, second, strict=True))
 
 
 def _enclosing_connections() -> set[Any]:
-    """The connections of the open transactions active in the current context (of every session)."""
+    """The connections of the transactions active in the current context (of every session) whose leases are not
+    released."""
     from adorm.executor.transactions import _active, Atomic
 
     found = set()
     for transaction in _active.get().values():
-        if isinstance(transaction, Atomic) and not transaction.root.closed and transaction.lease is not None:
-            found.add(transaction.lease.slot.connection)
+        lease = transaction.lease if isinstance(transaction, Atomic) else None
+        if lease is not None and not lease.released:
+            found.add(lease.slot.connection)
     return found
 
 
@@ -369,12 +417,14 @@ class SharedConnectionMixin:
     transaction stays open and nothing closes the wrapper. Every call but ``connect_sync()`` holds the shared connection
     (`SharedTestConnection.hold()`); a cancelled call that waits for it raises a cancellation error.
 
-    A transaction is a savepoint in the test's transaction. ``begin`` and an operation outside a transaction raise
-    `TransactionOverlapError` while another connection's transaction is open, unless they come from inside that
-    transaction (an ``atomic()`` block of it is active in the caller's context); what runs inside it belongs to its
-    savepoint and is rolled back with it. Ending a transaction while one begun inside it is still open rolls back both
-    and raises `TransactionOverlapError`; the inner one raises it on its next call. A transaction that is not the
-    innermost open one cannot run operations or create or end savepoints.
+    A transaction is a savepoint in the test's transaction. The router has ``begin`` and an operation outside a
+    transaction wait while another connection's transaction is open (`SharedTestConnection.turns`), unless they come
+    from inside that transaction (an ``atomic()`` block of it is active in the caller's context); what runs inside it
+    belongs to its savepoint and is rolled back with it. ``begin`` and an operation outside a transaction that reach the
+    connection while a transaction they are not inside is open raise `TransactionOverlapError`. Ending a transaction
+    while one begun inside it is still open rolls back both and raises `TransactionOverlapError`; the inner one raises
+    it on its next call. A transaction that is not the innermost open one cannot run operations or create or end
+    savepoints.
 
     An operation outside a transaction runs in a savepoint of its own, so that a failure leaves the test's transaction
     usable. A failed operation inside the innermost transaction rolls back to that transaction's innermost savepoint

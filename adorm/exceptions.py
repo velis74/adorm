@@ -337,8 +337,8 @@ class TransactionClosed(TransactionManagementError):
 
 
 class TransactionOverlapError(TransactionManagementError):
-    """A transaction or an operation overlapped a transaction it is not nested in, on a connection that cannot isolate
-    them: the test connection the slots share inside Django's ``TestCase`` (`adorm.testing.django`)."""
+    """Work overlapped a transaction it is not nested in, on a connection that cannot isolate them: the test connection
+    the slots share inside Django's ``TestCase`` (`adorm.testing.django`)."""
 
 
 # SQLSTATE class (first two characters, else the first) to exception, as psycopg maps them, except class 3D:
@@ -459,7 +459,8 @@ class SessionTimeout(AdormError):
 
 
 class DeadlockError(SessionTimeout):
-    """A slot acquisition failed, or cannot succeed, while the flow already holds slots.
+    """A slot acquisition failed, or cannot succeed: the flow holds slots, or it waits for a transaction on a shared
+    database session that cannot end (`adorm.executor.turns`).
 
     ``held_sessions`` lists the sessions whose slots the waiting flow holds.
     """

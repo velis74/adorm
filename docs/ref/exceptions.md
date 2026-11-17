@@ -462,28 +462,43 @@ except adorm.TransactionClosed:
 
 ### `adorm.TransactionOverlapError`
 
-Two transactions that are not nested overlapped on a connection that cannot isolate them: the test connection the
-slots share inside Django's `TestCase` ([test mode](/topics/testing)). Raised by:
+Work overlapped a transaction it is not nested in, on a connection that cannot isolate them: the test connection the
+slots share inside Django's `TestCase` ([test mode](/topics/testing#transactions-in-a-testcase)). A transaction or an
+operation outside a transaction that another flow starts there, and a Django statement outside the open
+transaction's context, wait for the open transaction instead. Raised by:
 
-- a transaction, or an operation outside a transaction, that starts while another flow's transaction is open;
-- the end of a transaction while a transaction begun inside it is open, and that inner transaction's next operation.
+- an operation of a transaction, or a savepoint of it, while a transaction begun inside it is open;
+- the end of a transaction while a transaction begun inside it is open, and that inner transaction's next operation;
+- a `BEGIN` or an operation sent on a lease of [`Router.acquire()`](/ref/pool#async-acquire-session-timeout-none),
+  which takes no turn, while a transaction it is not inside is open;
+- a Django statement outside an open transaction's context that cannot wait: it runs on the event loop's thread, or
+  no adorm flow has taken a turn there yet.
 
 Tests that need isolated concurrent transactions use `TransactionTestCase`.
 
 ```python
-async def other_flow():
-    async with adorm.atomic():
-        await Member.objects.create(name="bob")
+audit = adorm.create_session(session_name="audit")
+
+
+async def record(member, opened, done):
+    async with audit.atomic():                    # a transaction of another session
+        await audit.bind(AuditEntry).create(action=f"created {member.name}")
+        opened.set()
+        await done.wait()
 
 
 class SignupTests(TestCase):
-    async def test_a_second_writer(self):
-        async with adorm.atomic():
-            await Member.objects.create(name="ann")
-            # A flow that does not run inside this transaction: its own transaction overlaps it.
-            task = asyncio.create_task(other_flow(), context=contextvars.Context())
-            with self.assertRaises(adorm.TransactionOverlapError):
-                await task
+    async def test_a_nested_transaction_left_open(self):
+        opened, done = asyncio.Event(), asyncio.Event()
+        with self.assertRaises(adorm.TransactionOverlapError):
+            async with adorm.atomic():
+                member = await Member.objects.create(name="ann")
+                task = asyncio.create_task(record(member, opened, done))   # nested in this transaction
+                await opened.wait()
+        # the end of the block rolled back both transactions
+        done.set()
+        with self.assertRaises(adorm.TransactionOverlapError):
+            await task
 ```
 
 ## Executor errors
@@ -503,13 +518,17 @@ except adorm.SessionTimeout as exc:
 
 ### `adorm.DeadlockError(message=None, *, held_sessions=(), session=None, timeout=None)`
 
-A `SessionTimeout` raised for a flow that waits for a slot while it holds slots. `held_sessions` is a tuple of the
-sessions whose slots the flow holds. Raised:
+A `SessionTimeout` raised for a slot acquisition that cannot succeed: the flow holds slots, or it waits for a
+transaction on a shared database session that cannot end. `held_sessions` is a tuple of the sessions whose slots the
+flow holds. Raised:
 
 - when the acquisition times out while the flow holds a slot;
 - at once when every slot is held by a flow that itself waits for a slot;
 - inside a transaction, when an operation or a nested `atomic()` waits for a savepoint of another task to end longer
-  than the `acquire_timeout` connection option in effect; `held_sessions` holds the transaction's session.
+  than the `acquire_timeout` connection option in effect; `held_sessions` holds the transaction's session;
+- on a shared database session (Django's `TestCase`, [transaction turns](/ref/pool#transaction-turns)), when a
+  transaction, an operation outside a transaction or a Django statement waits for the open transaction: at once when
+  that transaction's task awaits the waiting task, else after the `acquire_timeout` in effect.
 
 ```python
 audit = adorm.create_session(using="default", session_name="audit")

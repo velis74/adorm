@@ -148,6 +148,13 @@ Pools added with `add()` are not affected by profile changes. The default router
 router = Router(profiles=adorm.settings.profiles)
 ```
 
+When the driver's connections for a profile share one database session
+([`Driver.transaction_turns()`](/ref/drivers#async-transaction-turns-profile) returns
+[`TransactionTurns`](#adorm-executor-turns-transactionturns-name-advice), as inside Django's `TestCase`), `slot()` takes the
+exclusive turn and `run()` a shared one before the acquisition, within its timeout. A flow inside a transaction that
+holds the turn takes none. The lease holds the turn until the slot has been returned or has left the pool.
+`acquire()` takes no turn.
+
 | Member | Meaning |
 |---|---|
 | `profiles` | the registry, `None` without one |
@@ -205,6 +212,7 @@ After a hook that ran custom SQL every option the slot remembers counts as unkno
 | `on_acquire` returns an option the driver does not declare | `NotSupportedError`; the slot leaves the pool |
 | setting the options fails (a role the login may not become) | the driver's error; the slot leaves the pool |
 | `on_acquire` and setting the options do not finish within `timeout` | `SessionTimeout` or `DeadlockError` whose message names the hook; the hook is cancelled and the slot leaves the pool |
+| `slot()` or `run()`: the turn on a shared database session is not granted within `timeout`, or the transaction that holds it awaits the waiting flow | `DeadlockError` ([`TransactionTurns.take()`](#adorm-executor-turns-transactionturns-name-advice)) |
 
 The flow holds a slot when the current task acquired an unreleased lease, or when the current context holds one
 ([`held_leases()`](#adorm-executor-held-leases)). A deadlock raised at once goes to the newest of the waiting tasks
@@ -224,7 +232,8 @@ finally:
 #### `slot(session, *, timeout=None)`
 
 An asynchronous context manager: `acquire()`, record the lease with [`holding()`](#adorm-executor-holding-lease)
-for the block, release it on exit. The lease counts for deadlocks raised at once.
+for the block, release it on exit. The lease counts for deadlocks raised at once. On a shared database session it
+first takes the exclusive turn (a transaction's).
 
 ```python
 async with router.slot(session) as lease:
@@ -249,6 +258,8 @@ also after an error or a cancellation.
   acquired.
 - The operation's request carries the database options in effect; the slot sets them before it executes the
   operation.
+- On a shared database session it first takes a shared turn: it waits while a transaction it is not inside holds
+  the turn.
 - Enclosing [`adorm.timeout()`](/ref/options#adorm-timeout-delay) blocks see the operation in the phase
   `"waiting_for_slot"` until the slot is acquired, then `"executing"`.
 - A cancellation raises `CancelledError` with the operation's [`CancellationOutcome`](#adorm-cancellationoutcome). It
@@ -287,6 +298,90 @@ with holding(lease):
 ### `adorm.executor.held_leases()`
 
 The unreleased leases of the enclosing `holding()` and `Router.slot()` blocks of the current context, as a tuple.
+
+## Transaction turns
+
+`adorm.executor.turns` serialises the transactions on a database session that several slots share, such as the test
+connection of Django's `TestCase` ([test mode](/topics/testing#transactions-in-a-testcase)).
+
+```python
+from adorm.executor.turns import awaits, DEADLOCK_CHECK_INTERVAL, TransactionTurns, Turn
+```
+
+### `adorm.executor.turns.TransactionTurns(name, advice="")`
+
+The turns of one shared database session. A transaction holds the turn alone; operations outside a transaction hold
+it together. Turns are granted in the order they were asked for: an operation asked for after a waiting transaction
+waits for it. `name` describes the session in error messages; `advice`, when not empty, ends the message of every
+`DeadlockError` raised for a wait.
+
+| Member | Meaning |
+|---|---|
+| `name`, `advice` | the description of the session and the advice of the error messages |
+| `holders` | the [`Turn`](#adorm-executor-turns-turn) objects held now, in the order they were granted |
+| `waiting` | how many turns wait |
+| `enclosed()` | whether the current context holds the unreleased lease of a transaction that holds the turn ([`held_leases()`](#adorm-executor-held-leases)); the router then takes no turn |
+
+#### `async take(*, exclusive, session, deadline, timeout, held_sessions=...)`
+
+Waits for a turn, exclusive for a transaction, and returns the [`Turn`](#adorm-executor-turns-turn). `deadline` is the
+event loop time the wait ends at; `session`, `timeout` and `held_sessions(task)` (the router's
+[`held_sessions()`](#held-sessions-task-none)) describe the error.
+
+| Outcome | Raised |
+|---|---|
+| `deadline` passes | [`DeadlockError`](/ref/exceptions#adorm-deadlockerror-message-none-held-sessions-session-none-timeout-none) with `session`, `timeout` and `held_sessions` |
+| the task of a transaction that holds the turn awaits the waiting task ([`awaits()`](#adorm-executor-turns-awaits-task-target)) | `DeadlockError` at once when the wait starts, else at the next check, every [`DEADLOCK_CHECK_INTERVAL`](#adorm-executor-turns-deadlock-check-interval) seconds |
+| the waiting task is cancelled | `CancelledError`; a turn granted meanwhile goes to the next waiting turns |
+
+```python
+turns = TransactionTurns("the shared session")
+turn = await turns.take(exclusive=True, session=session, deadline=loop.time() + 30, timeout=30)
+try:
+    ...                                  # the transaction
+finally:
+    turn.release()
+```
+
+#### `take_blocking(what, timeout=None)`
+
+From a thread other than the event loop's: blocks until a shared turn is granted and returns the `Turn`, which
+`release()` gives up from that thread. `what` describes the waiting work in the error. Returns `None` without waiting
+when no turn has been taken on a running event loop yet, or when called on that loop's thread. `timeout` defaults to
+the longest timeout of the transactions that hold or wait for the turn, else 30 seconds; past it the wait raises
+`DeadlockError`. The task of the transaction that holds the turn is not followed to the thread, so a deadlock with a
+thread is raised at the timeout.
+
+### `adorm.executor.turns.Turn`
+
+A flow's turn on a `TransactionTurns`.
+
+| Member | Meaning |
+|---|---|
+| `exclusive` | `True` for a transaction's turn |
+| `session`, `task`, `timeout` | the session, the task that asked for the turn and the acquisition's timeout; `session` and `task` are `None` for a turn of `take_blocking()` |
+| `held` | whether the turn is granted and not released |
+| `release()` | gives up the turn; the next waiting turns that fit are granted. A second call does nothing. From another thread, the release is scheduled on the turn's event loop |
+
+### `adorm.executor.turns.awaits(task, target)`
+
+Whether `task` is `target` or waits for it: it awaits `target`, or a task or an `asyncio.gather()` that waits for it.
+A wait through a plain future (`asyncio.wait()`, a `TaskGroup`, an `Event`) is not followed.
+
+```python
+async def both():
+    await asyncio.gather(other(), target)
+
+
+target = asyncio.create_task(work())
+parent = asyncio.create_task(both())
+await asyncio.sleep(0)
+awaits(parent, target)       # True
+```
+
+### `adorm.executor.turns.DEADLOCK_CHECK_INTERVAL`
+
+`0.05`: the seconds between the checks of waiting turns for a transaction whose task awaits the waiting task.
 
 ## Leases and queues
 

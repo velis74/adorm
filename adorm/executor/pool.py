@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from adorm.checks import SchemaProblem
     from adorm.drivers.base import Driver, DriverConnection, Profile
     from adorm.executor.sessions import Session
+    from adorm.executor.turns import Turn
     from adorm.operations import Operation
     from adorm.settings import ConnectionProfile, ProfileRegistry
 
@@ -409,6 +410,10 @@ class Router:
     pool a flow waits for is held through `slot()` or `run()` by tasks that themselves wait for a slot that cannot
     become free, one of those tasks gets `DeadlockError` at once.
 
+    When the driver's connections for a profile share one database session (`Driver.transaction_turns()`), `slot()`
+    takes the exclusive turn and `run()` a shared one before the acquisition, within its deadline
+    (`adorm.executor.turns.TransactionTurns`); a flow inside a transaction that holds the turn takes none.
+
     With ``profiles``, a `ProfileRegistry`, a session whose ``using`` no added pool serves gets a pool created
     from the registry's profile of that name (`ProfileRegistry.resolve()`), with the profile's pool settings or the
     registry's. When that profile is unregistered or replaced, or the registry's default pool settings change for a
@@ -574,21 +579,53 @@ class Router:
         return await self._acquire(pool, session, timeout, resolve_options(session, pool))
 
     async def _acquire(
-        self, pool: Pool, session: Session, timeout: float | None, options: ResolvedOptions
+        self,
+        pool: Pool,
+        session: Session,
+        timeout: float | None,
+        options: ResolvedOptions,
+        turn: Literal["transaction", "operation"] | None = None,
     ) -> SlotLease:
         """Acquire a slot of ``pool``; when ``pool`` is retired after a profile change, of the pool that serves the
-        session's profile now, within the same deadline."""
+        session's profile now, within the same deadline. With ``turn``, first take a turn of that kind when the
+        driver's connections share a database session (`_take_turn()`); the lease holds it until it is returned."""
         timeout = options.acquire_timeout if timeout is None else check_timeout(timeout, "timeout")
         deadline = asyncio.get_running_loop().time() + timeout
-        while True:
-            try:
-                await self._schema_checked(pool, session, deadline, timeout)
-                return await self._acquire_from(pool, session, deadline, timeout, options)
-            except InterfaceError:
-                if not pool.retired:
-                    raise
-            pool = await self.get_pool(session.using)
-            options = resolve_options(session, pool)
+        taken = None if turn is None else await self._take_turn(pool, session, turn, deadline, timeout)
+        try:
+            while True:
+                try:
+                    await self._schema_checked(pool, session, deadline, timeout)
+                    lease = await self._acquire_from(pool, session, deadline, timeout, options)
+                    break
+                except InterfaceError:
+                    if not pool.retired:
+                        raise
+                pool = await self.get_pool(session.using)
+                options = resolve_options(session, pool)
+        except BaseException:
+            if taken is not None:
+                taken.release()
+            raise
+        lease._turn = taken
+        return lease
+
+    async def _take_turn(
+        self, pool: Pool, session: Session, kind: Literal["transaction", "operation"], deadline: float, timeout: float
+    ) -> Turn | None:
+        """Wait for a turn of ``kind`` on the `TransactionTurns` of ``pool``'s profile
+        (`Driver.transaction_turns()`); ``None`` when there are none or the current context is inside a transaction
+        that holds the turn."""
+        turns = await pool.driver.transaction_turns(pool.profile)
+        if turns is None or turns.enclosed():
+            return None
+        return await turns.take(
+            exclusive=kind == "transaction",
+            session=session,
+            deadline=deadline,
+            timeout=timeout,
+            held_sessions=self.held_sessions,
+        )
 
     async def _schema_checked(self, pool: Pool, session: Session, deadline: float, timeout: float) -> None:
         """Wait for the start-up schema check of ``pool`` (`Pool`), starting it when none runs or has passed."""
@@ -691,14 +728,21 @@ class Router:
             raise
 
     async def _acquire_bound(
-        self, session: Session, timeout: float | None, pool: Pool | None = None, options: ResolvedOptions | None = None
+        self,
+        session: Session,
+        timeout: float | None,
+        pool: Pool | None = None,
+        options: ResolvedOptions | None = None,
+        *,
+        turn: Literal["transaction", "operation"],
     ) -> SlotLease:
-        """`acquire()` a lease that only the acquiring task releases, so it counts for immediate deadlocks."""
+        """`acquire()` a lease that only the acquiring task releases, so it counts for immediate deadlocks, with a
+        turn of ``turn`` (`_acquire()`)."""
         if pool is None:
             pool = await self.get_pool(session.using)
         if options is None:
             options = resolve_options(session, pool)
-        lease = await self._acquire(pool, session, timeout, options)
+        lease = await self._acquire(pool, session, timeout, options, turn)
         lease._bound = True
         return lease
 
@@ -841,7 +885,7 @@ class Router:
         """Acquire a slot for ``session`` for the ``async with`` block, recorded with `holding()`, and release it
         on exit. The lease counts for deadlocks raised at once; one from `acquire()` does not, as any task may
         release it."""
-        lease = await self._acquire_bound(session, timeout)
+        lease = await self._acquire_bound(session, timeout, turn="transaction")
         try:
             with holding(lease):
                 yield lease
@@ -863,7 +907,7 @@ class Router:
             options = resolve_options(session, pool)
             pool.capabilities.check_options(options.database, pool.driver.name)
             with tracking("waiting_for_slot", operation, session):
-                lease = await self._acquire_bound(session, None, pool, options)
+                lease = await self._acquire_bound(session, None, pool, options, turn="operation")
             if lease.pool is not pool:
                 # acquired from the pool that replaced a retired one
                 pool = lease.pool

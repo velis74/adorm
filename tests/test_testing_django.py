@@ -1,10 +1,12 @@
 """Test mode: the Django driver inside Django's ``TestCase`` (slots on the test's connection, transactions as
-savepoints, overlapping transactions refused) and ``TransactionTestCase`` (connections of their own), under Django's
-async test methods (the event loop on a thread of its own) and pytest-asyncio (the event loop on the test's thread).
+savepoints, overlapping transactions taking turns) and ``TransactionTestCase`` (connections of their own), under
+Django's async test methods (the event loop on a thread of its own) and pytest-asyncio (the event loop on the test's
+thread).
 
 The failures that matter: flows racing for the shared connection, a cancelled flow that waits for it or runs on it, a
 failed operation that would break the test's transaction for every other flow, options that leak between slots,
-transactions that overlap or outlive the one they began in, and slots that outlive their test."""
+transactions that overlap, wait for each other or outlive the one they began in, and slots that outlive their
+test."""
 
 import asyncio
 import contextvars
@@ -31,6 +33,7 @@ import adorm
 from adorm import (
     ConnectionProfile,
     create_session,
+    DeadlockError,
     IntegrityError,
     InterfaceError,
     NotSupportedError,
@@ -51,6 +54,7 @@ from adorm.testing.django import (
     QUERY_CANCELED,
     shared_connection_class,
     shared_test_connection,
+    shared_transaction_turns,
     SharedConnectionMixin,
     SharedTestConnection,
     TestDatabase,
@@ -200,11 +204,13 @@ class SharedConnectionTests(TestCase):
         assert wrapper.in_atomic_block
         assert len(open_testcase_atomics(wrapper)) == 2
 
-    async def test_overlapping_transactions_raise(self):
+    async def test_overlapping_transactions_wait_for_the_open_one(self):
         async with executor():
+            turns = await turns_of()
             for i in REPEAT:
                 first, second = create_session("default", f"first-{i}"), create_session("default", f"second-{i}")
                 entered, finish = asyncio.Event(), asyncio.Event()
+                seen = []
 
                 async def hold(session=first, entered=entered, finish=finish, i=i):
                     async with session.atomic():
@@ -212,19 +218,233 @@ class SharedConnectionTests(TestCase):
                         entered.set()
                         await finish.wait()
 
+                async def follow(session=second, seen=seen, i=i):
+                    async with session.atomic():
+                        seen.extend(await tag_names(session))
+                        await tags(session).create(name=f"second-{i}")
+
                 task = asyncio.create_task(hold())
-                await entered.wait()
-                with pytest.raises(TransactionOverlapError):
-                    async with second.atomic():
-                        await tags(second).create(name="never")
-                # An operation outside a transaction would run inside the open one, so it is refused too.
-                with pytest.raises(TransactionOverlapError):
-                    await tags(second).count()
+                await first_of(entered.wait(), task)
+                waiter = asyncio.create_task(follow())
+                # An operation outside a transaction would run inside the open one: it waits too.
+                count = asyncio.create_task(tags(second).filter(name__startswith="first-").count())
+                await until(lambda: turns.waiting == 2)
+                assert not waiter.done()
+                assert not count.done()
+                finish.set()
+                await asyncio.gather(task, waiter)
+                assert f"first-{i}" in seen
+                assert await count == i + 1
+            assert await tag_names() == sorted(["seed", *(f"{n}-{i}" for n in ("first", "second") for i in REPEAT)])
+            await idle(turns)
+
+    async def test_racing_transactions_run_one_after_the_other(self):
+        async with executor():
+            for i in REPEAT:
+                log = []
+
+                async def flow(n, i=i, log=log):
+                    session = create_session("default", f"race-{i}-{n}")
+                    async with session.atomic():
+                        log.append(("begin", n))
+                        await tags(session).create(name=f"race-{i}-{n}")
+                        count = await tags(session).filter(name__startswith=f"race-{i}-").count()
+                        log.append(("end", n))
+                        return count
+
+                async def read(i=i):
+                    return await tags(create_session("default", "reader")).filter(name__startswith=f"race-{i}-").count()
+
+                results = await asyncio.gather(flow(0), flow(1), read(), flow(2), read())
+                # Each transaction saw the writes of those before it and none of a later one.
+                assert sorted(results[i] for i in (0, 1, 3)) == [1, 2, 3]
+                assert all(0 <= results[i] <= 3 for i in (2, 4))
+                assert [kind for kind, _ in log] == ["begin", "end"] * 3
+                assert all(log[k][1] == log[k + 1][1] for k in range(0, 6, 2))
+            assert await tags().filter(name__startswith="race-").count() == 3 * len(REPEAT)
+
+    async def test_waiting_flows_run_in_the_order_they_came(self):
+        holder = create_session("default", "holder")
+        async with executor():
+            turns = await turns_of()
+            for i in REPEAT:
+                entered, finish = asyncio.Event(), asyncio.Event()
+                order = []
+
+                async def hold(entered=entered, finish=finish, order=order):
+                    async with holder.atomic():
+                        await tags(holder).count()
+                        entered.set()
+                        await finish.wait()
+                        order.append("holder")
+
+                async def transaction(n, order=order, i=i):
+                    session = create_session("default", f"tx-{n}")
+                    async with session.atomic():
+                        order.append(f"tx-{n}")
+                        await tags(session).create(name=f"tx-{i}-{n}")
+
+                async def operation(n, order=order):
+                    count = await tags(create_session("default", f"op-{n}")).count()
+                    order.append(f"op-{n}")
+                    return count
+
+                task = asyncio.create_task(hold())
+                await first_of(entered.wait(), task)
+                flows = []
+                for n, start in enumerate([transaction, operation, operation, transaction, operation]):
+                    flows.append(asyncio.create_task(start(n)))
+                    await until(lambda n=n: turns.waiting == n + 1)
+                finish.set()
+                await asyncio.gather(task, *flows)
+                # Operations that came together run together; none passes a transaction that came before it.
+                assert order[:2] == ["holder", "tx-0"]
+                assert sorted(order[2:4]) == ["op-1", "op-2"]
+                assert order[4:] == ["tx-3", "op-4"]
+                assert await flows[4] == 1 + 2 * (i + 1)
+            await idle(turns)
+
+    async def test_cancelling_a_flow_that_waits_for_an_open_transaction(self):
+        holder = create_session("default", "holder")
+        async with executor() as pool:
+            turns = await turns_of()
+            for i in REPEAT:
+                entered, finish = asyncio.Event(), asyncio.Event()
+
+                async def hold(entered=entered, finish=finish, i=i):
+                    async with holder.atomic():
+                        await tags(holder).create(name=f"held-{i}")
+                        entered.set()
+                        await finish.wait()
+
+                async def never(i=i):
+                    async with create_session("default", "never").atomic():
+                        await tags(create_session("default", "never")).create(name=f"never-{i}")
+
+                task = asyncio.create_task(hold())
+                await first_of(entered.wait(), task)
+                waiting = [asyncio.create_task(never()), asyncio.create_task(tags().create(name=f"never-op-{i}"))]
+                after = asyncio.create_task(tags().create(name=f"after-{i}"))
+                await until(lambda: turns.waiting == 3)
+                for flow in waiting:
+                    flow.cancel()
+                for flow in waiting:
+                    with pytest.raises(asyncio.CancelledError) as raised:
+                        await flow
+                    assert adorm.cancellation_outcome(raised.value) is adorm.CancellationOutcome.NOT_STARTED
+                assert turns.waiting == 1
+                assert not after.done()
+                finish.set()
+                await asyncio.gather(task, after)
+            assert await tag_names() == sorted(["seed", *(f"{n}-{i}" for n in ("held", "after") for i in REPEAT)])
+            await idle(turns)
+            assert all(not slot.lease for slot in pool._slots)
+
+    async def test_a_wait_for_an_open_transaction_times_out_as_a_deadlock(self):
+        holder = create_session("default", "holder")
+        async with executor(acquire_timeout=0.2):
+            turns = await turns_of()
+            for i in REPEAT:
+                entered, finish = asyncio.Event(), asyncio.Event()
+
+                async def hold(entered=entered, finish=finish, i=i):
+                    async with holder.atomic():
+                        await tags(holder).create(name=f"held-{i}")
+                        entered.set()
+                        await finish.wait()
+                        await tags(holder).create(name=f"held-late-{i}")
+
+                task = asyncio.create_task(hold())
+                await first_of(entered.wait(), task)
+                waiter = create_session("default", "waiter")
+                with pytest.raises(DeadlockError, match="stayed held for 0.2 s") as raised:
+                    await enter(waiter)
+                assert (raised.value.session, raised.value.timeout, raised.value.held_sessions) == (waiter, 0.2, ())
+                with pytest.raises(DeadlockError):
+                    await tags(waiter).count()
+                # A time limit of the flow ends the wait first, as a wait for a slot.
+                with adorm.connection_options(acquire_timeout=5):
+                    with pytest.raises(adorm.OperationTimeout) as limited:
+                        async with adorm.timeout(0.1):
+                            await tags(waiter).count()
+                assert limited.value.phase == "waiting_for_slot"
+                assert turns.waiting == 0
                 finish.set()
                 await task
-                async with second.atomic():
-                    await tags(second).create(name=f"second-{i}")
-            assert await tag_names() == sorted(["seed", *(f"{n}-{i}" for n in ("first", "second") for i in REPEAT)])
+            assert await tag_names() == sorted(["seed", *(f"held{n}-{i}" for n in ("", "-late") for i in REPEAT)])
+
+    async def test_a_transaction_that_awaits_a_flow_waiting_for_it_is_a_deadlock(self):
+        outer, other = create_session("default", "outer"), create_session("default", "other")
+        async with executor(acquire_timeout=60):
+            turns = await turns_of()
+            for i in REPEAT:
+                async with asyncio.timeout(10), outer.atomic():
+                    await tags(outer).create(name=f"outer-{i}")
+                    # Awaited directly, through gather() and through a task in between.
+                    with pytest.raises(DeadlockError, match="awaits") as raised:
+                        await asyncio.create_task(enter(other), context=contextvars.Context())
+                    assert raised.value.session == other
+                    results = await asyncio.gather(
+                        asyncio.create_task(tags(other).count(), context=contextvars.Context()),
+                        tags(outer).filter(name=f"outer-{i}").count(),
+                        return_exceptions=True,
+                    )
+                    assert isinstance(results[0], DeadlockError)
+                    assert results[1] == 1
+
+                    async def middle():
+                        await asyncio.create_task(enter(other), context=contextvars.Context())
+
+                    with pytest.raises(DeadlockError):
+                        await asyncio.create_task(middle())
+                    # A flow that waits first and is awaited afterwards.
+                    late = asyncio.create_task(enter(other), context=contextvars.Context())
+                    await until(lambda: turns.waiting == 1)
+                    with pytest.raises(DeadlockError):
+                        await late
+                    await tags(outer).create(name=f"outer-late-{i}")
+                await idle(turns)
+            assert await tag_names() == sorted(["seed", *(f"outer{n}-{i}" for n in ("", "-late") for i in REPEAT)])
+
+    async def test_a_task_that_outlives_its_transaction_takes_turns_afterwards(self):
+        outer, holder = create_session("default", "outer"), create_session("default", "holder")
+        async with executor():
+            turns = await turns_of()
+            for i in REPEAT:
+                created, go_on, entered, finish = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+                seen = []
+
+                async def outliving(created=created, go_on=go_on, seen=seen, i=i):
+                    # Inside the transaction: nested in it, committed with it.
+                    await tags(create_session("default", "inside")).create(name=f"inside-{i}")
+                    created.set()
+                    await go_on.wait()
+                    with pytest.raises(TransactionClosed):
+                        await tags(outer).count()
+                    # Outside the ended transaction: its work waits for the open one.
+                    await tags(create_session("default", "late")).create(name=f"late-{i}")
+                    async with create_session("default", "late").atomic():
+                        seen.extend(await tag_names(create_session("default", "late")))
+
+                async def hold(entered=entered, finish=finish, i=i):
+                    async with holder.atomic():
+                        await tags(holder).create(name=f"held-{i}")
+                        entered.set()
+                        await finish.wait()
+
+                async with outer.atomic():
+                    await tags(outer).create(name=f"outer-{i}")
+                    task = asyncio.create_task(outliving())
+                    await first_of(created.wait(), task)
+                holding = asyncio.create_task(hold())
+                await first_of(entered.wait(), holding)
+                go_on.set()
+                await until(lambda: turns.waiting == 1)
+                assert not task.done()
+                finish.set()
+                await asyncio.gather(holding, task)
+                assert {f"outer-{i}", f"inside-{i}", f"held-{i}", f"late-{i}"} <= set(seen)
+            await idle(turns)
 
     async def test_a_transaction_begun_inside_another_is_nested(self):
         outer, inner = create_session("default", "outer"), create_session("default", "inner")
@@ -286,6 +506,7 @@ class SharedConnectionTests(TestCase):
     async def test_a_failed_transaction_leaves_the_shared_connection_usable(self):
         failing, nested = create_session("default", "failing"), create_session("default", "nested")
         async with executor():
+            turns = await turns_of()
             for i in REPEAT:
                 failed, done = asyncio.Event(), asyncio.Event()
 
@@ -308,11 +529,12 @@ class SharedConnectionTests(TestCase):
 
                 task = asyncio.create_task(fail())
                 await first_of(failed.wait(), task)
-                with pytest.raises(TransactionOverlapError):
-                    await tags().count()
+                count = asyncio.create_task(tags().count())
+                await until(lambda: turns.waiting == 1)
                 done.set()
                 with pytest.raises(IntegrityError):
                     await task
+                assert await count == 1 + i
                 await tags().create(name=f"after-{i}")
             assert await tag_names() == ["after-0", "after-1", "after-2", "seed"]
 
@@ -713,8 +935,9 @@ class SharedConnectionTests(TestCase):
                 assert await tag_names() == ["seed"]
                 assert not shared_of(pool).transactions
 
-    async def test_django_orm_code_takes_turns_and_respects_open_transactions(self):
+    async def test_django_orm_code_takes_turns_and_waits_for_open_transactions(self):
         async with executor():
+            turns = await turns_of()
             for i in REPEAT:
 
                 async def orm_write(n, i=i):
@@ -732,7 +955,7 @@ class SharedConnectionTests(TestCase):
                         assert f"joined-{i}" in await tag_names()
                         raise KeyError
                 assert f"joined-{i}" not in await sync_to_async(names_on_test_thread)()
-                # Outside it, it is refused while the transaction is open.
+                # Outside it, it waits until the transaction has ended.
                 entered, finish = asyncio.Event(), asyncio.Event()
 
                 async def hold(entered=entered, finish=finish, i=i):
@@ -740,16 +963,71 @@ class SharedConnectionTests(TestCase):
                         await tags(create_session("default", "holder")).create(name=f"held-{i}")
                         entered.set()
                         await finish.wait()
+                        await tags(create_session("default", "holder")).create(name=f"held-late-{i}")
 
                 task = asyncio.create_task(hold())
                 await first_of(entered.wait(), task)
-                with pytest.raises(TransactionOverlapError):
-                    await sync_to_async(names_on_test_thread)()
+                reading = asyncio.create_task(sync_to_async(names_on_test_thread)())
+                await until(lambda: turns.waiting == 1)
+                assert not reading.done()
                 finish.set()
                 await task
-                assert f"held-{i}" in await sync_to_async(names_on_test_thread)()
+                names = await reading
+                assert {f"held-{i}", f"held-late-{i}"} <= set(names)
+                await idle(turns)
             assert await tags().filter(name__startswith="orm-").count() == 6 * len(REPEAT)
             assert await tags().filter(name__startswith="adorm-").count() == 6 * len(REPEAT)
+
+    async def test_django_orm_code_racing_an_adorm_transaction_runs_after_it(self):
+        writer = create_session("default", "writer")
+        async with executor():
+            turns = await turns_of()
+            for i in REPEAT:
+                entered, finish = asyncio.Event(), asyncio.Event()
+
+                async def transaction(entered=entered, finish=finish, i=i):
+                    async with writer.atomic():
+                        await tags(writer).create(name=f"tx-{i}")
+                        entered.set()
+                        await finish.wait()
+
+                async def orm(entered=entered, i=i):
+                    await entered.wait()
+                    await sync_to_async(dj.Tag.objects.create)(name=f"orm-{i}")
+                    return await sync_to_async(lambda: dj.Tag.objects.filter(name__endswith=f"-{i}").count())()
+
+                async def release(finish=finish):
+                    await until(lambda: turns.waiting == 1)
+                    finish.set()
+
+                results = await asyncio.gather(transaction(), orm(), release())
+                assert results[1] == 2
+                await idle(turns)
+
+    async def test_django_orm_code_waiting_past_the_timeout_raises_deadlock_error(self):
+        holder = create_session("default", "holder")
+        async with executor(acquire_timeout=0.2):
+            turns = await turns_of()
+            for i in range(3):
+                entered, finish = asyncio.Event(), asyncio.Event()
+
+                async def hold(entered=entered, finish=finish, i=i):
+                    async with holder.atomic():
+                        await tags(holder).create(name=f"held-{i}")
+                        entered.set()
+                        await finish.wait()
+
+                task = asyncio.create_task(hold())
+                await first_of(entered.wait(), task)
+                with pytest.raises(DeadlockError, match="statement of Django code") as raised:
+                    await sync_to_async(names_on_test_thread)()
+                assert raised.value.timeout == 0.2
+                assert "TransactionTestCase" in str(raised.value)
+                assert turns.waiting == 0
+                finish.set()
+                await task
+                await idle(turns)
+            assert await tag_names() == sorted(["seed", *(f"held-{i}" for i in range(3))])
 
     async def test_a_slot_that_outlives_its_test_leaves_the_pool(self):
         wrapper = await sync_to_async(wrapper_of_test)()
@@ -832,6 +1110,18 @@ def drop_raising_trigger() -> None:
         cursor.execute(
             f"DROP TRIGGER adorm_test_tag_notice ON {dj.Tag._meta.db_table}; DROP FUNCTION adorm_test_tag_notice()"
         )
+
+
+async def turns_of(alias="default"):
+    """The turns of the test's shared connection of ``alias``."""
+    turns = await shared_transaction_turns(alias)
+    assert turns is not None
+    return turns
+
+
+async def idle(turns):
+    """Return once no turn is held or waits: the last slot has been returned."""
+    await until(lambda: not turns.holders and not turns.waiting)
 
 
 def shared_of(pool) -> SharedTestConnection:
@@ -990,14 +1280,20 @@ async def test_on_the_test_thread_slots_share_its_connection(seeded, driver_clas
     assert seeded.in_atomic_block
 
 
-async def test_on_the_test_thread_overlapping_transactions_raise(seeded):  # noqa: ARG001
+async def test_on_the_test_thread_a_transaction_awaiting_an_overlapping_one_is_a_deadlock(seeded):  # noqa: ARG001
     first, second = create_session("default", "first"), create_session("default", "second")
-    async with executor():
-        async with first.atomic():
-            await tags(first).count()
-            # A flow that does not inherit the transaction's context.
-            with pytest.raises(TransactionOverlapError):
-                await asyncio.create_task(enter(second), context=contextvars.Context())
+    async with executor(acquire_timeout=60):
+        for _ in REPEAT:
+            async with asyncio.timeout(10), first.atomic():
+                await tags(first).count()
+                # A flow that does not inherit the transaction's context waits for it, and the transaction awaits it.
+                with pytest.raises(DeadlockError) as raised:
+                    await asyncio.create_task(enter(second), context=contextvars.Context())
+                assert raised.value.session == second
+                assert raised.value.timeout == 60
+                assert await tags(first).count() == 1
+        # Once the transaction has ended, the same flow runs.
+        await asyncio.create_task(enter(second), context=contextvars.Context())
 
 
 async def enter(session):

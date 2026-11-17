@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from adorm.drivers.base import DriverConnection
     from adorm.executor.pool import Pool
     from adorm.executor.sessions import Session
+    from adorm.executor.turns import Turn
 
 __all__ = [
     "REQUEST_METHODS",
@@ -384,6 +385,7 @@ class SlotLease:
         "_aborted",
         "_bound",
         "_released",
+        "_turn",
         "channel",
         "commit_timeout",
         "hook_options",
@@ -406,6 +408,7 @@ class SlotLease:
         self._released = False
         self._aborted: str | None = None
         self._bound = False  # released only by ``owner``
+        self._turn: Turn | None = None  # given up once the slot is returned
 
     @property
     def events(self) -> asyncio.Queue[Event]:
@@ -485,6 +488,13 @@ class SlotLease:
             return
         self._released = True
         await self.slot._finish(self, reason)
+
+    def _returned(self) -> None:
+        """Give up the lease's turn (`adorm.executor.turns.Turn`) once the slot has been returned or has left the
+        pool."""
+        turn, self._turn = self._turn, None
+        if turn is not None:
+            turn.release()
 
     async def _wait_returned(self) -> None:
         """Wait until the slot has finished returning this released lease, through any cancellation meanwhile."""
@@ -872,6 +882,7 @@ class Slot:
             self.lease = None
             lease.channel.close()
             self.pool._removed(self)
+            lease._returned()
             return
         if self.lease is not lease or self.state != _LEASED:
             return
@@ -914,16 +925,19 @@ class Slot:
     async def _conclude(self, lease: SlotLease, reason: CloseReason | None) -> None:
         """Return the slot of the ended ``lease`` to the pool, or close it for ``reason`` or the slot's own reason."""
         try:
+            try:
+                if reason is None:
+                    reason = await self._release_reason(lease)
+            except BaseException:
+                await self._leave(CloseReason.UNUSABLE)
+                raise
             if reason is None:
-                reason = await self._release_reason(lease)
-        except BaseException:
-            await self._leave(CloseReason.UNUSABLE)
-            raise
-        if reason is None:
-            self.state = _IDLE
-            self.pool._returned(self)
-        else:
-            await self._leave(reason)
+                self.state = _IDLE
+                self.pool._returned(self)
+            else:
+                await self._leave(reason)
+        finally:
+            lease._returned()
 
     async def _release_reason(self, lease: SlotLease) -> CloseReason | None:
         """Why the slot leaves the pool once the connection has settled; ``None`` when it stays."""
