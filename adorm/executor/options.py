@@ -91,7 +91,8 @@ def _check_option(name: Any, value: Any) -> Any:
 
 
 def check_options(options: Mapping[str, Any]) -> Mapping[str, Any]:
-    """``options`` checked, as a read-only mapping. Raises `ValueError` for a name that is not an identifier, for an
+    """``options`` checked, as a read-only mapping. Raises `ValueError` for a name that is neither an identifier nor a
+    custom option name (`is_custom_option()`), for an
     ``acquire_timeout`` that is not a positive, finite number of seconds, for a ``commit_timeout`` that is neither
     that nor ``None``, for a value of `TIMEOUT_OPTIONS` that is neither a number of seconds from 0 to
     `MAX_TIMEOUT_OPTION` nor ``None``, for a ``role`` that is neither a non-empty string without NUL nor ``None`` and

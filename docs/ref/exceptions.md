@@ -528,7 +528,9 @@ flow holds. Raised:
   than the `acquire_timeout` connection option in effect; `held_sessions` holds the transaction's session;
 - on a shared database session (Django's `TestCase`, [transaction turns](/ref/pool#transaction-turns)), when a
   transaction, an operation outside a transaction or a Django statement waits for the open transaction: at once when
-  that transaction's task awaits the waiting task, else after the `acquire_timeout` in effect.
+  that transaction's task awaits the waiting task; else a transaction or an operation after the `acquire_timeout` in
+  effect, and a Django statement after the longest acquisition timeout of the transactions that hold or wait for the
+  turn ([`take_blocking()`](/ref/pool#take-blocking-what-timeout-none)).
 
 ```python
 audit = adorm.create_session(using="default", session_name="audit")

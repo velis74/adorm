@@ -709,7 +709,8 @@ class DjangoConnection(ThreadedConnection):
             self._leave(atomic, rollback=True)
 
     def set_options_sync(self, options: Any, local: bool) -> None:
-        """Set PostgreSQL's time limits with `set_options_sql()` on a cursor of the connection."""
+        """Set the connection options (time limits, `role`, custom options) with `set_options_sql()` on a cursor of
+        the connection."""
         sql = set_options_sql(options, local)
         if sql:
             with self.db.cursor() as cursor:
