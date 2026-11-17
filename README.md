@@ -1,4 +1,8 @@
-# <img src="adorm-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> adorm
+# <img src="https://raw.githubusercontent.com/velis74/adorm/main/adorm-icon.svg" alt="" style="width:2.5em; height: 2.5em; vertical-align: middle"> adorm
+
+[![PyPI](https://img.shields.io/pypi/v/adorm)](https://pypi.org/project/adorm/)
+[![Python](https://img.shields.io/pypi/pyversions/adorm)](https://pypi.org/project/adorm/)
+[![Licence](https://img.shields.io/pypi/l/adorm)](https://github.com/velis74/adorm/blob/main/LICENSE)
 
 adorm (asynchronous database ORM, pronounced "adore") is a pure async ORM for Python: every call that touches the
 database is a coroutine or returns an awaitable. Applications build queries and model operations with adorm's API; a
@@ -6,17 +10,48 @@ driver executes them, natively on the event loop (PostgreSQL through asyncpg) or
 library or ORM (Django). adorm's pool runs a synchronous library on a thread owned by one slot, with that slot's
 connection, so the event loop never runs synchronous database code. The API is modelled on the Django ORM.
 
-The package is pre-release; the API reference on the documentation site lists what it provides.
+**Documentation: <https://docs.velis.si/adorm/>** ([quick start](https://docs.velis.si/adorm/intro/quickstart),
+[API reference](https://docs.velis.si/adorm/ref/), [changelog](https://docs.velis.si/adorm/intro/changelog))
 
-## Requirements
+adorm is pre-alpha (0.0.x): the API can change in any release.
 
-- Python 3.11 or newer
-- PostgreSQL for the test suite
-- the conformance run on SQLite needs no database server (Python's `sqlite3`)
+## Installation
+
+```bash
+pip install "adorm[django]"     # the Django ORM driver
+pip install "adorm[asyncpg]"    # the native PostgreSQL driver: asyncpg, Django and psycopg 3
+```
+
+Both drivers need Python 3.11 or newer and Django 5.2 or newer: the native PostgreSQL driver compiles its SQL with
+Django's query compiler.
+
+## Example
+
+```python
+import adorm
+
+from myapp.adorm_models import Activity, Member
+
+
+async def rename_member(member_id: int, name: str) -> None:
+    async with adorm.atomic():
+        member = await Member.objects.get(pk=member_id)
+        member.name = name
+        await member.save()
+        await Activity.objects.create(member_id=member.pk, kind="renamed")
+
+
+async def active_names() -> list[str]:
+    return [m.name async for m in Member.objects.filter(active=True).order_by("name")]
+```
+
+`myapp.adorm_models` is generated from the Django models with `adorm generate`; the
+[quick start](https://docs.velis.si/adorm/intro/quickstart) sets up a project from start to finish.
 
 ## Development
 
-The project uses [uv](https://docs.astral.sh/uv/).
+The project uses [uv](https://docs.astral.sh/uv/). The test suite needs PostgreSQL; the conformance run on SQLite
+needs no database server (Python's `sqlite3`).
 
 ```bash
 uv sync
@@ -61,7 +96,7 @@ uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
 
 ## Demo
 
-`demo.py` runs the demo application, a library on PostgreSQL: every example and concurrency scenario on every
+[`demo.py`](https://docs.velis.si/adorm/intro/demo) runs the demo application, a library on PostgreSQL: every example and concurrency scenario on every
 available driver, with the adorm code, the SQL each driver sent, the result and the time side by side.
 
 [![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/velis74/adorm?quickstart=1)
@@ -84,7 +119,7 @@ npm run test:e2e
 
 ## Documentation
 
-The documentation site is in `docs/` (VitePress, published on docs.velis.si):
+The documentation site is in `docs/` (VitePress, published on <https://docs.velis.si/adorm/>):
 
 ```bash
 npm install
@@ -93,4 +128,4 @@ npm run docs:dev
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](https://github.com/velis74/adorm/blob/main/LICENSE).
