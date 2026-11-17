@@ -1120,6 +1120,26 @@ async def test_a_savepoint_whose_rollback_fails_marks_the_outer_block(setup):
     assert calls(driver)[-1] == ("rollback", None)
 
 
+@pytest.mark.parametrize("error", [OperationalError("x"), RuntimeError("x")])
+async def test_a_failed_savepoint_rollback_fails_the_outer_block_whatever_the_error(setup, error):
+    """Whatever the rollback raised, the database transaction may hold the savepoint's writes: the outer block
+    refuses further operations and rolls back."""
+    _, driver = setup.pool()
+    session = unique_session()
+    with pytest.raises(TransactionManagementError) as raised:
+        async with session.atomic():
+            driver.connections[0].errors["rollback_to_savepoint"] = error
+            with pytest.raises(KeyError):
+                async with session.atomic():
+                    raise KeyError
+            with pytest.raises(TransactionManagementError):
+                await session.execute(Op())
+    assert calls(driver)[-1] == ("rollback", None)
+    assert "commit" not in [c[0] for c in calls(driver)]
+    cause = raised.value.__cause__
+    assert cause is error or cause.__cause__ is error
+
+
 async def test_an_explicit_savepoint_rollback_that_fails_raises_and_marks_the_outer_block(setup):
     _, driver = setup.pool()
     session = unique_session()

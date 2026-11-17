@@ -692,7 +692,11 @@ class Atomic:
                 try:
                     await parent._request("rollback_to_savepoint", self.savepoint)
                     await parent._request("release_savepoint", self.savepoint)
-                except Exception:
+                except Exception as exc:
+                    if parent._failed is None:
+                        # The savepoint's writes may still be in the transaction.
+                        parent._failed = TransactionManagementError(f"rolling back {self!r} failed")
+                        parent._failed.__cause__ = exc
                     if explicit and failed is None:
                         raise
                     logger.warning("rolling back %r failed", self, exc_info=True)

@@ -88,7 +88,8 @@ created inside it.
   after a failed operation.
 - A transaction block returns its slot to the pool at the end; a slot whose commit or rollback did not succeed leaves
   the pool.
-- A savepoint whose end failed or was cancelled marks the enclosing block as failed.
+- A savepoint whose end failed or was cancelled, or whose rollback failed with any error, marks the enclosing block
+  as failed: its further operations raise `TransactionManagementError` and it rolls back.
 
 | Member | Meaning |
 |---|---|
