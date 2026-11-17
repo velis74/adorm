@@ -1,6 +1,7 @@
 """Connection options in layers, the slot's memory of what it set, and ``adorm.timeout()``."""
 
 import asyncio
+import contextvars
 import gc
 import itertools
 import threading
@@ -32,7 +33,7 @@ from adorm.executor.options import (
     session_options,
     set_session_options,
 )
-from adorm.executor.slot import Request
+from adorm.executor.slot import CloseReason, Request
 from tests.executor_fakes import FakeDriver, Op, OptionsDriver, Profile
 
 REPEAT = range(10)
@@ -131,6 +132,11 @@ async def hold_slot(session, holding, done):
         ("idle_in_transaction_session_timeout", -0.5),
         ("statement_timeout", 2147483.648),
         ("lock_timeout", 3e6),
+        ("role", ""),
+        ("role", 5),
+        ("role", "a\x00b"),
+        ("app.user_id", 7),
+        ("app.user_id", "a\x00b"),
     ],
 )
 def test_invalid_values_are_refused(name, value):
@@ -156,7 +162,17 @@ def test_valid_values_are_kept():
         checked["work_mem"] = "2MB"
 
 
-@pytest.mark.parametrize("name", ["", "1x", "a-b", 3])
+def test_role_and_custom_options_are_kept():
+    assert check_options({"role": "Alice", "app.user_id": "7", "a.b.c_1": "", "role_x": None}) == {
+        "role": "Alice",
+        "app.user_id": "7",
+        "a.b.c_1": "",
+        "role_x": None,
+    }
+    assert check_options({"role": None, "app.user_id": None}) == {"role": None, "app.user_id": None}
+
+
+@pytest.mark.parametrize("name", ["", "1x", "a-b", 3, "App.user", "app.", ".app", "app..x", "app.1x", "app.user-id"])
 def test_option_names_are_identifiers(name):
     with pytest.raises(ValueError, match="identifier"):
         check_options({name: 1})
@@ -536,8 +552,14 @@ async def test_the_commit_runs_with_the_options_around_it(setup):
     assert driver.connections[0].calls[-1] == ("commit", None)
 
 
+# Options from profile hooks
+
+
 @pytest.mark.parametrize("attempt", REPEAT)
-async def test_on_acquire_runs_with_the_sessions_options_and_hooks_make_the_slot_set_them_again(setup, attempt):  # noqa: ARG001
+async def test_on_acquire_runs_before_the_slot_sets_the_leases_options_and_a_hook_without_options_sends_nothing(
+    setup,
+    attempt,  # noqa: ARG001
+):
     seen = []
 
     def on_acquire(connection, _profile, _session):
@@ -549,13 +571,259 @@ async def test_on_acquire_runs_with_the_sessions_options_and_hooks_make_the_slot
         await session.execute(Op())
         await session.execute(Op())
     await session.execute(Op())
-    assert seen == [
-        [({"lock_timeout": 1}, False)],
-        [({"lock_timeout": 1}, False)] * 3,
-        [({"lock_timeout": 1}, False)] * 4 + [({"lock_timeout": None}, False)],
+    assert seen == [[], [({"lock_timeout": 1}, False)], [({"lock_timeout": 1}, False)]]
+    assert driver.connections[0].option_calls == [({"lock_timeout": 1}, False), ({"lock_timeout": None}, False)]
+
+
+def returning(options):
+    """An ``on_acquire`` hook that returns ``options``."""
+
+    def on_acquire(_connection, _profile, _session):
+        return options
+
+    return on_acquire
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_hook_options_lie_between_the_profile_and_the_session_and_a_block_restores_them(
+    setup,
+    attempt,  # noqa: ARG001
+):
+    hook = returning({"statement_timeout": 7, "role": "alice", "app.user_id": "1"})
+    pool, driver = setup.pool(options={"statement_timeout": 10, "lock_timeout": 2}, max_connections=1, on_acquire=hook)
+    session = unique_session()
+    await session.execute(Op())
+    connection = driver.connections[0]
+    assert connection.option_calls == [
+        ({"app.user_id": "1", "lock_timeout": 2, "role": "alice", "statement_timeout": 7}, False)
     ]
-    # Each hook may have changed the option, so each operation sets it again.
-    assert driver.connections[0].option_calls == [({"lock_timeout": 1}, False)] * 4 + [({"lock_timeout": None}, False)]
+    del connection.option_calls[:]
+    with adorm.connection_options(statement_timeout=3, role=None):
+        await session.execute(Op())
+    await session.execute(Op())
+    session.set_options(role="bob")
+    try:
+        await session.execute(Op())
+        with adorm.connection_options(role=None):
+            await session.execute(Op())
+    finally:
+        session.set_options()
+    await session.execute(Op())
+    assert connection.option_calls == [
+        ({"role": None, "statement_timeout": 3}, False),
+        ({"role": "alice", "statement_timeout": 7}, False),
+        ({"role": "bob"}, False),
+        ({"role": None}, False),
+        ({"role": "alice"}, False),
+    ]
+    assert pool._slots.pop().options == {"app.user_id": "1", "lock_timeout": 2, "role": "alice", "statement_timeout": 7}
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_inside_a_transaction_a_block_restores_the_hooks_value(setup, attempt):  # noqa: ARG001
+    _, driver = setup.pool(max_connections=1, on_acquire=returning({"role": "alice"}))
+    session = unique_session()
+    async with session.atomic():
+        await session.execute(Op())
+        with adorm.connection_options(role="bob"):
+            await session.execute(Op())
+        await session.execute(Op())
+        await rolled_back_savepoint(session, role=None)
+        await session.execute(Op())
+    assert driver.connections[0].option_calls == [
+        ({"role": "alice"}, False),
+        ({"role": "bob"}, True),
+        ({"role": "alice"}, True),
+        ({"role": None}, True),
+    ]
+
+
+current_user = contextvars.ContextVar("test_options_user", default=None)
+
+
+def role_of_current_user(_connection, _profile, _session):
+    user = current_user.get()
+    return None if user is None else {"role": user}
+
+
+async def as_user(user, coroutine_function):
+    token = current_user.set(user)
+    try:
+        return await coroutine_function()
+    finally:
+        current_user.reset(token)
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_hook_options_end_with_the_lease(setup, attempt):  # noqa: ARG001
+    pool, driver = setup.pool(max_connections=1, on_acquire=role_of_current_user)
+    session = unique_session()
+    for user in ("alice", "alice", None, "bob", None):
+        await as_user(user, lambda: session.execute(Op()))
+    assert driver.connections[0].option_calls == [
+        ({"role": "alice"}, False),
+        ({"role": None}, False),
+        ({"role": "bob"}, False),
+        ({"role": None}, False),
+    ]
+    assert pool.size == 1
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_concurrent_leases_each_run_with_their_own_hook_options(setup, attempt):  # noqa: ARG001
+    pool, _ = setup.pool(max_connections=2, on_acquire=role_of_current_user)
+    users = ["alice", "bob", None] * 4
+    gate = asyncio.Event()
+    ran = []
+
+    def op_for(user):
+        return Op(gate=gate, effect=lambda connection: ran.append((user, connection_role(connection))))
+
+    ops = [op_for(user) for user in users]
+    tasks = [
+        asyncio.create_task(as_user(user, lambda op=op: unique_session().execute(op)))
+        for user, op in zip(users, ops, strict=True)
+    ]
+    await until(lambda: sum(op.started.is_set() for op in ops) == 2)
+    gate.set()
+    await asyncio.gather(*tasks)
+    assert sorted(ran, key=str) == sorted(((user, user) for user in users), key=str)
+    assert pool.in_use == 0
+
+
+async def test_a_role_from_the_hook_reaches_each_operation_of_its_user(setup):
+    """Operations of two users on one slot, interleaved: the connection's role when each runs is its user's."""
+    pool, driver = setup.pool(max_connections=1, on_acquire=role_of_current_user)
+    roles_when_run = []
+
+    def record(connection):
+        roles_when_run.append(connection_role(connection))
+
+    for _ in REPEAT:
+        for user in ("alice", "bob", None, "alice"):
+            await as_user(user, lambda: unique_session().execute(Op(effect=record)))
+    assert roles_when_run == ["alice", "bob", None, "alice"] * len(REPEAT)
+    assert pool.size == 1
+
+
+def connection_role(connection):
+    """The role the fake ``connection`` has by its ``set_options()`` calls."""
+    role = None
+    for options, _ in connection.option_calls:
+        role = options.get("role", role)
+    return role
+
+
+@pytest.mark.parametrize(
+    ("result", "error", "match"),
+    [
+        (["role", "alice"], TypeError, "returns a mapping of connection options or None, not list"),
+        ({"acquire_timeout": 1}, ValueError, "cannot set acquire_timeout"),
+        ({"commit_timeout": 1}, ValueError, "cannot set commit_timeout"),
+        ({"role": ""}, ValueError, "role"),
+        ({"app.user_id": 7}, ValueError, "app.user_id"),
+        ({"search_path": "x"}, NotSupportedError, "search_path"),
+    ],
+)
+async def test_a_hook_returning_bad_options_fails_the_acquisition_and_discards_the_slot(setup, result, error, match):
+    pool, driver = setup.pool(max_connections=1, on_acquire=returning(result))
+    session = unique_session()
+    for attempt in range(3):
+        with pytest.raises(error, match=match):
+            await session.execute(Op())
+        assert driver.connections[attempt].closed
+        assert driver.connections[attempt].calls == []
+        assert (pool.size, pool.in_use) == (0, 0)
+
+
+async def test_a_failing_option_from_the_hook_fails_the_acquisition_and_discards_the_slot(setup):
+    pool, driver = setup.pool(max_connections=1, on_acquire=role_of_current_user)
+    session = unique_session()
+    await as_user("alice", lambda: session.execute(Op()))
+    driver.connections[0].errors["set_options"] = OperationalError('role "nobody" does not exist')
+    with pytest.raises(OperationalError, match="nobody"):
+        await as_user("nobody", lambda: session.execute(Op()))
+    assert driver.connections[0].closed
+    assert await as_user("bob", lambda: session.execute(Op())) == "op"
+    assert driver.connections[1].option_calls == [({"role": "bob"}, False)]
+    assert pool.size == 1
+
+
+async def test_hook_options_are_set_within_the_acquisitions_timeout(setup):
+    def on_acquire(connection, _profile, _session):
+        connection.gates["set_options"] = asyncio.Event()
+        return {"role": "alice"}
+
+    pool, driver = setup.pool(max_connections=1, acquire_timeout=SHORT, on_acquire=on_acquire)
+    with pytest.raises(SessionTimeout, match="on_acquire"):
+        await unique_session().execute(Op())
+    assert driver.connections[0].closed
+    assert driver.connections[0].calls == []
+    assert (pool.size, pool.in_use) == (0, 0)
+
+
+async def test_a_hook_that_runs_custom_sql_makes_the_slot_set_its_options_again_and_leave_the_pool(setup):
+    custom = []
+
+    def on_acquire(connection, _profile, _session):
+        if custom:
+            connection.mark_custom_sql()
+        return {"role": "alice"}
+
+    pool, driver = setup.pool(max_connections=1, options={"lock_timeout": 1}, on_acquire=on_acquire)
+    session = unique_session()
+    await session.execute(Op())
+    slot = next(iter(pool._slots))
+    custom.append(True)
+    await session.execute(Op())
+    await until(lambda: driver.connections[0].closed)
+    assert driver.connections[0].option_calls == [({"lock_timeout": 1, "role": "alice"}, False)] * 2
+    assert slot.close_reason is CloseReason.CUSTOM_SQL
+    assert pool.size == 0
+
+
+async def test_on_release_runs_with_the_leases_options_and_its_result_is_ignored(setup):
+    seen = []
+
+    def on_release(connection, _profile, _session):
+        seen.append(connection_role(connection))
+        return {"role": "ignored"}
+
+    pool, driver = setup.pool(max_connections=1, on_acquire=role_of_current_user, on_release=on_release)
+    for user in ("alice", "bob"):
+        await as_user(user, lambda: unique_session().execute(Op()))
+    await until(lambda: pool.in_use == 0)
+    assert seen == ["alice", "bob"]
+    assert driver.connections[0].option_calls == [({"role": "alice"}, False), ({"role": "bob"}, False)]
+    assert pool.size == 1
+
+
+class DefaultRoleDriver(OptionsDriver):
+    """`OptionsDriver` whose connections start with the role ``app``, as one with ``assume_role`` does."""
+
+    def connection_defaults(self, profile):  # noqa: ARG002
+        return {"role": "app"}
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
+async def test_the_drivers_connection_defaults_start_the_profile_layer(setup, attempt):  # noqa: ARG001
+    pool, driver = setup.pool(driver=DefaultRoleDriver(), max_connections=1, options={"lock_timeout": 1})
+    assert pool.options == {"role": "app", "lock_timeout": 1}
+    session = unique_session()
+    await session.execute(Op())
+    with adorm.connection_options(role="alice"):
+        await session.execute(Op())
+    await session.execute(Op())
+    with adorm.connection_options(role=None):
+        await session.execute(Op())
+    await session.execute(Op())
+    assert driver.connections[0].option_calls == [
+        ({"lock_timeout": 1}, False),
+        ({"role": "alice"}, False),
+        ({"role": "app"}, False),
+        ({"role": None}, False),
+        ({"role": "app"}, False),
+    ]
 
 
 async def test_cancelling_at_any_point_leaves_no_unawaited_call(setup):

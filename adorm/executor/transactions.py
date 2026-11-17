@@ -403,7 +403,8 @@ class Atomic:
         except asyncio.CancelledError as exc:
             mark_cancellation(exc, CancellationOutcome.NOT_STARTED)
             raise
-        return await self._request("execute", operation, options=options.database, operation=operation)
+        lease = cast("SlotLease", self.lease)
+        return await self._request("execute", operation, options=options.for_lease(lease), operation=operation)
 
     def on_commit(self, func: Callback, *, robust: bool = False) -> None:
         """Run ``func()`` after the transaction commits, once the slot has been released, in registration order and
@@ -484,7 +485,7 @@ class Atomic:
                 raise
             try:
                 with tracking("executing", "begin", self.session):
-                    await lease.call("begin", options=resolve_options(self.session, lease.pool).database)
+                    await lease.call("begin", options=resolve_options(self.session, lease.pool).for_lease(lease))
             except BaseException:
                 # A begin that failed or was cancelled may have left the connection inside a transaction.
                 await lease.release(discard=True)
@@ -642,7 +643,7 @@ class Atomic:
                 failed = await self._discard_forced(forced)
                 if failed is None:
                     try:
-                        options = self._options().database
+                        options = self._options().for_lease(lease)
                     except NotSupportedError as exc:
                         failed = exc
             if lease._aborted is not None:

@@ -10,10 +10,12 @@ from adorm.executor import Timeout
 from adorm.executor.options import (
     ADORM_OPTIONS,
     block_options,
+    check_hook_options,
     check_options,
     MAX_TIMEOUT_OPTION,
     resolve_options,
     ResolvedOptions,
+    ROLE_OPTION,
     session_options,
     set_session_options,
     TIMEOUT_OPTIONS,
@@ -29,21 +31,39 @@ from adorm.executor.options import (
 | `statement_timeout` | database | seconds from `0` (no limit) to `MAX_TIMEOUT_OPTION`, or `None` for the database's default | the database, through the driver |
 | `lock_timeout` | database | as `statement_timeout` | the database, through the driver |
 | `idle_in_transaction_session_timeout` | database | as `statement_timeout` | the database, through the driver |
+| `role` | database | a role name, a non-empty string, or `None` for the database's default | the database, through the driver (PostgreSQL's `SET ROLE`) |
+| a custom option, such as `app.user_id` | database | a string, or `None` for the database's default | the database, through a driver that declares custom options |
 | any other name | database | what the driver accepts, or `None` for the database's default | the database, through the driver |
+
+A custom option's name is two or more lowercase ASCII identifiers joined by dots
+([`is_custom_option()`](/ref/drivers#adorm-drivers-is-custom-option-name)): PostgreSQL's customized options, which
+row-level security policies read with `current_setting()`. It is not a Python identifier, so it is passed by
+unpacking a mapping:
+
+```python
+with adorm.connection_options(**{"app.user_id": "42"}):
+    await Note.objects.count()
+```
 
 Layers, from first to last; a later layer overrides an earlier one:
 
-1. the profile: its pool settings for the adorm options, its [`options`](/ref/settings#adorm-connectionprofile) for
-   the database options;
-2. the session ([`Session.set_options()`](/ref/sessions#set-options-options));
-3. the enclosing `connection_options()` blocks, innermost last.
+1. the profile: its pool settings for the adorm options; for the database options the options the driver sets on
+   every new connection ([`Driver.connection_defaults()`](/ref/drivers#connection-defaults-profile)), overridden by
+   its [`options`](/ref/settings#adorm-connectionprofile);
+2. the options the profile's `on_acquire` hook returns for the slot's lease
+   ([`check_hook_options()`](#adorm-executor-options-check-hook-options-result-hook-profile-name));
+3. the session ([`Session.set_options()`](/ref/sessions#set-options-options));
+4. the enclosing `connection_options()` blocks, innermost last.
+
+When a layer's option ends, the slot sets the value of the layer below it, the database's default only when no layer
+below sets the option.
 
 A database option is sent only to a driver that declares it in
 [`Capabilities.connection_options`](/ref/drivers#adorm-drivers-capabilities). An operation with an undeclared option
 raises [`NotSupportedError`](/ref/exceptions) before it takes a slot. An option whose value is `None` is not sent and
 needs no declaration. The [Django driver](/topics/django-driver) on PostgreSQL and the
-[native PostgreSQL driver](/topics/postgresql-driver) declare `statement_timeout`, `lock_timeout` and
-`idle_in_transaction_session_timeout`; the Django driver on other databases declares none
+[native PostgreSQL driver](/topics/postgresql-driver) declare `statement_timeout`, `lock_timeout`,
+`idle_in_transaction_session_timeout`, `role` and custom options; the Django driver on other databases declares none
 ([databases](/topics/django-driver#databases)).
 
 ### `adorm.connection_options(**options)`
@@ -132,16 +152,31 @@ async with adorm.timeout(10) as t:
 Returns the mapping `options`, checked, as a read-only mapping. Raises `TypeError` for anything but a mapping and
 `ValueError` for:
 
-- a name that is not an identifier;
+- a name that is neither an identifier nor a custom option name;
 - an `acquire_timeout` that is not a positive, finite number of seconds;
 - a `commit_timeout` that is neither that nor `None`;
-- a value of a `TIMEOUT_OPTIONS` option that is neither a number of seconds from 0 to `MAX_TIMEOUT_OPTION` nor `None`.
+- a value of a `TIMEOUT_OPTIONS` option that is neither a number of seconds from 0 to `MAX_TIMEOUT_OPTION` nor `None`;
+- a `role` that is neither a non-empty string without NUL nor `None`;
+- a custom option whose value is neither a string without NUL nor `None`.
 
 Other values are checked by the driver that sets them.
 
 ```python
 check_options({"statement_timeout": 5, "work_mem": "64MB"})   # mappingproxy({...})
 check_options({"lock_timeout": -1})                           # ValueError
+check_options({"role": "alice", "app.user_id": "42"})          # mappingproxy({...})
+check_options({"app.user_id": 42})                             # ValueError: a string
+```
+
+### `adorm.executor.options.check_hook_options(result, hook, profile_name)`
+
+The database options a profile hook returned, checked as in `check_options()`: an empty mapping for `None`, the
+checked mapping for a mapping. Raises `TypeError` for another value and `ValueError` for `acquire_timeout` or
+`commit_timeout` and as `check_options()`. `hook` and `profile_name` name the hook in the message.
+
+```python
+check_hook_options({"role": "alice"}, "on_acquire", "default")    # mappingproxy({'role': 'alice'})
+check_hook_options("alice", "on_acquire", "default")              # TypeError
 ```
 
 ### `adorm.executor.options.block_options()`
@@ -166,7 +201,8 @@ those of the enclosing blocks.
 ```python
 with adorm.connection_options(statement_timeout=5):
     resolve_options(session, pool)
-# ResolvedOptions(acquire_timeout=30.0, commit_timeout=60.0, database=mappingproxy({'statement_timeout': 5}))
+# ResolvedOptions(acquire_timeout=30.0, commit_timeout=60.0, database=mappingproxy({'statement_timeout': 5}),
+#                 profile=mappingproxy({}), overrides=mappingproxy({'statement_timeout': 5}))
 ```
 
 ### `adorm.executor.options.ResolvedOptions`
@@ -178,6 +214,12 @@ A frozen dataclass of the options in effect.
 | `acquire_timeout` | seconds an acquisition waits |
 | `commit_timeout` | seconds the slot of a transaction waits for its next request, `None` for no limit |
 | `database` | the database options to set, without those whose value is `None` |
+| `profile` | the profile's layer of database options (`Pool.options`) |
+| `overrides` | the session's and the blocks' database options, `None` values included |
+
+`for_lease(lease)` returns the database options to set on `lease`'s slot: `database` with the lease's
+[`hook_options`](/ref/pool#adorm-executor-slotlease) placed between `profile` and `overrides`, without the options whose
+value is `None`.
 
 ### `adorm.executor.options.ADORM_OPTIONS`
 
@@ -187,6 +229,10 @@ A frozen dataclass of the options in effect.
 
 `frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})`: the database options whose
 value `check_options()` checks as a number of seconds.
+
+### `adorm.executor.options.ROLE_OPTION`
+
+`"role"`: the database option naming the role the connection acts as.
 
 ### `adorm.executor.options.MAX_TIMEOUT_OPTION`
 

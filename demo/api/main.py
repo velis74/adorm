@@ -80,7 +80,7 @@ SCENARIO_RUNS = {
             "statements": [
                 {
                     "session": "B",
-                    "sql": "SET lock_timeout = 500",
+                    "sql": "SET LOCAL lock_timeout = 500",
                     "params": [],
                     "at_ms": 3.0,
                     "duration_ms": 0.2,

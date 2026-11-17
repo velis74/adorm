@@ -11,10 +11,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["POSTGRESQL_OPTIONS", "numbered_placeholders", "set_options_sql", "Statement"]
+from adorm.drivers.base import is_custom_option
 
-POSTGRESQL_OPTIONS = frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})
-"""The connection options `set_options_sql()` sets: PostgreSQL's time limits, in seconds."""
+__all__ = [
+    "POSTGRESQL_OPTIONS",
+    "POSTGRESQL_TIMEOUTS",
+    "numbered_placeholders",
+    "quote_identifier",
+    "quote_literal",
+    "set_options_sql",
+    "Statement",
+]
+
+POSTGRESQL_TIMEOUTS = frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})
+"""PostgreSQL's time limits among `POSTGRESQL_OPTIONS`, in seconds."""
+
+POSTGRESQL_OPTIONS = POSTGRESQL_TIMEOUTS | {"role"}
+"""The named connection options `set_options_sql()` sets: PostgreSQL's time limits and ``role``."""
 
 
 @dataclass(frozen=True)
@@ -70,18 +83,48 @@ def _milliseconds(name: str, value: Any) -> int:
     return 1 if milliseconds == 0 and value > 0 else milliseconds
 
 
+def quote_identifier(name: str) -> str:
+    """``name`` as a quoted PostgreSQL identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def quote_literal(value: str) -> str:
+    """``value`` as a PostgreSQL string literal, valid whatever ``standard_conforming_strings`` is."""
+    quoted = value.replace("'", "''")
+    if "\\" in value:
+        return "E'" + quoted.replace("\\", "\\\\") + "'"
+    return f"'{quoted}'"
+
+
+def _text(name: str, value: Any) -> str:
+    if not isinstance(value, str) or "\x00" in value:
+        raise ValueError(f"{name} is a string without NUL, not {value!r}")
+    return value
+
+
+def _value_sql(name: str, value: Any) -> str:
+    if name == "role":
+        if value == "":
+            raise ValueError("role is a non-empty string, not ''")
+        return quote_identifier(_text(name, value))
+    if name in POSTGRESQL_TIMEOUTS:
+        return str(_milliseconds(name, value))
+    return quote_literal(_text(name, value))
+
+
 def set_options_sql(options: Mapping[str, Any], local: bool) -> str:
-    """The statements, separated by ``;``, that set ``options`` (names of `POSTGRESQL_OPTIONS`, values in seconds,
-    ``0`` for no limit) on a PostgreSQL connection: ``SET`` or, with ``local``, ``SET LOCAL``. A value of ``None``
-    resets the option to its default: ``RESET``, or ``SET LOCAL … TO DEFAULT``. A positive value below one millisecond
-    becomes one millisecond, since ``0`` means no limit. Raises `ValueError` for another name or a value that is not
-    a number of seconds from 0 to 2147483.647; an empty string for no options."""
+    """The statements, separated by ``;``, that set ``options`` on a PostgreSQL connection: ``SET`` or, with
+    ``local``, ``SET LOCAL``. The names are those of `POSTGRESQL_OPTIONS` and custom options
+    (`adorm.drivers.base.is_custom_option()`). A time limit's value is in seconds, ``0`` for no limit; a positive value
+    below one millisecond becomes one millisecond. ``role``'s value is a role name, a custom option's a string. A value
+    of ``None`` resets the option to its default: ``RESET``, or ``SET LOCAL … TO DEFAULT``. Raises `ValueError` for
+    another name or a value of another form; an empty string for no options."""
     statements = []
     for name, value in options.items():
-        if name not in POSTGRESQL_OPTIONS:
+        if name not in POSTGRESQL_OPTIONS and not (isinstance(name, str) and is_custom_option(name)):
             raise ValueError(f"{name!r} is not a PostgreSQL connection option adorm sets")
         if value is None:
             statements.append(f"SET LOCAL {name} TO DEFAULT" if local else f"RESET {name}")
         else:
-            statements.append(f"SET{' LOCAL' if local else ''} {name} = {_milliseconds(name, value)}")
+            statements.append(f"SET{' LOCAL' if local else ''} {name} = {_value_sql(name, value)}")
     return "; ".join(statements)

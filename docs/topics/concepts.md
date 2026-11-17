@@ -26,8 +26,9 @@ A connection profile is a named entry in adorm's settings; its name is the `usin
 alias. A profile names the driver, the database alias, extra driver parameters and optional hooks:
 
 - `connect` creates the connection instead of the driver's default,
-- `on_acquire` runs when a session gets a slot (for example `SET ROLE`),
-- `on_release` resets session state when the slot returns to the pool.
+- `on_acquire` runs when a session gets a slot and returns connection options for that session's use of it (for
+  example the current user's `role`),
+- `on_release` runs when the slot returns to the pool.
 
 Pool settings are `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout` and
 `purge_stale_connections_at` (see [Pool](#pool) and [Slots](#slots)); a profile's `options` are its database

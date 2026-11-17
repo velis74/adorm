@@ -44,10 +44,12 @@ with profiles creates its own pools.
 
 The profile's `on_acquire` and `on_release` attributes, when present and not `None`, are its
 [hooks](/topics/profiles#hooks). A hook or `connect` that is not callable raises `TypeError`, and so does a coroutine
-function with a threaded driver. The profile's `options` attribute, when present and not `None`, holds its database
-connection options, the first layer of [`connection_options()`](/ref/options#adorm-connection-options-options). A name
-the driver does not declare in `Capabilities.connection_options` raises `NotSupportedError`; `acquire_timeout` or
-`commit_timeout` among them raises `ValueError`.
+function with a threaded driver. The pool's `options` are the options the driver sets on every new connection
+([`Driver.connection_defaults()`](/ref/drivers#connection-defaults-profile)), overridden by the profile's `options`
+attribute when present and not `None`: the first layer of
+[`connection_options()`](/ref/options#adorm-connection-options-options). A name the driver does not declare
+([`Capabilities.check_options()`](/ref/drivers#check-options-options-driver-none)) raises `NotSupportedError`;
+`acquire_timeout` or `commit_timeout` among them raises `ValueError`.
 
 A threaded driver cancels a hook by asking its thread to stop the running call
 ([`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection)). A hook that does not stop extends the
@@ -88,7 +90,8 @@ pool = Pool(AsyncpgDriver(), profile, check_schema="raise")              # refus
 | `name` | the profile name |
 | `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout`, `purge_stale_connections_at`, `check_schema` | the constructor arguments |
 | `on_acquire`, `on_release` | the profile's hooks, `None` when it has none |
-| `options` | the profile's database connection options, checked, as a read-only mapping |
+| `connection_defaults` | the database options the driver sets on every new connection for the profile, checked |
+| `options` | `connection_defaults` overridden by the profile's database connection options, checked, as a read-only mapping |
 | `capabilities` | what the driver supports for the profile ([`Driver.capabilities_for(profile)`](/ref/drivers#capabilities-for-profile)), read once; operations, connection options and channels are checked against it before a slot is acquired |
 | `limit` | the current maximum number of slots: the lower of `max_connections` and the slot count at the last refusal, `None` when neither applies |
 | `size` | slots in the pool, opening ones included |
@@ -181,9 +184,13 @@ Acquires a slot of the pool of `session.using` (`get_pool()`) for `session` and 
 to the `acquire_timeout` [connection option](/ref/options) in effect: the pool's `acquire_timeout`, unless the session
 or an enclosing `connection_options()` block sets one. The lease's `commit_timeout` is the `commit_timeout` option in
 effect. A database option in effect that the driver does not declare raises `NotSupportedError` before the
-acquisition waits. When the profile has an `on_acquire` hook, the acquisition sets the session's database options on
-the connection, then calls the hook with the connection's [`target`](/ref/drivers#adorm-drivers-driverconnection),
-the profile and `session`, in the current task's context, before it returns the lease.
+acquisition waits. When the profile has an `on_acquire` hook, the acquisition calls it with the connection's
+[`target`](/ref/drivers#adorm-drivers-driverconnection), the profile and `session`, in the current task's context.
+The mapping of database options it returns, checked with
+[`check_hook_options()`](/ref/options#adorm-executor-options-check-hook-options-result-hook-profile-name), becomes the
+lease's `hook_options`, and the acquisition sets the options in effect with them
+([`ResolvedOptions.for_lease()`](/ref/options#adorm-executor-options-resolvedoptions)) before it returns the lease.
+After a hook that ran custom SQL every option the slot remembers counts as unknown and is set again.
 
 | Outcome | Raised |
 |---|---|
@@ -194,7 +201,10 @@ the profile and `session`, in the current task's context, before it returns the 
 | the pool is closed, or no pool or profile serves `session.using` | `InterfaceError` |
 | opening a connection fails other than by a refusal | the driver's error |
 | `on_acquire` raises | its error, mapped by the connection; the slot leaves the pool |
-| `on_acquire` does not finish within `timeout` | `SessionTimeout` or `DeadlockError` whose message names the hook; the hook is cancelled and the slot leaves the pool |
+| `on_acquire` returns neither `None` nor a mapping, or a mapping `check_hook_options()` refuses | `TypeError` or `ValueError`; the slot leaves the pool |
+| `on_acquire` returns an option the driver does not declare | `NotSupportedError`; the slot leaves the pool |
+| setting the options fails (a role the login may not become) | the driver's error; the slot leaves the pool |
+| `on_acquire` and setting the options do not finish within `timeout` | `SessionTimeout` or `DeadlockError` whose message names the hook; the hook is cancelled and the slot leaves the pool |
 
 The flow holds a slot when the current task acquired an unreleased lease, or when the current context holds one
 ([`held_leases()`](#adorm-executor-held-leases)). A deadlock raised at once goes to the newest of the waiting tasks
@@ -295,6 +305,7 @@ A slot handed to one flow by `Router.acquire()`. Use it as an asynchronous conte
 | `released` | whether `release()` was called or the slot aborted the lease's transaction |
 | `aborted` | whether the slot rolled back the lease's transaction because no request arrived within `commit_timeout`; requests then raise [`TransactionClosed`](/ref/exceptions#adorm-transactionclosed) |
 | `commit_timeout` | the seconds the slot waits for the lease's next request inside a transaction, `None` for no limit: the pool's `commit_timeout`, which `acquire()` replaces with the `commit_timeout` connection option in effect |
+| `hook_options` | the database options the profile's `on_acquire` hook returned for the lease, a read-only mapping (empty without a hook): the layer between the profile's options and the session's |
 
 ```python
 async with await router.acquire(session) as lease:
@@ -336,8 +347,9 @@ cancelled meanwhile.
 - The lease's channel closes: callbacks and backend events left unread on `events` go to the pool's `events` bus;
   unread outcomes are dropped.
 - A slot that stays in the pool first runs the profile's `on_release` hook with the connection's target, the profile
-  and the lease's session. When the hook raises or runs longer than the pool's `release_timeout`, the error is logged
-  and the slot leaves the pool. The next request gets the slot after the hook has finished.
+  and the lease's session; its return value is ignored. When the hook raises or runs longer than the pool's
+  `release_timeout`, the error is logged and the slot leaves the pool; when it runs custom SQL, the slot leaves the
+  pool too. The next request gets the slot after the hook has finished.
 - When the connection has not settled ([`DriverConnection.settled`](/ref/drivers#settled)), `release()` returns at
   once and the slot decides once it has.
 - After the first call the lease takes no requests (`InterfaceError`); a second call does nothing.
@@ -450,7 +462,8 @@ The slot remembers the database connection options it set on its connection:
   restores what was remembered when the savepoint was created; a released savepoint keeps them.
 - A setting that fails or is cancelled leaves those options unknown; the next request with options sets them again.
   The request's call does not run; its outcome is the error, or `CancelledEvent(started=False)` for a cancellation.
-- After a profile hook has run on the connection, every remembered option is unknown.
+- A new connection starts with the pool's `connection_defaults` remembered.
+- After an `on_acquire` hook that ran custom SQL, every remembered option is unknown.
 - Options that a `set_options` request or the driver set are not remembered.
 
 When its lease ends, the slot waits at most the pool's `release_timeout` for the connection to settle
@@ -471,8 +484,8 @@ connection and leaves the pool for the first of these reasons that applies:
 | `HOOK_FAILED` | the profile's `on_release` hook failed or timed out |
 
 A lease whose `on_acquire` hook failed ends with `HOOK_FAILED` before any of these. A slot that leaves the pool skips
-the `on_release` hook. The profile's `on_acquire` hook, when there is one, is the only work done on the connection for
-a new lease before its first request.
+the `on_release` hook. The profile's `on_acquire` hook and the options it returns, when there is one, are the only work
+done on the connection for a new lease before its first request.
 
 ```python
 lease = await router.acquire(session)
@@ -595,6 +608,6 @@ A `StrEnum` of why a slot closed its connection and left the pool, the value of
 | `UNUSABLE` | `"unusable"` | the connection reported itself unusable, or the slot stopped serving requests |
 | `LISTENING` | `"listening"` | the connection still listened for notifications when its lease ended |
 | `UNSETTLED` | `"unsettled"` | the connection did not finish the work of its last call within the pool's `release_timeout` |
-| `HOOK_FAILED` | `"hook_failed"` | setting the session's options and running the profile's `on_acquire` hook, or running its `on_release` hook, failed or timed out |
+| `HOOK_FAILED` | `"hook_failed"` | running the profile's `on_acquire` hook and setting the options it returned, or running its `on_release` hook, failed or timed out |
 | `STALE` | `"stale"` | it stayed idle for the pool's `purge_stale_connections_at` seconds |
 | `POOL_CLOSED` | `"pool_closed"` | its pool was closed |

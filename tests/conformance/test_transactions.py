@@ -14,8 +14,23 @@ pytestmark = pytest.mark.django_db(transaction=True)
 
 REPEAT = range(3)
 
-OPTIONS: dict[str, object] = {"statement_timeout": 5, "lock_timeout": 2, "idle_in_transaction_session_timeout": 60}
+OPTIONS: dict[str, object] = {
+    "statement_timeout": 5,
+    "lock_timeout": 2,
+    "idle_in_transaction_session_timeout": 60,
+    "role": None,  # the login role (`option_value()`)
+}
 """A value for every connection option a driver of the suite declares; `test_set_options` sets each one."""
+
+
+def option_value(option):
+    """The value `test_set_options` sets: ``role`` becomes the login role, which needs no role to be created."""
+    if option == "role":
+        from django.db import connections
+
+        return connections.settings["default"]["USER"]
+    return OPTIONS[option]
+
 
 UNDECLARED_OPTION = ("work_mem", "1MB")
 
@@ -86,8 +101,23 @@ async def test_set_options(driver, option):
         pytest.skip(f"the {driver.name} driver does not declare {option}")
     connection = await driver.open_connection(ConnectionProfile("default", driver), lambda _event: None)
     try:
-        await connection.set_options({option: OPTIONS[option]}, local=False)
+        await connection.set_options({option: option_value(option)}, local=False)
         assert await connection.execute(Count(Query("clubs.Club"))) == 3
+        await connection.set_options({option: None}, local=False)
+        assert await connection.execute(Count(Query("clubs.Club"))) == 3
+    finally:
+        await connection.close()
+
+
+async def test_custom_options_are_set_and_reset(driver):
+    if not driver.capabilities.custom_options:
+        pytest.skip(f"the {driver.name} driver does not declare custom options")
+    connection = await driver.open_connection(ConnectionProfile("default", driver), lambda _event: None)
+    try:
+        for local in (False, True):
+            await connection.set_options({"adorm_test.app_user": "o'neil\\x"}, local=local)
+            assert await connection.execute(Count(Query("clubs.Club"))) == 3
+            await connection.set_options({"adorm_test.app_user": None}, local=local)
     finally:
         await connection.close()
 

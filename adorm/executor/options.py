@@ -13,20 +13,24 @@ from dataclasses import dataclass
 from types import MappingProxyType, TracebackType
 from typing import Any, cast, TYPE_CHECKING
 
+from adorm.drivers.base import is_custom_option
 from adorm.exceptions import OperationTimeout, TimeoutPhase
 from adorm.executor.slot import carry_cancellation
 
 if TYPE_CHECKING:
     from adorm.executor.pool import Pool
     from adorm.executor.sessions import Session
+    from adorm.executor.slot import SlotLease
 
 __all__ = [
     "ADORM_OPTIONS",
     "MAX_TIMEOUT_OPTION",
+    "ROLE_OPTION",
     "TIMEOUT_OPTIONS",
     "ResolvedOptions",
     "Timeout",
     "block_options",
+    "check_hook_options",
     "check_options",
     "connection_options",
     "resolve_options",
@@ -44,6 +48,10 @@ TIMEOUT_OPTIONS = frozenset({"statement_timeout", "lock_timeout", "idle_in_trans
 MAX_TIMEOUT_OPTION = 2147483.647
 """The largest value of a `TIMEOUT_OPTIONS` option: PostgreSQL's limit of 2147483647 milliseconds."""
 
+ROLE_OPTION = "role"
+"""The database option naming the role the connection acts as (PostgreSQL's ``SET ROLE``): a non-empty string."""
+
+
 _EMPTY: Mapping[str, Any] = MappingProxyType({})
 
 
@@ -54,9 +62,23 @@ def check_timeout(value: Any, what: str) -> float:
     return float(value)
 
 
+def _check_text(name: str, value: Any) -> Any:
+    if value is not None and (not isinstance(value, str) or "\x00" in value):
+        raise ValueError(f"{name} is a string without NUL or None, not {value!r}")
+    return value
+
+
 def _check_option(name: Any, value: Any) -> Any:
-    if not isinstance(name, str) or not name.isidentifier():
-        raise ValueError(f"a connection option name is an identifier, not {name!r}")
+    if not isinstance(name, str) or not (name.isidentifier() or is_custom_option(name)):
+        raise ValueError(
+            f"a connection option name is an identifier or a custom option name (app.user_id), not {name!r}"
+        )
+    if is_custom_option(name):
+        return _check_text(name, value)
+    if name == ROLE_OPTION:
+        if value == "":
+            raise ValueError("role is a non-empty string or None, not ''")
+        return _check_text(name, value)
     if name == "acquire_timeout":
         return check_timeout(value, name)
     if name == "commit_timeout":
@@ -71,8 +93,10 @@ def _check_option(name: Any, value: Any) -> Any:
 def check_options(options: Mapping[str, Any]) -> Mapping[str, Any]:
     """``options`` checked, as a read-only mapping. Raises `ValueError` for a name that is not an identifier, for an
     ``acquire_timeout`` that is not a positive, finite number of seconds, for a ``commit_timeout`` that is neither
-    that nor ``None`` and for a value of `TIMEOUT_OPTIONS` that is neither a number of seconds from 0 to
-    `MAX_TIMEOUT_OPTION` nor ``None``. Other values are checked by the driver that sets them."""
+    that nor ``None``, for a value of `TIMEOUT_OPTIONS` that is neither a number of seconds from 0 to
+    `MAX_TIMEOUT_OPTION` nor ``None``, for a ``role`` that is neither a non-empty string without NUL nor ``None`` and
+    for a custom option (`is_custom_option()`) whose value is neither a string without NUL nor ``None``. Other values
+    are checked by the driver that sets them."""
     if not isinstance(options, Mapping):
         raise TypeError(f"connection options are a mapping, not {type(options).__name__}")
     return MappingProxyType({name: _check_option(name, value) for name, value in options.items()})
@@ -86,6 +110,23 @@ def check_profile_options(options: Mapping[str, Any] | None, profile_name: str) 
         raise ValueError(
             f"{', '.join(misplaced)} of profile {profile_name!r} is a pool setting, not a connection option"
         )
+    return checked
+
+
+def check_hook_options(result: Any, hook: str, profile_name: str) -> Mapping[str, Any]:
+    """The database options a profile hook returned, checked (`check_options()`): ``None`` for none, else a mapping
+    without adorm options. Raises `TypeError` for another value and `ValueError` as `check_options()`."""
+    if result is None:
+        return _EMPTY
+    if not isinstance(result, Mapping):
+        raise TypeError(
+            f"{hook} of profile {profile_name!r} returns a mapping of connection options or None, "
+            f"not {type(result).__name__}"
+        )
+    checked = check_options(result)
+    misplaced = sorted(ADORM_OPTIONS & checked.keys())
+    if misplaced:
+        raise ValueError(f"{hook} of profile {profile_name!r} cannot set {', '.join(misplaced)}")
     return checked
 
 
@@ -138,22 +179,35 @@ def set_session_options(session: Session, options: Mapping[str, Any]) -> Mapping
 @dataclass(frozen=True, slots=True)
 class ResolvedOptions:
     """The options in effect for a session on a pool: the adorm options and the database options to set, without
-    those whose value is ``None`` (the database's default)."""
+    those whose value is ``None`` (the database's default). ``profile`` is the profile's layer of database options
+    and ``overrides`` the session's and the blocks' layers above it, ``None`` values included."""
 
     acquire_timeout: float
     commit_timeout: float | None
     database: Mapping[str, Any]
+    profile: Mapping[str, Any] = _EMPTY
+    overrides: Mapping[str, Any] = _EMPTY
+
+    def for_lease(self, lease: SlotLease) -> Mapping[str, Any]:
+        """The database options to set on ``lease``'s slot: ``database`` with the options its profile's
+        ``on_acquire`` hook returned (`SlotLease.hook_options`) between the profile's layer and the session's."""
+        hook = lease.hook_options
+        if not hook:
+            return self.database
+        merged = {**self.profile, **hook, **self.overrides}
+        return MappingProxyType({name: value for name, value in merged.items() if value is not None})
 
 
 def resolve_options(session: Session, pool: Pool) -> ResolvedOptions:
     """The options in effect in the current context for ``session`` on ``pool``: the profile's options (its pool's
     ``acquire_timeout`` and ``commit_timeout`` and ``pool.options``), replaced by the session's, replaced by those of
     the enclosing blocks."""
-    merged = {**pool.options, **session_options(session), **_block.get()}
-    acquire_timeout = merged.pop("acquire_timeout", pool.acquire_timeout)
-    commit_timeout = merged.pop("commit_timeout", pool.commit_timeout)
+    overrides = {**session_options(session), **_block.get()}
+    acquire_timeout = overrides.pop("acquire_timeout", pool.acquire_timeout)
+    commit_timeout = overrides.pop("commit_timeout", pool.commit_timeout)
+    merged = {**pool.options, **overrides}
     database = MappingProxyType({name: value for name, value in merged.items() if value is not None})
-    return ResolvedOptions(acquire_timeout, commit_timeout, database)
+    return ResolvedOptions(acquire_timeout, commit_timeout, database, pool.options, MappingProxyType(overrides))
 
 
 # Client-side time limit

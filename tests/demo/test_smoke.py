@@ -241,7 +241,7 @@ def test_lock_wait_with_timeout(client, drivers, repeat):  # noqa: ARG001 - repe
         assert run["outcomes"]["A"]["status"] == "ok"
         assert run["outcomes"]["B"]["sqlstate"] == "55P03"
         assert run["outcomes"]["B"]["error"] == "OperationalError"
-        assert any(s["session"] == "B" and s["sql"] == "SET lock_timeout = 500" for s in run["statements"])
+        assert any(s["session"] == "B" and s["sql"] == "SET LOCAL lock_timeout = 500" for s in run["statements"])
         assert run["ms"] >= 500
 
 

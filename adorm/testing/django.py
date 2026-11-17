@@ -373,9 +373,10 @@ class SharedConnectionMixin:
     those of Django's nested ``atomic()`` blocks do: they run only when the test runs them
     (``captureOnCommitCallbacks(execute=True)``).
 
-    Connection options are kept per connection and applied before each operation. A profile with ``params`` that
-    differ from the wrapper's settings, a ``connect`` hook or an ``on_acquire`` or ``on_release`` hook raises
-    `NotSupportedError` on connecting: a hook's changes to the session would reach every connection.
+    Connection options are kept per connection and applied with ``SET LOCAL`` before each operation, those an
+    ``on_acquire`` hook returns included. A profile with ``params`` that differ from the wrapper's settings or a
+    ``connect`` hook raises `NotSupportedError` on connecting. A statement a profile hook runs raises
+    `NotSupportedError`: its effect on the session would reach every connection.
 
     A notice is emitted by the connection that holds the shared connection when the server sends it. ``listen()``
     raises `NotSupportedError`: notifications arrive when a transaction commits, which the test's transaction never
@@ -452,6 +453,13 @@ class SharedConnectionMixin:
         driver = self.driver.name  # type: ignore[attr-defined]
         raise NotSupportedError(NO_NOTIFICATIONS, driver=driver, unsupported=[NOTIFY])
 
+    def _hook_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:  # noqa: ARG002
+        raise NotSupportedError(
+            f"a hook of profile {self.profile.name!r} ran SQL on the shared connection of Django's TestCase, where its "
+            "effect would reach every slot; return connection options from the hook or use TransactionTestCase",
+            driver=self.driver.name,  # type: ignore[attr-defined]
+        )
+
     # Connecting
 
     def connect_sync(self) -> None:
@@ -463,11 +471,6 @@ class SharedConnectionMixin:
             raise NotSupportedError(
                 f"profile {profile.name!r} sets params or a connect hook, which the shared connection of Django's "
                 "TestCase cannot apply; use TransactionTestCase"
-            )
-        if getattr(profile, "on_acquire", None) is not None or getattr(profile, "on_release", None) is not None:
-            raise NotSupportedError(
-                f"profile {profile.name!r} sets an on_acquire or on_release hook, whose changes to the session the "
-                "shared connection of Django's TestCase would carry to every slot; use TransactionTestCase"
             )
         self._previous = getattr(connections._connections, self.alias, None)
         db.inc_thread_sharing()

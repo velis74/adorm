@@ -3,10 +3,10 @@
 The Django driver's statements are read with an execute wrapper on every Django connection
 (``connection_created``), the asyncpg driver's with a query logger on every connection its profile's ``connect`` hook
 opens. The profiles' ``on_acquire`` and ``on_release`` hooks record which session holds a connection. A statement
-belongs to the session that held its connection when it started; a statement outside a lease belongs to the session
-whose lease of the connection follows, as the slot sends a session's connection options before ``on_acquire``. A
-connection no session ever held is the observer's (`OBSERVER`): the monitor `adorm.testing.wait_for_lock()` opens.
-Statements are kept only between `Capture.start()` and `Capture.stop()`.
+belongs to the session that held its connection when it started; a statement outside a lease (the setup of a new
+connection) belongs to the session whose lease of the connection follows. A connection no session ever held is the
+observer's (`OBSERVER`): the monitor `adorm.testing.wait_for_lock()` opens. Statements are kept only between
+`Capture.start()` and `Capture.stop()`.
 """
 
 from __future__ import annotations

@@ -3,6 +3,7 @@ database and ends with its block, also inside transactions and savepoints; an un
 is taken; an expired timeout reports the phase and leaves the pool usable."""
 
 import asyncio
+import contextvars
 
 import asyncpg
 import pytest
@@ -228,77 +229,77 @@ async def test_a_timeout_while_waiting_for_a_slot(driver, make_router):  # noqa:
     assert await Club.objects.count() == 3
 
 
-def _show_settings(seen):
-    """An ``on_release`` hook that appends the connection's ``statement_timeout`` and ``lock_timeout`` to ``seen``."""
-    sql = "SELECT current_setting('statement_timeout'), current_setting('lock_timeout')"
-
-    def hook(connection, _profile, _session):
-        if isinstance(connection, asyncpg.Connection):
-
-            async def fetch():
-                seen.append(tuple(await connection.fetchrow(sql)))
-
-            return fetch()
-        with connection.cursor() as cursor:
-            cursor.execute(sql)
-            seen.append(tuple(cursor.fetchone()))
-        return None
-
-    return hook
+async def show(tx, *names):
+    """The values of the settings ``names`` on the connection of ``tx``'s slot, read without custom SQL: on the
+    ``asyncpg.Connection`` directly, on Django's psycopg connection past its execute wrappers."""
+    sql = "SELECT " + ", ".join(f"current_setting('{name}', true)" for name in names)
+    connection = tx.lease.slot.connection
+    if isinstance(connection.target, asyncpg.Connection):
+        return tuple(await connection.target.fetchrow(sql))
+    return await connection.call_hook(lambda db, *_: tuple(db.connection.execute(sql).fetchone()))
 
 
 async def test_options_are_set_and_reset_on_the_connection(driver, make_router):
     declares(driver, "lock_timeout")
-    seen = []
-    make_router(profile={"on_release": _show_settings(seen)})
+    make_router(max_connections=1)
     for _ in REPEAT:
         with adorm.connection_options(statement_timeout=3, lock_timeout=0.25):
             assert await Club.objects.count() == 3
-            async with adorm.atomic():
+            async with adorm.atomic() as tx:
+                assert await show(tx, "statement_timeout", "lock_timeout") == ("3s", "250ms")
                 with adorm.connection_options(statement_timeout=4):
                     assert await Club.objects.count() == 3
-        assert await Club.objects.count() == 3
-    assert seen == [("3s", "250ms"), ("3s", "250ms"), ("0", "0")] * len(REPEAT)
+                    assert await show(tx, "statement_timeout", "lock_timeout") == ("4s", "250ms")
+                assert await Club.objects.count() == 3
+                assert await show(tx, "statement_timeout", "lock_timeout") == ("3s", "250ms")
+        async with adorm.atomic() as tx:
+            assert await show(tx, "statement_timeout", "lock_timeout") == ("0", "0")
 
 
-def _run_sql(sql):
-    """A profile hook that runs ``sql`` on the connection."""
-
-    def hook(connection, _profile, _session):
-        if isinstance(connection, asyncpg.Connection):
-            return connection.execute(sql)
-        with connection.cursor() as cursor:
-            cursor.execute(sql)
-        return None
-
-    return hook
-
-
-async def test_a_hook_that_sets_or_resets_an_option_is_followed_by_the_slot(driver, make_router):
+async def test_options_a_hook_returns_hold_for_its_lease_and_a_block_restores_them(driver, make_router):
     declares(driver, "statement_timeout")
-    seen = []
-    show = _show_settings(seen)
 
-    def on_release(connection, profile, session):
-        result = show(connection, profile, session)
-        if result is None:
-            return _run_sql("RESET ALL")(connection, profile, session)
+    def on_acquire(_connection, _profile, _session):
+        return {"statement_timeout": 7}
 
-        async def both():
-            await result
-            await _run_sql("RESET ALL")(connection, profile, session)
-
-        return both()
-
-    make_router(
-        profile={"on_acquire": _run_sql("SET statement_timeout = '7s'"), "on_release": on_release},
-        max_connections=1,
-    )
+    pool = make_router(profile={"on_acquire": on_acquire}, max_connections=1).pools[0]
     for _ in REPEAT:
-        assert await Club.objects.count() == 3
-        with adorm.connection_options(statement_timeout=3):
+        async with adorm.atomic() as tx:
+            assert await show(tx, "statement_timeout") == ("7s",)
+            with adorm.connection_options(statement_timeout=3):
+                assert await Club.objects.count() == 3
+                assert await show(tx, "statement_timeout") == ("3s",)
             assert await Club.objects.count() == 3
+            assert await show(tx, "statement_timeout") == ("7s",)
         with adorm.connection_options(statement_timeout=3):
-            assert await Club.objects.count() == 3
-        assert await Club.objects.count() == 3
-    assert [statement_timeout for statement_timeout, _ in seen] == ["7s", "3s", "3s", "7s"] * len(REPEAT)
+            async with adorm.atomic() as tx:
+                assert await show(tx, "statement_timeout") == ("3s",)
+        with adorm.connection_options(statement_timeout=None):
+            async with adorm.atomic() as tx:
+                assert await show(tx, "statement_timeout") == ("0",)
+        async with adorm.atomic() as tx:
+            assert await show(tx, "statement_timeout") == ("7s",)
+    (slot,) = pool._slots
+    assert not slot.connection.ran_custom_sql
+
+
+async def test_a_custom_option_from_a_hook_reaches_the_connection(driver, make_router):
+    if not driver.capabilities.custom_options:
+        pytest.skip(f"the {driver.name} driver does not declare custom options")
+    user = contextvars.ContextVar("conformance_user")
+
+    def on_acquire(_connection, _profile, _session):
+        return {"adorm_test.app_user": user.get()}
+
+    make_router(profile={"on_acquire": on_acquire}, max_connections=1)
+
+    async def who(name):
+        token = user.set(name)
+        try:
+            async with adorm.atomic() as tx:
+                return (await show(tx, "adorm_test.app_user"))[0]
+        finally:
+            user.reset(token)
+
+    for _ in REPEAT:
+        assert [await who(name) for name in ("alice", "bob", None, "alice")] == ["alice", "bob", "", "alice"]

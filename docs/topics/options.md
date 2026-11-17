@@ -2,8 +2,9 @@
 
 adorm has two kinds of limits:
 
-- **connection options**: limits the database enforces (`statement_timeout`, `lock_timeout`, …) and limits adorm
-  enforces on slots (`acquire_timeout`, `commit_timeout`), set in layers;
+- **connection options**: session parameters of the database connection (`statement_timeout`, `lock_timeout`,
+  `role`, custom options such as `app.user_id`, …) and limits adorm enforces on slots (`acquire_timeout`,
+  `commit_timeout`), set in layers;
 - **`adorm.timeout()`**: a client-side limit on everything a block of code does with adorm; on expiry it reports
   the phase the operation was in.
 
@@ -11,11 +12,12 @@ The [reference](/ref/options) lists every name.
 
 ## Connection options
 
-Options apply in three layers; for each option the last layer that sets it wins:
+Options apply in four layers; for each option the last layer that sets it wins:
 
 | Layer | Set with | Applies to |
 |---|---|---|
 | profile | `ConnectionProfile(options=...)` for database options, the profile's `pool` settings for `acquire_timeout` and `commit_timeout` | every session of the profile |
+| hook | the mapping the profile's [`on_acquire` hook](/topics/profiles#hooks) returns | the session's use of one slot, from acquisition to release |
 | session | `session.set_options(...)` | the session `(using, session_name)` |
 | block | `with adorm.connection_options(...):` | every operation in the block, in tasks created inside it too |
 
@@ -42,7 +44,7 @@ with adorm.connection_options(lock_timeout=0.5):
 ```
 
 `connection_options()` is a synchronous `with`: it only sets a context variable, like
-[`Session.activate()`](/topics/sessions). Values are seconds. For the database's time limits:
+[`Session.activate()`](/topics/sessions). Time limits are seconds:
 
 - `0` means no limit;
 - the largest value is 2147483.647 (PostgreSQL's limit of 2147483647 ms);
@@ -52,6 +54,51 @@ with adorm.connection_options(lock_timeout=0.5):
 with adorm.connection_options(statement_timeout=None):
     await rebuild_statistics()
 ```
+
+When a layer's option ends, the operation runs with the value of the layer below it: a block inside a hook's `role`
+restores that role when it ends. The database's default applies only when no layer sets the option, or a layer sets
+it to `None`.
+
+### Roles and custom options
+
+`role` is the role the connection acts as (PostgreSQL's `SET ROLE`): privileges and row-level security policies
+apply to it, while the connection stays logged in as its login role. A custom option is a name of lowercase
+identifiers joined by dots, such as `app.user_id`; its value is a string that SQL reads with `current_setting()`.
+Custom option names are not Python identifiers, so they are passed by unpacking a mapping:
+
+```python
+adorm.configure(
+    profiles={
+        "reports": ConnectionProfile("reports", "adorm.drivers.asyncpg.AsyncpgDriver", options={"role": "reporting"}),
+    }
+)
+
+with adorm.connection_options(role="auditor"):
+    await Payment.objects.count()                   # SET role = "auditor"; the profile's role after the block
+
+with adorm.connection_options(**{"app.tenant_id": "17"}):
+    await Invoice.objects.filter(paid=False).count()     # a policy reads current_setting('app.tenant_id')
+```
+
+`role=None` runs as the login role. The [multiple database users](/howto/multiple-database-users) recipe sets the
+current user's role from an `on_acquire` hook.
+
+### Options from a profile hook
+
+The profile's `on_acquire` hook returns the hook layer, or `None` for none. It runs in the context of the task that
+acquires the slot, so it can read the current user from a context variable:
+
+```python
+def on_acquire(connection, profile, session):
+    user = current_user.get()
+    return None if user is None else {"role": user.db_role, "app.user_id": str(user.pk)}
+```
+
+- The slot sets the options in effect with the hook layer before the acquisition completes; a value the database
+  refuses fails the acquisition and the slot leaves the pool.
+- The hook layer ends with the lease: the next session on the slot runs with its own.
+- Session parameters reach the connection only as options. SQL a hook runs on its `connection` argument is custom
+  SQL: the slot does not know what it set, and leaves the pool when the lease ends.
 
 ### What reaches the database
 
@@ -77,9 +124,11 @@ A driver declares the options it supports in [`Capabilities.connection_options`]
 - An operation with an option its driver does not declare raises `NotSupportedError` before it takes a slot, outside
   and inside a transaction; a transaction stays usable.
 - An option whose value is `None` is not sent and needs no declaration.
-- The Django driver on PostgreSQL and the native PostgreSQL driver declare `statement_timeout`, `lock_timeout` and
-  `idle_in_transaction_session_timeout`; the Django driver on other databases declares none
-  ([databases](/topics/django-driver#databases)).
+- The Django driver on PostgreSQL and the native PostgreSQL driver declare `statement_timeout`, `lock_timeout`,
+  `idle_in_transaction_session_timeout`, `role` and custom options; the Django driver on other databases declares
+  none ([databases](/topics/django-driver#databases)).
+- On PostgreSQL, a `DATABASES` entry's `OPTIONS["assume_role"]` starts the profile's `role`: the drivers set it on
+  every new connection, so a block that ends restores it.
 
 ```python
 with adorm.connection_options(statement_timeout=5):
@@ -91,13 +140,8 @@ with adorm.connection_options(statement_timeout=5):
 so a transaction never runs with options another session left on the slot. The `COMMIT` runs with the options in
 effect at the end of the block (relevant to deferred constraint triggers).
 
-Profile hooks run on the same connection:
-
-- `on_acquire` runs with the session's options already set.
-- After each hook the slot sets its options again before the next operation, so a hook may set or reset them
-  (`RESET ALL`, `DISCARD ALL`).
-- A value a hook sets holds until a layer sets that option; when that layer ends, the slot resets the option to the
-  database's default. The profile's `options` always keep their value.
+Inside Django's `TestCase` the slots share the test's connection, and every operation sets its slot's options, the
+hook layer included, with `SET LOCAL` ([testing](/topics/testing#connection-options-and-profile-hooks)).
 
 ### adorm's own options
 

@@ -70,12 +70,13 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `alias` | the target's database alias, a non-empty string |
 | `params` | the driver parameters; stored as a read-only copy |
 | `connect` | `None`, or `connect(profile)` returning a new connection in place of the one the driver opens; each driver documents what it returns (the [Django driver](/ref/drivers#adorm-drivers-django-djangoconnection): the DB-API connection Django's wrapper uses; the [native PostgreSQL driver](/ref/drivers#adorm-drivers-asyncpg-asyncpgdriver): an `asyncpg.Connection` or an awaitable of one) |
-| `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request |
-| `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool |
+| `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request; it returns `None` or a mapping of database [connection options](/ref/options) for the session's lease, the layer between `options` and the session's ([hooks](/topics/profiles#hooks)) |
+| `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool; its return value is ignored |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
 | `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
 
 `connection` is the target's connection ([`DriverConnection.target`](/ref/drivers#adorm-drivers-driverconnection)).
+SQL a hook runs on it is custom SQL: the slot leaves the pool when the lease ends.
 
 - A threaded driver runs `connect` and the hooks on the connection's thread; they are plain functions. A coroutine
   function raises `TypeError` when the profile is created with a driver instance or class, or, for a driver given by
@@ -88,13 +89,13 @@ A named connection profile, frozen. It satisfies the driver contract's
 - Profiles compare by identity ([`same_as()`](#same-as-other) compares values) and copy as themselves.
 
 ```python
-def set_role(connection, profile, session):
-    with connection.cursor() as cursor:
-        cursor.execute("SET ROLE " + connection.ops.quote_name(profile.params["role"]))
+def current_role(connection, profile, session):
+    user = current_user.get()
+    return None if user is None else {"role": user.username}
 
 
-profile = ConnectionProfile("user:alice", "adorm.drivers.django.DjangoDriver", params={"role": "alice"},
-                            on_acquire=set_role, on_release=reset_role)
+profile = ConnectionProfile("default", "adorm.drivers.django.DjangoDriver", on_acquire=current_role)
+alice = ConnectionProfile("user:alice", "adorm.drivers.django.DjangoDriver", options={"role": "alice"})
 reports = ConnectionProfile("reports", AsyncpgDriver(), options={"statement_timeout": 300},
                             pool=PoolSettings(acquire_timeout=60))
 ```
@@ -232,7 +233,7 @@ A path of another form raises `ValueError`; a module that does not exist, or a m
 `ImportError`. Driver paths of profiles and the import paths of the [`ADORM`](#adorm) setting are imported with it.
 
 ```python
-hook = import_object("myapp.roles:set_role", "hook")
+hook = import_object("myapp.roles:current_role", "hook")
 ```
 
 ## Default routers
@@ -286,8 +287,7 @@ ADORM = {
     "profiles": {
         "default": {
             "driver": "adorm.drivers.django.DjangoDriver",
-            "on_acquire": "myapp.roles.set_role",
-            "on_release": "myapp.roles.reset_role",
+            "on_acquire": "myapp.roles.current_role",
         },
     },
     "providers": ["myapp.tenants:tenant_profile"],
@@ -368,7 +368,7 @@ and `debug`. A driver given by import path is imported to check the profile agai
 
 ```python
 kwargs = settings_configuration()
-kwargs["profiles"]["default"].on_acquire      # the function "myapp.roles.set_role" names
+kwargs["profiles"]["default"].on_acquire      # the function "myapp.roles.current_role" names
 ```
 
 ### `adorm.contrib.django.default_profiles()`

@@ -180,9 +180,9 @@ async def _application_name():
 
 
 def _setting(db, name):
-    with db.cursor() as cursor:
-        cursor.execute("SELECT current_setting(%s)", [name])
-        return cursor.fetchone()[0]
+    """``name``'s value on Django's wrapper ``db``, read on its psycopg connection past Django's execute wrappers, so
+    that the read is not custom SQL."""
+    return db.connection.execute("SELECT current_setting(%s)", [name]).fetchone()[0]
 
 
 def only_slot(pool):
@@ -281,26 +281,46 @@ async def test_raw_sql_of_an_on_commit_callback_closes_the_slot_after_the_callba
     assert slot.close_reason is CloseReason.CUSTOM_SQL
 
 
-async def test_sql_of_profile_hooks_and_connection_options_is_not_custom(library, executor):  # noqa: ARG001
+async def test_connection_options_and_options_from_hooks_are_not_custom_sql(library, executor):  # noqa: ARG001
     driver = OrmDjangoDriver()
     seen = []
     profile = ConnectionProfile(
         "default",
         driver,
-        on_acquire=lambda db, *_: raw_sql_on(db, "SET application_name TO 'adorm hook'"),
-        on_release=lambda db, *_: raw_sql_on(db, "RESET application_name"),
+        on_acquire=lambda *_: {"adorm_test.app_user": "alice"},
+        on_release=lambda *_: None,
         options={"statement_timeout": 5},
     )
     pool = executor(profile, max_connections=1, acquire_timeout=5)
-    for _ in range(3):
+    for _ in REPEAT:
         async with adorm.atomic() as tx:
-            seen.append(await tx.lease.slot.connection.call_hook(lambda db, *_: _setting(db, "application_name")))
             with adorm.connection_options(lock_timeout=2):
                 assert await Tag.objects.count() == 1
-    assert seen == ["adorm hook"] * 3
+                seen.append(await tx.lease.slot.connection.call_hook(lambda db, *_: _setting(db, "lock_timeout")))
+            seen.append(await tx.lease.slot.connection.call_hook(lambda db, *_: _setting(db, "adorm_test.app_user")))
+    assert seen == ["2s", "alice"] * len(REPEAT)
     slot = only_slot(pool)
     assert slot.close_reason is None
     assert not slot.connection.ran_custom_sql
+
+
+@pytest.mark.parametrize("hook", ["on_acquire", "on_release"])
+async def test_sql_a_profile_hook_runs_is_custom_and_the_slot_leaves_the_pool(library, executor, hook):  # noqa: ARG001
+    driver = OrmDjangoDriver()
+    profile = ConnectionProfile(
+        "default", driver, **{hook: lambda db, *_: raw_sql_on(db, "SET application_name TO 'adorm hook'")}
+    )
+    pool = executor(profile, max_connections=1, acquire_timeout=5)
+    pids = set()
+    for _ in REPEAT:
+        async with adorm.atomic() as tx:
+            assert await Tag.objects.count() == 1
+            slot = tx.lease.slot
+            pids.add(slot.connection.backend_pid)
+        await asyncio.wait_for(slot.wait_closed(), GUARD)
+        assert slot.close_reason is CloseReason.CUSTOM_SQL
+    assert len(pids) == len(REPEAT)
+    assert pool.size == 0
 
 
 def raw_sql_on(db, sql):

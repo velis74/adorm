@@ -186,9 +186,13 @@ class FakeDriver(Driver):
 
 
 class OptionsDriver(FakeDriver):
-    """`FakeDriver` that declares the connection options ``statement_timeout``, ``lock_timeout`` and ``work_mem``."""
+    """`FakeDriver` that declares the connection options ``statement_timeout``, ``lock_timeout``, ``work_mem`` and
+    ``role`` and custom options."""
 
     name = "fake-options"
     capabilities = Capabilities(
-        operations={"op"}, connection_options={"statement_timeout", "lock_timeout", "work_mem"}, savepoints=True
+        operations={"op"},
+        connection_options={"statement_timeout", "lock_timeout", "work_mem", "role"},
+        custom_options=True,
+        savepoints=True,
     )

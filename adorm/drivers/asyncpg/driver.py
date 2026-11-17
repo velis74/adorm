@@ -7,7 +7,7 @@ import inspect
 import logging
 import shlex
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 from urllib.parse import urlencode
 
@@ -21,6 +21,7 @@ from adorm.drivers.base import BackendActivity, Capabilities, DatabaseMonitor, D
 from adorm.drivers.django.driver import (
     CAPABILITIES as DJANGO_CAPABILITIES,
     clear_content_types_on_migrate,
+    connection_defaults,
     database_key,
     map_django_error,
 )
@@ -71,14 +72,15 @@ CAPABILITIES = Capabilities(
     operations=DJANGO_CAPABILITIES.operations,
     constructs=DJANGO_CAPABILITIES.constructs,
     connection_options=POSTGRESQL_OPTIONS,
+    custom_options=True,
     backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
     max_channel_length=MAX_IDENTIFIER_LENGTH,
     savepoints=True,
     cancellation=True,
 )
 """What `AsyncpgDriver` supports: the operations and constructs of `adorm.drivers.django.CAPABILITIES` (reads,
-writes, row locks), savepoints, cancellation, the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS` and
-the backend events `NOTIFY`, `NOTICE` and `CONNECTION_LOST`."""
+writes, row locks), savepoints, cancellation, the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`,
+custom options and the backend events `NOTIFY`, `NOTICE` and `CONNECTION_LOST`."""
 
 MAX_GET_RESULTS = 21
 """How many rows ``get`` fetches at most to report how many matched, as Django's ``get()``."""
@@ -204,7 +206,7 @@ class AsyncpgConnection(DriverConnection):
     Each operation translates into Django query sets, queries and model instances, compiles them on the event loop
     without a database connection and runs the statements on asyncpg; writes run Django's write logic as `Writer`
     does, without Django's model methods and signals. ``target`` (what profile hooks receive) is the
-    ``asyncpg.Connection``.
+    ``asyncpg.Connection``; every statement a hook runs on it marks the connection with `mark_custom_sql()`.
     """
 
     driver: AsyncpgDriver
@@ -242,6 +244,21 @@ class AsyncpgConnection(DriverConnection):
     @property
     def target(self) -> Any:
         return self.conn
+
+    async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
+        """`DriverConnection.call_hook()`; a statement the hook runs on ``target`` marks the connection with
+        `mark_custom_sql()`."""
+
+        def ran(_query: Any) -> None:
+            self.mark_custom_sql()
+
+        self.conn.add_query_logger(ran)
+        try:
+            result = await super().call_hook(hook, *args)
+        finally:
+            self.conn.remove_query_logger(ran)
+        await asyncio.sleep(0)  # asyncpg reports queries with call_soon()
+        return result
 
     # Backend events
 
@@ -586,6 +603,10 @@ class AsyncpgDriver(Driver):
     def database_key(self, profile: Profile) -> Any:
         """The PostgreSQL database of ``profile`` (`adorm.drivers.django.database_key()`)."""
         return database_key(profile)
+
+    def connection_defaults(self, profile: Profile) -> dict[str, Any]:
+        """The ``role`` of ``OPTIONS["assume_role"]`` (`adorm.drivers.django.connection_defaults()`)."""
+        return connection_defaults(profile)
 
     def schema_hash(self, label: str) -> str:
         """The schema hash of the installed Django model ``label``, which the driver compiles queries for

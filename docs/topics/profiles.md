@@ -112,8 +112,7 @@ ADORM = {
         "default": {
             "driver": "adorm.drivers.django.DjangoDriver",
             "alias": "default",
-            "on_acquire": "myapp.roles.set_role",
-            "on_release": "myapp.roles.reset_role",
+            "on_acquire": "myapp.roles.current_role",
             "options": {"statement_timeout": 30},
         },
         "reports": {
@@ -129,7 +128,7 @@ ADORM = {
 ```
 
 An invalid value stops `django.setup()` with `ImproperlyConfigured`, which names the entry, for example
-`ADORM['profiles']['default']['on_acquire']: module 'myapp.roles' has no hook 'set_rol'`; adorm's previous configuration stays.
+`ADORM['profiles']['default']['on_acquire']: module 'myapp.roles' has no hook 'current_rol'`; adorm's previous configuration stays.
 
 Overriding `ADORM` in a test (`override_settings`, pytest-django's `settings` fixture) reconfigures adorm on entry
 and on exit; so does overriding `DATABASES` while `ADORM` has no `profiles`.
@@ -193,8 +192,8 @@ A profile has three optional hooks:
 | Hook | Runs | Typical use |
 |---|---|---|
 | `connect(profile)` | when a slot opens its connection, instead of the driver's default | credentials from a vault, custom connection arguments |
-| `on_acquire(connection, profile, session)` | when a slot is assigned to a session, before its first request | `SET ROLE`, `set_config()` for row-level security |
-| `on_release(connection, profile, session)` | when the session returns a usable slot to the pool | `RESET ROLE`, undoing what `on_acquire` set |
+| `on_acquire(connection, profile, session)` | when a slot is assigned to a session, before its first request; returns `None` or a mapping of [connection options](/topics/options) for the session's lease | the current user's `role`, a custom option such as `app.user_id` for row-level security |
+| `on_release(connection, profile, session)` | when the session returns a usable slot to the pool; its return value is ignored | state outside the database connection, such as a log of who held the slot |
 
 `connection` is the target's connection: Django's connection wrapper for the Django driver, an
 `asyncpg.Connection` for asyncpg. `session` is the session that gets or returns the slot.
@@ -208,19 +207,25 @@ variables, such as the current user; one profile and one pool can serve every us
 
 ```python
 def on_acquire(connection, profile, session):
-    with connection.cursor() as cursor:                    # Django's connection, on the slot's thread
-        cursor.execute("SELECT set_config('app.user_id', %s, false)", [str(current_user.get().pk)])
-
-
-def on_release(connection, profile, session):
-    with connection.cursor() as cursor:
-        cursor.execute("RESET app.user_id")
+    user = current_user.get()
+    if user is None:
+        return None                                        # the profile's options only
+    return {"role": user.username, "app.user_id": str(user.pk)}
 ```
 
-`on_acquire` runs with the session's [connection options](/topics/options) set. A hook may set or reset options
-adorm manages, including `RESET ALL` and `DISCARD ALL`; after each hook the slot sets its options again before the
-next operation. A value a hook sets holds until a layer sets that option; when that layer ends, the slot resets the
-option to the database's default, not to the hook's value. The profile's `options` apply in every case.
+The options `on_acquire` returns are the lease's layer between the profile's `options` and the session's
+([layers](/topics/options#connection-options)). The slot sets them before the acquisition completes and sends only
+what differs from the connection's current values; a lease of the same user on the same slot sends nothing. They
+end with the lease: the next lease's operations run with that lease's options, and a block that overrides one of
+them restores the hook's value when it ends. A value the database refuses (a role the login may not become) fails
+the acquisition. An option the driver does not declare raises `NotSupportedError`; another return value raises
+`TypeError`, and `acquire_timeout` or `commit_timeout` `ValueError`. Each of these takes the slot out of the pool.
+
+Session parameters are set only through connection options. SQL a hook runs on `connection` is custom SQL: the slot
+does not know what it changed, so it leaves the pool when the lease ends, as after [custom SQL of an
+operation](/topics/pool#slot-lifecycle), and `on_release` does not run for it. The Django driver sees the statements
+a hook runs through Django's wrapper, the native PostgreSQL driver every statement on the `asyncpg.Connection`.
+`on_acquire` runs before the slot sets the lease's options, so SQL it runs sees the options the previous lease left.
 
 An atomic operation outside a transaction runs `on_acquire`, the operation and `on_release`. A transaction runs
 `on_acquire` before `BEGIN` and `on_release` after `COMMIT` or `ROLLBACK`. The next session gets the slot after
@@ -239,9 +244,9 @@ Hook failures:
 A threaded driver cancels a hook by asking the connection's thread to stop it. A hook that does not stop extends
 the release or the acquisition by up to the driver's `cancel_grace` seconds; then the connection is given up.
 
-A slot that leaves the pool closes its connection, and the next request opens a new one; session state set by
-`on_acquire` never reaches another session. The [multiple database users](/howto/multiple-database-users) recipe
-uses `on_acquire` and `on_release` for `SET ROLE`.
+A slot that leaves the pool closes its connection, and the next request opens a new one; session state set by a
+hook's SQL never reaches another session. The [multiple database users](/howto/multiple-database-users) recipe
+returns the user's `role` from `on_acquire`.
 
 ## Profiles created at run time
 
@@ -250,7 +255,7 @@ Profiles can be registered at run time, for example one per user:
 ```python
 from adorm.settings import register_profile, unregister_profile
 
-register_profile(ConnectionProfile("user:alice", DjangoDriver, on_acquire=..., on_release=...))
+register_profile(ConnectionProfile("user:alice", DjangoDriver, options={"role": "alice"}))
 ...
 unregister_profile("user:alice")       # its pools close
 ```
@@ -268,8 +273,7 @@ async def per_user(name: str) -> ConnectionProfile | None:
     if not name.startswith("user:"):
         return None
     user = name.removeprefix("user:")
-    return ConnectionProfile(name, DjangoDriver, params={"role": await role_of(user)},
-                             on_acquire=set_role, on_release=reset_role)
+    return ConnectionProfile(name, DjangoDriver, options={"role": await role_of(user)})
 
 
 session = adorm.create_session(f"user:{request.user.username}", "web")

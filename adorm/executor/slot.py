@@ -376,6 +376,8 @@ class SlotLease:
     ``channel.on()`` runs it. ``owner`` is the task that acquired the lease. ``commit_timeout`` is the number of
     seconds the slot waits for the next request of the lease inside a transaction (``None`` for no limit); it
     starts as the pool's and `Router.acquire()` sets the ``commit_timeout`` connection option in effect.
+    ``hook_options`` are the database connection options the profile's ``on_acquire`` hook returned for the lease,
+    the layer between the profile's options and the session's (`ResolvedOptions.for_lease()`).
     """
 
     __slots__ = (
@@ -384,6 +386,7 @@ class SlotLease:
         "_released",
         "channel",
         "commit_timeout",
+        "hook_options",
         "owner",
         "pool",
         "requests",
@@ -399,6 +402,7 @@ class SlotLease:
         self.requests = RequestQueue(self)
         self.channel = EventChannel(slot.pool.events)
         self.commit_timeout: float | None = slot.pool.commit_timeout
+        self.hook_options: Mapping[str, Any] = MappingProxyType({})
         self._released = False
         self._aborted: str | None = None
         self._bound = False  # released only by ``owner``
@@ -524,8 +528,9 @@ class Slot:
     each remembered option the request lacks, and nothing when all match. Outside a transaction it sets them for the
     connection (``local=False``); inside one with ``local=True`` (``SET LOCAL``), remembered until the transaction
     ends and restored by a rollback to a savepoint. An option whose setting failed or was cancelled is set again by
-    the next request with options. After a profile hook has run on the connection, every remembered option counts as
-    unknown and is set again, since the hook may have set or reset it.
+    the next request with options. A new connection starts with the options the driver sets on it
+    (`Driver.connection_defaults()`). After a profile hook ran custom SQL, every remembered option counts as unknown
+    and is set again.
 
     When its lease ends, the slot waits for the connection to settle (`DriverConnection.settle()`; the release does not
     wait for it), then leaves the pool, closing the connection, when the lease was released with ``discard``, the
@@ -577,6 +582,7 @@ class Slot:
     async def open(self) -> None:
         """Open the driver connection and start serving requests."""
         self.connection = await self.pool.driver.open_connection(self.pool.profile, self._emit)
+        self._options = dict(self.pool.connection_defaults)
         self._server = asyncio.get_running_loop().create_task(
             self._serve(), name=f"adorm-slot-{self.slot_id}", context=contextvars.Context()
         )
@@ -705,7 +711,7 @@ class Slot:
         }
 
     async def set_options_for(self, desired: Mapping[str, Any]) -> None:
-        """Bring the connection's database options to ``desired`` outside a request (`_set_options()`), as before the
+        """Bring the connection's database options to ``desired`` outside a request (`_set_options()`), as after the
         ``on_acquire`` hook."""
         await self._set_options(desired)
 
@@ -739,8 +745,8 @@ class Slot:
         return await coroutine
 
     def forget_options(self) -> None:
-        """Treat every option the slot set as unknown, so the next request with options sets it again (a hook may
-        have changed it)."""
+        """Treat every option the slot set as unknown, so the next request with options sets it again (custom SQL
+        may have changed it)."""
         self._options = dict.fromkeys(self._options, _UNKNOWN)
 
     def _end_transaction_options(self) -> None:
@@ -967,7 +973,6 @@ class Slot:
         try:
             async with asyncio.timeout(timeout):
                 await connection.call_hook(self.pool.on_release, self.pool.profile, lease.session)
-            self.forget_options()
         except TimeoutError:
             logger.error("on_release of %r did not finish within %g s; the slot leaves the pool", self, timeout)
             return False

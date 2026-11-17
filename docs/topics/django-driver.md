@@ -58,7 +58,8 @@ A connection is `django.db.connections[profile.alias]` on the slot's thread: Dja
 - With Django's connection pool on the alias (`OPTIONS["pool"]`), the slot opens its connection directly, not from
   that pool; closing the slot ends it on the server.
 - The profile's `params` replace keys of the `DATABASES` entry for that profile's connections. The shared `DATABASES`
-  entry is unchanged. On a `direct` driver the event loop thread's wrapper gets its own settings back when the slot
+  entry is unchanged. On PostgreSQL, `OPTIONS["assume_role"]` starts the profile's `role`
+  [connection option](/topics/options). On a `direct` driver the event loop thread's wrapper gets its own settings back when the slot
   closes.
 - The `connect` hook, when set, returns the DB-API connection (on PostgreSQL a psycopg connection, on SQLite a
   `sqlite3` connection) the wrapper uses instead of
@@ -91,8 +92,8 @@ adorm.configure(
 )
 ```
 
-Profile hooks (`on_acquire`, `on_release`) receive the wrapper and run on the slot's thread; see
-[Multiple database users](/howto/multiple-database-users).
+Profile hooks (`on_acquire`, `on_release`) receive the wrapper and run on the slot's thread; a statement they run
+through the wrapper is custom SQL. See [Multiple database users](/howto/multiple-database-users).
 
 Every ORM call of the driver runs on the profile's alias: query sets with `using(alias)`, `save(using=alias)`,
 `transaction.atomic(using=alias)`. Inside `full_clean()`, the queries Django routes itself (unique checks,
@@ -533,7 +534,8 @@ The driver inspects the callers of Django's cursor wrapper:
 | Django's `transaction.atomic()` and savepoints | no |
 | `connection.cursor().execute(...)`, `Manager.raw()` | yes |
 | the same in an `on_commit()` callback, of the transaction or run at once outside one | yes; after a commit the slot decides once the callbacks have run |
-| the profile's `on_acquire` and `on_release` hooks, connection options | no |
+| connection options, also those an `on_acquire` hook returns | no |
+| a statement the profile's `on_acquire` or `on_release` hook runs through the wrapper | yes |
 
 ```python
 from django.db import connection

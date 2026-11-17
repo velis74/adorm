@@ -13,11 +13,19 @@ from collections import deque
 from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from types import MappingProxyType
 from typing import Any, cast, Literal, TYPE_CHECKING
 
 from adorm.events import EventBus
 from adorm.exceptions import DeadlockError, InterfaceError, SchemaCheckError, SessionTimeout
-from adorm.executor.options import check_profile_options, check_timeout, resolve_options, ResolvedOptions, tracking
+from adorm.executor.options import (
+    check_hook_options,
+    check_profile_options,
+    check_timeout,
+    resolve_options,
+    ResolvedOptions,
+    tracking,
+)
 from adorm.executor.slot import (
     CancellationOutcome,
     carry_cancellation,
@@ -143,13 +151,18 @@ class Pool:
     slot leaves the pool at the end of a lease is up to the slot (`Slot`).
 
     The profile's ``on_acquire`` and ``on_release`` attributes, when present and not ``None``, are its hooks: the
-    router calls ``on_acquire`` when it assigns a slot to a session, after setting the session's database connection
-    options, the slot calls ``on_release`` when the session returns it usable. After either hook the slot sets its
-    options again before the next request (`Slot`). ``release_timeout`` is the number of seconds ``on_release`` may
-    run before the slot leaves the pool instead.
+    router calls ``on_acquire`` when it assigns a slot to a session, the slot calls ``on_release`` when the session
+    returns it usable. ``on_acquire`` returns ``None`` or a mapping of database connection options
+    (`check_hook_options()`), the lease's layer between the profile's options and the session's
+    (`SlotLease.hook_options`); the router sets the options in effect with that layer before the acquisition
+    completes. An option the driver does not declare raises `NotSupportedError`. A hook that fails,
+    returns another value or does not finish in time discards the slot. SQL a hook runs is custom SQL
+    (`DriverConnection.ran_custom_sql`): the slot leaves the pool when the lease ends. ``release_timeout`` is the
+    number of seconds ``on_release`` may run before the slot leaves the pool instead.
 
-    The profile's ``options`` attribute, when present and not ``None``, holds its database connection options, the
-    first layer of `adorm.connection_options()`; ``options`` is that mapping, checked. An option the driver does
+    ``connection_defaults`` are the database options the driver sets on each new connection
+    (`Driver.connection_defaults()`). ``options`` are those, replaced by the profile's ``options`` attribute (when
+    present and not ``None``), checked: the first layer of `adorm.connection_options()`. An option the driver does
     not declare raises `NotSupportedError` and ``acquire_timeout`` or ``commit_timeout`` among them `ValueError`.
 
     ``capabilities`` is what the driver supports for the profile (`Driver.capabilities_for()`); the pool checks
@@ -190,7 +203,10 @@ class Pool:
         check_hook(getattr(profile, "connect", None), "connect", profile.name, driver.mode)
         self.on_acquire = self._hook(profile, "on_acquire")
         self.on_release = self._hook(profile, "on_release")
-        self.options = check_profile_options(getattr(profile, "options", None), profile.name)
+        self.connection_defaults = check_profile_options(driver.connection_defaults(profile), profile.name)
+        self.options = MappingProxyType(
+            {**self.connection_defaults, **check_profile_options(getattr(profile, "options", None), profile.name)}
+        )
         self.capabilities = driver.capabilities_for(profile)
         self.capabilities.check_options(
             [name for name, value in self.options.items() if value is not None], driver.name
@@ -613,7 +629,7 @@ class Router:
 
                 async def execute(operation: Operation) -> Any:
                     pool.driver.check(operation, capabilities=pool.capabilities)
-                    return await lease.call("execute", operation, options=options.database)
+                    return await lease.call("execute", operation, options=options.for_lease(lease))
 
                 problems = await check_models(list(registry), execute)
             finally:
@@ -650,16 +666,22 @@ class Router:
     async def _on_acquire(
         self, pool: Pool, lease: SlotLease, deadline: float, timeout: float, options: ResolvedOptions
     ) -> None:
-        """Set the session's database options, then run the profile's ``on_acquire`` hook, within the acquisition's
-        deadline; on failure discard the slot."""
+        """Run the profile's ``on_acquire`` hook and set the database options in effect with those it returned, within
+        the acquisition's deadline; on failure discard the slot."""
         slot = lease.slot
         connection = cast("DriverConnection", slot.connection)
         hook_timeout = asyncio.timeout_at(deadline)
         try:
             async with hook_timeout:
-                await slot.set_options_for(options.database)
-                await connection.call_hook(pool.on_acquire, pool.profile, lease.session)
-            slot.forget_options()
+                result = await connection.call_hook(pool.on_acquire, pool.profile, lease.session)
+                hook_options = check_hook_options(result, "on_acquire", pool.name)
+                pool.capabilities.check_options(
+                    [name for name, value in hook_options.items() if value is not None], pool.driver.name
+                )
+                lease.hook_options = hook_options
+                if connection.ran_custom_sql:
+                    slot.forget_options()
+                await slot.set_options_for(options.for_lease(lease))
         except BaseException as exc:
             # The hook may have left the connection in any state.
             await lease._release(CloseReason.HOOK_FAILED)
@@ -858,7 +880,7 @@ class Router:
         outcome = CancellationOutcome.UNKNOWN
         try:
             with tracking("executing", operation, session):
-                result = await lease.call("execute", operation, options=options.database)
+                result = await lease.call("execute", operation, options=options.for_lease(lease))
             outcome = CancellationOutcome.SUCCEEDED
         except asyncio.CancelledError as exc:
             cancelled = exc

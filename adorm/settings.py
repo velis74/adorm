@@ -124,11 +124,13 @@ class ConnectionProfile:
       returns (the Django driver: the DB-API connection Django's wrapper uses; the asyncpg driver: an
       ``asyncpg.Connection``);
     - ``on_acquire(connection, profile, session)`` runs when a slot is assigned to a session, before its first
-      request;
+      request, and returns ``None`` or a mapping of database connection options for the session's lease, the layer
+      between ``options`` and the session's (`adorm.executor.Pool`);
     - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.
 
-    ``connection`` is the target's connection. A threaded driver runs the hooks on the connection's thread and
-    they are plain functions; an async driver awaits a hook's result when it is awaitable. ``options`` are the
+    ``connection`` is the target's connection. SQL a hook runs on it is custom SQL: the slot leaves the pool when the
+    lease ends. A threaded driver runs the hooks on the connection's thread and they are plain functions; an async
+    driver awaits a hook's result when it is awaitable. ``options`` are the
     database connection options of the profile, the first layer of `adorm.connection_options()`; ``acquire_timeout``
     and ``commit_timeout`` are pool settings and raise `ValueError` there, and an option a driver given as an
     instance or class does not declare raises `NotSupportedError`. ``pool`` overrides the registry's pool defaults.

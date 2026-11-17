@@ -133,17 +133,23 @@ transaction.
 ## Connection options and profile hooks
 
 [Connection options](/topics/options) are per slot: a slot's options are set with `SET LOCAL` before each of its
-operations and the options another slot set are reset. They do not leak between flows or out of a transaction.
+operations and the options another slot set are reset. They do not leak between flows or out of a transaction. The
+options an `on_acquire` hook returns, such as a `role` or a custom option for row-level security, are applied the
+same way, so a profile with such a hook runs under `TestCase` as in production.
 
 ```python
 with adorm.connection_options(statement_timeout=2):
     await Member.objects.count()          # runs with a 2 s limit
 await Member.objects.count()              # runs without one, on whichever slot
+
+
+def on_acquire(connection, profile, session):
+    return {"app.user_id": str(current_user.get().pk)}     # SET LOCAL app.user_id = '…' before each operation
 ```
 
-These profiles cannot share the test's connection:
+A statement a profile hook runs on the test's connection raises `NotSupportedError`: its effect on the session would
+reach every slot. These profiles cannot share the test's connection either:
 
-- a profile with `on_acquire` or `on_release` hooks: a session change such as `SET ROLE` would reach every slot;
 - a profile with `params` that differ from the alias's `DATABASES` entry;
 - a profile with a `connect` hook.
 

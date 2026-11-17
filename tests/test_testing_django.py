@@ -508,16 +508,61 @@ class SharedConnectionTests(TestCase):
         assert seen["seven"] == ["7s"] * len(REPEAT)
         assert seen["after"] == ["0"] * len(REPEAT)
 
-    async def test_a_profile_with_session_hooks_cannot_share_the_test_connection(self):
+    async def test_options_a_hook_returns_apply_to_each_operation_of_the_lease_only(self):
+        seen = ShowingConnection.seen = {}
+        user = contextvars.ContextVar("test_user", default=None)
+
+        def on_acquire(_db, _profile, _session):
+            return None if user.get() is None else {APP_USER: user.get()}
+
+        async def count(label, name=None):
+            token = user.set(name)
+            try:
+                return await tags(create_session("default", f"{label}-{name}")).filter(name=f"opt-{label}").count()
+            finally:
+                user.reset(token)
+
+        def django_sees():
+            with connections["default"].cursor() as cursor:
+                cursor.execute(f"SELECT current_setting('{APP_USER}', true)")
+                return cursor.fetchone()[0]
+
+        async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire) as pool:
+            for _ in REPEAT:
+                await asyncio.gather(*(count("users", name) for name in ("alice", "bob", None) * 3))
+                assert await sync_to_async(django_sees)() in (None, "")
+                token = user.set("carol")
+                try:
+                    async with create_session("default", "tx").atomic():
+                        await count("tx", "carol")
+                        with adorm.connection_options(**{APP_USER: "dave"}):
+                            await count("block")
+                        await count("tx", "carol")
+                finally:
+                    user.reset(token)
+            # NULL before the option is first set on the test's connection, '' after a reset: both mean no user.
+            users = [value or "" for value in seen["users"]]
+            assert sorted(users) == sorted(["alice", "bob", ""] * 3 * len(REPEAT))
+            assert seen["tx"] == ["carol"] * 2 * len(REPEAT)
+            assert seen["block"] == ["dave"] * len(REPEAT)
+            assert all(not slot.connection.ran_custom_sql for slot in pool._slots)
+
+    async def test_sql_a_hook_runs_on_the_shared_connection_is_refused(self):
         def hook(db, _profile, _session):
             with db.cursor() as cursor:
-                cursor.execute("RESET ROLE")
+                cursor.execute(f"SET {APP_USER} = 'alice'")
 
-        for hooks in ({"on_acquire": hook}, {"on_release": hook}):
-            async with executor(**hooks) as pool:
-                with pytest.raises(NotSupportedError, match="on_acquire or on_release"):
+        async with executor(on_acquire=hook) as pool:
+            for _ in REPEAT:
+                with pytest.raises(NotSupportedError, match="ran SQL on the shared connection"):
                     await tags().count()
                 assert not pool._slots
+        async with executor(on_release=hook) as pool:
+            for _ in REPEAT:
+                await tags().count()
+                async with asyncio.timeout(10):
+                    while pool.size:
+                        await asyncio.sleep(0.01)
 
     def test_capture_on_commit_callbacks_sees_djangos_callbacks_unchanged(self):
         calls = []
@@ -735,8 +780,11 @@ def shared_of(pool) -> SharedTestConnection:
     return next(iter(pool._slots)).connection._shared
 
 
+APP_USER = "adorm_test.app_user"
+
+
 class ShowingConnection(DjangoConnection):
-    """Records ``statement_timeout`` before each operation, by the ``opt-<label>`` the operation filters on."""
+    """Records the driver's ``setting`` before each operation, by the ``opt-<label>`` the operation filters on."""
 
     seen: dict[str, list[str]] = {}
 
@@ -744,13 +792,16 @@ class ShowingConnection(DjangoConnection):
         label = re.search(r"opt-([a-z]+)", repr(operation))
         if label is not None:
             with self.db.cursor() as cursor:
-                cursor.execute("SHOW statement_timeout")
+                cursor.execute("SELECT current_setting(%s, true)", [self.driver.setting])
                 self.seen.setdefault(label.group(1), []).append(cursor.fetchone()[0])
         return super().execute_sync(operation)
 
 
 class ShowingDriver(DjangoDriver):
     connection_class = ShowingConnection
+
+    def __init__(self, setting="statement_timeout"):
+        self.setting = setting
 
 
 # Under Django's TransactionTestCase: slots with connections of their own.

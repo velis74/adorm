@@ -63,9 +63,10 @@ async with router.slot(session) as lease:
 `router.run(session, operation)` runs one operation on a slot of its own, as an operation outside a transaction
 runs.
 
-When the pool's profile has [hooks](/topics/profiles#hooks), `acquire()` runs `on_acquire` before it returns the
-lease, within the acquisition's timeout, and `release()` runs `on_release` before the slot goes to the next request,
-within the pool's `release_timeout`. A hook that fails takes its slot out of the pool.
+When the pool's profile has [hooks](/topics/profiles#hooks), `acquire()` runs `on_acquire` and sets the connection
+options it returns before it returns the lease, within the acquisition's timeout, and `release()` runs `on_release`
+before the slot goes to the next request, within the pool's `release_timeout`. A hook that fails takes its slot out of
+the pool.
 
 ### Pool size
 
@@ -102,7 +103,8 @@ task fails, every queued request fails with `InterfaceError` and the slot leaves
 ## Slot lifecycle
 
 adorm decides how long a connection lives; Django's `CONN_MAX_AGE` does not apply. Acquiring a slot sends no ping,
-reset or query; the profile's `on_acquire` hook is the only work before a lease's first request. When a lease ends,
+reset or query; the profile's `on_acquire` hook and the options it returns are the only work before a lease's first
+request. When a lease ends,
 the slot closes its connection and leaves the pool, and the next request gets a fresh connection, when
 
 - the session ended without a commit or rollback: its client is gone, a `commit` or `rollback` failed, or a lease
@@ -110,9 +112,9 @@ the slot closes its connection and leaves the pool, and the next request gets a 
 - a request failed with a connection error ([`is_connection_lost()`](/ref/drivers#adorm-drivers-driverconnection),
   such as PostgreSQL's `57P01` after `pg_terminate_backend()`), even when the driver still reports the connection
   usable;
-- the connection ran SQL that adorm did not generate, such as a Django signal receiver's `cursor.execute()`
-  ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), also when the transaction committed: that SQL may have changed
-  the connection's state;
+- the connection ran SQL that adorm did not generate, such as a Django signal receiver's `cursor.execute()` or SQL of a
+  profile hook ([`ran_custom_sql`](/ref/drivers#ran-custom-sql)), also when the transaction committed: that SQL may
+  have changed the connection's state;
 - the connection listens on a notification channel ([`listening`](/ref/drivers#adorm-drivers-driverconnection)), as
   after an [`adorm.listen()`](/topics/events#listening-for-notifications) block that did not unlisten:
   a later lease would receive its notifications;

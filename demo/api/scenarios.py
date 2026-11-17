@@ -174,8 +174,8 @@ async def hold_edition(log, isbn: str, pause) -> str:
 
 
 async def lock_with_timeout(log, isbn: str) -> str:
-    with adorm.connection_options(lock_timeout=0.5):
-        async with adorm.atomic():
+    async with adorm.atomic():
+        with adorm.connection_options(lock_timeout=0.5):
             log("select_for_update() with lock_timeout=0.5")
             await Edition.objects.select_for_update().get(isbn=isbn)
             log("has the row lock", "ok")

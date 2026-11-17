@@ -99,7 +99,8 @@ Coverage tests fail when:
 | nested `atomic()` blocks, on a driver with `savepoints` | a nested block commits on normal exit and rolls back on an exception; the outer block keeps its own writes |
 | a database error (`IntegrityError` of a duplicate primary key) in a nested block, on a driver with `savepoints` and `create` | the nested block rolls back; the outer block writes again and commits both writes; one slot, released |
 | nested `atomic()` blocks, on a driver without `savepoints` | `NotSupportedError` with the driver's name and `unsupported == ("savepoints",)`; the outer block goes on reading and commits; one slot, released |
-| a connection option the driver declares | `set_options()` accepts the value in `OPTIONS` and the connection executes the next operation |
+| a connection option the driver declares | `set_options()` accepts the value in `OPTIONS` (for `role`, the login role) and then `None`, and the connection executes the next operation after each |
+| a custom option, on a driver that declares custom options | `set_options()` sets and resets a value with a quote and a backslash, with and without `local` |
 | a connection option the driver does not declare | `NotSupportedError` naming it, with `local` false and true; the connection stays usable |
 
 `tests/conformance/test_options.py` runs every driver through [connection options](/topics/options) and
@@ -115,8 +116,9 @@ Coverage tests fail when:
 | a limited read in a savepoint that rolls back | the enclosing transaction waits again |
 | a limit set inside a released savepoint, then lifted inside the same transaction | the transaction waits again (`SET LOCAL … TO DEFAULT` was sent) |
 | a limit set inside a committed transaction | the next operation on the slot waits |
-| `current_setting()` read by an `on_release` hook after operations with two options, in a transaction inside the same block, and with none | the options of the block after the operation and after the transaction, the defaults after an operation without options |
-| an `on_acquire` hook that sets `statement_timeout` and an `on_release` hook that runs `RESET ALL`, around operations with and without a block | the block's value inside the block, the hook's value without one |
+| `current_setting()` read in transactions with two options, with a block inside them, and with none | the options in effect at each read: the inner block's inside it, the outer block's after it, the defaults without options |
+| an `on_acquire` hook that returns `statement_timeout`, around operations with and without a block, inside and outside a transaction, and with a block that sets `None` | the block's value inside the block, the hook's value without one, the database's default for `None`; the connection ran no custom SQL |
+| an `on_acquire` hook that returns a custom option from a context variable, for users in turn and without one | each lease's value, `''` without one |
 | an option the driver does not declare | `NotSupportedError` naming it before a slot is opened; `None` values run |
 | `adorm.timeout()` around a blocked operation | `OperationTimeout` with `phase="executing"`, the operation and the session; the pool serves the next operation |
 | `adorm.timeout()` while the only slot is held | `OperationTimeout` with `phase="waiting_for_slot"` and `CancellationOutcome.NOT_STARTED`; nothing stays queued |

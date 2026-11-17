@@ -16,6 +16,7 @@ import inspect
 import itertools
 import logging
 import queue
+import re
 import selectors
 import socket
 import threading
@@ -48,6 +49,7 @@ __all__ = [
     "ThreadedDriver",
     "check_channel",
     "is_connection_error",
+    "is_custom_option",
     "is_refusal",
     "operation_models",
 ]
@@ -102,7 +104,9 @@ class Capabilities:
     """What a driver supports.
 
     ``operations`` and ``constructs`` are the names `Operation` reports, ``connection_options`` the options
-    ``set_options()`` accepts and ``backend_events`` the `BackendEvent` names the driver emits. ``savepoints`` and
+    ``set_options()`` accepts and ``backend_events`` the `BackendEvent` names the driver emits. ``custom_options``
+    tells whether ``set_options()`` also accepts custom options (`is_custom_option()`, names
+    such as ``app.user_id``); it defaults to ``False``. ``savepoints`` and
     ``cancellation`` tell whether the driver implements savepoints and cancels a running statement; both default
     to ``False``, so a driver declares only what it implements. ``max_channel_length`` is the longest notification
     channel name in bytes of UTF-8 the backend accepts, ``None`` (the default) for no limit.
@@ -115,6 +119,7 @@ class Capabilities:
     savepoints: bool = False
     cancellation: bool = False
     max_channel_length: int | None = None
+    custom_options: bool = False
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -168,11 +173,24 @@ class Capabilities:
 
     def check_options(self, options: Iterable[str], driver: str | None = None) -> None:
         """Raise `NotSupportedError` naming every option the driver does not support."""
-        missing = sorted(set(options) - self.connection_options)
+        missing = sorted(
+            name
+            for name in set(options) - self.connection_options
+            if not (self.custom_options and isinstance(name, str) and is_custom_option(name))
+        )
         if missing:
             raise NotSupportedError(
                 f"unsupported connection options: {', '.join(missing)}{_on(driver)}", driver=driver, unsupported=missing
             )
+
+
+_CUSTOM_OPTION = re.compile(r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+")
+
+
+def is_custom_option(name: str) -> bool:
+    """Whether ``name`` is a custom connection option: lowercase ASCII identifiers joined by dots, such as
+    ``app.user_id`` (PostgreSQL's customized options)."""
+    return _CUSTOM_OPTION.fullmatch(name) is not None
 
 
 def _on(driver: str | None) -> str:
@@ -627,6 +645,12 @@ class Driver(ABC):
         without one overrides it.
         """
         return is_refusal(exc)
+
+    def connection_defaults(self, profile: Profile) -> Mapping[str, Any]:  # noqa: ARG002 - subclasses use it
+        """The database connection options the driver sets on every new connection for ``profile``, such as a role
+        from its settings; the pool starts the profile's layer of options with them. Empty unless overridden. Does
+        no I/O."""
+        return {}
 
     def database_key(self, profile: Profile) -> Any:  # noqa: ARG002 - subclasses use it
         """A hashable value naming the database ``profile`` connects to, or ``None`` (the default) when the driver

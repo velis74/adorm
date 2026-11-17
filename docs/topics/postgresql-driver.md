@@ -72,7 +72,7 @@ connection raises `NotSupportedError` when it opens, as it can neither see nor r
 | `TIME_ZONE`, Django's `USE_TZ` and `TIME_ZONE` | the session time zone (`TimeZone`), as Django sets it on its own connections |
 | `OPTIONS["options"]` | its `-c name=value`, `-cname=value` and `--name=value` settings go to `server_settings`; any other token raises `NotSupportedError` |
 | `OPTIONS["connect_timeout"]` | `timeout` of `asyncpg.connect()` |
-| `OPTIONS["assume_role"]` | `SET ROLE` after the connection opens |
+| `OPTIONS["assume_role"]` | `SET ROLE` after the connection opens; the profile's `role` [connection option](/topics/options) starts with it |
 | `OPTIONS["isolation_level"]` (a psycopg `IsolationLevel` value) | `BEGIN ISOLATION LEVEL …` for every transaction |
 | `OPTIONS["server_side_binding"]` | how parameters are typed ([parameter types](/topics/sql-compilation#parameter-types-psycopg-and-asyncpg)) |
 | `OPTIONS["pool"]`, `["prepare_threshold"]`, `["cursor_factory"]`, `["context"]` | no effect: they configure psycopg and Django's pool |
@@ -132,11 +132,13 @@ adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDr
 ### Hooks
 
 `on_acquire` and `on_release` receive the `asyncpg.Connection`. They may be coroutine functions or plain functions;
-the driver awaits an awaitable return value. See [Multiple database users](/howto/multiple-database-users).
+the driver awaits an awaitable return value. `on_acquire` returns the lease's connection options. A statement a hook
+runs on the connection is custom SQL: a query logger on the connection sees it, and the slot leaves the pool when
+the lease ends. See [Multiple database users](/howto/multiple-database-users).
 
 ```python
 async def on_acquire(connection, profile, session):
-    await connection.execute("SELECT set_config('application_name', $1, false)", session.session_name)
+    return {"role": await role_of(current_user.get())}
 ```
 
 

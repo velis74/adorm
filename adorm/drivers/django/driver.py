@@ -314,9 +314,9 @@ class DjangoConnection(ThreadedConnection):
     the connection closes, the wrapper gets the alias's settings back (for a ``direct`` driver, the event loop thread's
     wrapper). A statement that an operation, or one of Django's ``on_commit()`` callbacks, runs through the wrapper's
     cursor from code other than Django's query compiler and database backend (raw SQL of a signal receiver,
-    ``Manager.raw()``, ``cursor.execute()``) marks the connection with `mark_custom_sql()`; SQL sent past Django's
-    execute wrappers (``callproc()``, the DB-API connection) is not seen. SQL of profile hooks and of
-    ``set_options()`` does not count.
+    ``Manager.raw()``, ``cursor.execute()``) marks the connection with `mark_custom_sql()`, as does every statement a
+    profile hook runs through the wrapper; SQL sent past Django's execute wrappers (``callproc()``, the DB-API
+    connection) is not seen. SQL of ``set_options()`` does not count.
 
     A transaction is an outermost ``transaction.atomic()`` block of the alias, entered by ``begin()`` and left by
     ``commit()`` or ``rollback()``; a savepoint is a Django savepoint inside it, so Django's ``on_commit()`` callbacks
@@ -442,6 +442,15 @@ class DjangoConnection(ThreadedConnection):
         connection was opened (`adorm.testing.django.TestDatabase.current()`): after the ``TestCase`` test it was opened
         in, and, for one opened outside a ``TestCase``, while a ``TestCase`` transaction is open."""
         return super().is_usable() and (self._test is None or self._test.current())
+
+    def _run_hook(self, hook: Any, args: tuple[Any, ...]) -> Any:
+        """Run a profile hook; a statement it runs through the wrapper is custom SQL (`_hook_sql()`)."""
+        with self.db.execute_wrapper(self._hook_sql):
+            return super()._run_hook(hook, args)
+
+    def _hook_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
+        self.mark_custom_sql()
+        return execute(sql, params, many, context)
 
     def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
         if self._cancelled() and not str(sql).lstrip().upper().startswith("ROLLBACK"):
@@ -1030,6 +1039,17 @@ def database_key(profile: Any) -> Any:
     return key
 
 
+def connection_defaults(profile: Any) -> dict[str, Any]:
+    """The connection options Django sets on a new PostgreSQL connection of ``profile``'s ``DATABASES`` entry with its
+    ``params`` applied: ``{"role": ...}`` for ``OPTIONS["assume_role"]``, else none. Does not connect."""
+    entry = _profile_entry(profile)
+    vendor = profile_vendor(profile)
+    if entry is None or vendor is None or vendor.name != "postgresql":
+        return {}
+    role = (entry.get("OPTIONS") or {}).get("assume_role")
+    return {"role": role} if role else {}
+
+
 class DjangoMonitor(DatabaseMonitor):
     """A `DatabaseMonitor` on a Django connection wrapper of its own, on a thread of its own, for ``profile``'s alias
     with its ``params`` and ``connect`` hook applied, as `DjangoConnection` opens it. Inside a Django test it connects
@@ -1147,6 +1167,10 @@ class DjangoDriver(ThreadedDriver):
     def database_key(self, profile: Any) -> Any:
         """The database of ``profile`` (`adorm.drivers.django.database_key()`)."""
         return database_key(profile)
+
+    def connection_defaults(self, profile: Any) -> dict[str, Any]:
+        """The ``role`` of ``OPTIONS["assume_role"]`` on PostgreSQL (`adorm.drivers.django.connection_defaults()`)."""
+        return connection_defaults(profile)
 
     def schema_hash(self, label: str) -> str:
         """The schema hash of the installed Django model ``label`` (`adorm.drivers.django.model_schema_hash()`)."""

@@ -1,17 +1,19 @@
 # Multiple database users
 
 ::: info Status
-The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run the
-hooks of this recipe and execute reads, writes, row locks and savepoints. Any `Driver` whose connection `target` is Django's connection wrapper or an
-`asyncpg.Connection` works too (see [Writing a driver](/howto/writing-a-driver)).
+The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) set the
+`role` and custom [connection options](/topics/options) of this recipe and execute reads, writes, row locks and
+savepoints. Any `Driver` that declares these options works too (see [Writing a driver](/howto/writing-a-driver)).
 :::
 
 This recipe runs each application user's queries as that user's PostgreSQL role, so the database enforces privileges
 and row-level security, while every connection logs in with one account. adorm has no user management of its own:
 
 - one [connection profile](/topics/profiles) logs in as the shared account;
-- its `on_acquire` hook switches the connection to the current user's role with `SET ROLE`;
-- its `on_release` hook switches it back with `RESET ROLE` before the connection serves the next user.
+- the `role` [connection option](/topics/options) switches the connection to the current user's role: its
+  `on_acquire` hook returns it for each use of a slot, or a profile per user sets it in its `options`;
+- the slot sets the role with `SET role` before the session's first operation and replaces it for the next session;
+  no hook runs SQL.
 
 ## 1. Create the roles
 
@@ -50,51 +52,29 @@ async def db_role_middleware(request, call_next):
 A threaded driver runs the hook on the connection's thread in a copy of the acquiring task's context, with the same
 variable value.
 
-## 3. Write the hooks
+## 3. Write the hook
 
-The hooks receive the target's connection, the profile and the session. Quote the role as an identifier; `SET ROLE`
-takes no query parameters. Without a current user the hook sets no role and the connection runs as the login role,
-which has no privileges of its own.
-
-With the Django ORM driver the connection is Django's connection wrapper and the hooks run on the slot's thread:
+The hook returns the connection options of the session's use of the slot. Without a current user it returns `None`
+and the connection runs as the login role, which has no privileges of its own. The same function serves both drivers:
 
 ```python
-def set_role(connection, profile, session):
+def current_role(connection, profile, session):
     role = db_role.get()
-    if role is not None:
-        with connection.cursor() as cursor:
-            cursor.execute("SET ROLE " + connection.ops.quote_name(role))
-
-
-def reset_role(connection, profile, session):
-    with connection.cursor() as cursor:
-        cursor.execute("RESET ROLE")
+    return None if role is None else {"role": role}
 ```
 
-With the native PostgreSQL driver the connection is an `asyncpg.Connection` and the hooks are coroutines:
+- The slot sends `SET role = "alice"` (the name quoted as an identifier) before the session's first request, outside
+  a transaction; the role holds for every operation and transaction of the session on that slot.
+- The next session on the slot runs with its own role: the slot sends `SET role = "bob"`, or `RESET role` for a
+  session without a user. A session of the same user on the same slot sends nothing.
+- A role the login may not become, or one that does not exist, fails the acquisition and closes the slot.
+- A `with adorm.connection_options(role=...)` block inside the session runs as another role and restores the hook's
+  role when it ends.
+- Inside Django's `TestCase` the role is set with `SET LOCAL` before each operation
+  ([testing](/topics/testing#connection-options-and-profile-hooks)).
 
-```python
-def quote_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-async def set_role(connection, profile, session):
-    role = db_role.get()
-    if role is not None:
-        await connection.execute("SET ROLE " + quote_identifier(role))
-
-
-async def reset_role(connection, profile, session):
-    await connection.execute("RESET ROLE")
-```
-
-- `on_acquire` runs before the session's first request, outside a transaction; the role holds for every operation and
-  transaction of the session on that slot.
-- `on_release` runs before the slot returns to the pool; the next session gets the slot only after it has finished.
-- A `SET ROLE` that fails (an unknown role, a role the login may not become) fails the acquisition and closes the
-  slot.
-- A `RESET ROLE` that fails or does not finish within the pool's `release_timeout` closes the slot, so a connection in
-  one user's role never serves another user.
+A hook that runs SQL on its `connection` argument instead runs custom SQL: the slot cannot tell what that SQL set,
+so it closes the connection when the session releases it.
 
 ## 4. Register the profile
 
@@ -106,8 +86,7 @@ adorm.configure(
         "default": {
             "driver": "adorm.drivers.django.DjangoDriver",
             "alias": "default",                   # DATABASES["default"] logs in as app_login
-            "on_acquire": set_role,
-            "on_release": reset_role,
+            "on_acquire": current_role,
             "pool": {"max_connections": 20},
         },
     },
@@ -115,7 +94,7 @@ adorm.configure(
 ```
 
 With the [Django app](/topics/profiles#configuring-from-django-settings) installed, the same profile goes into the
-`ADORM` setting, with the hooks as import paths:
+`ADORM` setting, with the hook as an import path:
 
 ```python
 # settings.py
@@ -123,8 +102,7 @@ ADORM = {
     "profiles": {
         "default": {
             "driver": "adorm.drivers.django.DjangoDriver",
-            "on_acquire": "myapp.roles.set_role",
-            "on_release": "myapp.roles.reset_role",
+            "on_acquire": "myapp.roles.current_role",
             "pool": {"max_connections": 20},
         },
     },
@@ -147,21 +125,20 @@ privilege on raises `ProgrammingError` with SQLSTATE `42501`.
 
 ## Variations
 
-- **The role from the session**: a hook can read `session.session_name` instead of a context variable, e.g. with
+- **The role from the session**: the hook reads `session.session_name` instead of a context variable, e.g. with
   sessions created as `adorm.create_session("default", f"user:{username}")`.
 - **A profile per user**: a [profile provider](/topics/profiles#profiles-created-at-run-time) creates
-  `ConnectionProfile(f"user:{name}", ..., params={"role": name}, on_acquire=..., on_release=...)` on the user's first
-  request, and the hooks read `profile.params["role"]`. Each such profile has its own pool: users share no
-  connections and `max_connections` applies per user. A pool closes an idle connection after
-  `purge_stale_connections_at` seconds (300 by default), so the connection count follows the users active within that
-  time. `adorm.settings.unregister_profile()` closes a user's pool at once. The login role's connection limit
-  (`ALTER ROLE app_login CONNECTION LIMIT ...`) caps all of them together.
-- **Row-level security without roles**: keep one role and set a variable instead, `SELECT set_config('app.user_id',
-  %s, false)` in `on_acquire` (`$1` with asyncpg) and `RESET app.user_id` in `on_release`; policies read
-  `current_setting('app.user_id')`.
-- **A role per tenant**: the same hooks with the tenant's role in the context variable.
-- **Several hooks**: a hook is any callable; a function that calls `set_role()` and then sets `app.user_id` combines
-  both. `on_release` then runs `RESET ROLE` and `RESET app.user_id`: `RESET ALL` resets the settings but not the role.
-- **Time limits per user**: `statement_timeout` and `lock_timeout` are [connection options](/topics/options), set by
-  the profile's `options`, `session.set_options()` or `adorm.connection_options()`. A hook may set them too; the slot
-  sets its own values again after each hook.
+  `ConnectionProfile(f"user:{name}", ..., options={"role": name})` on the user's first request; no hook is needed.
+  Each such profile has its own pool: users share no connections and `max_connections` applies per user. A pool
+  closes an idle connection after `purge_stale_connections_at` seconds (300 by default), so the connection count
+  follows the users active within that time. `adorm.settings.unregister_profile()` closes a user's pool at once. The
+  login role's connection limit (`ALTER ROLE app_login CONNECTION LIMIT ...`) caps all of them together.
+- **Row-level security without roles**: keep one role and return a custom option instead,
+  `{"app.user_id": str(user.pk)}`; policies read `current_setting('app.user_id', true)`. A session without a user
+  runs with the option reset, which that call reads as `NULL` or an empty string.
+- **A role per tenant**: the same hook with the tenant's role in the context variable.
+- **Role and user together**: the hook returns both, `{"role": role, "app.user_id": user_id}`.
+- **Time limits per user**: `statement_timeout` and `lock_timeout` are connection options too; the hook may return
+  them with the role.
+- **`assume_role`**: a `DATABASES` entry's `OPTIONS["assume_role"]` starts the profile's `role`; a user's role from
+  the hook replaces it for that user's sessions, and a session without a user runs with it.

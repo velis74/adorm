@@ -59,7 +59,7 @@ Setup, before serving:
 | `demo/api/capture.py` | recording of the SQL each driver sends, attributed to sessions |
 | `demo/api/drivers.py` | the drivers and their connection profiles |
 | `demo/api/main.py` | the FastAPI app |
-| `demo/frontend/` | Vite, Vue 3, Vuetify, `@dynamicforms/vue-grid` and `@dynamicforms/vuetify-inputs` (npm workspace `adorm-demo-frontend`) |
+| `demo/frontend/` | Vite, Vue 3, Vuetify, `@dynamicforms/vue-forms`, `@dynamicforms/vue-grid` and `@dynamicforms/vuetify-inputs` (npm workspace `adorm-demo-frontend`) |
 | `demo/e2e/` | Playwright tests of the frontend (npm workspace `adorm-demo-e2e`) |
 | `tests/demo/` | the API on every available driver, through `demo.py` |
 
@@ -80,8 +80,8 @@ The SQL is recorded on the connections: an execute wrapper on every Django conne
 `ROLLBACK` from psycopg's transaction control included), a query logger on every asyncpg connection, opened by the
 asyncpg profiles' `connect` hook. The profiles' `on_acquire` and `on_release` hooks record which session holds a
 connection; a statement belongs to the session that held its connection when it started. A statement outside a lease
-(the setup of a new connection, connection options the slot sets before `on_acquire`) belongs to the session whose
-lease of the connection follows, and has no session when no lease follows. The monitor connections of
+(the setup of a new connection) belongs to the session whose lease of the connection follows, and has no session when
+no lease follows. The monitor connections of
 `wait_for_lock()` are left out.
 
 ## Examples
@@ -138,8 +138,8 @@ change is restored after each run.
 
 ```python
 async def lock_with_timeout(log, isbn: str) -> str:
-    with adorm.connection_options(lock_timeout=0.5):
-        async with adorm.atomic():
+    async with adorm.atomic():
+        with adorm.connection_options(lock_timeout=0.5):
             log("select_for_update() with lock_timeout=0.5")
             await Edition.objects.select_for_update().get(isbn=isbn)
             log("has the row lock", "ok")

@@ -493,6 +493,8 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
   `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).
 - `connect_sync()` or `open_connection()` uses `profile.connect` when it is set.
 - `target` returns the target's connection object, which the profile's `on_acquire` and `on_release` hooks receive.
+  A driver that sees the statements run on it marks those a hook runs with `mark_custom_sql()`; session parameters
+  reach the connection as connection options, which `on_acquire` returns.
 - `backend_pid` names the connection's database session and `open_monitor()` reads sessions on a connection of its
   own, when the database reports lock waits.
 - A connection that shares its database session with other connections and takes it per call reports

@@ -150,6 +150,19 @@ class DjangoDriver(ThreadedDriver):
         return super().is_refusal(exc) or "too many connections" in str(exc.original)
 ```
 
+#### `connection_defaults(profile)`
+
+Returns the database [connection options](/ref/options) the driver sets on every new connection for `profile`, a
+mapping; empty unless overridden. Does no I/O. The pool starts the profile's layer of options with them
+([`Pool.options`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)) and the slot of a new connection counts them as set, so ending a
+layer that overrides one of them restores the driver's value instead of the database's default.
+[`DjangoDriver`](#adorm-drivers-django-djangodriver) and [`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver)
+return [`adorm.drivers.django.connection_defaults(profile)`](#adorm-drivers-django-connection-defaults-profile).
+
+```python
+DjangoDriver().connection_defaults(profile)   # {"role": "app_reader"} for OPTIONS={"assume_role": "app_reader"}
+```
+
 #### `database_key(profile)`
 
 Returns a hashable value naming the database `profile` connects to, or `None` (the default) when the driver cannot
@@ -226,7 +239,7 @@ thread instead (see [`ThreadedDriver`](#adorm-drivers-threadeddriver)).
 
 ### `adorm.drivers.Capabilities`
 
-`Capabilities(operations=frozenset(), constructs=frozenset(), connection_options=frozenset(), backend_events=frozenset(), savepoints=False, cancellation=False, max_channel_length=None)`
+`Capabilities(operations=frozenset(), constructs=frozenset(), connection_options=frozenset(), backend_events=frozenset(), savepoints=False, cancellation=False, max_channel_length=None, custom_options=False)`
 
 What a driver supports; a frozen, hashable dataclass. The four name fields take any iterable of strings, stored as
 `frozenset`; a plain string raises `TypeError`.
@@ -240,6 +253,7 @@ What a driver supports; a frozen, hashable dataclass. The four name fields take 
 | `savepoints` | the driver implements savepoints; `False` by default |
 | `cancellation` | the driver cancels a running statement; `False` by default |
 | `max_channel_length` | the longest notification channel name the backend accepts, in bytes of UTF-8; `None` (the default) for no limit |
+| `custom_options` | `set_options()` also accepts custom options, names such as `app.user_id` ([`is_custom_option()`](#adorm-drivers-is-custom-option-name)); `False` by default |
 
 #### `unsupported(operation)`
 
@@ -279,7 +293,8 @@ CAPABILITIES.check_channel("x" * 64)    # ValueError: the channel name 'xxx…' 
 #### `check_options(options, driver=None)`
 
 Raises `NotSupportedError` naming every option in `options` (any iterable of names, e.g. a dict) the driver does
-not support; `unsupported` holds those names, sorted.
+not support: a name outside `connection_options`, unless it is a custom option and `custom_options` is `True`;
+`unsupported` holds those names, sorted.
 
 ```python
 caps = Capabilities(operations={"select"}, constructs={"lookup.exact"}, connection_options={"statement_timeout"})
@@ -287,6 +302,7 @@ caps = Capabilities(operations={"select"}, constructs={"lookup.exact"}, connecti
 caps.unsupported(operation)        # ["lookup.icontains"] for a select with an icontains lookup
 caps.check(operation, "raw-sql")   # NotSupportedError: 'select' operation needs unsupported lookup.icontains (driver 'raw-sql')
 caps.check_options({"work_mem": "4MB"})   # NotSupportedError: unsupported connection options: work_mem
+caps.check_options({"app.user_id": "7"})  # NotSupportedError unless custom_options=True
 ```
 
 ### `adorm.drivers.Operation`
@@ -369,6 +385,17 @@ check_channel("orders")       # 'orders'
 check_channel("")             # ValueError: a channel name is a non-empty string without NUL, not ''
 ```
 
+### `adorm.drivers.is_custom_option(name)`
+
+Returns whether the string `name` is a custom connection option's name: two or more lowercase ASCII identifiers
+joined by dots, as PostgreSQL's customized options are written.
+
+```python
+is_custom_option("app.user_id")    # True
+is_custom_option("App.user")       # False: PostgreSQL folds unquoted names to lowercase
+is_custom_option("work_mem")       # False
+```
+
 ### `adorm.drivers.is_refusal(exc)`
 
 Returns whether `exc` is an `OperationalError` with a SQLSTATE of class `53` (insufficient resources, such as
@@ -408,7 +435,7 @@ The contract the slot calls:
 | `is_usable()` | whether the connection can serve further calls; does no I/O |
 | `async close()` | closes the connection; logs errors instead of raising them; a second call does nothing |
 | `target` | the target's connection that the profile's `on_acquire` and `on_release` hooks receive; defaults to the driver connection itself |
-| `async call_hook(hook, *args)` | calls `hook(self.target, *args)`, awaits the result when it is awaitable and returns it; an exception the hook raises is mapped with `map_error()` |
+| `async call_hook(hook, *args)` | calls `hook(self.target, *args)`, awaits the result when it is awaitable and returns it; an exception the hook raises is mapped with `map_error()`. A driver that sees the statements of its target marks the SQL a hook runs with `mark_custom_sql()` |
 | `map_error(exc)` | returns the adorm exception for an exception the target raised; defaults to `wrap_driver_error(exc)` |
 | `is_connection_lost(exc)` | whether a mapped adorm exception leaves the connection unusable; defaults to [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc). A driver for a target that reports statement errors as `OperationalError` without a SQLSTATE overrides it. The slot closes a connection whose request failed with such an error when the lease ends, whatever `is_usable()` says. A threaded connection records the answer in the error's `connection_lost` |
 | `is_cancellation(exc)` | whether a mapped adorm exception is the error of a statement the target cancelled; defaults to SQLSTATE `57014`. A [threaded connection](#adorm-drivers-threadedconnection) raises `CancelledError` for a cancelled call that ended with such an error |
@@ -461,7 +488,8 @@ the connection's state (a `SET`, a temporary table, a prepared statement, an adv
 
 Marks the connection as having run custom SQL. A driver calls it when code it runs for an operation executes its
 own SQL; the [Django driver](#adorm-drivers-django-djangoconnection) does so for raw SQL of signal receivers, managers
-and `on_commit()` callbacks. SQL of profile hooks and of `set_options()` (which the slot tracks) is not custom.
+and `on_commit()` callbacks, and both PostgreSQL drivers for every statement a profile hook runs. SQL of
+`set_options()` (which the slot tracks) is not custom.
 Callable from any thread; the mark is never cleared.
 
 ```python
@@ -858,7 +886,8 @@ other databases have the [capabilities of their vendor](#adorm-drivers-django-ve
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean`, `check_table` |
 | `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
-| `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout` |
+| `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `role` |
+| `custom_options` | `True` |
 | `backend_events` | `notify`, `notice`, `connection_lost` |
 | `max_channel_length` | [`MAX_IDENTIFIER_LENGTH`](#adorm-drivers-postgresql-max-identifier-length) (63) |
 
@@ -953,8 +982,20 @@ backend that does not load, an in-memory SQLite database and a `NAME` that is no
 `AsyncpgDriver` ([`Driver.database_key()`](#database-key-profile)).
 
 ```python
-database_key(ConnectionProfile("reports", DjangoDriver(), alias="default", on_acquire=set_role))
+database_key(ConnectionProfile("reports", DjangoDriver(), alias="default", on_acquire=current_role))
 # ("postgresql", "localhost", "5432", "club"), the same as for the profile "default"
+```
+
+### `adorm.drivers.django.connection_defaults(profile)`
+
+The connection options Django sets on a new connection of the `DATABASES` entry `profile.alias` with
+`profile.params` replacing its keys: `{"role": <role>}` for `OPTIONS["assume_role"]` on PostgreSQL, else an empty
+mapping. Does not connect. [`Driver.connection_defaults()`](#connection-defaults-profile) of `DjangoDriver` and
+`AsyncpgDriver`.
+
+```python
+connection_defaults(ConnectionProfile("reports", DjangoDriver(), params={"OPTIONS": {"assume_role": "reader"}}))
+# {"role": "reader"}
 ```
 
 ### `adorm.drivers.django.model_schema_hash(label)`
@@ -1552,7 +1593,9 @@ driver.schema_hash("clubs.Club")   # 'e8c2eed312ab7b68'
 ### `adorm.drivers.asyncpg.AsyncpgConnection`
 
 The [`DriverConnection`](#adorm-drivers-driverconnection) of `AsyncpgDriver`. `conn` is the `asyncpg.Connection`,
-also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `profile` its profile.
+also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `profile` its profile. While a hook
+runs, a query logger on `conn` marks every statement the hook runs with
+[`mark_custom_sql()`](#mark-custom-sql).
 
 | Method | Does |
 |---|---|
@@ -1608,8 +1651,8 @@ async with await AsyncpgDriver().open_monitor(profile) as monitor:
 
 The [`Capabilities`](#adorm-drivers-capabilities) of `AsyncpgDriver`: the `operations` and `constructs` of the
 Django driver's [`CAPABILITIES`](#adorm-drivers-django-capabilities) (every read, `aggregate` included, the writes,
-`check_table` and every construct listed there), `savepoints`, `cancellation` and the `connection_options` of
-[`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options). `backend_events`: `notify`, `notice`,
+`check_table` and every construct listed there), `savepoints`, `cancellation`, the `connection_options` of
+[`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options) and `custom_options`. `backend_events`: `notify`, `notice`,
 `connection_lost`; `max_channel_length`: [`MAX_IDENTIFIER_LENGTH`](#adorm-drivers-postgresql-max-identifier-length).
 
 ### `adorm.drivers.asyncpg.writes.Writer(connection)`
@@ -1748,7 +1791,15 @@ Returns PostgreSQL's `server_version_num` for an asyncpg `ServerVersion` (`Conne
 no ORM or database library.
 
 ```python
-from adorm.drivers.sql import numbered_placeholders, POSTGRESQL_OPTIONS, set_options_sql, Statement
+from adorm.drivers.sql import (
+    numbered_placeholders,
+    POSTGRESQL_OPTIONS,
+    POSTGRESQL_TIMEOUTS,
+    quote_identifier,
+    quote_literal,
+    set_options_sql,
+    Statement,
+)
 ```
 
 ### `adorm.drivers.sql.Statement`
@@ -1784,25 +1835,58 @@ numbered_placeholders("SELECT %s, %s", ["int4", None])
 
 ### `adorm.drivers.sql.POSTGRESQL_OPTIONS`
 
-`frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})`: the
-[connection options](/ref/options) `set_options_sql()` sets, PostgreSQL's time limits. The Django and the native
-PostgreSQL drivers declare them.
+`frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "role"})`: the named
+[connection options](/ref/options) `set_options_sql()` sets, PostgreSQL's time limits and the role. The Django and
+the native PostgreSQL drivers declare them, and custom options.
+
+### `adorm.drivers.sql.POSTGRESQL_TIMEOUTS`
+
+`frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})`: the options of
+`POSTGRESQL_OPTIONS` whose value is a number of seconds.
+
+### `adorm.drivers.sql.quote_identifier(name)`
+
+`name` as a quoted PostgreSQL identifier, with `"` doubled.
+
+```python
+quote_identifier('Al"ice')    # '"Al""ice"'
+```
+
+### `adorm.drivers.sql.quote_literal(value)`
+
+`value` as a PostgreSQL string literal, with `'` doubled; a value with a backslash becomes an escape string
+(`E'...'`) with `\` doubled, so the literal means the same whatever `standard_conforming_strings` is.
+
+```python
+quote_literal("o'neil")       # "'o''neil'"
+quote_literal("a\\b")         # "E'a\\\\b'"
+```
 
 ### `adorm.drivers.sql.set_options_sql(options, local)`
 
 The statements that set `options` on a PostgreSQL connection, separated by `; `, in the order of `options`; an empty
-string for no options. Values are seconds, non-negative and finite, sent as whole milliseconds (`0` means no limit; a
-positive value below one millisecond becomes one millisecond). A value of `None` resets the option to its default.
-Raises `ValueError` for a name outside `POSTGRESQL_OPTIONS` and for any other value.
+string for no options. The names are those of `POSTGRESQL_OPTIONS` and custom options
+([`is_custom_option()`](#adorm-drivers-is-custom-option-name)), written unquoted.
+
+| Option | Value | Sent as |
+|---|---|---|
+| a time limit | seconds, non-negative and finite | whole milliseconds (`0` means no limit; a positive value below one millisecond becomes one millisecond) |
+| `role` | a non-empty string without NUL | `quote_identifier()` |
+| a custom option | a string without NUL | `quote_literal()` |
+
+A value of `None` resets the option to its default. Raises `ValueError` for another name and for a value of another
+form.
 
 | `local` | A value | `None` |
 |---|---|---|
-| `False` | `SET name = <ms>` | `RESET name` |
-| `True` | `SET LOCAL name = <ms>` | `SET LOCAL name TO DEFAULT` |
+| `False` | `SET name = <value>` | `RESET name` |
+| `True` | `SET LOCAL name = <value>` | `SET LOCAL name TO DEFAULT` |
 
 ```python
 set_options_sql({"statement_timeout": 5, "lock_timeout": None}, local=True)
 # 'SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout TO DEFAULT'
+set_options_sql({"role": "alice", "app.user_id": "42"}, local=False)
+# 'SET role = "alice"; SET app.user_id = \'42\''
 ```
 
 ## PostgreSQL errors and sessions

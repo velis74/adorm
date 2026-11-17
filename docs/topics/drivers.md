@@ -213,8 +213,9 @@ opens the target's connection with `connect(profile)`: a threaded driver calls i
 `connect_sync()` on the connection's thread, an async driver awaits its result in `open_connection()`.
 
 The profile's `on_acquire` and `on_release` hooks run through the connection's `call_hook()`, which passes them
-the connection's `target`, the target's own connection object (for `SET ROLE` and similar through the target's API).
-A threaded connection runs them on its thread. See [connection profiles](/topics/profiles#hooks).
+the connection's `target`, the target's own connection object. A threaded connection runs them on its thread.
+Session parameters reach the connection as connection options, which `on_acquire` returns; a driver that sees the
+statements of its target marks the SQL a hook runs as custom SQL. See [connection profiles](/topics/profiles#hooks).
 
 ```python
 class DjangoConnection(ThreadedConnection):

@@ -24,7 +24,7 @@ from adorm.drivers.asyncpg import (
 )
 from adorm.drivers.django import CAPABILITIES as DJANGO_CAPABILITIES, READ_CAPABILITIES
 from adorm.drivers.sql import POSTGRESQL_OPTIONS
-from adorm.executor import Pool, Router, set_runner
+from adorm.executor import CloseReason, Pool, Router, set_runner
 from adorm.operations import Count, Select
 from adorm.query import Query
 from tests.djangoproject.library import models as dj
@@ -193,7 +193,8 @@ async def test_profile_params_and_hooks_reach_the_slots_connection(library, run_
     seen = []
 
     async def on_acquire(connection, profile, session):  # noqa: ARG001
-        seen.append((await connection.fetchval("SHOW application_name"), await connection.fetchval("SHOW TimeZone")))
+        settings = connection.get_settings()  # reported by the server, without a statement
+        seen.append((settings.application_name, settings.TimeZone))
 
     def on_release(connection, profile, session):  # noqa: ARG001
         seen.append(type(connection))
@@ -210,6 +211,38 @@ async def test_profile_params_and_hooks_reach_the_slots_connection(library, run_
     assert seen == [("adorm_reports", "Europe/Ljubljana"), asyncpg.Connection] * 2
     assert connections.settings["default"] == shared
     assert pool.size == 1
+
+
+@pytest.mark.parametrize("hook", ["on_acquire", "on_release"])
+async def test_sql_a_profile_hook_runs_is_custom_and_the_slot_leaves_the_pool(library, run_pool, hook):  # noqa: ARG001
+    async def run_sql(connection, profile, session):  # noqa: ARG001
+        await connection.execute("SET application_name TO 'adorm hook'")
+
+    pool = await run_pool(**{hook: run_sql})
+    for _ in range(3):
+        async with adorm.atomic() as tx:
+            assert await Author.objects.count() == 4
+            slot = tx.lease.slot
+        await asyncio.wait_for(slot.wait_closed(), 10)
+        assert slot.close_reason is CloseReason.CUSTOM_SQL
+    assert pool.size == 0
+
+
+async def test_options_from_a_hook_are_not_custom_sql(library, run_pool):  # noqa: ARG001
+    def on_acquire(connection, profile, session):  # noqa: ARG001
+        return {"adorm_test.app_user": "alice", "statement_timeout": 7}
+
+    pool = await run_pool(on_acquire=on_acquire, on_release=lambda *_: None)
+    for _ in range(3):
+        async with adorm.atomic() as tx:
+            assert await Author.objects.count() == 4
+            conn = tx.lease.slot.connection.conn
+            # The slot runs nothing while the block awaits this.
+            assert await conn.fetchval("SELECT current_setting('adorm_test.app_user')") == "alice"
+            assert await conn.fetchval("SHOW statement_timeout") == "7s"
+    (slot,) = pool._slots
+    assert slot.close_reason is None
+    assert not slot.connection.ran_custom_sql
 
 
 async def test_libpq_options_reach_asyncpg_through_its_dsn(library, run_pool):  # noqa: ARG001
@@ -244,6 +277,7 @@ async def test_the_connect_hook_opens_the_connection_and_the_driver_configures_i
     conn = levels[-1]
     assert await conn.fetchval("SHOW TimeZone") == "UTC"
     assert await conn.fetchval("SHOW role") == user
+    assert pool.options == {"role": user}
     async with adorm.atomic():
         assert await Author.objects.filter(rating__gte=4).count() == 2
         conn = levels[-1]

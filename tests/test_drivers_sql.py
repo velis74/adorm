@@ -66,7 +66,20 @@ def test_set_options_sql():
     )
     assert set_options_sql({}, local=False) == ""
     assert set_options_sql({"lock_timeout": 2147483.647}, local=False) == "SET lock_timeout = 2147483647"
-    assert {"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"} == POSTGRESQL_OPTIONS
+    assert {"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "role"} == POSTGRESQL_OPTIONS
+
+
+def test_set_options_sql_for_role_and_custom_options():
+    assert set_options_sql({"role": 'Al"ice', "app.user_id": "7"}, local=False) == (
+        """SET role = "Al""ice"; SET app.user_id = '7'"""
+    )
+    assert set_options_sql({"role": None, "app.user_id": None}, local=False) == "RESET role; RESET app.user_id"
+    assert set_options_sql({"role": None, "app.user_id": None}, local=True) == (
+        "SET LOCAL role TO DEFAULT; SET LOCAL app.user_id TO DEFAULT"
+    )
+    assert set_options_sql({"a.b.c": "o'neil"}, local=True) == "SET LOCAL a.b.c = 'o''neil'"
+    assert set_options_sql({"a.b": "back\\slash'"}, local=False) == "SET a.b = E'back\\\\slash''" + "'"
+    assert set_options_sql({"a.b": ""}, local=False) == "SET a.b = ''"
 
 
 @pytest.mark.parametrize(
@@ -77,8 +90,15 @@ def test_set_options_sql():
         {"lock_timeout": True},
         {"lock_timeout": float("inf")},
         {"statement_timeout": 2147483.648},
+        {"role": ""},
+        {"role": 5},
+        {"role": "a\x00"},
+        {"app.user_id": 7},
+        {"app.user_id": "a\x00"},
+        {"App.user": "x"},
+        {"app.user-id": "x"},
     ],
 )
 def test_set_options_sql_refuses_other_names_and_values(options):
-    with pytest.raises(ValueError, match="work_mem|seconds"):
+    with pytest.raises(ValueError, match="work_mem|seconds|role|string|PostgreSQL connection option"):
         set_options_sql(options, local=False)

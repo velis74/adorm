@@ -30,10 +30,11 @@ from adorm.exceptions import InterfaceError, OperationalError, wrap_driver_error
 
 logger = logging.getLogger(__name__)
 
-OPTIONS = frozenset({"statement_timeout", "lock_timeout"})
+OPTIONS = frozenset({"statement_timeout", "lock_timeout", "role"})
 CAPABILITIES = Capabilities(
     operations={"raw", "listen"},
     connection_options=OPTIONS,
+    custom_options=True,
     backend_events={"notify"},
     savepoints=True,
     cancellation=True,

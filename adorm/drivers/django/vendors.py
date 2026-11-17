@@ -147,14 +147,15 @@ CAPABILITIES = Capabilities(
     operations=READ_CAPABILITIES.operations | _WRITES,
     constructs=READ_CAPABILITIES.constructs | _ROW_LOCKS | _ON_CONFLICT | {"clause.select_for_update.no_key"},
     connection_options=POSTGRESQL_OPTIONS,
+    custom_options=True,
     backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
     max_channel_length=MAX_IDENTIFIER_LENGTH,
     savepoints=True,
     cancellation=True,
 )
 """What `DjangoDriver` supports on PostgreSQL with psycopg 3: `READ_CAPABILITIES`, the writes, row locks, savepoints,
-the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS` and the backend events `NOTIFY`, `NOTICE` and
-`CONNECTION_LOST`."""
+the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`, custom options and the backend events `NOTIFY`,
+`NOTICE` and `CONNECTION_LOST`."""
 
 PSYCOPG2_CAPABILITIES = replace(CAPABILITIES, backend_events=frozenset())
 """What `DjangoDriver` supports on PostgreSQL with psycopg 2: `CAPABILITIES` without backend events."""
