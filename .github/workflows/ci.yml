@@ -137,4 +137,5 @@ jobs:
             docs/**
             demo.py
             demo/**
+            scripts/**
           github-token: ${{ secrets.GITHUB_TOKEN }}
