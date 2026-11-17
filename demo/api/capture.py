@@ -21,6 +21,14 @@ from typing import Any
 from adorm import ConnectionProfile, PoolSettings
 from adorm.drivers import Driver
 
+_BEGIN_PENDING = "_adorm_demo_begin_pending"
+"""The attribute of a Django connection whose autocommit was turned off and that has sent no statement since."""
+
+_IDLE = 0  # psycopg.pq.TransactionStatus.IDLE
+
+DESK_OPTION = "app.reader"
+"""The custom connection option the desk profiles' ``on_acquire`` hook sets."""
+
 OBSERVER = "demo"
 """The session name of the statements of connections no session held."""
 
@@ -51,7 +59,22 @@ class Statement:
 
 
 def _param(value: Any) -> Any:
-    return value if isinstance(value, (int, float, str, bool, type(None))) else str(value)
+    """``value`` as JSON: lists and tuples item by item, dates, decimals and the like as pydantic serialises them, else
+    its text."""
+    if isinstance(value, (int, float, str, bool, type(None))):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_param(item) for item in value]
+    from pydantic_core import PydanticSerializationError, to_jsonable_python
+
+    try:
+        return to_jsonable_python(value)
+    except PydanticSerializationError:
+        return str(value)
+
+
+def _error_text(error: BaseException) -> str:
+    return f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
 
 
 class Capture:
@@ -68,6 +91,12 @@ class Capture:
     def on_acquire(self, connection: Any, _profile: Any, session: Any) -> None:
         """The profiles' ``on_acquire`` hook: ``session`` holds ``connection`` from now on."""
         self._own(connection, session.session_name)
+
+    def on_acquire_desk(self, connection: Any, profile: Any, session: Any) -> dict[str, str]:
+        """The ``on_acquire`` hook of the desk profiles: `on_acquire()`, and the custom option `DESK_OPTION` set to the
+        session's name for the lease."""
+        self.on_acquire(connection, profile, session)
+        return {DESK_OPTION: session.session_name}
 
     def on_release(self, connection: Any, _profile: Any, _session: Any) -> None:
         """The profiles' ``on_release`` hook: no session holds ``connection`` from now on."""
@@ -105,7 +134,7 @@ class Capture:
                     params=tuple(params or ()) if not isinstance(params, dict) else tuple(params.items()),
                     at=started - self._start,
                     duration=ended - started,
-                    error=None if error is None else f"{type(error).__name__}: {error}".strip(),
+                    error=None if error is None else _error_text(error),
                 )
             )
 
@@ -136,6 +165,13 @@ class Capture:
 
     def _django_wrapper(self, execute: Any, sql: str, params: Any, many: bool, context: dict) -> Any:
         started = time.monotonic()
+        connection = context["connection"]
+        if getattr(connection, _BEGIN_PENDING, False):
+            setattr(connection, _BEGIN_PENDING, False)
+            raw = connection.connection
+            if raw is not None and raw.info.transaction_status == _IDLE:
+                # psycopg sends BEGIN with this statement.
+                self._record(connection, "BEGIN", None, started, started, None)
         error = None
         try:
             return execute(sql, params, many, context)
@@ -147,13 +183,13 @@ class Capture:
 
     def _watch_transactions(self, connection: Any) -> None:
         """Record psycopg's transaction control on Django's ``connection``, which bypasses the execute wrappers:
-        ``BEGIN`` when autocommit is turned off (psycopg sends it before the next statement), ``COMMIT`` and
-        ``ROLLBACK`` when a transaction is open."""
+        ``BEGIN`` when psycopg sends it, before the first statement after autocommit was turned off
+        (`_django_wrapper()`), ``COMMIT`` and ``ROLLBACK`` when a transaction is open."""
         set_autocommit, commit, rollback = connection._set_autocommit, connection._commit, connection._rollback
 
         def in_transaction() -> bool:
             raw = connection.connection
-            return raw is not None and raw.info.transaction_status != 0  # psycopg.pq.TransactionStatus.IDLE
+            return raw is not None and raw.info.transaction_status != _IDLE
 
         def timed(function: Any, sql: str, *args: Any) -> Any:
             started = time.monotonic()
@@ -167,14 +203,16 @@ class Capture:
                 self._record(connection, sql, None, started, time.monotonic(), error)
 
         def _set_autocommit(autocommit: bool) -> Any:
-            if autocommit:
-                return set_autocommit(autocommit)
-            return timed(set_autocommit, "BEGIN", autocommit)
+            result = set_autocommit(autocommit)
+            setattr(connection, _BEGIN_PENDING, not autocommit)
+            return result
 
         def _commit() -> Any:
+            setattr(connection, _BEGIN_PENDING, False)
             return timed(commit, "COMMIT") if in_transaction() else commit()
 
         def _rollback() -> Any:
+            setattr(connection, _BEGIN_PENDING, False)
             return timed(rollback, "ROLLBACK") if in_transaction() else rollback()
 
         connection._set_autocommit, connection._commit, connection._rollback = _set_autocommit, _commit, _rollback
@@ -207,17 +245,19 @@ class Capture:
         conn.add_query_logger(logged)
         return conn
 
-    def profile(self, name: str, driver: Driver, pool: PoolSettings) -> ConnectionProfile:
-        """The connection profile ``name`` on ``driver`` whose connections this capture records; raises
-        `NotImplementedError` for a driver whose SQL it cannot record."""
+    def profile(self, name: str, driver: Driver, pool: PoolSettings, *, desk: bool = False) -> ConnectionProfile:
+        """The connection profile ``name`` on ``driver`` whose connections this capture records, with
+        `on_acquire_desk()` as its ``on_acquire`` hook when ``desk``; raises `NotImplementedError` for a driver whose
+        SQL it cannot record."""
         if driver.name == "asyncpg":
             connect = self.connect_asyncpg
         elif driver.name == "django":
             connect = None
         else:
             raise NotImplementedError(f"the demo cannot record the SQL of the driver {driver.name!r}")
+        on_acquire = self.on_acquire_desk if desk else self.on_acquire
         return ConnectionProfile(
-            name, driver, connect=connect, on_acquire=self.on_acquire, on_release=self.on_release, pool=pool
+            name, driver, connect=connect, on_acquire=on_acquire, on_release=self.on_release, pool=pool
         )
 
 

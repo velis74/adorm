@@ -162,6 +162,22 @@ def test_write_examples_are_reverted(client, drivers):
     assert client.post("/api/examples/stock/run").json()["runs"][0]["result"] == before
 
 
+def test_statement_parameters_are_json(client):
+    for run in client.post("/api/examples/enrol_readers/run", json={"params": {"count": 2}}).json()["runs"]:
+        insert = next(s for s in run["statements"] if s["sql"].startswith("INSERT"))
+        assert any(isinstance(param, list) for param in insert["params"]), insert
+
+
+def test_custom_options_from_the_hook_and_the_block(client, drivers):
+    for run in client.post("/api/examples/desk_options/run", json={}).json()["runs"]:
+        assert run["error"] is None, run
+        sql = [s["sql"] for s in run["statements"]]
+        assert any(s.startswith('SET "app"."reader" = ') and "'example'" in s for s in sql), sql
+        assert any(s.startswith('SET LOCAL "app"."reader" = ') and "'audit'" in s for s in sql), sql
+        assert 'RESET "app"."reader"' in sql, sql
+    assert len(drivers) >= 1
+
+
 def test_example_parameters(client):
     runs = client.post("/api/examples/search_books/run", json={"params": {"search": "karamazov"}}).json()["runs"]
     for run in runs:
@@ -181,6 +197,11 @@ def test_example_parameters(client):
         ("/api/examples/enrol_readers/run", {"params": {"count": "many"}}, 422),
         ("/api/examples/enrol_readers/run", {"params": {"count": 0}}, 422),
         ("/api/examples/enrol_readers/run", {"params": {"count": 21}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": None}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": [1]}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": 2.7}}, 422),
+        ("/api/examples/enrol_readers/run", {"params": {"count": True}}, 422),
+        ("/api/examples/search_books/run", {"params": {"search": None}}, 422),
     ],
 )
 def test_errors(client, path, body, status):
@@ -214,7 +235,25 @@ def scenario(client, drivers, name):
         assert times == sorted(times)
         sessions = set(run["flows"]) | {f"{flow}2" for flow in run["flows"]}
         assert {statement["session"] for statement in run["statements"]} <= sessions
+        assert_transactions_end(run["statements"])
+        assert all(not (s["error"] or "").endswith(":") for s in run["statements"])
+    # A connection the scenario set options on runs the next example without them.
+    for example in client.post("/api/examples/dashboard/run", json={}).json()["runs"]:
+        assert not [s["sql"] for s in example["statements"] if s["sql"].startswith(("SET", "RESET"))]
     return runs
+
+
+def assert_transactions_end(statements):
+    """Each session's ``BEGIN`` is followed by its ``COMMIT`` or ``ROLLBACK``."""
+    open_by_session = {}
+    for statement in statements:
+        session, sql = statement["session"], statement["sql"]
+        if sql == "BEGIN":
+            assert not open_by_session.get(session), (session, statements)
+            open_by_session[session] = True
+        elif sql in ("COMMIT", "ROLLBACK"):
+            open_by_session[session] = False
+    assert not any(open_by_session.values()), open_by_session
 
 
 def events(run, flow):
@@ -277,6 +316,9 @@ def test_deadlock_on_the_slots(client, drivers, repeat):  # noqa: ARG001 - repea
         failed = next(e["at_ms"] for e in run["events"] if e["flow"] == "B" and e["kind"] == "error")
         assert failed - asked < 500, "DeadlockError comes at once, not after acquire_timeout"
         assert [e["text"] for e in run["events"] if e["flow"] == "demo"][1] == "A waits for a slot B holds"
+        if run["driver"] == "django":
+            # B's transaction runs no statement, so psycopg sends no BEGIN for it.
+            assert not [s for s in run["statements"] if s["session"] == "B" and s["sql"] == "BEGIN"]
         assert any(statement["session"] == "A2" for statement in run["statements"])
         assert not [statement for statement in run["statements"] if statement["session"] == "B2"]
 

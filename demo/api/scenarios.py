@@ -421,8 +421,9 @@ RESTORE_LOCK_TIMEOUT = 5.0
 async def restore(state: tuple[dict[str, int], int]) -> None:
     """Delete the loans created after `snapshot()` and restore the editions' ``available``."""
     available, last = state
-    with adorm.connection_options(lock_timeout=RESTORE_LOCK_TIMEOUT):
-        async with adorm.atomic():
+    async with adorm.atomic():
+        # Inside the transaction: SET LOCAL, which ends with the commit.
+        with adorm.connection_options(lock_timeout=RESTORE_LOCK_TIMEOUT):
             await Loan.objects.filter(id__gt=last).delete()
             for isbn, count in available.items():
                 await Edition.objects.filter(isbn=isbn).update(available=count)

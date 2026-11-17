@@ -72,12 +72,14 @@ uv run adorm generate --settings demo.backend.settings -o demo/models --line-len
 
 ## Drivers and profiles
 
-Each available driver has two [connection profiles](/topics/profiles): `<driver>` with a pool of six slots and
-`<driver>-small` with two slots and `acquire_timeout=1`. An example runs in the session `(<driver>, "example")`, a flow
-of a scenario in `(<driver>, <flow>)`. One run, of an example or a scenario, executes at a time.
+Each available driver has three [connection profiles](/topics/profiles): `<driver>` with a pool of six slots,
+`<driver>-small` with two slots and `acquire_timeout=1`, and `<driver>-desk`, as small, whose `on_acquire` hook returns
+the custom option `app.reader` set to the session's name. An example runs in the session `(<driver>, "example")`
+(`desk_options` in `(<driver>-desk, "example")`), a flow of a scenario in `(<driver>, <flow>)`. One run, of an example or a scenario, executes at a time.
 
-The SQL is recorded on the connections: an execute wrapper on every Django connection (`BEGIN`, `COMMIT` and
-`ROLLBACK` from psycopg's transaction control included), a query logger on every asyncpg connection, opened by the
+The SQL is recorded on the connections: an execute wrapper on every Django connection (`COMMIT` and `ROLLBACK` from
+psycopg's transaction control included, and `BEGIN` when psycopg sends it, before the first statement of the
+transaction, at that statement's start), a query logger on every asyncpg connection, opened by the
 asyncpg profiles' `connect` hook. The profiles' `on_acquire` and `on_release` hooks record which session holds a
 connection; a statement belongs to the session that held its connection when it started. A statement outside a lease
 (the setup of a new connection) belongs to the session whose lease of the connection follows, and has no session when
@@ -116,6 +118,7 @@ async def lend(isbn: str, reader: str) -> dict:
 | `lend` | a transaction with `select_for_update()` and an `F()` update |
 | `ensure_tag` | `get_or_create()` |
 | `enrol_readers` | `bulk_create()` |
+| `desk_options` | a custom option from the profile's `on_acquire` hook (`SET`), overridden in a transaction by `connection_options()` (`SET LOCAL`) and reset outside one (`RESET`) |
 
 The writing examples commit; after each driver's run the demo reverts the writes with the example's `undo` coroutine,
 outside the recording.
@@ -153,9 +156,9 @@ async def lock_with_timeout(log, isbn: str) -> str:
 | `GET /api/health` | `status`, `adorm_version` and `drivers`, the drivers runs execute on |
 | `GET /api/drivers` | every driver of the demo: `name`, `description`, `available`, `reason` when it is not, `mode` |
 | `GET /api/examples` | the examples: `id`, `title`, `description`, `code`, `params` (with `minimum` and `maximum` of an `int`), `writes` |
-| `POST /api/examples/{id}/run` | body `{"params": {...}}`; per driver `ms`, `result` or `error`, `statements` |
+| `POST /api/examples/{id}/run` | body `{"params": {...}}`; `example`, `params` (the arguments the example ran with) and `runs`; per run `driver`, `ms`, `result`, `error` and `statements` |
 | `GET /api/scenarios` | the scenarios: `id`, `title`, `description`, `code` of the flows, `choreography` |
-| `POST /api/scenarios/{id}/run` | per driver `ms`, `flows`, `outcomes`, `events` (`at_ms`, `flow`, `kind`, `text`), `statements` |
+| `POST /api/scenarios/{id}/run` | `scenario` and `runs`; per run `id`, `driver`, `ms`, `flows`, `outcomes`, `events` (`at_ms`, `flow`, `kind`, `text`) and `statements` |
 
 An unknown id answers 404, a parameter that is unknown or does not fit 422, and no available driver 503. A statement
 is `session`, `sql`, `params`, `at_ms`, `duration_ms` and `error`. A flow's outcome is `{"status": "ok", "result"}`,

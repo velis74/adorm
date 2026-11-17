@@ -1,8 +1,9 @@
 """The drivers the demo runs on and their connection profiles.
 
 A driver is available when its module imports; a ``ModuleNotFoundError`` of a package outside adorm makes it
-unavailable, any other import error propagates. Every available driver has two connection profiles: one named after
-it with `POOL`, and ``<name>-small`` with `SMALL_POOL`. Their connections are recorded by `demo.api.capture.CAPTURE`.
+unavailable, any other import error propagates. Every available driver has three connection profiles: one named after
+it with `POOL`, ``<name>-small`` with `SMALL_POOL`, and ``<name>-desk`` with `SMALL_POOL`, whose ``on_acquire`` hook
+sets a custom option. Their connections are recorded by `demo.api.capture.CAPTURE`.
 """
 
 from __future__ import annotations
@@ -44,10 +45,11 @@ class DemoDriver:
         return import_object(self.target, "driver class")()
 
     def profiles(self, driver: Driver) -> dict[str, ConnectionProfile]:
-        """The connection profiles ``name`` and ``name-small`` on ``driver``."""
+        """The connection profiles ``name``, ``name-small`` and ``name-desk`` on ``driver``."""
         return {
             self.name: CAPTURE.profile(self.name, driver, POOL),
             f"{self.name}-small": CAPTURE.profile(f"{self.name}-small", driver, SMALL_POOL),
+            f"{self.name}-desk": CAPTURE.profile(f"{self.name}-desk", driver, SMALL_POOL, desk=True),
         }
 
 

@@ -51,15 +51,21 @@ class Param:
         }
 
     def parse(self, value: Any) -> Any:
-        """``value`` as the example takes it; ``ValueError`` when it does not fit."""
+        """``value`` as the example takes it: an ``int`` parameter an integer (not a bool) or a string of digits, a
+        ``text`` or ``choice`` parameter a string; ``ValueError`` when it does not fit."""
         if self.kind == "int":
-            number = int(value)
-            if (self.minimum is not None and number < self.minimum) or (
-                self.maximum is not None and number > self.maximum
+            if isinstance(value, str) and value.isascii() and value.isdigit():
+                value = int(value)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or (self.minimum is not None and value < self.minimum)
+                or (self.maximum is not None and value > self.maximum)
             ):
-                raise ValueError(f"{self.name} is from {self.minimum} to {self.maximum}")
-            return number
-        value = str(value)
+                raise ValueError(f"{self.name} is an integer from {self.minimum} to {self.maximum}")
+            return value
+        if not isinstance(value, str):
+            raise ValueError(f"{self.name} is a string")
         if self.kind == "choice" and value not in self.choices:
             raise ValueError(f"{self.name} is one of {', '.join(map(repr, self.choices))}")
         return value
@@ -329,3 +335,20 @@ async def enrol_readers(count: int) -> list[dict]:
         [Reader(name=f"New reader {n}", email=f"new{n}@example.com", joined=TODAY) for n in range(1, count + 1)]
     )
     return [{"id": reader.id, "name": reader.name, "email": reader.email} for reader in readers]
+
+
+@example(
+    "Custom connection options",
+    "The desk profile's on_acquire hook sets the custom option app.reader to the session's name for each lease; "
+    "connection_options() overrides it inside a transaction (SET LOCAL) and resets it outside one.",
+)
+async def desk_options() -> dict:
+    desk = adorm.create_session(f"{adorm.current_session().using}-desk", "example")
+    with desk.activate():
+        loans = await Loan.objects.count()  # SET "app"."reader" = 'example', from on_acquire
+        async with adorm.atomic():
+            with adorm.connection_options(**{"app.reader": "audit"}):
+                overdue = await Loan.objects.filter(due__lt=TODAY, returned__isnull=True).count()  # SET LOCAL
+        with adorm.connection_options(**{"app.reader": None}):
+            readers = await Reader.objects.count()  # RESET "app"."reader"
+    return {"loans": loans, "overdue": overdue, "readers": readers}
