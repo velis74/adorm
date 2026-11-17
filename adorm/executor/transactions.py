@@ -205,7 +205,7 @@ class Atomic:
     operation and the ``COMMIT``.
 
     `on_commit()` registers callbacks that run after the transaction commits. The block learns of the commit from the
-    slot's ``CallbackEvent(ON_COMMIT)``, the same event in process and from a remote slot.
+    slot's ``CallbackEvent(ON_COMMIT)``.
     """
 
     __slots__ = (

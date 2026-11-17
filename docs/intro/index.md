@@ -81,6 +81,6 @@ pip install "adorm[asyncpg]"
 
 ## Related projects
 
-- [fastapi-viewsets](:fastapi_viewsets:/) serves adorm models through DRF-style viewsets.
-- [muxws](:muxws:/) carries operations between an application and a separate adorm server.
+- [fastapi-viewsets](:fastapi_viewsets:/): DRF-style viewsets for FastAPI with a typed TypeScript client.
+- [muxws](:muxws:/): multiplexed, cancellable streams over one WebSocket.
 - [docs.velis.si](:docs_velis:/) lists the other libraries in this family.

@@ -158,8 +158,7 @@ async with adorm.atomic() as tx:
     tx.on_commit(search_index.refresh, robust=True)     # a failing refresh does not fail the request
 ```
 
-The block runs the callbacks when the slot reports the commit with the `on_commit` [event](/topics/events), the
-event a remote slot sends as well.
+The block runs the callbacks when the slot reports the commit with the `on_commit` [event](/topics/events).
 
 ## A failed operation
 

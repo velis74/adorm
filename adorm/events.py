@@ -6,10 +6,8 @@ its driver connection reports through ``emit``. On the client an `EventChannel` 
 settles the future of the request that awaits it, a callback runs the handlers registered for its name, and
 whatever nobody claims is queued for the reader and handed to an `EventBus` when the channel closes.
 
-Every event has a JSON-safe form (`Event.to_dict()`, `Event.from_dict()`, `encode_error()`, `decode_error()`). A
-remote driver uses it to carry a server slot's events to its connection, which returns each outcome from the
-connection method that ran the request and emits the server's other callbacks and backend events; the client's own
-slot delivers them to its channel like those of any other connection.
+Every event has a JSON-safe form (`Event.to_dict()`, `Event.from_dict()`, `encode_error()`, `decode_error()`) for
+carrying it across a process boundary.
 """
 
 from __future__ import annotations

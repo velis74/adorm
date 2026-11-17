@@ -1,6 +1,8 @@
+import ast
 import importlib
 import json
 import re
+import textwrap
 
 from pathlib import Path
 
@@ -310,3 +312,33 @@ def test_codegen_django_names_are_documented(name):
 
 def test_cli_main_is_documented():
     assert re.search(r"^### `adorm\.cli\.main\(", reference_text(), re.MULTILINE)
+
+
+PYTHON_FENCE = re.compile(r"^( *)```(?:python|py)\b[^\n]*\n(.*?)^\1```", re.MULTILINE | re.DOTALL)
+
+
+def python_blocks() -> list[tuple[str, int, str]]:
+    """Every ```python block of the docs and README.md: (file, line of the fence, source)."""
+    pages = [p for p in DOCS.rglob("*.md") if "node_modules" not in p.parts and ".vitepress" not in p.parts]
+    blocks = []
+    for page in [*sorted(pages), DOCS.parent / "README.md"]:
+        text = page.read_text(encoding="utf-8")
+        for match in PYTHON_FENCE.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            blocks.append((str(page.relative_to(DOCS.parent)), line, textwrap.dedent(match.group(2))))
+    return blocks
+
+
+def test_docs_have_python_blocks():
+    assert len(python_blocks()) > 50
+
+
+@pytest.mark.parametrize(
+    ("source", "line", "code"), [pytest.param(*block, id=f"{block[0]}:{block[1]}") for block in python_blocks()]
+)
+def test_python_blocks_are_valid_syntax(source, line, code):
+    try:
+        tree = ast.parse(code, filename=source, type_comments=False)
+        compile(tree, source, "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT, dont_inherit=True)
+    except SyntaxError as exc:
+        pytest.fail(f"{source}:{line + (exc.lineno or 0)}: {exc.msg}")

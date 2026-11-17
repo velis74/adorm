@@ -32,6 +32,6 @@ features:
   - title: Sessions, slots and a pool
     details: Logical sessions name a connection profile. Atomic operations borrow a slot for one call, transactions hold one for the whole block, with timeouts and deadlock detection.
   - title: pydantic models
-    details: Generated models are pydantic BaseModel subclasses, so the same schema serves the database layer and fastapi-viewsets endpoints.
+    details: Generated models are pydantic BaseModel subclasses, so the same schema serves the database layer and pydantic validation and serialisation.
     link: /topics/models
 ---

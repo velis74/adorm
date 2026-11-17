@@ -1,7 +1,7 @@
 # Models
 
 An adorm model is a pydantic `BaseModel` subclass of [`adorm.Model`](/ref/models#adorm-model). The class describes a
-database row for adorm and a schema for pydantic and fastapi-viewsets. It declares its fields, its identity (`_meta`)
+database row for adorm and a pydantic schema. It declares its fields, its identity (`_meta`)
 and its relations.
 
 ```python

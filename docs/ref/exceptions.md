@@ -180,6 +180,8 @@ connection that raised the error: whether the error left that connection unusabl
 judged it.
 
 ```python
+try:
+    await Member.objects.count()
 except adorm.OperationalError as exc:
     if exc.connection_lost:
         ...   # the slot leaves the pool; the next operation gets a new connection

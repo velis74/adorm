@@ -508,7 +508,7 @@ connection follows the database: on SQLite only an `InterfaceError` (a closed co
 
 ```python
 try:
-    await Club.objects.create(name="Veslaški klub Koper", slug="koper-sailing", ...)
+    await Club.objects.create(name="Veslaški klub Koper", slug="koper-sailing")
 except adorm.IntegrityError as exc:   # on SQLite
     exc.sqlstate, exc.table_name, exc.fields   # None, 'clubs_club', ('slug',)
 ```

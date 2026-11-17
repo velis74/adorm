@@ -474,8 +474,8 @@ def compute_schema_hash(
     key, parent labels, fields (name, ORM name, type, nullability, constraints), forward relations and the managers
     with an ORM name (name, ORM names, the driver methods' names, targets and parameter kinds and types).
 
-    Defaults, descriptions, return types and reverse relations do not take part: they do not change the data a client
-    and a server exchange. A model whose managers all lack ORM names hashes as one without managers.
+    Defaults, descriptions, return types and reverse relations do not take part: they do not change the data a model
+    and its driver exchange. A model whose managers all lack ORM names hashes as one without managers.
     """
     payload = {
         "label": label,

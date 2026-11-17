@@ -299,11 +299,10 @@ Idle slots close at once, held slots when their lease is released. The next sess
 pool built from the current profile, or from a provider when none is registered. A request waiting for a slot of the
 closed pool moves to that pool within its timeout, or raises `InterfaceError` when no profile of the name remains.
 
-## Remote execution
+## Where a profile lives
 
 A profile lives where its pool runs. Its parameters, credentials and hooks are not part of a session or an
-operation: a session is the pair `(using, session_name)`, and `using` is the profile name. For a pool in a separate
-adorm server, the application's driver sends the profile name and the server's settings define the profile.
+operation: a session is the pair `(using, session_name)`, and `using` is the profile name.
 
 ## Routers with profiles
 

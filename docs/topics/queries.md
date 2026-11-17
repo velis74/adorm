@@ -416,8 +416,8 @@ Update(members.filter(age__lt=18), {"junior": True})
 Delete(members.filter(joined__lt=cutoff))
 ```
 
-An operation converts to JSON-safe data with its values typed by the model schema; an adorm server decodes each
-value as its field's type. See [Operation encoding](/ref/encoding).
+An operation converts to JSON-safe data with its values typed by the model schema; decoding restores each value as
+its field's type. See [Operation encoding](/ref/encoding).
 
 ## Construct names
 

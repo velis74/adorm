@@ -1792,10 +1792,14 @@ The isolation level `begin()` names for each value of psycopg's `IsolationLevel`
 `READ COMMITTED`, `3` `REPEATABLE READ`, `4` `SERIALIZABLE`.
 
 ```python
-"default": {
-    "driver": "adorm.drivers.asyncpg.AsyncpgDriver",
-    "params": {"OPTIONS": {"isolation_level": psycopg.IsolationLevel.SERIALIZABLE}},
-}
+adorm.configure(
+    profiles={
+        "default": {
+            "driver": "adorm.drivers.asyncpg.AsyncpgDriver",
+            "params": {"OPTIONS": {"isolation_level": psycopg.IsolationLevel.SERIALIZABLE}},
+        },
+    },
+)
 ```
 
 ### `adorm.drivers.asyncpg.MAX_GET_RESULTS`

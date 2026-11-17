@@ -198,32 +198,11 @@ one outcome. Cancelling the task that awaits `lease.call()` cancels its request 
 [`CancellationOutcome`](/ref/pool#adorm-cancellationoutcome), which the request's outcome event completes when it
 arrives after the caller has left (see [cancellation](/topics/cancellation#events)).
 
-## In process and remote
+## JSON-safe form
 
-adorm has no remote driver; this section is the event contract one implements. The core handles events the same
-way whether the database is reached in the application's process or through a separate adorm server. A remote
-driver's connection sits behind an ordinary slot of the application's pool.
-
-```text
-application                                               server
-  slot ── Request ──▶ remote DriverConnection ── encoded ──▶ server slot ──▶ ORM driver connection
-  slot ◀── return / raise / emit ◀──────────── encoded ◀─── server events
-```
-
-Every event has a JSON-safe form: `event.to_dict()` encodes it, `Event.from_dict()` decodes it, and errors travel by
-class, message and their adorm attributes ([`encode_error()`](/ref/events#adorm-events-encode-error-error-encode-encode-value)).
-A remote connection decodes each event of the server slot and maps it onto the driver contract:
-
-| Server event | In the remote connection |
-|---|---|
-| `ResultEvent` of the request a method sent | the return value of that method (`execute()`, `commit()` …) |
-| `ErrorEvent` of that request | the exception that method raises |
-| `CancelledEvent` of that request | the method ends cancelled, as a cancelled driver call does |
-| `CallbackEvent` other than `on_commit` / `on_rollback`, `BackendEvent` | passed to `emit` |
-| `CallbackEvent("on_commit")`, `CallbackEvent("on_rollback")` | not forwarded: the application's slot delivers its own |
-
-The application's slot delivers one outcome per request and its own `on_commit` and `on_rollback`, as for a
-connection in the process. Server request ids do not reach the application's channel.
+Every event has a JSON-safe form for carrying it across a process boundary: `event.to_dict()` encodes it,
+`Event.from_dict()` decodes it, and errors travel by class, message and their adorm attributes
+([`encode_error()`](/ref/events#adorm-events-encode-error-error-encode-encode-value)).
 
 Result values and payloads are encoded by their inferred type ([`encode_value()`](/ref/encoding#adorm-codec-encode-value-value-hint-none));
 `to_dict(encode)` and `from_dict(data, decode)` take a codec that encodes them by the types of the model schema
@@ -238,7 +217,7 @@ instead.
 | [Transactions](/topics/transactions#events) | nothing | outcomes of their requests, `on_commit` |
 | [Pool, router and slots](/topics/pool#events) | outcomes, `on_commit`, `on_rollback` | callbacks and backend events of idle connections and of released leases (the pool's `EventBus`) |
 | [Connection profiles](/topics/profiles#events) | nothing | nothing; events emitted during `on_acquire` / `on_release` follow the pool's rules |
-| [Drivers](/topics/drivers#events) | callbacks, backend events | nothing; a remote driver decodes the server's events into return values, errors and `emit` |
+| [Drivers](/topics/drivers#events) | callbacks, backend events | nothing |
 | [Django driver](/topics/django-driver#events) | `notice`, `notify`, `connection_lost` (on PostgreSQL with psycopg 3); Django's signals and `on_commit()` callbacks stay on the driver side | nothing |
 | [Native PostgreSQL driver](/topics/postgresql-driver#events) | `notice`, `notify`, `connection_lost` | nothing |
 | [`adorm.listen()`](#listening-for-notifications) | nothing | `notify`, `connection_lost` of its slot; passes other events to the pool's `EventBus` |

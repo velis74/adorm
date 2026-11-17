@@ -154,11 +154,13 @@ hook layer included, with `SET LOCAL` ([testing](/topics/testing#connection-opti
   transaction takes the value in effect when it starts.
 
 ```python
-with adorm.connection_options(acquire_timeout=0.5):
-    try:
-        await Member.objects.count()
-    except adorm.SessionTimeout:
-        return cached_count()
+async def member_count():
+    with adorm.connection_options(acquire_timeout=0.5):
+        try:
+            return await Member.objects.count()
+        except adorm.SessionTimeout:
+            return cached_count()
+
 
 with adorm.connection_options(commit_timeout=600):
     async with adorm.atomic():                  # a slow import that awaits other services between writes

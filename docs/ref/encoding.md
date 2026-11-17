@@ -1,9 +1,8 @@
 # Operation encoding
 
-Operations and query nodes convert to JSON-safe data and back, for sending an operation across a process boundary,
-for example to an adorm server (over [muxws](:muxws:/) or HTTP) that executes it with an ORM driver. A value is
-encoded with a pydantic `TypeAdapter` for the type of the field it is compared with or written to, taken from the
-model schema, as in the argument transport of [`celery_viewset`](:fastapi_viewsets:/) in fastapi-viewsets.
+Operations and query nodes convert to JSON-safe data and back, for sending an operation across a process boundary.
+A value is encoded with a pydantic `TypeAdapter` for the type of the field it is compared with or written to, taken
+from the model schema, as in the argument transport of [`celery_viewset`](:fastapi_viewsets:/) in fastapi-viewsets.
 
 ```python
 from adorm.codec import decode_value, encode_value

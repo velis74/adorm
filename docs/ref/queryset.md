@@ -424,7 +424,10 @@ await Tag.objects.bulk_create(new_tags, batch_size=500)   # 500 rows per INSERT,
 await Tag.objects.bulk_create([Tag(name="indoor"), Tag(name="night")], ignore_conflicts=True)
 
 members = await Member.objects.bulk_create(
-    [Member(email="ana@example.com", level="advanced", ...), Member(email="new@example.com", ...)],
+    [
+        Member(email="ana@example.com", level="advanced", fee=40, club_id=1),
+        Member(email="new@example.com", fee=40, club_id=1),
+    ],
     update_conflicts=True,
     update_fields=["level"],
     unique_fields=["email"],

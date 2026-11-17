@@ -188,9 +188,5 @@ A threaded driver can also run [**direct**](/topics/drivers#execution-mode): the
 thread, one task per event loop (for example a Celery task through `celery_viewset`). Django's `async_unsafe` check
 accepts adorm's calls and applies to everything else.
 
-A separate adorm server is another driver: the client sends the operation description to the server (over
-[muxws](:muxws:/) or HTTP), which executes it with an ORM driver. The server holds the profiles and their credentials;
-the client sends only the profile name.
-
 Errors are adorm's own [exceptions](/ref/exceptions) modelled on Django's (`DoesNotExist`, `IntegrityError`, …).
 An error adorm does not recognise becomes a `DatabaseError` that carries the driver's exception in `original`.
