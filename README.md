@@ -37,7 +37,8 @@ CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
 
 `ADORM_TEST_CREATE_ROLES=1` also runs the tests of the `role` connection option. They create and drop the roles
 `adorm_test_login`, `adorm_test_alice` and `adorm_test_bob` and need `CREATEROLE`. Roles belong to the whole server and
-outlive the test databases: set the variable only on a server dedicated to the tests (CI sets it).
+outlive the test databases: set the variable only on a server dedicated to the tests. CI runs the suite with
+`CREATEDB` only, then grants `CREATEROLE` and runs these tests separately.
 
 The demo reads its database URL from `ADORM_DEMO_DATABASE_URL`. Both variables can be set in `.env` in the repository
 root (ignored by git; `.env.example` lists them). Variables set in the environment take precedence.

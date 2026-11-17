@@ -16,8 +16,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ['3.11', '3.12', '3.13']
-    env:
-      ADORM_TEST_CREATE_ROLES: "1"
     services:
       postgres:
         image: postgres:17
@@ -36,11 +34,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Create the test database user
-        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB CREATEROLE PASSWORD 'adorm'"
+        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB PASSWORD 'adorm'"
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest
+      - name: Role tests (CREATEROLE granted)
+        run: |
+          psql postgres://postgres:postgres@localhost:5432/postgres -c "ALTER ROLE adorm CREATEROLE"
+          ADORM_TEST_CREATE_ROLES=1 uv run pytest tests/test_profiles_backends.py
       - name: Conformance suite on SQLite
         run: uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
       - run: uv build
@@ -116,12 +118,14 @@ jobs:
         with:
           python-version: '3.13'
       - name: Create the test database user
-        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB CREATEROLE PASSWORD 'adorm'"
+        run: psql postgres://postgres:postgres@localhost:5432/postgres -c "CREATE ROLE adorm LOGIN CREATEDB PASSWORD 'adorm'"
       - run: uv sync --locked
       - name: Tests with coverage
         run: |
           uv run coverage run -m pytest
           uv run coverage run -a -m pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
+          psql postgres://postgres:postgres@localhost:5432/postgres -c "ALTER ROLE adorm CREATEROLE"
+          ADORM_TEST_CREATE_ROLES=1 uv run coverage run -a -m pytest tests/test_profiles_backends.py
           uv run coverage json
       - name: Incremental coverage check
         uses: velis74/incremental-coverage-check@v3
