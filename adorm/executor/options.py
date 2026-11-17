@@ -9,7 +9,7 @@ import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType, TracebackType
 from typing import Any, cast, TYPE_CHECKING
 
@@ -186,8 +186,8 @@ class ResolvedOptions:
     acquire_timeout: float
     commit_timeout: float | None
     database: Mapping[str, Any]
-    profile: Mapping[str, Any] = _EMPTY
-    overrides: Mapping[str, Any] = _EMPTY
+    profile: Mapping[str, Any] = field(default_factory=lambda: _EMPTY)
+    overrides: Mapping[str, Any] = field(default_factory=lambda: _EMPTY)
 
     def for_lease(self, lease: SlotLease) -> Mapping[str, Any]:
         """The database options to set on ``lease``'s slot: ``database`` with the options its profile's
