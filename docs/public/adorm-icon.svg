@@ -1,1 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#3b6ea5"/><ellipse cx="32" cy="18" rx="18" ry="6" fill="#fff"/><path d="M14 18v28c0 3.3 8 6 18 6s18-2.7 18-6V18" fill="none" stroke="#fff" stroke-width="4"/><path d="M14 32c0 3.3 8 6 18 6s18-2.7 18-6" fill="none" stroke="#fff" stroke-width="4"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="92" fill="#0b2258"/>
+<g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="18">
+<path stroke="#159ff5" d="M208 256h70q22 0 22-22v-76h38"/>
+<path stroke="#62dc7a" d="M208 256h70q22 0 22 22v76h38"/>
+<path stroke="#fff" d="M88 216v80c0 17 27 30 60 30s60-13 60-30v-80m-120 40c0 17 27 30 60 30s60-13 60-30"/>
+<ellipse cx="148" cy="216" rx="60" ry="30" stroke="#fff"/>
+<rect x="338" y="112" width="86" height="92" rx="20" stroke="#159ff5"/>
+<rect x="338" y="308" width="86" height="92" rx="20" stroke="#62dc7a"/>
+<path stroke="#159ff5" stroke-width="12" d="M364 143h34m-34 29h21"/>
+<path stroke="#62dc7a" stroke-width="12" d="M364 339h34m-34 29h21"/>
+</g>
+</svg>
