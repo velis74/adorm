@@ -2,7 +2,9 @@
   <div class="timeline" :style="{ '--flows': lanes.length }" data-testid="timeline">
     <div class="cell head">ms</div>
     <div v-for="lane in lanes" :key="lane" class="cell head">
-      <v-chip size="x-small" label :color="sessionColor(lane)">{{ lane === 'demo' ? 'observer' : `flow ${lane}` }}</v-chip>
+      <v-chip size="x-small" label :color="sessionColor(lane)">
+        {{ lane === 'demo' ? 'observer' : `flow ${lane}` }}
+      </v-chip>
     </div>
     <template v-for="(event, index) in run.events" :key="index">
       <div class="cell time">{{ event.at_ms.toFixed(1) }}</div>

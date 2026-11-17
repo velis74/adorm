@@ -85,7 +85,8 @@ uv run adorm generate --settings demo.backend.settings -o demo/models --line-len
 Each available driver has three [connection profiles](/topics/profiles): `<driver>` with a pool of six slots,
 `<driver>-small` with two slots and `acquire_timeout=1`, and `<driver>-desk`, as small, whose `on_acquire` hook returns
 the custom option `app.reader` set to the session's name. An example runs in the session `(<driver>, "example")`
-(`desk_options` in `(<driver>-desk, "example")`), a flow of a scenario in `(<driver>, <flow>)`. One run, of an example or a scenario, executes at a time.
+(`desk_options` in `(<driver>-desk, "example")`), a flow of a scenario in `(<driver>, <flow>)`. One run, of an example
+or a scenario, executes at a time.
 
 The SQL is recorded on the connections: an execute wrapper on every Django connection (`COMMIT` and `ROLLBACK` from
 psycopg's transaction control included, and `BEGIN` when psycopg sends it, before the first statement of the

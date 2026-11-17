@@ -47,7 +47,7 @@ jobs:
         run: uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
       - run: uv build
 
-  docs:
+  node:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -56,6 +56,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
+      # eslint, markdownlint, vue-tsc and tsc, report only.
+      - run: npm run lint
       - run: npm run docs:build
 
   e2e:
@@ -135,4 +137,5 @@ jobs:
             docs/**
             demo.py
             demo/**
+            scripts/**
           github-token: ${{ secrets.GITHUB_TOKEN }}

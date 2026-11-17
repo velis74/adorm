@@ -126,7 +126,9 @@ async with adorm.atomic():                               # session ("default", "
 
 ### Waits that cannot end
 
-A wait for an open transaction raises [`DeadlockError`](/ref/exceptions#adorm-deadlockerror-message-none-held-sessions-session-none-timeout-none) when it cannot end:
+A wait for an open transaction raises
+[`DeadlockError`](/ref/exceptions#adorm-deadlockerror-message-none-held-sessions-session-none-timeout-none) when it
+cannot end:
 
 | The open transaction | Raised |
 |---|---|

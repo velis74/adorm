@@ -5,6 +5,7 @@
         <span class="font-weight-medium">About this demo</span>
       </v-expansion-panel-title>
       <v-expansion-panel-text class="text-body-2" data-testid="intro-text">
+        <!-- prettier-ignore -->
         <p class="mb-2">
           A library: authors, books, editions, tags, readers and loans. The schema is a Django app; the adorm models
           are generated from it with <code>adorm generate</code>. The examples and scenarios are coroutine functions
@@ -13,6 +14,7 @@
         <v-row dense class="mb-1">
           <v-col cols="12" md="6">
             <div class="text-subtitle-2">Examples</div>
+            <!-- prettier-ignore -->
             <p>
               The query API as Django developers know it, with <code>await</code> and <code>async for</code>. Each
               example shows its code; a run shows, per driver, the SQL sent to the database, the result and the time
@@ -22,16 +24,17 @@
           <v-col cols="12" md="6">
             <div class="text-subtitle-2">Concurrency</div>
             <p>
-              Several flows in concurrent tasks, each in a session of its own: row locks, a lock timeout, cancelling
-              a statement, a deadlock in the database, a deadlock between pool slots, an exhausted pool. A run shows
-              when each flow did what, what it saw, its SQL and how it ended.
+              Several flows in concurrent tasks, each in a session of its own: row locks, a lock timeout, cancelling a
+              statement, a deadlock in the database, a deadlock between pool slots, an exhausted pool. A run shows when
+              each flow did what, what it saw, its SQL and how it ended.
             </p>
           </v-col>
         </v-row>
         <p class="mb-2">
-          Every run executes on each available driver ({{ driverNames }}). The same code gives the same result on
-          each; the times show that the drivers are comparable, not which one is faster under load.
+          Every run executes on each available driver ({{ driverNames }}). The same code gives the same result on each;
+          the times show that the drivers are comparable, not which one is faster under load.
         </p>
+        <!-- prettier-ignore -->
         <p class="mb-0">
           Setting adorm up in a project: the quick start, <code>docs/intro/quickstart.md</code> in the adorm
           repository. This demo: <code>docs/intro/demo.md</code>. The API behind this page:

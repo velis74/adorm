@@ -44,9 +44,10 @@ class Member(Model):
 ### `adorm.Model`
 
 Base class of adorm models, a subclass of pydantic `BaseModel`. A model declares `_meta` (a
-[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)), its fields as pydantic fields and its relations as [`Relation`](#adorm-models-relation-target)
-descriptors. A subclass without its own `_meta` inherits its parent's; a model without any `_meta` is abstract: it
-cannot load or save rows and its instances compare by identity.
+[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)), its fields as pydantic
+fields and its relations as [`Relation`](#adorm-models-relation-target) descriptors. A subclass without its own `_meta`
+inherits its parent's; a model without any `_meta` is abstract: it cannot load or save rows and its instances compare by
+identity.
 
 The model configuration:
 
@@ -123,10 +124,11 @@ member.model_dump()            # {"id": 1, "name": "Ana", "fee": Decimal("12")}
 
 #### `objects`
 
-Class attribute: the model's default [`Manager`](#adorm-manager-orm-name-none-method-manager-none), `Manager()` unless the class declares
-its own. Reading it returns the model bound to the [current session](./sessions#adorm-current-session), a
-[`BoundModel`](./sessions#adorm-boundmodel), evaluated at every access. Reading it on an instance or on an abstract
-model raises `AttributeError`. A class that sets `objects` to something other than a manager raises `TypeError`.
+Class attribute: the model's default [`Manager`](#adorm-manager-orm-name-none-method-manager-none), `Manager()` unless
+the class declares its own. Reading it returns the model bound to the [current
+session](./sessions#adorm-current-session), a [`BoundModel`](./sessions#adorm-boundmodel), evaluated at every access.
+Reading it on an instance or on an abstract model raises `AttributeError`. A class that sets `objects` to something
+other than a manager raises `TypeError`.
 
 ```python
 await Member.objects.filter(active=True).count()
@@ -158,8 +160,9 @@ Member(name="Ana") == Member(name="Ana")   # False
 
 #### `save(*, update_fields=None, force_insert=False, force_update=False)`
 
-Coroutine: write the instance with a [`Save`](./operations#adorm-operations-save-model-pk-values-update-fields-none-force-insert-false-force-update-false) operation on the instance's
-executor.
+Coroutine: write the instance with a
+[`Save`](./operations#adorm-operations-save-model-pk-values-update-fields-none-force-insert-false-force-update-false)
+operation on the instance's executor.
 
 - The values written are the fields in `model_fields_set` (the loaded and the assigned ones), the primary key
   excepted. Fields the instance never set are left to the target, so its defaults apply on insert.
@@ -446,9 +449,9 @@ activity.tags.query
 
 After [`prefetch_related()`](./queryset#prefetch-related-lookups) of a `ReverseForeignKey` or a `ManyToMany`, the
 query set the relation returns on the instance holds the prefetched rows: `async for`, `count()` and `exists()` read
-them without an operation. Its building methods (`filter()`, `order_by()` …) return query sets that run an operation, and its
-other terminal methods run one. A prefetched `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` fills the relation's cache;
-`await instance.rel` then runs no operation.
+them without an operation. Its building methods (`filter()`, `order_by()` …) return query sets that run an operation,
+and its other terminal methods run one. A prefetched `ForeignKey`, `ReverseOneToOne` or `GenericForeignKey` fills the
+relation's cache; `await instance.rel` then runs no operation.
 
 ```python
 club = await Club.objects.prefetch_related("memberships").get(slug="koper-sailing")
@@ -797,8 +800,8 @@ first manager whose `queryset_class` declares the method
 ([`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none)). No such
 manager raises `TypeError`, and so does an instance of any other class. The result is the driver's, with every
 [`ModelRow`](./operations#adorm-operations-modelrow-model-row), also inside lists, tuples and the values of mappings,
-turned into an instance of the registered model on the same session; a row of a model that is not registered raises `InterfaceError`. A
-`DoesNotExist` or `MultipleObjectsReturned` the driver raises becomes the model's.
+turned into an instance of the registered model on the same session; a row of a model that is not registered raises
+`InterfaceError`. A `DoesNotExist` or `MultipleObjectsReturned` the driver raises becomes the model's.
 
 ```python
 LoanManager.lend.schema.kwarg_type("days")       # int
@@ -897,9 +900,10 @@ registry.schema_hashes()                    # {"clubs.Club": "e8c2eed312ab7b68",
 
 ### `adorm.models.model_schema(model)`
 
-The [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods) of the model class `model`: its label, primary key, the
-type of every field (with its pydantic constraints), the target label of every relation, `_meta.orm_names` and the
-`MethodSchema` of every [driver method](#adorm-models-driver-methods-model). An abstract model raises `TypeError`.
+The [`ModelSchema`](./encoding#adorm-schema-modelschema-label-pk-fields-relations-orm-names-methods) of the model class
+`model`: its label, primary key, the type of every field (with its pydantic constraints), the target label of every
+relation, `_meta.orm_names` and the `MethodSchema` of every [driver method](#adorm-models-driver-methods-model). An
+abstract model raises `TypeError`.
 
 ```python
 schema = model_schema(Member)

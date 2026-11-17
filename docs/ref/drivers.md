@@ -129,8 +129,8 @@ driver.check_schema_hash("clubs.Club", Club._meta.schema_hash)
 
 Raises `NotSupportedError` when a connection for `profile` cannot listen for notifications; opens no connection.
 Defaults to [`capabilities_for(profile).check_backend_event("notify", name)`](#check-backend-event-name-driver-none).
-[`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) calls it before it takes a slot. `DjangoDriver` also raises it inside
-Django's `TestCase`, whose shared connection receives no notifications.
+[`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) calls it before it takes a slot. `DjangoDriver` also
+raises it inside Django's `TestCase`, whose shared connection receives no notifications.
 
 ```python
 await DjangoDriver().check_listen(profile)   # with psycopg 2: NotSupportedError: the backend event 'notify' is not supported (driver 'django')
@@ -139,9 +139,11 @@ await DjangoDriver().check_listen(profile)   # with psycopg 2: NotSupportedError
 #### `is_refusal(exc)`
 
 Returns whether `exc`, an adorm exception raised by `open_connection()`, means the database refuses more
-connections. A [pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false) with `max_connections=0` then stops opening connections and queues the
-request. Defaults to [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc); override it when the library reports a
-refused connection without a SQLSTATE:
+connections. A
+[pool](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)
+with `max_connections=0` then stops opening connections and queues the request. Defaults to
+[`is_refusal(exc)`](#adorm-drivers-is-refusal-exc); override it when the library reports a refused connection without a
+SQLSTATE:
 
 ```python
 class DjangoDriver(ThreadedDriver):
@@ -154,10 +156,11 @@ class DjangoDriver(ThreadedDriver):
 
 Returns the database [connection options](/ref/options) the driver sets on every new connection for `profile`, a
 mapping; empty unless overridden. Does no I/O. The pool starts the profile's layer of options with them
-([`Pool.options`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)) and the slot of a new connection counts them as set, so ending a
-layer that overrides one of them restores the driver's value instead of the database's default.
-[`DjangoDriver`](#adorm-drivers-django-djangodriver) and [`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver)
-return [`adorm.drivers.django.connection_defaults(profile)`](#adorm-drivers-django-connection-defaults-profile).
+([`Pool.options`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false))
+and the slot of a new connection counts them as set, so ending a layer that overrides one of them restores the driver's
+value instead of the database's default. [`DjangoDriver`](#adorm-drivers-django-djangodriver) and
+[`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver) return
+[`adorm.drivers.django.connection_defaults(profile)`](#adorm-drivers-django-connection-defaults-profile).
 
 ```python
 DjangoDriver().connection_defaults(profile)   # {"role": "app_reader"} for OPTIONS={"assume_role": "app_reader"}
@@ -180,10 +183,10 @@ class TenantDriver(DjangoDriver):
 
 #### `async transaction_turns(profile)`
 
-Returns the [`TransactionTurns`](/ref/pool#adorm-executor-turns-transactionturns-name-advice) of the database session that the
-connections for `profile` share, when they share one; `None` (the default) when each connection is a session of its
-own. The [router](/ref/pool#adorm-executor-router-pools-profiles-none) takes a turn on it before it acquires a slot for
-a transaction or an operation outside a transaction. [`DjangoDriver`](#adorm-drivers-django-djangodriver) returns
+Returns the [`TransactionTurns`](/ref/pool#adorm-executor-turns-transactionturns-name-advice) of the database session
+that the connections for `profile` share, when they share one; `None` (the default) when each connection is a session of
+its own. The [router](/ref/pool#adorm-executor-router-pools-profiles-none) takes a turn on it before it acquires a slot
+for a transaction or an operation outside a transaction. [`DjangoDriver`](#adorm-drivers-django-djangodriver) returns
 [`shared_transaction_turns(profile.alias)`](/ref/testing#adorm-testing-django-shared-transaction-turns-alias): the
 turns of the test's connection inside Django's `TestCase`.
 
@@ -257,7 +260,8 @@ thread instead (see [`ThreadedDriver`](#adorm-drivers-threadeddriver)).
 
 ### `adorm.drivers.Capabilities`
 
-`Capabilities(operations=frozenset(), constructs=frozenset(), connection_options=frozenset(), backend_events=frozenset(), savepoints=False, cancellation=False, max_channel_length=None, custom_options=False)`
+`Capabilities(operations=frozenset(), constructs=frozenset(), connection_options=frozenset(),
+backend_events=frozenset(), savepoints=False, cancellation=False, max_channel_length=None, custom_options=False)`
 
 What a driver supports; a frozen, hashable dataclass. The four name fields take any iterable of strings, stored as
 `frozenset`; a plain string raises `TypeError`.
@@ -301,7 +305,8 @@ Capabilities().check_backend_event("notify", "memory")   # NotSupportedError: th
 
 Returns `channel` when [`adorm.drivers.check_channel()`](#adorm-drivers-check-channel-channel) accepts it and it is
 at most `max_channel_length` bytes in UTF-8; raises `TypeError` or `ValueError` otherwise.
-`DriverConnection.listen()`, `unlisten()` and [`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) check the names with it.
+`DriverConnection.listen()`, `unlisten()` and [`adorm.listen()`](/ref/events#adorm-listen-channels-session-none) check
+the names with it.
 
 ```python
 CAPABILITIES.check_channel("orders")    # 'orders'
@@ -464,8 +469,8 @@ The contract the slot calls:
 | `settled`, `async settle()` | whether, and until when, the connection still works for its last call after the call's outcome ([below](#settled)) |
 
 A failed check raises `NotSupportedError`, naming the driver, before the subclass is called: `execute()` runs
-[`Driver.check()`](#check-operation-schema-hashes-none-capabilities-none) with the connection's `capabilities`, the savepoint calls
-check `savepoints`, `set_options()` checks `connection_options`. A subclass implements:
+[`Driver.check()`](#check-operation-schema-hashes-none-capabilities-none) with the connection's `capabilities`, the
+savepoint calls check `savepoints`, `set_options()` checks `connection_options`. A subclass implements:
 
 | Method | Required | Does |
 |---|---|---|
@@ -668,8 +673,9 @@ Behaviour around those methods:
   raises its error, and raises `asyncio.CancelledError` when the call failed with an error `is_cancellation()` accepts
   (by default SQLSTATE `57014`); `start()` and
   `call_hook()` always raise `asyncio.CancelledError`. When the call does not finish within `cancel_grace`, the
-  connection becomes unusable, the task raises `asyncio.CancelledError`, and further calls raise `InterfaceError`. Cancelling `open_connection()` during `connect_sync()` works the same
-  way, then runs `close_sync()` and stops the thread.
+  connection becomes unusable, the task raises `asyncio.CancelledError`, and further calls raise `InterfaceError`.
+  Cancelling `open_connection()` during `connect_sync()` works the same way, then runs `close_sync()` and stops the
+  thread.
 - `cancel()` runs `cancel_sync()` for the running call: on a thread of its own when called on the event loop's
   thread, otherwise on the calling thread. It does nothing when no call is running.
 - `close()` runs `close_sync()` on the thread and stops the thread; a call after it raises `InterfaceError`.
@@ -746,9 +752,9 @@ profile names it by class, instance or import path. It runs on the database of a
 | `async transaction_turns(profile)` | inside Django's `TestCase` the turns of the test's connection ([`shared_transaction_turns()`](/ref/testing#adorm-testing-django-shared-transaction-turns-alias)), else `None` |
 
 `open_connection(profile, emit)` creates the connection with
-[`adorm.testing.django.django_connection()`](/ref/testing#adorm-testing-django-django-connection-driver-profile-emit) and starts it:
-a `connection_class` connection outside Django's test environment, one that shares the test's connection inside a
-Django `TestCase` ([test mode](/topics/testing)).
+[`adorm.testing.django.django_connection()`](/ref/testing#adorm-testing-django-django-connection-driver-profile-emit)
+and starts it: a `connection_class` connection outside Django's test environment, one that shares the test's connection
+inside a Django `TestCase` ([test mode](/topics/testing)).
 
 `schema_hash(label)` is [`model_schema_hash(label)`](#adorm-drivers-django-model-schema-hash-label), the hash of the
 installed Django model, which [`Driver.check_schema_hash()`](#check-schema-hash-label-expected) compares with the
@@ -803,8 +809,9 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 
 Values go through [`field_kwargs()`](#adorm-drivers-django-translation-field-kwargs-query-values) and lookups through
 [`lookup_kwargs()`](#adorm-drivers-django-translation-lookup-kwargs-query-lookups). Every call runs on
-`profile.alias` (`using()`, `save(using=...)`). Django's model methods (`save()` and `delete()` overrides), its signals and its own
-atomic blocks run on the connection's thread as they run in Django code; the signals are not reported to the client.
+`profile.alias` (`using()`, `save(using=...)`). Django's model methods (`save()` and `delete()` overrides), its signals
+and its own atomic blocks run on the connection's thread as they run in Django code; the signals are not reported to the
+client.
 
 Django's `on_commit()` callbacks registered during a transaction (by a `save()` override, a signal receiver):
 
@@ -829,11 +836,12 @@ method outside a transaction holds the write lock for its whole call, whether it
 
 A [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation reads the
 catalogue through the wrapper's cursor outside the execute wrapper (not custom SQL). The expected tables come
-from [`expected_tables(operation, self.db, driver.name, check_types=...)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true), each table's
-columns from `vendor.columns()`: [`columns_sql("%s")`](#adorm-drivers-postgresql-columns-sql-parameter) on PostgreSQL,
-Django's introspection (`table_names()`, `get_table_description()`) elsewhere. Column types are compared on PostgreSQL
-and SQLite, whose catalogues report a column's type as Django declared it; on other databases only the columns and
-their nullability. The result is the
+from [`expected_tables(operation, self.db, driver.name,
+check_types=...)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true), each
+table's columns from `vendor.columns()`: [`columns_sql("%s")`](#adorm-drivers-postgresql-columns-sql-parameter) on
+PostgreSQL, Django's introspection (`table_names()`, `get_table_description()`) elsewhere. Column types are compared on
+PostgreSQL and SQLite, whose catalogues report a column's type as Django declared it; on other databases only the
+columns and their nullability. The result is the
 [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field`
 problems. A label without an installed Django model raises `SchemaMismatchError` before any statement; an open
 transaction stays usable.
@@ -999,8 +1007,8 @@ The database of the `DATABASES` entry `profile.alias` with `profile.params` repl
 [`Vendor.database_key(entry)`](#adorm-drivers-django-vendors-vendor-name-features-none): `(vendor, host, port, name)`
 (`HOST` and `PORT` as strings, `""` when not set), on SQLite `("sqlite", path)` with the file's real path (a
 `file:` URI as written). `None` for a profile with a `connect` hook, an alias without an entry, a
-backend that does not load, an in-memory SQLite database and a `NAME` that is not hashable. The database key of `DjangoDriver` and
-`AsyncpgDriver` ([`Driver.database_key()`](#database-key-profile)).
+backend that does not load, an in-memory SQLite database and a `NAME` that is not hashable. The database key of
+`DjangoDriver` and `AsyncpgDriver` ([`Driver.database_key()`](#database-key-profile)).
 
 ```python
 database_key(ConnectionProfile("reports", DjangoDriver(), alias="default", on_acquire=current_role))
@@ -1023,9 +1031,9 @@ connection_defaults(ConnectionProfile("reports", DjangoDriver(), params={"OPTION
 
 The schema hash of the installed Django model `label`:
 [`adorm.codegen.django.schema_hash()`](/ref/codegen#adorm-codegen-django-schema-hash-model-warn-true) with
-`warn=False`: no `CodegenWarning`, the process's warning filters untouched; callable from any thread. Raises `LookupError` when no such model is installed and `CodegenError` for a model the generator cannot
-describe. Defined in `adorm.drivers.django.schema`; the `schema_hash()` of `DjangoDriver` and
-`AsyncpgDriver`.
+`warn=False`: no `CodegenWarning`, the process's warning filters untouched; callable from any thread. Raises
+`LookupError` when no such model is installed and `CodegenError` for a model the generator cannot describe. Defined in
+`adorm.drivers.django.schema`; the `schema_hash()` of `DjangoDriver` and `AsyncpgDriver`.
 
 ```python
 from adorm.drivers.django import model_schema_hash
@@ -1157,9 +1165,9 @@ table and column of `ORA-01400`. Untested.
 `CAPABILITIES` without `clause.select_for_update.nowait` and `.skip_locked` (a transaction holds the write lock from
 `BEGIN IMMEDIATE` on, which keeps other writers off the rows `select_for_update()` reads; Django sends no
 `FOR UPDATE`), the [`POSTGRESQL_ONLY`](#adorm-drivers-django-vendors-postgresql-only)
-constructs, `clause.combinator.slice` (Django refuses a sliced query in a set operation), `lookup.contains`, `lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII
-letters), connection options and backend events. It has `clause.on_conflict.ignore` and `.update`, the set
-operations, savepoints and cancellation.
+constructs, `clause.combinator.slice` (Django refuses a sliced query in a set operation), `lookup.contains`,
+`lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII letters), connection options and
+backend events. It has `clause.on_conflict.ignore` and `.update`, the set operations, savepoints and cancellation.
 
 #### `adorm.drivers.django.vendors.MYSQL_CAPABILITIES`
 
@@ -1280,13 +1288,14 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   `order_by()` and the slice; a `none()` combination becomes the first query set's `none()`. The ordering is translated
   on the model of the first combined query that is not itself combined; after `values()` or `values_list()`, a key is
   a name those methods give, mapped to the first query's column at the same position, and another key raises
-  `DatabaseError` (`ORDER BY term does not match any column in the result set.`). A combined query that selects model rows selects the fields of `values()` or `values_list()`
-  given after the set operation; the rows are built as the first combined query's rows, keyed by those names column
-  by column (a different number of names raises `ProgrammingError`). As a subquery, a combined query of model rows
-  selects its primary key.
-- A node without a translation (a function or aggregate class of a driver's own, such as a `Func` subclass a driver adds) raises
-  `NotSupportedError`; a `select_related()` path that is not a relation of the adorm model, or not a foreign key or one-to-one relation,
-  raises `ProgrammingError`. Unknown fields raise Django's `FieldError` when the query set is built.
+  `DatabaseError` (`ORDER BY term does not match any column in the result set.`). A combined query that selects model
+  rows selects the fields of `values()` or `values_list()` given after the set operation; the rows are built as the
+  first combined query's rows, keyed by those names column by column (a different number of names raises
+  `ProgrammingError`). As a subquery, a combined query of model rows selects its primary key.
+- A node without a translation (a function or aggregate class of a driver's own, such as a `Func` subclass a driver
+  adds) raises `NotSupportedError`; a `select_related()` path that is not a relation of the adorm model, or not a
+  foreign key or one-to-one relation, raises `ProgrammingError`. Unknown fields raise Django's `FieldError` when the
+  query set is built.
 
 ```python
 translated = translate(Query("library.Author").select_related("mentor").only("name", "mentor__name"))
@@ -1896,7 +1905,7 @@ quote_literal("a\\b")         # "E'a\\\\b'"
 
 ### `adorm.drivers.sql.set_options_sql(options, local)`
 
-The statements that set `options` on a PostgreSQL connection, separated by `; `, in the order of `options`; an empty
+The statements that set `options` on a PostgreSQL connection, separated by `"; "`, in the order of `options`; an empty
 string for no options. The names are those of `POSTGRESQL_OPTIONS` and custom options
 ([`is_custom_option()`](#adorm-drivers-is-custom-option-name)). A name of `POSTGRESQL_OPTIONS` is written as is, a
 custom option's name with each dotted part as `quote_identifier()` (`"app"."user"`), so parts that are SQL keywords are
@@ -2042,10 +2051,11 @@ references_key('Key (club_id)=(9) is not present in table "clubs_club".')       
 ## Table checks
 
 `adorm.drivers.postgresql` also compares a table's columns in PostgreSQL's catalogue with a
-model's expectations. A driver turns a [`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation into
-`ExpectedTable` values (the Django and the native PostgreSQL drivers with
-[`expected_tables()`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true)), runs `columns_sql()` for each and
-returns the `table_problems()`.
+model's expectations. A driver turns a
+[`CheckTable`](/ref/operations#adorm-operations-checktable-model-fields-many-to-many) operation into `ExpectedTable`
+values (the Django and the native PostgreSQL drivers with
+[`expected_tables()`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true)), runs
+`columns_sql()` for each and returns the `table_problems()`.
 
 ```python
 from adorm.drivers.postgresql import columns_sql, ExpectedColumn, ExpectedTable, normalize_type, table_problems
@@ -2118,9 +2128,9 @@ table_problems(table, [(True, "name", "character varying(50)", True, False)])
 ## Django's compiler for asyncpg
 
 `adorm.drivers.asyncpg.compiler` compiles Django queries into SQL for asyncpg, without a database connection; the
-[native PostgreSQL driver](#native-postgresql-driver) builds its statements with it. It imports Django, psycopg 3 (Django's PostgreSQL backend must run on it) and asyncpg, which the `asyncpg` extra
-installs (`pip install "adorm[asyncpg]"`). [SQL compilation for asyncpg](/topics/sql-compilation) describes the
-behaviour it relies on.
+[native PostgreSQL driver](#native-postgresql-driver) builds its statements with it. It imports Django, psycopg 3
+(Django's PostgreSQL backend must run on it) and asyncpg, which the `asyncpg` extra installs (`pip install
+"adorm[asyncpg]"`). [SQL compilation for asyncpg](/topics/sql-compilation) describes the behaviour it relies on.
 
 ```python
 from adorm.drivers.asyncpg.compiler import bind_param, DjangoCompiler, DjangoStatement, MAX_QUERY_PARAMS, StatementNeeded

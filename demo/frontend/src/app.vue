@@ -10,10 +10,11 @@
           size="small"
           variant="elevated"
           :color="driver.available ? 'success' : 'grey'"
-          :title="driver.available ? driver.description : driver.reason ?? ''"
+          :title="driver.available ? driver.description : (driver.reason ?? '')"
           :data-testid="`driver-${driver.name}`"
         >
-          {{ driver.name }}<template v-if="driver.mode"> · {{ driver.mode }}</template>
+          {{ driver.name }}
+          <template v-if="driver.mode">· {{ driver.mode }}</template>
         </v-chip>
         <v-btn variant="text" size="small" href="/docs" target="_blank" rel="noopener">API</v-btn>
         <v-btn

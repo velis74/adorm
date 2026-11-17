@@ -6,8 +6,8 @@ driver parameters, the hooks that run around a connection's use, connection opti
 database accounts are different profiles.
 
 The [Django driver](/topics/django-driver) and the [native PostgreSQL driver](/topics/postgresql-driver) run profile
-hooks and execute reads, writes, row locks and savepoints. Any `Driver` implementation works (see [Writing a driver](/howto/writing-a-driver)). The Django app
-`adorm.contrib.django` configures adorm from the `ADORM` setting.
+hooks and execute reads, writes, row locks and savepoints. Any `Driver` implementation works (see [Writing a
+driver](/howto/writing-a-driver)). The Django app `adorm.contrib.django` configures adorm from the `ADORM` setting.
 
 ```python
 import adorm
@@ -128,7 +128,8 @@ ADORM = {
 ```
 
 An invalid value stops `django.setup()` with `ImproperlyConfigured`, which names the entry, for example
-`ADORM['profiles']['default']['on_acquire']: module 'myapp.roles' has no hook 'current_rol'`; adorm's previous configuration stays.
+`ADORM['profiles']['default']['on_acquire']: module 'myapp.roles' has no hook 'current_rol'`; adorm's previous
+configuration stays.
 
 Overriding `ADORM` in a test (`override_settings`, pytest-django's `settings` fixture) reconfigures adorm on entry
 and on exit; so does overriding `DATABASES` while `ADORM` has no `profiles`.
