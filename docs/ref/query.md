@@ -8,6 +8,8 @@ from adorm import F, Lower, Q, Sum
 from adorm.query import COMBINATORS, ForUpdate, Query, as_query
 ```
 
+## Query
+
 ### `adorm.query.Query(model, *, manager=None)`
 
 The rows of one model that a read returns. `model` is the model's label, `"app_label.ModelName"`. `manager` names
@@ -183,7 +185,8 @@ Query("club.Member").defer("biography")            # every field but biography
 
 #### `defer(*fields)`
 
-Leaves `fields` unloaded until accessed. Calls add up; after `only()` it removes the fields from the loaded set. `defer(None)` loads every field again. After `values()` or `values_list()` raises `TypeError`.
+Leaves `fields` unloaded until accessed. Calls add up; after `only()` it removes the fields from the loaded set.
+`defer(None)` loads every field again. After `values()` or `values_list()` raises `TypeError`.
 
 ```python
 Query("club.Member").only("name", "club__name")

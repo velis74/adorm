@@ -130,7 +130,8 @@ class SQLiteDriver(ThreadedDriver):
 `Capabilities` lists the operation kinds, constructs and connection options the driver supports, and whether it
 implements savepoints and cancellation (both `False` by default). The connection checks every call against it before
 the driver's code runs. A driver whose support depends on the database a profile names overrides
-[`capabilities_for(profile)`](/ref/drivers#capabilities-for-profile), which the pool reads once without I/O. This driver accepts no options, so `set_options()` raises `NotSupportedError`:
+[`capabilities_for(profile)`](/ref/drivers#capabilities-for-profile), which the pool reads once without I/O. This driver
+accepts no options, so `set_options()` raises `NotSupportedError`:
 
 ```python
 await connection.set_options({"statement_timeout": 5}, local=False)
@@ -181,8 +182,8 @@ class NotifyingConnection(SQLiteConnection):
 A driver whose target delivers notifications declares `notify` and implements listening. An async connection
 implements `_listen()` and `_unlisten()`; a threaded one `listen_sync()` and `unlisten_sync()`. When the target
 reads its socket only during a call, a threaded connection also implements `idle_fileno()` and `idle_sync()`: the
-connection's thread waits for that socket between calls and reads what arrived. An exception from `idle_sync()` makes the connection unusable and is
-emitted as `BackendEvent("connection_lost")`, which ends an `adorm.listen()` block.
+connection's thread waits for that socket between calls and reads what arrived. An exception from `idle_sync()` makes
+the connection unusable and is emitted as `BackendEvent("connection_lost")`, which ends an `adorm.listen()` block.
 
 ```python
 from adorm.drivers.postgresql import listen_sql, unlisten_sql
@@ -381,8 +382,8 @@ A driver whose target knows the models takes part in the [schema checks](/topics
 
 - `schema_hash(label)` returns the target's hash of a model, computed as `adorm generate` computes it, and raises
   `LookupError` for a model the target lacks. The driver computes a label's hash once and keeps it.
-- [`check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) compares it with the hash the client expects for
-  every model an operation reaches and raises `SchemaMismatchError` on a difference.
+- [`check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) compares it with the hash the client
+  expects for every model an operation reaches and raises `SchemaMismatchError` on a difference.
 - The client's hashes come from the process's model registry by default. A driver that executes operations for
   clients in other processes receives each client's hashes when the client connects (the client sends
   [`registry.schema_hashes()`](/ref/models#adorm-models-registry)) and passes them as
@@ -464,8 +465,8 @@ it. Every case of the catalogue runs on it: a case whose operation kinds and con
 the catalogue's result, any other case must raise `NotSupportedError` naming only names the driver lacks. A declared
 construct the driver executes wrongly fails the case; an undeclared one does not reach its code.
 
-```console
-$ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycopg
+```bash
+ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycopg
 ```
 
 ## Checklist
@@ -489,8 +490,8 @@ $ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psyc
 - `capabilities` lists exactly what the driver executes, including `savepoints` and `cancellation` when it
   implements them, and the conformance suite passes on it.
 - With `clause.manager`, a query and a `Create` that name a manager run through that manager of the target ORM; with
-  the operation `call`, a `Call` runs the method on the target manager `Call.manager` or its query set and returns model instances as
-  `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).
+  the operation `call`, a `Call` runs the method on the target manager `Call.manager` or its query set and returns model
+  instances as `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).
 - `connect_sync()` or `open_connection()` uses `profile.connect` when it is set.
 - `target` returns the target's connection object, which the profile's `on_acquire` and `on_release` hooks receive.
   A driver that sees the statements run on it marks those a hook runs with `mark_custom_sql()`; session parameters

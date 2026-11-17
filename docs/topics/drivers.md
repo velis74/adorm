@@ -97,8 +97,8 @@ raises `NotSupportedError`, and nothing is executed. The error names the driver 
 (`NotSupportedError.driver`, `.unsupported`).
 
 - Outside a transaction the router checks an operation with
-  [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) before it acquires a slot, so an unsupported
-  operation does not wait for a slot of a full pool.
+  [`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) before it acquires a slot, so an
+  unsupported operation does not wait for a slot of a full pool.
 - Inside a transaction the check in `execute()` refuses before anything reaches the database; the transaction stays
   usable.
 
@@ -178,8 +178,8 @@ connection unusable: `is_usable()` returns `False` and the slot drops it. A driv
 
 Every error a connection raises is an adorm [exception](/ref/exceptions); `asyncio.CancelledError` passes
 through. `DriverConnection.map_error()` converts the target's exceptions, by default with
-[`wrap_driver_error`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): SQLSTATE first, then the PEP 249
-class name. A driver overrides it for errors the target reports without a SQLSTATE that adorm classifies
+[`wrap_driver_error`](/ref/exceptions#adorm-exceptions-wrap-driver-error-exc-details-none): SQLSTATE first, then the PEP
+249 class name. A driver overrides it for errors the target reports without a SQLSTATE that adorm classifies
 differently. A driver whose target reports a cancelled statement without SQLSTATE `57014` overrides
 `DriverConnection.is_cancellation()`.
 

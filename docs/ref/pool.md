@@ -150,8 +150,8 @@ router = Router(profiles=adorm.settings.profiles)
 
 When the driver's connections for a profile share one database session
 ([`Driver.transaction_turns()`](/ref/drivers#async-transaction-turns-profile) returns
-[`TransactionTurns`](#adorm-executor-turns-transactionturns-name-advice), as inside Django's `TestCase`), `slot()` takes the
-exclusive turn and `run()` a shared one before the acquisition, within its timeout. A flow inside a transaction that
+[`TransactionTurns`](#adorm-executor-turns-transactionturns-name-advice), as inside Django's `TestCase`), `slot()` takes
+the exclusive turn and `run()` a shared one before the acquisition, within its timeout. A flow inside a transaction that
 holds the turn takes none. The lease holds the turn until the slot has been returned or has left the pool.
 `acquire()` takes no turn.
 
@@ -255,8 +255,8 @@ also after an error or a cancellation.
 
 - An operation the pool's driver does not support for the profile (`capabilities`), and a database connection option in effect
   ([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)) that it does not declare,
-  raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none)) before a slot is
-  acquired.
+  raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none))
+  before a slot is acquired.
 - The operation's request carries the database options in effect; the slot sets them before it executes the
   operation.
 - On a shared database session it first takes a shared turn: it waits while a transaction it is not inside holds

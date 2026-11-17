@@ -223,8 +223,8 @@ A `null=True` field is `<type> | None`. The default follows Django's:
 | automatic primary key, parent link, `auto_now`, `auto_now_add`, `db_default`, `GeneratedField`, `_order`, any other callable default (`timezone.now`) | `<type> \| None = None` |
 
 The last row covers values the database or Django fills in when the row is stored. The field is optional and `None`
-until then; [`save()`](/ref/models#save-update-fields-none-force-insert-false-force-update-false) leaves a field it was not given
-to the target.
+until then; [`save()`](/ref/models#save-update-fields-none-force-insert-false-force-update-false) leaves a field it was
+not given to the target.
 
 ### Relations
 

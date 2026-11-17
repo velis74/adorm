@@ -157,11 +157,12 @@ prefetched rows for `async for`, `count()` and `exists()`.
 
 ### Generic foreign keys
 
-A [`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true) points at a
-row of any model: the content type field (a foreign key to Django's `ContentType`) names the model, the object id
-field holds the row's primary key. `adorm generate` writes one for every Django `GenericForeignKey`. Awaiting it loads
-the row of the registered adorm model for the content type; the object is cached while both fields keep their values.
-A missing row gives `None`, as in Django.
+A
+[`GenericForeignKey`](/ref/models#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true)
+points at a row of any model: the content type field (a foreign key to Django's `ContentType`) names the model, the
+object id field holds the row's primary key. `adorm generate` writes one for every Django `GenericForeignKey`. Awaiting
+it loads the row of the registered adorm model for the content type; the object is cached while both fields keep their
+values. A missing row gives `None`, as in Django.
 
 ```python
 class InvoiceLine(Model):
@@ -185,8 +186,9 @@ line = await InvoiceLine.objects.create(invoice_id=1, item=membership, descripti
 Assigning an instance sets the object id at once. The next `save()`, `full_clean()`, `create()` or `bulk_create()`
 reads the content type id through [`adorm.content_types`](/ref/models#adorm-contenttypes) on the session that writes,
 from the cache when it is there. Until then `content_type_id` holds the id cached for the instance's session; when
-none is cached it is unset, reading it raises `AttributeError` and `model_dump()` leaves it out. `get_or_create()` and `update_or_create()` take an instance in `defaults` too. Details are in the
-[reference](/ref/models#generic-assignment). Query paths do not traverse a generic foreign key.
+none is cached it is unset, reading it raises `AttributeError` and `model_dump()` leaves it out. `get_or_create()` and
+`update_or_create()` take an instance in `defaults` too. Details are in the [reference](/ref/models#generic-assignment).
+Query paths do not traverse a generic foreign key.
 
 ### Content types
 
@@ -244,7 +246,8 @@ await member.save(update_fields=["active"])  # updates one column
 ```
 
 `save()` builds a [`Save`](/ref/operations) operation and runs it on the instance's executor: the session of the query
-set that loaded the instance, or else the [current session](/topics/sessions#the-current-session). See the [Model API](/ref/models) for every option and error.
+set that loaded the instance, or else the [current session](/topics/sessions#the-current-session). See the [Model
+API](/ref/models) for every option and error.
 
 ### Creating many instances
 

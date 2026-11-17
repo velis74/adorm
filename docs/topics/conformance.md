@@ -34,7 +34,6 @@ names its operations report. `expected` is the result:
 async def exclude_keeps_rows_whose_column_is_null():
     return await names(Competition.objects.exclude(entry_deadline__lt=datetime.date(2026, 4, 1)))
 
-
 @case("select", "lookup.exact", "path.nested", expected=["Igor", "Jana", "Klemen"])
 async def lookups_across_relations():
     return await first_names(Member.objects.filter(memberships__club__slug="koper-sailing"))
@@ -73,11 +72,12 @@ many-to-many relations, multi-table inheritance, generic relations, JSON keys, s
 and aggregate, `select_for_update()` with its options, set operations (`union()` with and without `all`, `intersection()`,
 `difference()`, combinations left with a single query after empty ones), `prefetch_related()` (reverse, forward and many-to-many
 relations, a `Prefetch` query set into `to_attr`, across a generic foreign key), generic foreign key objects,
-content type lookups and generic foreign key assignment (also in `get_or_create()` and `update_or_create()` defaults), `in_bulk()`, `full_clean()`, and the writes (`create`, `bulk_create` with generated primary keys, defaults, batches
-that insert every row or none, `ignore_conflicts` and `update_conflicts`, `update_fields` and `unique_fields` ignored
-without `update_conflicts`, `create_from_parent`, `save` also with
-arithmetic, `update`, `delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught
-inside a transaction that then commits, `get_or_create`, `update_or_create`).
+content type lookups and generic foreign key assignment (also in `get_or_create()` and `update_or_create()` defaults),
+`in_bulk()`, `full_clean()`, and the writes (`create`, `bulk_create` with generated primary keys, defaults, batches that
+insert every row or none, `ignore_conflicts` and `update_conflicts`, `update_fields` and `unique_fields` ignored without
+`update_conflicts`, `create_from_parent`, `save` also with arithmetic, `update`, `delete` of a query set and of an
+instance, a delete refused with `ProtectedError`, also caught inside a transaction that then commits, `get_or_create`,
+`update_or_create`).
 
 Coverage tests fail when:
 
@@ -143,8 +143,6 @@ After the data is seeded, the tests:
 - override `create()`, `update()` and `bulk_create()` of `Tag`'s base manager's query set;
 - replace the `on_delete` handler of `Activity.coach` with a custom one;
 - connect signal receivers.
-
-
 
 | Test | What holds |
 |---|---|
@@ -240,10 +238,10 @@ that wait until an operation is in the database:
 
 ## Running it
 
-```console
-$ ADORM_TEST_DATABASE_URL=postgres://adorm@127.0.0.1:5432/adorm_test uv run pytest tests/conformance
-$ uv run pytest tests/conformance -k memory               # one driver
-$ uv run pytest tests/conformance -k exclude_keeps_rows   # one case on every driver
+```bash
+ADORM_TEST_DATABASE_URL=postgres://adorm@127.0.0.1:5432/adorm_test uv run pytest tests/conformance
+uv run pytest tests/conformance -k memory               # one driver
+uv run pytest tests/conformance -k exclude_keeps_rows   # one case on every driver
 ```
 
 A driver that is not installed is skipped with the reason. [Writing a driver](/howto/writing-a-driver#_7-run-the-conformance-suite)

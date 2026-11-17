@@ -384,8 +384,8 @@ async for line in lines:
 ```
 
 A prefetch is a sequence of `Select` operations that run one after another on the query set's session. Inside a
-transaction they use its slot and read its writes; outside one, each operation takes and returns a slot. A relation with more keys than
-[`BATCH_SIZE`](/ref/queryset#adorm-models-prefetch-batch-size) is read with one operation per batch.
+transaction they use its slot and read its writes; outside one, each operation takes and returns a slot. A relation with
+more keys than [`BATCH_SIZE`](/ref/queryset#adorm-models-prefetch-batch-size) is read with one operation per batch.
 [`prefetch_related_objects()`](/ref/queryset#adorm-prefetch-related-objects-instances-lookups-executor-none) prefetches
 for instances read earlier.
 

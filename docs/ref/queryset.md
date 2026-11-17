@@ -1,5 +1,7 @@
 # QuerySet API
 
+## QuerySet
+
 ### `adorm.QuerySet`
 
 `QuerySet(model, executor, query=None)`: the rows of `query` on `model` (a model class), run by `executor` (an
@@ -349,8 +351,8 @@ await Membership.objects.filter(active=True).aggregate(
 )
 ```
 
-Over a sliced, distinct (without fields) or grouped query set, or one whose annotations aggregate, the expressions aggregate the
-query set's rows:
+Over a sliced, distinct (without fields) or grouped query set, or one whose annotations aggregate, the expressions
+aggregate the query set's rows:
 
 ```python
 await Membership.objects.order_by("-fee")[:3].aggregate(Sum("fee"))          # the three highest fees

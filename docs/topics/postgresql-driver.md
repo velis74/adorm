@@ -40,7 +40,6 @@ adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDr
 
 from myapp.adorm_models import Activity, Member
 
-
 async def coaches(club_slug: str) -> list[Member]:
     activities = Activity.objects.filter(club__slug=club_slug, coach__isnull=False)
     return [member async for member in Member.objects.filter(pk__in=activities.values("coach")).order_by("last_name")]
@@ -120,11 +119,9 @@ import ssl
 
 import asyncpg
 
-
 async def connect(profile):
     context = ssl.create_default_context(cafile=CA_FILE)
     return await asyncpg.connect(DSN, ssl=context, statement_cache_size=0)     # behind a transaction-mode pooler
-
 
 adorm.configure(profiles={"default": {"driver": "adorm.drivers.asyncpg.AsyncpgDriver", "connect": connect}})
 ```
@@ -140,7 +137,6 @@ the lease ends. See [Multiple database users](/howto/multiple-database-users).
 async def on_acquire(connection, profile, session):
     return {"role": await role_of(current_user.get())}
 ```
-
 
 ## What a read runs
 

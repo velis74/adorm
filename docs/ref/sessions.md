@@ -51,9 +51,9 @@ reports.Member               # <BoundModel club.Member on Session('reports', 'ni
 
 #### `bind(model, manager="objects")`
 
-The [manager](./models#adorm-manager-orm-name-none-method-manager-none) `manager` of `model` (a model class or the label of a registered
-model) bound to this session, as a `BoundModel`. A label that is not registered raises `LookupError`; an abstract
-model and a `model` that is not a model class raise `TypeError`; a model without that manager raises
+The [manager](./models#adorm-manager-orm-name-none-method-manager-none) `manager` of `model` (a model class or the label
+of a registered model) bound to this session, as a `BoundModel`. A label that is not registered raises `LookupError`; an
+abstract model and a `model` that is not a model class raise `TypeError`; a model without that manager raises
 `AttributeError`.
 
 ```python
@@ -159,10 +159,11 @@ A model class bound to a session: what [`Model.objects`](./models#objects), anot
 
 The query methods of [`QuerySet`](./queryset) are also methods of the bound model, applied to `all()`: `filter`,
 `exclude`, `annotate`, `alias`, `order_by`, `values`, `values_list`, `only`, `defer`, `select_related`,
-`prefetch_related`, `distinct`, `none`, `select_for_update`, `union`, `intersection`, `difference`, and the coroutines `get`, `first`, `last`, `count`, `exists`,
-`in_bulk`, `aggregate`, `create`, `bulk_create`, `create_from_parent`, `get_or_create`, `update_or_create`, `update` and `delete`. `async for` iterates over every row. A public method of `queryset_class` that `QuerySet`
-does not define is a method of the bound model too, applied to `get_queryset()`, unless it is a driver method
-declared `queryset_only` or a function with a true `queryset_only` attribute.
+`prefetch_related`, `distinct`, `none`, `select_for_update`, `union`, `intersection`, `difference`, and the coroutines
+`get`, `first`, `last`, `count`, `exists`, `in_bulk`, `aggregate`, `create`, `bulk_create`, `create_from_parent`,
+`get_or_create`, `update_or_create`, `update` and `delete`. `async for` iterates over every row. A public method of
+`queryset_class` that `QuerySet` does not define is a method of the bound model too, applied to `get_queryset()`, unless
+it is a driver method declared `queryset_only` or a function with a true `queryset_only` attribute.
 
 ```python
 members = Member.objects
@@ -197,8 +198,8 @@ class Direct:
 The protocol of a `Runner` that also holds a slot for a transaction: `runner.slot(session)` returns an async context
 manager that acquires a slot for `session` on entry, raising `SessionTimeout` or `DeadlockError`, yields its
 [`SlotLease`](/ref/pool#adorm-executor-slotlease) and releases it on exit.
-[`Router`](/ref/pool#adorm-executor-router-pools-profiles-none) is one. [`atomic()`](/ref/transactions#adorm-atomic) needs one as
-the runner.
+[`Router`](/ref/pool#adorm-executor-router-pools-profiles-none) is one. [`atomic()`](/ref/transactions#adorm-atomic)
+needs one as the runner.
 
 ```python
 assert isinstance(router, TransactionRunner)

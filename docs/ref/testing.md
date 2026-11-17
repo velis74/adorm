@@ -125,8 +125,8 @@ while `current()` is false; a pool that outlives a `TestCase` test opens new con
 
 ### `adorm.testing.django.find_test_database(alias)`
 
-A coroutine: the [`TestDatabase`](#adorm-testing-django-testdatabase) of `alias`; `None` outside Django's test environment and for an alias
-without a `DATABASES` entry. The wrapper is that of the thread that runs the test:
+A coroutine: the [`TestDatabase`](#adorm-testing-django-testdatabase) of `alias`; `None` outside Django's test
+environment and for an alias without a `DATABASES` entry. The wrapper is that of the thread that runs the test:
 
 - under Django's async test methods (asgiref's `async_to_sync()`) the thread that waits for the event loop, reached
   with `sync_to_async(thread_sensitive=True)`;
@@ -169,8 +169,8 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 
 ### `adorm.testing.django.shared_test_connection(test)`
 
-The [`SharedTestConnection`](#adorm-testing-django-sharedtestconnection-test) of `test.wrapper` for the current test: the same
-object while the wrapper's `TestCase` atomic blocks are those of `test`, a new one for the next test.
+The [`SharedTestConnection`](#adorm-testing-django-sharedtestconnection-test) of `test.wrapper` for the current test:
+the same object while the wrapper's `TestCase` atomic blocks are those of `test`, a new one for the next test.
 
 ### `adorm.testing.django.shared_transaction_turns(alias)`
 

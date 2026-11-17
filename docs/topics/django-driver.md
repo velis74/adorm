@@ -59,8 +59,8 @@ A connection is `django.db.connections[profile.alias]` on the slot's thread: Dja
   that pool; closing the slot ends it on the server.
 - The profile's `params` replace keys of the `DATABASES` entry for that profile's connections. The shared `DATABASES`
   entry is unchanged. On PostgreSQL, `OPTIONS["assume_role"]` starts the profile's `role`
-  [connection option](/topics/options). On a `direct` driver the event loop thread's wrapper gets its own settings back when the slot
-  closes.
+  [connection option](/topics/options). On a `direct` driver the event loop thread's wrapper gets its own settings back
+  when the slot closes.
 - The `connect` hook, when set, returns the DB-API connection (on PostgreSQL a psycopg connection, on SQLite a
   `sqlite3` connection) the wrapper uses instead of
   opening one. Django configures it as its own (`OPTIONS["isolation_level"]`, time zone, `assume_role`). A psycopg 3
@@ -224,7 +224,7 @@ The driver translates an adorm [`Query`](/ref/query) into a Django query set
 | the model label | `apps.get_model(label)`, auto-created many-to-many through models included (`"library.Book_authors"`) |
 | no manager / `Query.manager` | `Model._base_manager` / the Django manager of that name, so its `get_queryset()` applies |
 | each `filter()` / `exclude()` call | one Django `filter()` call with a Django `Q`; `exclude()` is a negated `Q`, with Django's NULL handling |
-| `Q`, `&`, `|`, `~` on conditions | Django `Q`, `&`, `|`, `~` |
+| `Q`, `&`, `\|`, `~` on conditions | Django `Q`, `&`, `\|`, `~` |
 | `qs1 & qs2`, `qs1 \| qs2` | the filters of both / one filter with both queries' conditions joined with OR |
 | lookups (`exact` … `iregex`, `overlap`) | the lookup of the same name on the field, so `contains` on an `ArrayField` or `JSONField` is Django's containment and `overlap` is the `ArrayField` lookup; a lookup that a `JSONField` or `HStoreField` does not have (`overlap`) raises `FieldError` on the field, on a key inside it and on an annotation that refers to the field (`annotate(e=F("extra"))`), where Django would read the name as a key |
 | the values of `overlap` (`disciplines__overlap=["Lead", "Dinghy"]`) | a list, also when empty |
@@ -427,8 +427,9 @@ block raises `TransactionManagementError`.
 
 A commit the database refuses raises its error and rolls the transaction back. Example: a deferred foreign key
 (Django creates foreign keys on PostgreSQL and SQLite as deferred, checked at `COMMIT`) raises `IntegrityError`, on
-PostgreSQL with SQLSTATE `23503`, on SQLite with the detail `FOREIGN KEY constraint failed` and no table. A transaction that failed on the driver side without the core seeing the error (Django marked it for
-rollback, or PostgreSQL aborted it) is rolled back by `commit()`, which raises `TransactionManagementError`.
+PostgreSQL with SQLSTATE `23503`, on SQLite with the detail `FOREIGN KEY constraint failed` and no table. A transaction
+that failed on the driver side without the core seeing the error (Django marked it for rollback, or PostgreSQL aborted
+it) is rolled back by `commit()`, which raises `TransactionManagementError`.
 
 ### Row locks
 
@@ -447,9 +448,9 @@ async with adorm.atomic():
     free = [job async for job in Job.objects.select_for_update(skip_locked=True).filter(state="new")[:10]]
 ```
 
-`nowait` on a locked row raises `OperationalError`, on PostgreSQL with SQLSTATE `55P03`. Django's `update_or_create()` locks the row
-it updates the same way. `get_or_create()` retries its read after a concurrent insert of the same unique key, so two
-flows creating the same row create it once.
+`nowait` on a locked row raises `OperationalError`, on PostgreSQL with SQLSTATE `55P03`. Django's `update_or_create()`
+locks the row it updates the same way. `get_or_create()` retries its read after a concurrent insert of the same unique
+key, so two flows creating the same row create it once.
 
 ### Django's `on_commit()` callbacks
 
@@ -620,8 +621,8 @@ task.cancel()          # the database stops the statement
 
 A cancelled write inside a transaction, such as one waiting for a row lock, rolls the transaction back, including the
 writes before it; the slot returns to the pool. Inside a nested `adorm.atomic()` only that savepoint is rolled back
-and the enclosing block continues, except on SQLite, which rolls back the whole transaction ([SQLite](#sqlite)). A write outside a transaction that completes just before the cancellation arrives
-stays written.
+and the enclosing block continues, except on SQLite, which rolls back the whole transaction ([SQLite](#sqlite)). A write
+outside a transaction that completes just before the cancellation arrives stays written.
 
 ## In Django's tests
 
@@ -651,9 +652,9 @@ class MemberTests(TestCase):
   request. Django's signals and `on_commit()` callbacks produce no event.
 - The driver consumes no events.
 
-On PostgreSQL with psycopg 3 each connection emits three [backend events](/topics/events#backend-events) from handlers it adds to
-the psycopg connection. A connection that does not listen detects that the server ended it only when its next call
-fails:
+On PostgreSQL with psycopg 3 each connection emits three [backend events](/topics/events#backend-events) from handlers
+it adds to the psycopg connection. A connection that does not listen detects that the server ended it only when its next
+call fails:
 
 | Event | Source | When |
 |---|---|---|

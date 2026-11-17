@@ -126,7 +126,8 @@ A class method: `value` when it is a profile named `name` (`ValueError` for anot
 
 ### `adorm.PoolSettings`
 
-`PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0, purge_stale_connections_at=300.0, check_schema=False)`
+`PoolSettings(max_connections=0, acquire_timeout=30.0, commit_timeout=60.0, release_timeout=30.0,
+purge_stale_connections_at=300.0, check_schema=False)`
 
 The settings of a profile's pool, frozen; their meaning is under [`Pool`](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false).
 
@@ -352,8 +353,8 @@ configure_from_settings()
 ### `adorm.contrib.django.ensure_configured()`
 
 Calls [`configure_from_settings()`](#adorm-contrib-django-configure-from-settings) unless the app
-`adorm.contrib.django` is installed (its `ready()` configures adorm on `django.setup()`). Requires a set-up Django. [`adorm check-schema`](/ref/checks#adorm-check-schema)
-calls it.
+`adorm.contrib.django` is installed (its `ready()` configures adorm on `django.setup()`). Requires a set-up Django.
+[`adorm check-schema`](/ref/checks#adorm-check-schema) calls it.
 
 ```python
 django.setup()

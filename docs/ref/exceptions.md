@@ -301,8 +301,8 @@ references, before any statement runs.
 A delete was refused: `on_delete=PROTECT` references point at the objects being deleted. `protected_objects` holds
 the referencing objects. A driver raises it with [`ModelRow`](./operations#adorm-operations-modelrow-model-row)
 values; `QuerySet.delete()` and `Model.delete()` turn them into instances of the registered models, and a row of a
-model that is not registered stays a `ModelRow`. Without a SQLSTATE it leaves an open transaction usable: the references are checked before any statement changes
-data.
+model that is not registered stays a `ModelRow`. Without a SQLSTATE it leaves an open transaction usable: the references
+are checked before any statement changes data.
 
 ```python
 try:
@@ -342,8 +342,8 @@ the driver reports the error without them.
 Raised by [`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) and
 [`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) before any
 operation runs, by every driver for a path it cannot resolve while building the statement, and by
-[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) in place of `NotSupportedError` for an operation
-that also uses a construct the driver lacks. A `FieldError` without a SQLSTATE does not affect the
+[`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none) in place of `NotSupportedError`
+for an operation that also uses a construct the driver lacks. A `FieldError` without a SQLSTATE does not affect the
 [transaction](/topics/transactions#a-failed-operation) it is raised in.
 
 ```python
@@ -409,8 +409,11 @@ except adorm.SchemaMismatchError as exc:
 A [`ProgrammingError`](#adorm-programmingerror) that
 [`check_schema(raise_on_problems=True)`](/ref/checks#adorm-check-schema-models-none-session-none-raise-on-problems-false)
 raises when it finds problems, and every acquisition of a pool whose
-[start-up check](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false) with `check_schema="raise"` found problems. `problems` is the tuple of [`SchemaProblem`](/ref/checks#adorm-schemaproblem) values;
-the default message names their number and lists one per line.
+[start-up
+check](/ref/pool#adorm-executor-pool-driver-profile-max-connections-0-acquire-timeout-30-0-commit-timeout-60-0-release-timeout-30-0-purge-stale-connections-at-300-0-check-schema-false)
+with `check_schema="raise"` found problems. `problems` is the tuple of
+[`SchemaProblem`](/ref/checks#adorm-schemaproblem) values; the default message names their number and lists one per
+line.
 
 ```python
 try:
