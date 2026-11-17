@@ -432,6 +432,7 @@ class Router:
         self._resolving: dict[str, asyncio.Future[Pool]] = {}
         self._from_profiles: set[Pool] = set()
         self._retiring: set[asyncio.Task] = set()
+        self.closed = False
         for pool in pools:
             self.add(pool)
         if profiles is not None:
@@ -463,7 +464,10 @@ class Router:
 
     async def get_pool(self, using: str) -> Pool:
         """The pool of the profile ``using``, created from ``profiles`` when no pool serves it. Raises
-        `InterfaceError` when there is no such pool or profile, and the error of creating the profile's driver."""
+        `InterfaceError` when the router is closed or there is no such pool or profile, and the error of creating the
+        profile's driver."""
+        if self.closed:
+            raise InterfaceError("the router is closed")
         pool = self._pools.get(using)
         if pool is not None:
             return pool
@@ -505,6 +509,8 @@ class Router:
     async def _create_pool(self, using: str) -> Pool:
         registry = cast("ProfileRegistry", self.profiles)
         profile: ConnectionProfile = await registry.resolve(using)
+        if self.closed:
+            raise InterfaceError("the router is closed")
         settings = registry.pool if profile.pool is None else profile.pool
         pool = Pool(profile.get_driver(), profile, **settings.as_kwargs())
         existing = self._pools.get(using)
@@ -572,8 +578,8 @@ class Router:
         the pool's ``acquire_timeout`` unless the session or a `connection_options()` block sets one). The lease's
         ``commit_timeout`` is the ``commit_timeout`` option in effect. Raises `NotSupportedError` before waiting for a
         database option in effect that the driver does not declare, `SessionTimeout` or `DeadlockError`,
-        `InterfaceError` when the pool is closed, and the driver's error when opening a connection fails for another
-        reason than a refusal.
+        `InterfaceError` when the pool or the router is closed, and the driver's error when opening a connection fails
+        for another reason than a refusal.
         """
         pool = await self.get_pool(session.using)
         return await self._acquire(pool, session, timeout, resolve_options(session, pool))
@@ -956,5 +962,7 @@ class Router:
         return result
 
     async def close(self) -> None:
-        """Close every pool, those retired after a profile change included."""
+        """Close every pool, those retired after a profile change included, and refuse further acquisitions with
+        `InterfaceError`, also those still resolving their profile."""
+        self.closed = True
         await asyncio.gather(*(pool.close() for pool in self._pools.values()), *self._retiring)

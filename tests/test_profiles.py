@@ -968,6 +968,45 @@ async def test_router_close_waits_for_retired_pools():
     await asyncio.wait_for(closing, GUARD)
 
 
+async def test_a_closed_profile_router_refuses_operations_and_opens_nothing():
+    driver = FakeDriver()
+    router, _ = routed(profile(driver=driver))
+    await router.close()
+    with pytest.raises(InterfaceError, match="closed"):
+        await router.run(session(), Op())
+    with pytest.raises(InterfaceError, match="closed"):
+        await router.acquire(session())
+    assert all(pool.closed for pool in router.pools)
+    assert driver.connections == []
+    await router.close()
+
+
+async def test_an_operation_resolving_its_profile_when_the_router_closes_fails_and_opens_nothing():
+    registry = ProfileRegistry(pool={"acquire_timeout": LONG})
+    driver = FakeDriver()
+    gate, calls = asyncio.Event(), []
+
+    async def provider(name):
+        calls.append(name)
+        await gate.wait()
+        return profile(name, driver=driver)
+
+    registry.add_provider(provider)
+    router = Router(profiles=registry)
+    operation = asyncio.create_task(router.run(session(using="late"), Op()))
+    await until(lambda: calls)
+    await asyncio.wait_for(router.close(), GUARD)
+    gate.set()
+    with pytest.raises(InterfaceError, match="closed"):
+        await asyncio.wait_for(operation, GUARD)
+    assert all(pool.closed for pool in router.pools)
+    assert all(connection.closed for connection in driver.connections)
+    with pytest.raises(InterfaceError, match="closed"):
+        await router.run(session(using="late"), Op())
+    await router.close()
+    assert all(connection.closed for connection in driver.connections)
+
+
 # The default router of the settings
 
 

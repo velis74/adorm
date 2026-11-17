@@ -260,10 +260,11 @@ any task may release that lease.
 
 ## Closing
 
-`await router.close()` closes every pool: idle slots close at once, waiting requests raise `InterfaceError`, and a
-held slot closes when its lease is released. A slot still opening is closed once open, and its request raises
-`InterfaceError`. `close()` returns once the idle slots, the slots being discarded and the released slots whose
-connections are still settling (within `release_timeout`) are closed.
+`await router.close()` closes every pool and refuses further requests with `InterfaceError`, also those still resolving
+their profile: idle slots close at once, waiting requests raise `InterfaceError`, and a held slot closes when its lease
+is released. A slot still opening is closed once open, and its request raises `InterfaceError`. `close()` returns once
+the idle slots, the slots being discarded and the released slots whose connections are still settling (within
+`release_timeout`) are closed.
 
 ## Events
 

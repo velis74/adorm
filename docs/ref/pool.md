@@ -158,6 +158,7 @@ holds the turn takes none. The lease holds the turn until the slot has been retu
 | Member | Meaning |
 |---|---|
 | `profiles` | the registry, `None` without one |
+| `closed` | whether `close()` was called |
 
 #### `add(pool)`
 
@@ -171,9 +172,9 @@ profiles is not routed.
 
 #### `async get_pool(using)`
 
-The pool of the profile `using`, created from `profiles` when the router has none. Raises `InterfaceError` when there
-is neither a pool nor a profile, a provider's error, and the error of creating the profile's driver
-([`get_driver()`](/ref/settings#get-driver)).
+The pool of the profile `using`, created from `profiles` when the router has none. Raises `InterfaceError` when the
+router is closed (also when it closes while a provider resolves the profile) or there is neither a pool nor a profile,
+a provider's error, and the error of creating the profile's driver ([`get_driver()`](/ref/settings#get-driver)).
 
 #### `async remove(using)`
 
@@ -205,7 +206,7 @@ After a hook that ran custom SQL every option the slot remembers counts as unkno
 | no slot within `timeout`, while the flow holds a slot | [`DeadlockError`](/ref/exceptions) with `held_sessions` |
 | every slot of the pool is held, through `slot()` or `run()`, by tasks that wait for slots that cannot become free | `DeadlockError` at once, with `session`, `timeout` and `held_sessions` |
 | the database refuses a connection, the pool has other slots and `timeout` passes | `SessionTimeout` or `DeadlockError` |
-| the pool is closed, or no pool or profile serves `session.using` | `InterfaceError` |
+| the pool or the router is closed, or no pool or profile serves `session.using` | `InterfaceError` |
 | opening a connection fails other than by a refusal | the driver's error |
 | `on_acquire` raises | its error, mapped by the connection; the slot leaves the pool |
 | `on_acquire` returns neither `None` nor a mapping, or a mapping `check_hook_options()` refuses | `TypeError` or `ValueError`; the slot leaves the pool |
@@ -280,7 +281,9 @@ rows = await router.run(create_session("reports", "nightly"), operation)
 
 #### `async close()`
 
-Closes every pool, including those retired after a profile change.
+Closes every pool, including those retired after a profile change, and refuses further acquisitions with
+`InterfaceError`. An acquisition still resolving its profile when the router closes raises `InterfaceError` and creates
+no pool. A second call does nothing.
 
 ## Held slots
 
