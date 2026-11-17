@@ -534,7 +534,8 @@ queued and later requests fail with `InterfaceError` and the slot is unusable.
 
 The slot delivers to its lease's channel exactly one outcome per request: `ResultEvent`, `ErrorEvent`, or
 `CancelledEvent` for a request cancelled before it finished (`started=False` when it was still queued or was cancelled
-before the slot handed it to the connection, as while its connection options were set).
+before the slot handed it to the connection, as while its connection options were set outside a transaction; inside a
+transaction a cancelled `SET LOCAL` gives `started=True`).
 Before the outcome of a successful `commit` it delivers `CallbackEvent("on_commit")`, before that of a successful
 `rollback` `CallbackEvent("on_rollback")`. Events the connection emits go to the lease's channel, or to the pool's
 `events` bus while no lease holds the slot. The slot accepts only `CallbackEvent` and `BackendEvent` from the

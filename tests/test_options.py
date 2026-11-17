@@ -516,6 +516,38 @@ async def test_cancelling_while_options_are_set_sends_them_again(setup, attempt)
 
 
 @pytest.mark.parametrize("attempt", REPEAT)
+async def test_cancelling_while_set_local_runs_rolls_the_transaction_back(setup, attempt):  # noqa: ARG001
+    """A cancelled ``SET LOCAL`` may have aborted the database transaction: the operation's outcome is `UNKNOWN`, and
+    the block refuses further operations and rolls back."""
+    pool, driver = setup.pool(max_connections=1)
+    session = unique_session()
+    op = Op("never")
+    with pytest.raises(TransactionManagementError):  # noqa: PT012 - the block's exit raises
+        async with session.atomic():
+            await session.execute(Op())
+            connection = driver.connections[0]
+            connection.gates["set_options"] = asyncio.Event()
+
+            async def run():
+                with adorm.connection_options(statement_timeout=5):
+                    return await session.execute(op)
+
+            task = asyncio.create_task(run())
+            await connection.entered.setdefault("set_options", asyncio.Event()).wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await task
+            del connection.gates["set_options"]
+            with pytest.raises(TransactionManagementError):
+                await session.execute(Op())
+    assert cancellation_outcome(raised.value) is CancellationOutcome.UNKNOWN
+    assert not op.started.is_set()
+    assert connection.calls[-1] == ("rollback", None)
+    assert ("commit", None) not in connection.calls
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+@pytest.mark.parametrize("attempt", REPEAT)
 async def test_a_transaction_begins_with_its_own_options_not_those_the_previous_lease_left(setup, attempt):  # noqa: ARG001
     _, driver = setup.pool(max_connections=1)
     first, second = unique_session(), unique_session()

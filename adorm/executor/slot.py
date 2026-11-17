@@ -743,8 +743,11 @@ class Slot:
         self, desired: Mapping[str, Any] | None, coroutine: Any, started: list[bool], running: RunningRequest
     ) -> Any:
         """Set ``desired`` (`_set_options()`) unless it is ``None``, then await ``coroutine``, the request's call;
-        ``started[0]`` becomes true and ``running`` is reported once the call starts."""
+        ``started[0]`` becomes true and ``running`` is reported once the call starts. Inside a transaction
+        ``started[0]`` becomes true before options are set: a cancelled ``SET LOCAL`` may abort the transaction."""
         if desired is not None:
+            if self._in_transaction and self._option_changes(desired):
+                started[0] = True
             await self._set_options(desired)
         started[0] = True
         connection = self.connection
