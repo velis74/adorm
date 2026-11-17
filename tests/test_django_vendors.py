@@ -3,6 +3,8 @@ a slot is taken; errors of SQLite, MySQL and Oracle mapped without SQLSTATEs; th
 
 import sqlite3
 
+from types import SimpleNamespace
+
 import pytest
 
 from django.db.utils import IntegrityError as DjangoIntegrityError, OperationalError as DjangoOperationalError
@@ -465,3 +467,25 @@ def test_a_backend_without_a_vendor_of_its_own_follows_postgresqls_connection_ru
     assert other.integrity_details(IntegrityError("duplicate")) == {}
     assert other.backend_pid(object()) is None
     assert isinstance(vendor("sqlite"), SQLite)
+
+
+class _Database:
+    """A DB-API module of a backend: its ``OperationalError`` takes MySQL's ``(errno, message)`` as well."""
+
+    class OperationalError(Exception):
+        pass
+
+
+@pytest.mark.parametrize("name", ["postgresql", "sqlite", "mysql", "oracle", "cockroachdb"])
+def test_the_error_of_a_cancelled_calls_statement_is_its_vendors_cancellation(name):
+    """`cancelled_error()` raised under Django's ``wrap_database_errors`` and mapped is a cancellation; a lock error or
+    a deadlock is not."""
+    current = vendor(name)
+    db = SimpleNamespace(Database=_Database)
+    error = current.cancelled_error(db)
+    wrapped = DjangoOperationalError(*error.args)
+    wrapped.__cause__ = error
+    assert current.is_cancellation(map_django_error(wrapped, current))
+    other = DjangoOperationalError("deadlock detected")
+    other.__cause__ = _Database.OperationalError("deadlock detected")
+    assert not current.is_cancellation(map_django_error(other, current))

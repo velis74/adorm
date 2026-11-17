@@ -53,7 +53,6 @@ from adorm.drivers.django.vendors import (
     PostgreSQL,
     PSYCOPG2_CAPABILITIES,
     READ_CAPABILITIES,
-    sqlite_interrupted,
     TRANSACTION_ENDED,
     Vendor,
     vendor as vendor_named,
@@ -463,10 +462,10 @@ class DjangoConnection(ThreadedConnection):
         return execute(sql, params, many, context)
 
     def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
-        if self._cancelled() and not str(sql).lstrip().upper().startswith("ROLLBACK"):
-            # SQLite: interrupt() reaches a running statement only, the progress handler a long one only.
+        if self._cancelled() and not str(sql).lstrip().upper().startswith(_AFTER_CANCELLATION):
+            # A cancellation between two statements reaches neither: the server session is idle meanwhile.
             with self.db.wrap_database_errors:
-                raise sqlite_interrupted()
+                raise self.vendor.cancelled_error(self.db)
         if not self.ran_custom_sql and _custom_sql_call(sys._getframe(1), self._trusted, _ENTRIES):
             self.mark_custom_sql()
         return execute(sql, params, many, context)
@@ -525,8 +524,9 @@ class DjangoConnection(ThreadedConnection):
             atomic.__enter__()
 
     def _cancelled(self) -> bool:
-        """Whether the running call is cancelled (``cancel_sync()``): SQLite's progress handler and the check before
-        each statement."""
+        """Whether the running call is cancelled (``cancel_sync()``): the check before each statement and SQLite's
+        progress handler. A statement of a cancelled call but ``ROLLBACK`` raises `Vendor.cancelled_error()` before it
+        runs."""
         call = self._cancelled_call
         return call is not None and call is self._current
 
@@ -779,6 +779,7 @@ class DjangoConnection(ThreadedConnection):
         connection = getattr(db, "connection", None)
         if connection is None:
             return
+        self._cancelled_call = self._current
         self.vendor.cancel(self, connection)
 
     def close_sync(self) -> None:
@@ -817,6 +818,9 @@ class DjangoConnection(ThreadedConnection):
 _COMPOUND_REFUSAL = "not allowed in subqueries of compound statements"
 """The end of the message of Django's refusal of ``LIMIT``, ``OFFSET`` or ``ORDER BY`` in a query of a set operation,
 on a database without ``supports_slicing_ordering_in_compound`` (SQLite)."""
+
+_AFTER_CANCELLATION = ("ROLLBACK",)
+"""The statements a cancelled call still runs: those that end its transaction or savepoint."""
 
 _LOCKING_KINDS = frozenset(
     {

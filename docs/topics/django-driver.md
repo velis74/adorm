@@ -596,10 +596,14 @@ Cancelling the task that awaits an operation cancels the running statement from 
 | Database | The driver | The statement ends with |
 |---|---|---|
 | PostgreSQL | psycopg's `cancel_safe()` (`cancel()` on psycopg 2) | SQLSTATE `57014` |
-| SQLite | `interrupt()`; a statement the call starts after it, other than a `ROLLBACK`, raises before it runs; a wait for the write lock ends | `SQLITE_INTERRUPT`, or `LOCK_WAIT_CANCELLED` |
+| SQLite | `interrupt()`; a wait for the write lock ends | `SQLITE_INTERRUPT`, or `LOCK_WAIT_CANCELLED` |
 | MySQL, MariaDB | `KILL QUERY` on a connection opened for each cancellation (with the profile's `connect` hook when it has one, else with a 5-second connect timeout); a connection that cannot open, as at `max_connections`, loses the cancellation | error 1317 |
 | Oracle | the driver's `cancel()` | `ORA-01013` |
 | another backend | nothing: the call runs on, and after the driver's `cancel_grace` seconds the slot gives up its connection | |
+
+A statement that the cancelled call starts after the cancellation, other than a `ROLLBACK`, raises the database's
+cancellation error before it runs, on every database: a cancellation between two statements of one operation (the
+`SELECT` and the `INSERT` of `get_or_create()`, the batches of `bulk_create()`) stops the operation.
 
 - A statement the database cancelled: the `CancelledError` carries `CancellationOutcome.UNKNOWN`.
 - A statement that completed on the connection's thread before the cancellation reached the database: the task gets

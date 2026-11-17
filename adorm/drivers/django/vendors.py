@@ -34,6 +34,7 @@ from adorm.exceptions import Error, NotSupportedError, OperationalError
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CALL_CANCELLED",
     "CAPABILITIES",
     "LOCK_WAIT_CANCELLED",
     "MYSQL_CANCEL_CONNECT_TIMEOUT",
@@ -278,6 +279,10 @@ def _message(exc: BaseException) -> str:
     return str(last)
 
 
+CALL_CANCELLED = "canceling the statement: its call was cancelled"
+"""The message of `Vendor.cancelled_error()`."""
+
+
 class Vendor:
     """The Django driver's behaviour on databases of the vendor ``name``.
 
@@ -318,9 +323,15 @@ class Vendor:
         """The server's id of the session of the DB-API connection ``raw``; ``None`` here."""
         return None
 
-    def is_cancellation(self, exc: BaseException) -> bool:  # noqa: ARG002 - subclasses use it
-        """Whether ``exc``, a mapped adorm exception, is the error of a cancelled statement; ``False`` here."""
-        return False
+    def cancelled_error(self, db: Any) -> BaseException:
+        """The DB-API error a statement of a cancelled call raises before it runs, on Django's connection wrapper
+        ``db``; `is_cancellation()` recognises it. Here the backend's ``OperationalError`` `CALL_CANCELLED`."""
+        return db.Database.OperationalError(CALL_CANCELLED)
+
+    def is_cancellation(self, exc: BaseException) -> bool:
+        """Whether ``exc``, a mapped adorm exception, is the error of a cancelled statement: here the error of
+        `cancelled_error()`."""
+        return any(str(current) == CALL_CANCELLED for current in _chain(exc))
 
     def is_connection_lost(self, exc: BaseException) -> bool:
         """Whether ``exc``, a mapped adorm exception, leaves the connection unusable: `is_connection_error()` here."""
@@ -386,8 +397,15 @@ class PostgreSQL(Vendor):
         pid = getattr(info, "backend_pid", None) if info is not None else raw.get_backend_pid()
         return int(pid) if pid else None
 
+    def cancelled_error(self, db: Any) -> BaseException:
+        if _is_psycopg3():
+            from psycopg.errors import QueryCanceled
+
+            return QueryCanceled("canceling statement due to user request")
+        return super().cancelled_error(db)
+
     def is_cancellation(self, exc: BaseException) -> bool:
-        return getattr(exc, "sqlstate", None) == "57014"
+        return getattr(exc, "sqlstate", None) == "57014" or super().is_cancellation(exc)
 
     def integrity_details(self, exc: BaseException) -> dict[str, Any]:
         return postgresql_integrity_details(exc)
@@ -476,8 +494,7 @@ class SQLite(Vendor):
     every transaction with ``BEGIN IMMEDIATE`` (``OPTIONS["transaction_mode"]``, Django 5.1 and newer). A transaction
     and a write outside one take the write lock when they begin; `DjangoConnection` waits for it itself, for as long
     as the connection's busy timeout (``OPTIONS["timeout"]``, 5 seconds by default), and a cancellation ends the wait.
-    A running statement is cancelled with ``interrupt()``; a statement the cancelled call starts later, but a
-    ``ROLLBACK``, raises `sqlite_interrupted()` before it runs.
+    A running statement is cancelled with ``interrupt()``.
     """
 
     name = "sqlite"
@@ -511,6 +528,9 @@ class SQLite(Vendor):
     def cancel(self, connection: Any, raw: Any) -> None:
         connection._cancel_lock_wait()
         raw.interrupt()
+
+    def cancelled_error(self, db: Any) -> BaseException:  # noqa: ARG002 - the vendor contract
+        return sqlite_interrupted()
 
     def is_cancellation(self, exc: BaseException) -> bool:
         if isinstance(exc, OperationalError) and str(exc) == LOCK_WAIT_CANCELLED:
@@ -625,6 +645,9 @@ class MySQL(Vendor):
     def backend_pid(self, raw: Any) -> int | None:
         return int(raw.thread_id())
 
+    def cancelled_error(self, db: Any) -> BaseException:
+        return db.Database.OperationalError(_MYSQL_INTERRUPTED, "Query execution was interrupted")
+
     def is_cancellation(self, exc: BaseException) -> bool:
         return _errno(exc) == _MYSQL_INTERRUPTED
 
@@ -670,7 +693,7 @@ class Oracle(Vendor):
         raw.cancel()
 
     def is_cancellation(self, exc: BaseException) -> bool:
-        return _oracle_code(exc) == _ORACLE_CANCELLED
+        return _oracle_code(exc) == _ORACLE_CANCELLED or super().is_cancellation(exc)
 
     def is_connection_lost(self, exc: BaseException) -> bool:
         if isinstance(exc, OperationalError):

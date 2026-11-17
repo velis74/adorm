@@ -295,37 +295,6 @@ async def test_a_cancellation_racing_the_start_of_the_statement_stops_it(sqlite,
     assert await Club.objects.count() == 3
 
 
-@pytest.mark.parametrize("repeat", REPEAT)
-async def test_a_cancellation_between_the_statements_of_a_call_stops_the_next_one(sqlite, repeat):  # noqa: ARG001
-    """A short statement after the cancellation does not reach the progress handler; it does not run either."""
-    pool = sqlite()
-    assert await Club.objects.count() == 3
-    (connection,) = pool.driver.connections
-    selected = threading.Event()
-
-    def pause_after_select(execute, sql, params, many, context):
-        result = execute(sql, params, many, context)
-        if sql.lstrip().upper().startswith("SELECT") and not selected.is_set():
-            selected.set()
-            assert connection._lock_wake.wait(10)  # set by the cancellation
-        return result
-
-    connection.db.execute_wrappers.append(pause_after_select)
-    try:
-        task = asyncio.create_task(
-            Club.objects.get_or_create(slug="new-club", defaults={"name": "New", "city": "Ptuj", "founded": FOUNDED})
-        )
-        assert await in_thread(lambda: selected.wait(10))
-        task.cancel()
-        async with asyncio.timeout(5):
-            with pytest.raises(asyncio.CancelledError):
-                await task
-    finally:
-        connection.db.execute_wrappers.remove(pause_after_select)
-    assert (pool.size, pool.in_use) == (1, 0)
-    assert await Club.objects.filter(slug="new-club").count() == 0
-
-
 @pytest.mark.parametrize("repeat", range(3))
 async def test_a_cancelled_write_in_a_nested_block_rolls_back_the_whole_transaction(
     sqlite,

@@ -777,7 +777,7 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | `rollback_sync()` | leaves the block with a rollback; nothing without an open transaction |
 | `transaction_ended` | whether the database ended the open transaction on its own: SQLite after an interrupted `INSERT`, `UPDATE` or `DELETE` (`Vendor.transaction_ended()`, checked after every failed operation). Until the rollback, operations, savepoint methods and `commit_sync()` raise `OperationalError` [`TRANSACTION_ENDED`](#adorm-drivers-django-vendors-transaction-ended) without running SQL; `commit_sync()` leaves the block first |
 | `set_options_sync(options, local)` | [`set_options_sql(options, local)`](#adorm-drivers-sql-set-options-sql-options-local) on a cursor of the wrapper, one `execute()` without parameters; nothing for no options |
-| `cancel_sync()` | [`vendor.cancel()`](#adorm-drivers-django-vendors-vendor-name-features-none) on the DB-API connection under the wrapper: psycopg's `cancel_safe()` (`cancel()` without it), SQLite's `interrupt()` and the end of a wait for the write lock, MySQL's `KILL QUERY` on a connection of its own, Oracle's `cancel()`; nothing for another backend and before the connection exists |
+| `cancel_sync()` | marks the running call cancelled, then [`vendor.cancel()`](#adorm-drivers-django-vendors-vendor-name-features-none) on the DB-API connection under the wrapper: psycopg's `cancel_safe()` (`cancel()` without it), SQLite's `interrupt()` and the end of a wait for the write lock, MySQL's `KILL QUERY` on a connection of its own, Oracle's `cancel()`; nothing for another backend and before the connection exists |
 | `close_sync()` | the wrapper's `close()`; inside a transaction it also leaves the atomic block, so the wrapper keeps no transaction state for the next connection of its thread (a `direct` driver's); then the wrapper gets back the settings, DB-API module, health check flag and closing time it had before `connect_sync()` |
 | `prepare_call_sync()` | [`adopt_context_locals()`](#adorm-drivers-django-adopt-context-locals), then reads `backend_pid` and, for a DB-API connection of psycopg 3 it has not seen, adds the notice and notify handlers that emit `NOTICE` ([`notice_event()`](#adorm-drivers-django-notice-event-diagnostic)) and `NOTIFY` (also in `connect_sync()`) |
 | `listen_sync(channel)`, `unlisten_sync(channel)` | [`listen_sql(channel)`](#adorm-drivers-postgresql-listen-sql-channel) or `unlisten_sql(channel)` on a cursor of the wrapper; with psycopg 2 `listen_sync()` raises `NotSupportedError` |
@@ -1093,7 +1093,8 @@ own; `features` is the backend's `DatabaseFeatures` class.
 | `connected(connection)` | configures the DB-API connection of a [`DjangoConnection`](#adorm-drivers-django-djangoconnection) once it is open; here nothing |
 | `cancel(connection, raw)` | cancels the statement running on the DB-API connection `raw`; here nothing |
 | `backend_pid(raw)` | the server's id of the session; here `None` |
-| `is_cancellation(exc)` | whether a mapped error is a cancelled statement's; here `False` |
+| `cancelled_error(db)` | the DB-API error a statement of a cancelled call raises before it runs, on Django's connection wrapper `db`; here the backend's `OperationalError` [`CALL_CANCELLED`](#adorm-drivers-django-vendors-call-cancelled); PostgreSQL psycopg 3's `QueryCanceled` (SQLSTATE `57014`), SQLite [`sqlite_interrupted()`](#adorm-drivers-django-vendors-sqlite-interrupted), MySQL error 1317 |
+| `is_cancellation(exc)` | whether a mapped error is a cancelled statement's; here the error of `cancelled_error()` |
 | `is_connection_lost(exc)` | whether a mapped error leaves the connection unusable; here [`is_connection_error(exc)`](#adorm-drivers-is-connection-error-exc) |
 | `integrity_details(exc)` | the keyword arguments of `IntegrityError` the error gives; here `{}` |
 | `database_key(entry)` | `(name, HOST, PORT, NAME)` of the `DATABASES` entry |
@@ -1124,9 +1125,7 @@ SQLite allows one writer at a time beside any number of readers.
   `SQLITE_LOCKED`), until the connection's busy timeout (`PRAGMA busy_timeout`) passes, with it set to 0 meanwhile
   and restored afterwards.
 - `cancel()` ends a wait for the write lock (`OperationalError` [`LOCK_WAIT_CANCELLED`](#adorm-drivers-django-vendors-lock-wait-cancelled))
-  and calls `interrupt()`; `interrupt()` before a statement starts is lost, so a statement the cancelled call starts
-  later, other than a `ROLLBACK`, raises [`sqlite_interrupted()`](#adorm-drivers-django-vendors-sqlite-interrupted)
-  before it runs.
+  and calls `interrupt()`, which reaches a running statement only.
 - `is_cancellation()`: `SQLITE_INTERRUPT` or `LOCK_WAIT_CANCELLED`. `is_connection_lost()`: never an
   `OperationalError` (a lock, a full disk), as SQLite has no server connection. `transaction_ended()`: the
   connection is no longer in a transaction, as after an interrupted `INSERT`, `UPDATE` or `DELETE`, which rolls back
@@ -1188,6 +1187,11 @@ The connect timeout, in seconds, of the connection `MySQL.cancel()` opens with t
 
 A `sqlite3.OperationalError` with `sqlite_errorcode` `SQLITE_INTERRUPT`, the error of a statement `interrupt()`
 stopped; a statement of a cancelled call raises it, wrapped by Django, before it runs.
+
+#### `adorm.drivers.django.vendors.CALL_CANCELLED`
+
+The message of the `OperationalError` of [`Vendor.cancelled_error()`](#adorm-drivers-django-vendors-vendor-name-features-none)
+on a database without a cancellation error of its own: a statement of a cancelled call raises it before it runs.
 
 #### `adorm.drivers.django.vendors.TRANSACTION_ENDED`
 
