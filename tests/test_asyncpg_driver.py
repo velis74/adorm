@@ -213,10 +213,30 @@ async def test_profile_params_and_hooks_reach_the_slots_connection(library, run_
     assert pool.size == 1
 
 
+async def _execute(connection):
+    await connection.execute("SET application_name TO 'adorm hook'")
+
+
+async def _prepared(connection):
+    statement = await connection.prepare("SELECT set_config('application_name', 'adorm hook', false)")
+    await statement.fetchval()
+
+
+async def _cursor(connection):
+    async with connection.transaction():
+        cursor = await connection.cursor("SELECT set_config('application_name', 'adorm hook', false)")
+        await cursor.fetchrow()
+
+
+async def _executemany(connection):
+    await connection.executemany("SELECT set_config('application_name', $1, false)", [("adorm hook",)])
+
+
+@pytest.mark.parametrize("statement", [_execute, _prepared, _cursor, _executemany])
 @pytest.mark.parametrize("hook", ["on_acquire", "on_release"])
-async def test_sql_a_profile_hook_runs_is_custom_and_the_slot_leaves_the_pool(library, run_pool, hook):  # noqa: ARG001
+async def test_sql_a_profile_hook_runs_is_custom_and_the_slot_leaves_the_pool(library, run_pool, hook, statement):  # noqa: ARG001
     async def run_sql(connection, profile, session):  # noqa: ARG001
-        await connection.execute("SET application_name TO 'adorm hook'")
+        await statement(connection)
 
     pool = await run_pool(**{hook: run_sql})
     for _ in range(3):

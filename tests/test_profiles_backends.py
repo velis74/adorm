@@ -140,6 +140,25 @@ async def test_concurrent_users_never_see_each_others_user(per_user):
     assert all(who == user and owners == {user} for user, who, owners in results)
 
 
+@pytest.mark.parametrize("kind", ["django", "asyncpg"])
+async def test_a_custom_option_whose_name_has_sql_keywords_is_set_and_reset(kind, test_database_url, django_db_blocker):
+    option = "adorm_test.user"
+    router = per_user_router(kind, Identity(option=option, value=lambda user: user), test_database_url)
+    who = RawQuery(f"SELECT nullif(current_setting('{option}', true), '') AS who")
+    session = create_session("user:alice", "web")
+    with django_db_blocker.unblock():
+        try:
+            for _ in REPEAT:
+                assert await router.run(session, who) == [{"who": "alice"}]
+                with adorm.connection_options(**{option: "bob"}):
+                    assert await router.run(session, who) == [{"who": "bob"}]
+                with adorm.connection_options(**{option: None}):
+                    assert await router.run(session, who) == [{"who": None}]
+                assert await router.run(session, who) == [{"who": "alice"}]
+        finally:
+            await router.close()
+
+
 # One shared profile: on_acquire returns the user of the acquiring task's context
 
 

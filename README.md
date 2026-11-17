@@ -35,7 +35,7 @@ a superuser, and so are the tests of the demo, which refuses a superuser:
 CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';
 ```
 
-`ADORM_TEST_CREATE_ROLES=1` also runs the tests of `SET ROLE` in connection profiles. They create and drop the roles
+`ADORM_TEST_CREATE_ROLES=1` also runs the tests of the `role` connection option. They create and drop the roles
 `adorm_test_login`, `adorm_test_alice` and `adorm_test_bob` and need `CREATEROLE`. Roles belong to the whole server and
 outlive the test databases: set the variable only on a server dedicated to the tests (CI sets it).
 

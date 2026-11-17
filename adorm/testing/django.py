@@ -139,11 +139,12 @@ class SharedTestConnection:
     One connection at a time runs a call on it (`hold()`). The transactions of the connections are savepoints in the
     test's transaction; ``transactions`` lists the connections with an open one, innermost last. The connection
     options of each call are applied with ``SET LOCAL`` (`apply_options()`), since every statement runs inside the
-    test's transaction.
+    test's transaction. ``defaults`` are the options a connection of the alias starts with
+    (`Driver.connection_defaults()`, recorded by `add_defaults()`).
 
-    While connections use it (`attach()`), statements that other threads run through the wrapper (Django ORM code of
-    the test or of the code under test) hold it too, without connection options, and raise `TransactionOverlapError`
-    as an operation outside a transaction does (`check_isolated()`).
+    While connections use it (`attach()`), statements that other threads run through the wrapper (Django ORM code of the
+    test or of the code under test) hold it too, with ``defaults`` as their connection options, and raise
+    `TransactionOverlapError` as an operation outside a transaction does (`check_isolated()`).
     """
 
     def __init__(self, test: TestDatabase) -> None:
@@ -151,6 +152,7 @@ class SharedTestConnection:
         self.owner: SharedConnectionMixin | _Foreign | None = None
         self.transactions: list[SharedConnectionMixin] = []
         self._condition = threading.Condition()
+        self.defaults: dict[str, Any] = {}
         self._options: dict[str, Any] | None = {}
         self._touched: set[str] = set()
         self._holding = threading.local()
@@ -239,6 +241,14 @@ class SharedTestConnection:
             self._touched |= changes.keys()
         self._options = dict(desired)
 
+    def add_defaults(self, defaults: Mapping[str, Any]) -> None:
+        """Record the options a connection of the alias starts with; until a ``SET LOCAL`` is sent they are the
+        options known to be set."""
+        with self._condition:
+            self.defaults.update(defaults)
+            if self.owner is None and not self._touched and self._options is not None:
+                self._options = dict(self.defaults)
+
     def attach(self) -> None:
         """Count a connection that uses the shared connection; the first installs the guard of other threads'
         statements as the wrapper's outermost execute wrapper."""
@@ -263,7 +273,7 @@ class SharedTestConnection:
             return execute(sql, params, many, context)
         with self.hold(_Foreign()):
             self.check_isolated("statement of Django code")
-            self.apply_options({})
+            self.apply_options(self.defaults)
             try:
                 return execute(sql, params, many, context)
             except BaseException:
@@ -453,7 +463,9 @@ class SharedConnectionMixin:
         driver = self.driver.name  # type: ignore[attr-defined]
         raise NotSupportedError(NO_NOTIFICATIONS, driver=driver, unsupported=[NOTIFY])
 
-    def _hook_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:  # noqa: ARG002
+    def _hook_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
+        if not self._runs_hook():  # type: ignore[attr-defined]
+            return execute(sql, params, many, context)
         raise NotSupportedError(
             f"a hook of profile {self.profile.name!r} ran SQL on the shared connection of Django's TestCase, where its "
             "effect would reach every slot; return connection options from the hook or use TransactionTestCase",
@@ -477,6 +489,9 @@ class SharedConnectionMixin:
         self._sharing = True
         connections[self.alias] = db
         self._adopt(db)  # type: ignore[attr-defined]
+        defaults = self.driver.connection_defaults(profile)  # type: ignore[attr-defined]
+        self._session_options = dict(defaults)
+        self._shared.add_defaults(defaults)
         self._shared.attach()
         self._attached = True
 

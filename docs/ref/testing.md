@@ -149,6 +149,8 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 |---|---|
 | `test`, `wrapper` | the [`TestDatabase`](#adorm-testing-django-testdatabase) and its wrapper |
 | `owner` | the connection whose call holds the shared connection, `None` when free |
+| `defaults` | the options a connection of the alias starts with ([`Driver.connection_defaults()`](/ref/drivers#connection-defaults-profile), such as the `role` of `OPTIONS["assume_role"]`) |
+| `add_defaults(defaults)` | adds the connecting connection's `connection_defaults()` to `defaults`; until a `SET LOCAL` is sent they are the options known to be set |
 | `transactions` | the connections with an open transaction, innermost last |
 | `acquire(connection)` / `release(connection)` | wait until no other connection runs a call, then hold it (counted in the connection's `session_holds`); give it up. A call cancelled while it waits raises `OperationalError` with SQLSTATE [`QUERY_CANCELED`](#adorm-testing-django-query-canceled), which the connection's `is_cancellation()` accepts on every database, so the threaded bridge reports it as a cancellation |
 | `hold(connection)` | a `with` block between `acquire()` and `release()` |
@@ -158,7 +160,7 @@ The test connection of a `TestCase` as the slots of every pool share it, one per
 | `unwind(connection, error)` | rolls back `connection`'s transaction and those opened after it; the later ones raise `error` on their next call |
 | `watch_backend()` | adds a notice handler to the test's psycopg 3 connection, once per DB-API connection, that emits each notice as [`NOTICE`](/ref/events#adorm-events-notice) from the connection that holds the shared connection (`owner`); on SQLite instead a progress handler that stops the statements of the owner's cancelled call |
 | `check_isolated(what)` | raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction is open that the caller's context is not inside (no `atomic()` block of it is active there) |
-| `attach()` / `detach()` | count the connections that use the shared connection. While one does, an execute wrapper, the wrapper's outermost, makes each statement that another thread runs through the wrapper (Django ORM code of the test or of the code under test) hold the shared connection, run without connection options and pass `check_isolated()` first |
+| `attach()` / `detach()` | count the connections that use the shared connection. While one does, an execute wrapper, the wrapper's outermost, makes each statement that another thread runs through the wrapper (Django ORM code of the test or of the code under test) hold the shared connection, run with `defaults` as their connection options and pass `check_isolated()` first |
 
 ### `adorm.testing.django.shared_test_connection(test)`
 
@@ -174,8 +176,8 @@ Makes a [`DjangoConnection`](/ref/drivers#adorm-drivers-django-djangoconnection)
 | Call | Does |
 |---|---|
 | every call but `connect_sync()` | holds the shared connection ([`hold()`](#adorm-testing-django-sharedtestconnection-test)) while it runs; `execute_sync()` first applies the connection's options ([`apply_options()`](#adorm-testing-django-sharedtestconnection-test)), those an `on_acquire` hook returned included |
-| `connect_sync()` | takes the test's wrapper: Django's `inc_thread_sharing()` and `connections[alias] = wrapper` on the slot's thread, and [`attach()`](#adorm-testing-django-sharedtestconnection-test)es. A profile with a `connect` hook or `params` that differ from the wrapper's settings raises `NotSupportedError` |
-| a profile hook | a statement the hook runs through the wrapper raises `NotSupportedError`: its effect on the session would reach every slot |
+| `connect_sync()` | takes the test's wrapper: Django's `inc_thread_sharing()` and `connections[alias] = wrapper` on the slot's thread, starts with the driver's `connection_defaults()` as its session options, [`add_defaults()`](#adorm-testing-django-sharedtestconnection-test) them and [`attach()`](#adorm-testing-django-sharedtestconnection-test)es. A profile with a `connect` hook or `params` that differ from the wrapper's settings raises `NotSupportedError` |
+| a profile hook | a statement the hook runs through the wrapper raises `NotSupportedError`: its effect on the session would reach every slot. A statement another thread runs meanwhile is not the hook's |
 | `begin_sync()` | enters `transaction.atomic(using=alias)`, a savepoint of the test's transaction. Raises [`TransactionOverlapError`](/ref/exceptions#adorm-transactionoverlaperror) while a transaction of another connection is open that the caller's context is not inside |
 | `execute_sync(operation)` | outside a transaction: raises `TransactionOverlapError` as `begin_sync()` does, else runs the operation in a savepoint of its own. Inside a transaction: raises `TransactionOverlapError` while a transaction begun inside this one is open; a failure that leaves the transaction failed rolls back to its innermost savepoint at once; after Django marked it for rollback, further operations raise `TransactionManagementError` until a rollback |
 | `savepoint_sync()`, `release_savepoint_sync()`, `rollback_to_savepoint_sync()` | as `DjangoConnection`; raise `TransactionOverlapError` while a transaction begun inside this one is open |

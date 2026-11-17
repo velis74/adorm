@@ -69,7 +69,7 @@ Custom option names are not Python identifiers, so they are passed by unpacking 
 ```python
 adorm.configure(
     profiles={
-        "reports": ConnectionProfile("reports", "adorm.drivers.asyncpg.AsyncpgDriver", options={"role": "reporting"}),
+        "default": ConnectionProfile("default", "adorm.drivers.asyncpg.AsyncpgDriver", options={"role": "reporting"}),
     }
 )
 
@@ -98,7 +98,9 @@ def on_acquire(connection, profile, session):
   refuses fails the acquisition and the slot leaves the pool.
 - The hook layer ends with the lease: the next session on the slot runs with its own.
 - Session parameters reach the connection only as options. SQL a hook runs on its `connection` argument is custom
-  SQL: the slot does not know what it set, and leaves the pool when the lease ends.
+  SQL: the slot does not know what it set, and leaves the pool when the lease ends. The Django driver sees the
+  statements a hook runs through Django's execute wrappers (not those on the DB-API connection), the native
+  PostgreSQL driver every statement but `COPY`.
 
 ### What reaches the database
 

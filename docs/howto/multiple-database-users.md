@@ -65,8 +65,9 @@ def current_role(connection, profile, session):
 
 - The slot sends `SET role = "alice"` (the name quoted as an identifier) before the session's first request, outside
   a transaction; the role holds for every operation and transaction of the session on that slot.
-- The next session on the slot runs with its own role: the slot sends `SET role = "bob"`, or `RESET role` for a
-  session without a user. A session of the same user on the same slot sends nothing.
+- The next session on the slot runs with its own role: the slot sends `SET role = "bob"`, or, for a session without
+  a user, restores the profile's role: `RESET role`, or `SET role` to `OPTIONS["assume_role"]` (see below). A session
+  of the same user on the same slot sends nothing.
 - A role the login may not become, or one that does not exist, fails the acquisition and closes the slot.
 - A `with adorm.connection_options(role=...)` block inside the session runs as another role and restores the hook's
   role when it ends.

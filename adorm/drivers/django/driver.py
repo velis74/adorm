@@ -445,11 +445,21 @@ class DjangoConnection(ThreadedConnection):
 
     def _run_hook(self, hook: Any, args: tuple[Any, ...]) -> Any:
         """Run a profile hook; a statement it runs through the wrapper is custom SQL (`_hook_sql()`)."""
-        with self.db.execute_wrapper(self._hook_sql):
-            return super()._run_hook(hook, args)
+        self._hook_thread = threading.get_ident()
+        try:
+            with self.db.execute_wrapper(self._hook_sql):
+                return super()._run_hook(hook, args)
+        finally:
+            self._hook_thread = None
+
+    def _runs_hook(self) -> bool:
+        """Whether the calling thread runs this connection's profile hook: a statement another thread starts on a
+        shared wrapper meanwhile gets the hook's execute wrapper too."""
+        return getattr(self, "_hook_thread", None) == threading.get_ident()
 
     def _hook_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
-        self.mark_custom_sql()
+        if self._runs_hook():
+            self.mark_custom_sql()
         return execute(sql, params, many, context)
 
     def _watch_sql(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:

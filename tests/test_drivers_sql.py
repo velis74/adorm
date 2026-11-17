@@ -71,15 +71,19 @@ def test_set_options_sql():
 
 def test_set_options_sql_for_role_and_custom_options():
     assert set_options_sql({"role": 'Al"ice', "app.user_id": "7"}, local=False) == (
-        """SET role = "Al""ice"; SET app.user_id = '7'"""
+        """SET role = "Al""ice"; SET "app"."user_id" = '7'"""
     )
-    assert set_options_sql({"role": None, "app.user_id": None}, local=False) == "RESET role; RESET app.user_id"
+    assert set_options_sql({"role": None, "app.user_id": None}, local=False) == 'RESET role; RESET "app"."user_id"'
     assert set_options_sql({"role": None, "app.user_id": None}, local=True) == (
-        "SET LOCAL role TO DEFAULT; SET LOCAL app.user_id TO DEFAULT"
+        'SET LOCAL role TO DEFAULT; SET LOCAL "app"."user_id" TO DEFAULT'
     )
-    assert set_options_sql({"a.b.c": "o'neil"}, local=True) == "SET LOCAL a.b.c = 'o''neil'"
-    assert set_options_sql({"a.b": "back\\slash'"}, local=False) == "SET a.b = E'back\\\\slash''" + "'"
-    assert set_options_sql({"a.b": ""}, local=False) == "SET a.b = ''"
+    assert set_options_sql({"a.b.c": "o'neil"}, local=True) == """SET LOCAL "a"."b"."c" = 'o''neil'"""
+    assert set_options_sql({"a.b": "back\\slash'"}, local=False) == """SET "a"."b" = E'back\\\\slash''""" + "'"
+    assert set_options_sql({"a.b": ""}, local=False) == """SET "a"."b" = ''"""
+    # Parts that are SQL keywords
+    assert set_options_sql({"app.user": "x", "app.order": None}, local=False) == (
+        """SET "app"."user" = 'x'; RESET "app"."order\""""
+    )
 
 
 @pytest.mark.parametrize(

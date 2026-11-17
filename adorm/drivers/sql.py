@@ -112,19 +112,27 @@ def _value_sql(name: str, value: Any) -> str:
     return quote_literal(_text(name, value))
 
 
+def _name_sql(name: str) -> str:
+    if name in POSTGRESQL_OPTIONS:
+        return name
+    return ".".join(quote_identifier(part) for part in name.split("."))
+
+
 def set_options_sql(options: Mapping[str, Any], local: bool) -> str:
     """The statements, separated by ``;``, that set ``options`` on a PostgreSQL connection: ``SET`` or, with
     ``local``, ``SET LOCAL``. The names are those of `POSTGRESQL_OPTIONS` and custom options
     (`adorm.drivers.base.is_custom_option()`). A time limit's value is in seconds, ``0`` for no limit; a positive value
     below one millisecond becomes one millisecond. ``role``'s value is a role name, a custom option's a string. A value
-    of ``None`` resets the option to its default: ``RESET``, or ``SET LOCAL … TO DEFAULT``. Raises `ValueError` for
+    of ``None`` resets the option to its default: ``RESET``, or ``SET LOCAL … TO DEFAULT``. A custom option's name is
+    quoted part by part, so parts that are SQL keywords (``app.user``) are valid. Raises `ValueError` for
     another name or a value of another form; an empty string for no options."""
     statements = []
     for name, value in options.items():
         if name not in POSTGRESQL_OPTIONS and not (isinstance(name, str) and is_custom_option(name)):
             raise ValueError(f"{name!r} is not a PostgreSQL connection option adorm sets")
+        sql_name = _name_sql(name)
         if value is None:
-            statements.append(f"SET LOCAL {name} TO DEFAULT" if local else f"RESET {name}")
+            statements.append(f"SET LOCAL {sql_name} TO DEFAULT" if local else f"RESET {sql_name}")
         else:
-            statements.append(f"SET{' LOCAL' if local else ''} {name} = {_value_sql(name, value)}")
+            statements.append(f"SET{' LOCAL' if local else ''} {sql_name} = {_value_sql(name, value)}")
     return "; ".join(statements)

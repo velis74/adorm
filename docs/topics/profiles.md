@@ -224,7 +224,8 @@ the acquisition. An option the driver does not declare raises `NotSupportedError
 Session parameters are set only through connection options. SQL a hook runs on `connection` is custom SQL: the slot
 does not know what it changed, so it leaves the pool when the lease ends, as after [custom SQL of an
 operation](/topics/pool#slot-lifecycle), and `on_release` does not run for it. The Django driver sees the statements
-a hook runs through Django's wrapper, the native PostgreSQL driver every statement on the `asyncpg.Connection`.
+a hook runs through Django's wrapper (not those on its DB-API connection), the native PostgreSQL driver every
+statement on the `asyncpg.Connection` but `COPY`.
 `on_acquire` runs before the slot sets the lease's options, so SQL it runs sees the options the previous lease left.
 
 An atomic operation outside a transaction runs `on_acquire`, the operation and `on_release`. A transaction runs

@@ -206,7 +206,8 @@ class AsyncpgConnection(DriverConnection):
     Each operation translates into Django query sets, queries and model instances, compiles them on the event loop
     without a database connection and runs the statements on asyncpg; writes run Django's write logic as `Writer`
     does, without Django's model methods and signals. ``target`` (what profile hooks receive) is the
-    ``asyncpg.Connection``; every statement a hook runs on it marks the connection with `mark_custom_sql()`.
+    ``asyncpg.Connection``; every statement a hook runs on it, ``COPY`` excepted, marks the connection with
+    `mark_custom_sql()`.
     """
 
     driver: AsyncpgDriver
@@ -246,19 +247,14 @@ class AsyncpgConnection(DriverConnection):
         return self.conn
 
     async def call_hook(self, hook: Callable[..., Any], *args: Any) -> Any:
-        """`DriverConnection.call_hook()`; a statement the hook runs on ``target`` marks the connection with
-        `mark_custom_sql()`."""
-
-        def ran(_query: Any) -> None:
-            self.mark_custom_sql()
-
-        self.conn.add_query_logger(ran)
+        """`DriverConnection.call_hook()`; a statement the hook runs on ``target`` (``COPY`` excepted) marks the
+        connection with `mark_custom_sql()`."""
+        queries = self.conn._protocol.queries_count
         try:
-            result = await super().call_hook(hook, *args)
+            return await super().call_hook(hook, *args)
         finally:
-            self.conn.remove_query_logger(ran)
-        await asyncio.sleep(0)  # asyncpg reports queries with call_soon()
-        return result
+            if self.conn._protocol.queries_count != queries:
+                self.mark_custom_sql()
 
     # Backend events
 

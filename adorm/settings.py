@@ -128,12 +128,13 @@ class ConnectionProfile:
       between ``options`` and the session's (`adorm.executor.Pool`);
     - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.
 
-    ``connection`` is the target's connection. SQL a hook runs on it is custom SQL: the slot leaves the pool when the
-    lease ends. A threaded driver runs the hooks on the connection's thread and they are plain functions; an async
-    driver awaits a hook's result when it is awaitable. ``options`` are the
-    database connection options of the profile, the first layer of `adorm.connection_options()`; ``acquire_timeout``
-    and ``commit_timeout`` are pool settings and raise `ValueError` there, and an option a driver given as an
-    instance or class does not declare raises `NotSupportedError`. ``pool`` overrides the registry's pool defaults.
+    ``connection`` is the target's connection. SQL a hook runs on it that the driver sees
+    (`DriverConnection.call_hook()`) is custom SQL: the slot leaves the pool when the lease ends. A threaded driver runs
+    the hooks on the connection's thread and they are plain functions; an async driver awaits a hook's result when it is
+    awaitable. ``options`` are the database connection options of the profile, the first layer of
+    `adorm.connection_options()`; ``acquire_timeout`` and ``commit_timeout`` are pool settings and raise `ValueError`
+    there, and an option a driver given as an instance or class does not declare raises `NotSupportedError`. ``pool``
+    overrides the registry's pool defaults.
     ``params`` and ``connect`` do not appear in the representation. A profile copies as itself.
     """
 

@@ -150,15 +150,15 @@ class Pool:
     the slots a smaller load no longer needs reach that age. Acquiring a slot does nothing to its connection; when the
     slot leaves the pool at the end of a lease is up to the slot (`Slot`).
 
-    The profile's ``on_acquire`` and ``on_release`` attributes, when present and not ``None``, are its hooks: the
-    router calls ``on_acquire`` when it assigns a slot to a session, the slot calls ``on_release`` when the session
-    returns it usable. ``on_acquire`` returns ``None`` or a mapping of database connection options
-    (`check_hook_options()`), the lease's layer between the profile's options and the session's
-    (`SlotLease.hook_options`); the router sets the options in effect with that layer before the acquisition
-    completes. An option the driver does not declare raises `NotSupportedError`. A hook that fails,
-    returns another value or does not finish in time discards the slot. SQL a hook runs is custom SQL
-    (`DriverConnection.ran_custom_sql`): the slot leaves the pool when the lease ends. ``release_timeout`` is the
-    number of seconds ``on_release`` may run before the slot leaves the pool instead.
+    The profile's ``on_acquire`` and ``on_release`` attributes, when present and not ``None``, are its hooks: the router
+    calls ``on_acquire`` when it assigns a slot to a session, the slot calls ``on_release`` when the session returns it
+    usable. ``on_acquire`` returns ``None`` or a mapping of database connection options (`check_hook_options()`), the
+    lease's layer between the profile's options and the session's (`SlotLease.hook_options`); the router sets the
+    options in effect with that layer before the acquisition completes. An option the driver does not declare raises
+    `NotSupportedError`. A hook that fails, returns another value or does not finish in time discards the slot. SQL a
+    hook runs that the driver sees is custom SQL (`DriverConnection.ran_custom_sql`): the slot leaves the pool when the
+    lease ends. ``release_timeout`` is the number of seconds ``on_release`` may run before the slot leaves the pool
+    instead.
 
     ``connection_defaults`` are the database options the driver sets on each new connection
     (`Driver.connection_defaults()`). ``options`` are those, replaced by the profile's ``options`` attribute (when

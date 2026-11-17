@@ -522,15 +522,10 @@ class SharedConnectionTests(TestCase):
             finally:
                 user.reset(token)
 
-        def django_sees():
-            with connections["default"].cursor() as cursor:
-                cursor.execute(f"SELECT current_setting('{APP_USER}', true)")
-                return cursor.fetchone()[0]
-
         async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire) as pool:
             for _ in REPEAT:
                 await asyncio.gather(*(count("users", name) for name in ("alice", "bob", None) * 3))
-                assert await sync_to_async(django_sees)() in (None, "")
+                assert await sync_to_async(seen_on_test_connection)() in (None, "")
                 token = user.set("carol")
                 try:
                     async with create_session("default", "tx").atomic():
@@ -547,6 +542,33 @@ class SharedConnectionTests(TestCase):
             assert seen["block"] == ["dave"] * len(REPEAT)
             assert all(not slot.connection.ran_custom_sql for slot in pool._slots)
 
+    async def test_a_driver_default_is_restored_after_another_slot_changes_it(self):
+        seen = ShowingConnection.seen = {}
+
+        def start_with_base():
+            # As Django assumes OPTIONS["assume_role"] when it connects: a session-level setting.
+            with connections["default"].cursor() as cursor:
+                cursor.execute(f"SET {APP_USER} = 'base'")
+
+        async def count(label, session_name):
+            return await tags(create_session("default", session_name)).filter(name=f"opt-{label}").count()
+
+        async def alice(name):
+            with adorm.connection_options(**{APP_USER: "alice"}):
+                await count("alice", name)
+
+        await sync_to_async(start_with_base)()
+        async with executor(driver=DefaultsDriver(setting=APP_USER)):
+            for i in REPEAT:
+                await alice(f"alice-{i}")
+                await count("plain", f"alice-{i}")
+                await count("plain", f"other-{i}")
+                assert await sync_to_async(seen_on_test_connection)() == "base"
+                await asyncio.gather(alice(f"alice-c{i}"), *(count("plain", f"plain-{i}-{n}") for n in range(6)))
+                assert await sync_to_async(seen_on_test_connection)() == "base"
+        assert seen["alice"] == ["alice"] * 2 * len(REPEAT)
+        assert seen["plain"] == ["base"] * 8 * len(REPEAT)
+
     async def test_sql_a_hook_runs_on_the_shared_connection_is_refused(self):
         def hook(db, _profile, _session):
             with db.cursor() as cursor:
@@ -559,10 +581,46 @@ class SharedConnectionTests(TestCase):
                 assert not pool._slots
         async with executor(on_release=hook) as pool:
             for _ in REPEAT:
-                await tags().count()
-                async with asyncio.timeout(10):
-                    while pool.size:
-                        await asyncio.sleep(0.01)
+                async with adorm.atomic() as tx:
+                    await tags().count()
+                    slot = tx.lease.slot
+                await asyncio.wait_for(slot.wait_closed(), 10)
+                assert slot.close_reason is CloseReason.HOOK_FAILED
+                assert await sync_to_async(seen_on_test_connection)() in (None, "")
+            assert pool.size == 0
+
+    async def test_django_code_racing_a_hook_is_not_the_hooks_sql(self):
+        gated = threading.Event()
+        hook_runs = threading.Event()
+        django_waits = threading.Event()
+
+        def hook(_db, _profile, _session):
+            if gated.is_set():
+                hook_runs.set()
+                assert django_waits.wait(10)
+
+        async with executor(on_acquire=hook) as pool:
+            await tags().count()
+            shared = shared_of(pool)
+            acquire = shared.acquire
+
+            def watching_acquire(connection):
+                if not isinstance(connection, SharedConnectionMixin):
+                    django_waits.set()
+                return acquire(connection)
+
+            shared.acquire = watching_acquire
+            gated.set()
+            for i in REPEAT:
+                hook_runs.clear()
+                django_waits.clear()
+                operation = asyncio.ensure_future(tags(create_session("default", f"racing-{i}")).count())
+                await first_of(until(hook_runs.is_set), operation)
+                # Django's statement starts while the hook's execute wrapper is installed and waits for the hook.
+                django = asyncio.ensure_future(sync_to_async(names_on_test_thread)())
+                await operation
+                await django
+            assert all(not slot.connection.ran_custom_sql for slot in pool._slots)
 
     def test_capture_on_commit_callbacks_sees_djangos_callbacks_unchanged(self):
         calls = []
@@ -802,6 +860,20 @@ class ShowingDriver(DjangoDriver):
 
     def __init__(self, setting="statement_timeout"):
         self.setting = setting
+
+
+class DefaultsDriver(ShowingDriver):
+    """Its connections start with ``APP_USER`` set to ``base``, as Django's start with ``OPTIONS["assume_role"]``."""
+
+    def connection_defaults(self, profile):  # noqa: ARG002
+        return {APP_USER: "base"}
+
+
+def seen_on_test_connection():
+    """``APP_USER`` as a statement of Django code on the test's connection sees it."""
+    with connections["default"].cursor() as cursor:
+        cursor.execute(f"SELECT current_setting('{APP_USER}', true)")
+        return cursor.fetchone()[0]
 
 
 # Under Django's TransactionTestCase: slots with connections of their own.

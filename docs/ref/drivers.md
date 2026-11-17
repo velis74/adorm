@@ -722,6 +722,7 @@ profile names it by class, instance or import path. It runs on the database of a
 | `capabilities_for(profile)` | the capabilities of the database `profile`'s alias names: [`profile_vendor(profile)`](#adorm-drivers-django-profile-vendor-profile)`.capabilities()` ([vendors](#adorm-drivers-django-vendors)); `capabilities` for an alias without a `DATABASES` entry or whose backend does not load. Reads the backend class of the entry's `ENGINE`; does not connect |
 | `is_refusal(exc)` | [`is_refusal(exc)`](#adorm-drivers-is-refusal-exc) or [`vendors.is_refusal(exc)`](#adorm-drivers-django-vendors-is-refusal-exc) (MySQL's and Oracle's errors of too many connections) |
 | `database_key(profile)` | [`database_key(profile)`](#adorm-drivers-django-database-key-profile) |
+| `connection_defaults(profile)` | [`connection_defaults(profile)`](#adorm-drivers-django-connection-defaults-profile) |
 | `async open_monitor(profile)` | a started [`DjangoMonitor`](#adorm-drivers-django-djangomonitor-profile); `NotSupportedError` for a database other than PostgreSQL, before anything opens |
 | `async check_listen(profile)` | also `NotSupportedError` inside Django's `TestCase` |
 
@@ -990,8 +991,8 @@ database_key(ConnectionProfile("reports", DjangoDriver(), alias="default", on_ac
 
 The connection options Django sets on a new connection of the `DATABASES` entry `profile.alias` with
 `profile.params` replacing its keys: `{"role": <role>}` for `OPTIONS["assume_role"]` on PostgreSQL, else an empty
-mapping. Does not connect. [`Driver.connection_defaults()`](#connection-defaults-profile) of `DjangoDriver` and
-`AsyncpgDriver`.
+mapping. Does not connect. `DjangoDriver.connection_defaults()` and `AsyncpgDriver.connection_defaults()`
+([`Driver.connection_defaults()`](#connection-defaults-profile)) return it.
 
 ```python
 connection_defaults(ConnectionProfile("reports", DjangoDriver(), params={"OPTIONS": {"assume_role": "reader"}}))
@@ -1593,9 +1594,9 @@ driver.schema_hash("clubs.Club")   # 'e8c2eed312ab7b68'
 ### `adorm.drivers.asyncpg.AsyncpgConnection`
 
 The [`DriverConnection`](#adorm-drivers-driverconnection) of `AsyncpgDriver`. `conn` is the `asyncpg.Connection`,
-also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `profile` its profile. While a hook
-runs, a query logger on `conn` marks every statement the hook runs with
-[`mark_custom_sql()`](#mark-custom-sql).
+also `target`, what profile hooks receive; `compiler` is its `DjangoCompiler`; `profile` its profile. A statement a
+hook runs on `conn` (one that asyncpg counts in its protocol's `queries_count`: every statement but `COPY`) marks the
+connection with [`mark_custom_sql()`](#mark-custom-sql).
 
 | Method | Does |
 |---|---|
@@ -1866,7 +1867,9 @@ quote_literal("a\\b")         # "E'a\\\\b'"
 
 The statements that set `options` on a PostgreSQL connection, separated by `; `, in the order of `options`; an empty
 string for no options. The names are those of `POSTGRESQL_OPTIONS` and custom options
-([`is_custom_option()`](#adorm-drivers-is-custom-option-name)), written unquoted.
+([`is_custom_option()`](#adorm-drivers-is-custom-option-name)). A name of `POSTGRESQL_OPTIONS` is written as is, a
+custom option's name with each dotted part as `quote_identifier()` (`"app"."user"`), so parts that are SQL keywords are
+valid.
 
 | Option | Value | Sent as |
 |---|---|---|
@@ -1886,7 +1889,7 @@ form.
 set_options_sql({"statement_timeout": 5, "lock_timeout": None}, local=True)
 # 'SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout TO DEFAULT'
 set_options_sql({"role": "alice", "app.user_id": "42"}, local=False)
-# 'SET role = "alice"; SET app.user_id = \'42\''
+# 'SET role = "alice"; SET "app"."user_id" = \'42\''
 ```
 
 ## PostgreSQL errors and sessions

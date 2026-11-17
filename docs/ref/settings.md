@@ -76,7 +76,8 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
 
 `connection` is the target's connection ([`DriverConnection.target`](/ref/drivers#adorm-drivers-driverconnection)).
-SQL a hook runs on it is custom SQL: the slot leaves the pool when the lease ends.
+SQL a hook runs on it that the driver sees ([`call_hook()`](/ref/drivers#adorm-drivers-driverconnection)) is custom
+SQL: the slot leaves the pool when the lease ends.
 
 - A threaded driver runs `connect` and the hooks on the connection's thread; they are plain functions. A coroutine
   function raises `TypeError` when the profile is created with a driver instance or class, or, for a driver given by
