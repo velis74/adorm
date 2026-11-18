@@ -336,6 +336,65 @@ async def test_a_lock_wait_is_reported_with_its_blockers(router):
     await task
 
 
+async def test_a_commit_waiting_for_a_lock_is_reported(router):
+    driver = MonitoredDriver()
+    add_pool(router, driver)
+    session = unique_session()
+    inside, proceed = asyncio.Event(), asyncio.Event()
+
+    async def transaction():
+        async with session.atomic():
+            await session.execute(Op("inside"))
+            driver.connections[0].gates["commit"] = asyncio.Event()
+            inside.set()
+            await proceed.wait()
+
+    task = asyncio.create_task(transaction())
+    await inside.wait()
+    driver.lock(1001, 4242)
+    # the poll interval exceeds the timeout: only the commit's start wakes the wait
+    waiting = asyncio.create_task(wait_for_lock(task, timeout=GUARD, interval=2 * GUARD))
+    await asyncio.sleep(0)
+    proceed.set()
+    try:
+        wait = await waiting
+    finally:
+        driver.connections[0].gates["commit"].set()
+    assert wait.request.method == "commit"
+    assert wait.request is wait.running.request
+    assert wait.operation is None
+    assert wait.running.sender is task
+    assert wait.blocking_pids == (4242,)
+    await task
+
+
+async def test_a_commit_waiting_for_a_lock_when_the_wait_begins_is_reported(router):
+    driver = MonitoredDriver()
+    add_pool(router, driver)
+    session = unique_session()
+    driver.lock(1001, 4242)
+    entered = asyncio.Event()
+
+    async def transaction():
+        async with session.atomic():
+            await session.execute(Op("inside"))
+            connection = driver.connections[0]
+            connection.gates["commit"] = asyncio.Event()
+            connection.entered["commit"] = entered
+
+    task = asyncio.create_task(transaction())
+    await entered.wait()
+    assert running_operations(task) == ()
+    try:
+        wait = await wait_for_lock(task, timeout=GUARD)
+    finally:
+        driver.connections[0].gates["commit"].set()
+    assert wait.request.method == "commit"
+    assert wait.operation is None
+    assert wait.running.sender is task
+    await task
+
+
 async def test_the_wait_polls_until_the_operation_waits(router):
     driver = MonitoredDriver()
     add_pool(router, driver)
@@ -393,7 +452,7 @@ async def test_a_lock_wait_of_an_operation_that_ended_during_the_read_is_not_rep
     first.gate.set()
     await task
     driver.read_gate.set()
-    with pytest.raises(RuntimeError, match="returned before an operation"):
+    with pytest.raises(RuntimeError, match="returned before a request"):
         await waiting
     assert all(m.closed for m in driver.monitors)
 
@@ -477,7 +536,7 @@ async def test_a_task_that_finishes_without_waiting_raises_and_closes_the_monito
     waiting = asyncio.create_task(wait_for_lock(task, interval=GUARD))
     await driver.reading.wait()
     op.gate.set()
-    with pytest.raises(RuntimeError, match="returned before an operation"):
+    with pytest.raises(RuntimeError, match="returned before a request"):
         await waiting
     assert [m.closed for m in driver.monitors] == [True]
 

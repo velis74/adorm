@@ -224,7 +224,7 @@ the flow or starts a competitor:
 | Helper | Returns once |
 |---|---|
 | `wait_for_operation(task)` | an operation of `task` has been sent to the database: its slot handed it to the driver connection and it has its database session |
-| `wait_for_lock(task)` | an operation of `task` waits for a lock in the database; the result names the sessions that hold it |
+| `wait_for_lock(task)` | a request of `task` waits for a lock in the database: an operation, or a `commit` checking a deferred constraint; the result names the request and the sessions that hold the lock |
 | `running_operations(task)` | at once: the operations of `task` running now |
 
 - `task` is the task that awaits the operation, also inside a transaction. `session=` selects by session instead;
@@ -266,7 +266,7 @@ class RaceTests(TransactionTestCase):
             await rename
 ```
 
-`wait_for_lock()` reads the database sessions of the selected operations through the driver's monitor connection
+`wait_for_lock()` reads the database sessions of the selected requests through the driver's monitor connection
 ([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)), opened for the wait and closed afterwards. The
 Django and native PostgreSQL drivers read `pg_stat_activity`.
 
