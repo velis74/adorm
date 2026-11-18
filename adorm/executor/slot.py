@@ -836,6 +836,8 @@ class Slot:
         call.add_done_callback(lambda _call: inner.close())
         self._running = (request, call)
         event: Event
+        server = asyncio.current_task()
+        closing = False
         try:
             event = ResultEvent(request_id, await asyncio.shield(call))
         except asyncio.CancelledError:
@@ -843,8 +845,11 @@ class Slot:
                 # The slot itself is being closed.
                 call.cancel()
                 raise
+            # The call has ended; when the slot is being closed as well, its outcome is delivered first.
+            closing = server is not None and server.cancelling() > 0
             if not call.cancelled():
-                event = self._failed(request_id, cast("BaseException", call.exception()))
+                error = call.exception()
+                event = ResultEvent(request_id, call.result()) if error is None else self._failed(request_id, error)
             elif self._cancelled is request:
                 event = CancelledEvent(request_id, started=started[0])
             else:
@@ -866,6 +871,9 @@ class Slot:
                 self._in_transaction = False
                 self._deliver(lease, CallbackEvent(ON_COMMIT if request.method == "commit" else ON_ROLLBACK))
         self._deliver(lease, event)
+        if closing:
+            self._current = None  # answered: `_fail_outstanding()` skips it
+            raise asyncio.CancelledError
 
     def _failed(self, request_id: Any, error: BaseException) -> ErrorEvent:
         """The outcome of a request whose connection call raised ``error``; an error that leaves the connection unusable
@@ -1000,8 +1008,9 @@ class Slot:
 
     async def close(self, reason: CloseReason = CloseReason.POOL_CLOSED) -> None:
         """Stop serving and close the connection; ``close_reason`` becomes ``reason``. The running request, the queued
-        ones and those sent later fail with `InterfaceError`; a lease holding the slot frees the pool's capacity when it
-        is released. Logs errors instead of raising them; a second call does nothing."""
+        ones and those sent later fail with `InterfaceError`; a running request whose connection call has already ended
+        gets that call's outcome instead. A lease holding the slot frees the pool's capacity when it is released. Logs
+        errors instead of raising them; a second call does nothing."""
         if self.state == _CLOSED:
             return
         self.state = _CLOSED

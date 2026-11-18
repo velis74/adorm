@@ -234,6 +234,7 @@ that wait until an operation is in the database:
 | cancelling an operation once it waits, repeated | the slot returns and the next operation runs once the lock is released |
 | an operation sent by a task inside `atomic()`, cancelled once it waits, repeated | it is reported with that task as its sender; the transaction is `ROLLED_BACK` and no slot stays in use |
 | an operation reaching the driver | `wait_for_operation()` returns it with its sender and an integer `backend_pid` |
+| a `commit` of an insert whose deferred foreign key references a row another session locked, repeated (not on the memory driver) | `wait_for_lock()` reports the `commit` request (`operation` is `None`) with that session in `blocking_pids`; once released the insert is committed and no slot stays in use |
 | a monitor reading the holder's session and an unknown pid | only the holder's session comes back, not waiting for a lock; a second `close()` does nothing |
 
 ## Running it

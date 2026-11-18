@@ -206,7 +206,7 @@ outside every pool. Raises `NotSupportedError` unless overridden. [`DjangoDriver
 returns a [`DjangoMonitor`](#adorm-drivers-django-djangomonitor-profile), [`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver)
 an [`AsyncpgMonitor`](#adorm-drivers-asyncpg-asyncpgmonitor-conn-close-timeout-5-0).
 [`wait_for_lock()`](/ref/testing#adorm-testing-wait-for-lock-task-none-session-none-timeout-10-0-interval-0-01) reads
-the sessions of running operations through it.
+the sessions of running requests through it.
 
 ```python
 async with await driver.open_monitor(profile) as monitor:

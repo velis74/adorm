@@ -1,4 +1,4 @@
-"""Waiting in tests until an operation has reached the database, or waits there for a lock."""
+"""Waiting in tests until an operation has reached the database, or a request waits there for a lock."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 from adorm.exceptions import NotSupportedError
-from adorm.executor.slot import on_request_started, running_requests, RunningRequest
+from adorm.executor.slot import on_request_started, Request, running_requests, RunningRequest
 
 if TYPE_CHECKING:
     from adorm.drivers.base import BackendActivity, DatabaseMonitor
@@ -21,14 +21,19 @@ __all__ = ["LockWait", "running_operations", "wait_for_lock", "wait_for_operatio
 
 @dataclass(frozen=True, slots=True)
 class LockWait:
-    """An operation waiting for a lock in the database: the `RunningRequest` and its session's `BackendActivity`."""
+    """A request waiting for a lock in the database: the `RunningRequest` and its session's `BackendActivity`."""
 
     running: RunningRequest
     activity: BackendActivity
 
     @property
+    def request(self) -> Request:
+        """The request that waits: an ``execute`` of an operation, or a transaction call such as ``commit``."""
+        return self.running.request
+
+    @property
     def operation(self) -> Any:
-        """The operation that waits."""
+        """The operation that waits; ``None`` when the request is not an ``execute`` (`RunningRequest.operation`)."""
         return self.running.operation
 
     @property
@@ -37,10 +42,14 @@ class LockWait:
         return self.activity.blocking_pids
 
 
-def _matcher(task: asyncio.Task | None, session: Session | None) -> Callable[[RunningRequest], bool]:
+def _matcher(
+    task: asyncio.Task | None, session: Session | None, *, operations: bool = True
+) -> Callable[[RunningRequest], bool]:
+    """Select the requests of ``task`` and ``session``; with ``operations`` only ``execute`` requests."""
+
     def matches(running: RunningRequest) -> bool:
         return (
-            running.operation is not None
+            (not operations or running.operation is not None)
             and (task is None or running.sender is task)
             and (session is None or running.session is session)
         )
@@ -58,7 +67,7 @@ def running_operations(
 
 
 def _check_task(task: asyncio.Task | None, what: str) -> None:
-    """Raise `RuntimeError` when ``task`` has finished: it can no longer send the operation awaited."""
+    """Raise `RuntimeError` when ``task`` has finished: it can no longer send the request awaited."""
     if task is None or not task.done():
         return
     error = None if task.cancelled() else task.exception()
@@ -66,11 +75,11 @@ def _check_task(task: asyncio.Task | None, what: str) -> None:
     raise RuntimeError(f"{task!r} {outcome} before {what}") from error
 
 
-def _describe(task: asyncio.Task | None, session: Session | None) -> str:
+def _describe(task: asyncio.Task | None, session: Session | None, what: str = "an operation") -> str:
     parts = [f"of {task!r}"] if task is not None else []
     if session is not None:
         parts.append(f"of {session!r}")
-    return " ".join(["an operation", *parts])
+    return " ".join([what, *parts])
 
 
 async def wait_for_operation(
@@ -172,16 +181,18 @@ async def wait_for_lock(
     timeout: float = 10.0,
     interval: float = 0.01,
 ) -> LockWait:
-    """Wait until an operation waits for a lock in the database (`BackendActivity.waiting_for_lock`) and return the
+    """Wait until a request waits for a lock in the database (`BackendActivity.waiting_for_lock`) and return the
     `LockWait`.
 
-    ``task`` and ``session`` select the operation as in `running_operations()`. Each check reads the database sessions
-    of the selected operations that run then with their session (`RunningRequest.in_session`) through a
-    `DatabaseMonitor` of their pool's driver (`Driver.open_monitor()`), opened on first use and closed on return;
-    checks repeat every ``interval`` seconds and whenever a selected operation starts. Raises `NotSupportedError` when
-    the driver does not report its connections' database sessions (`DriverConnection.backend_pid`) or cannot monitor
-    them, `RuntimeError` when ``task`` finishes first and ``TimeoutError`` after ``timeout`` seconds."""
-    matches = _matcher(task, session)
+    Every request a slot runs counts, not only operations: a ``commit`` waits for the locks a deferred constraint
+    takes (`LockWait.request`). ``task`` selects the requests the task sent, ``session`` those of the session. Each
+    check reads the database sessions of the selected requests that run then with their session
+    (`RunningRequest.in_session`) through a `DatabaseMonitor` of their pool's driver (`Driver.open_monitor()`), opened
+    on first use and closed on return; checks repeat every ``interval`` seconds and whenever a selected request
+    starts. Raises `NotSupportedError` when the driver does not report its connections' database sessions
+    (`DriverConnection.backend_pid`) or cannot monitor them, `RuntimeError` when ``task`` finishes first and
+    ``TimeoutError`` after ``timeout`` seconds."""
+    matches = _matcher(task, session, operations=False)
     wakeup = asyncio.Event()
 
     def started(running: RunningRequest) -> None:
@@ -190,21 +201,21 @@ async def wait_for_lock(
 
     stop = on_request_started(started)
     monitors: dict[Pool, DatabaseMonitor] = {}
-    what = f"{_describe(task, session)} waited for a lock"
+    what = f"{_describe(task, session, 'a request')} waited for a lock"
     limit = asyncio.timeout(timeout)
     try:
         async with limit:
             while True:
                 _check_task(task, what)
                 wakeup.clear()
-                waits = await _activity(monitors, running_operations(task, session=session))
+                waits = await _activity(monitors, tuple(filter(matches, running_requests())))
                 if waits:
                     return waits[0]
                 await _wait(wakeup, task, interval)
     except TimeoutError:
         if not limit.expired():
             raise
-        raise TimeoutError(f"no {what.removeprefix('an ')} within {timeout:g} s") from None
+        raise TimeoutError(f"no {what.removeprefix('a ')} within {timeout:g} s") from None
     finally:
         stop()
         await asyncio.gather(*(monitor.close() for monitor in monitors.values()), return_exceptions=True)

@@ -3,14 +3,18 @@ another session holds is reported with its blocker, also inside a transaction, a
 while it waits goes back to the pool."""
 
 import asyncio
+import datetime
 
+from decimal import Decimal
+
+import asyncpg
 import pytest
 
 import adorm
 
 from adorm import ConnectionProfile, TransactionOutcome
 from adorm.testing import running_operations, wait_for_lock, wait_for_operation
-from tests.clubmodels.clubs import Member
+from tests.clubmodels.clubs import Member, Membership
 from tests.conformance.drivers import on_sqlite
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -107,3 +111,40 @@ async def test_a_monitor_reads_the_sessions_of_the_database(driver, blocker):
         assert not activity[holder].waiting_for_lock
     await monitor.close()  # a second close does nothing
     await blocker.release()
+
+
+async def test_a_commit_waiting_for_a_lock_is_reported(conformance_driver, make_router, club_data):
+    """A deferred foreign key takes its lock on the referenced row at ``COMMIT``."""
+    if conformance_driver.name == "memory":
+        pytest.skip("the memory driver checks no foreign key at commit")
+    pool = make_router(max_connections=2, acquire_timeout=5).pools[0]
+    holder = await asyncpg.connect(club_data)
+    try:
+        club_id = await holder.fetchval("SELECT id FROM clubs_club WHERE slug = 'koper-sailing'")
+        member_id = await holder.fetchval(
+            "SELECT id FROM clubs_member WHERE id NOT IN (SELECT member_id FROM clubs_membership WHERE club_id = $1)"
+            " ORDER BY id LIMIT 1",
+            club_id,
+        )
+        for _ in REPEAT:
+            await Membership.objects.filter(club_id=club_id, member_id=member_id).delete()
+            async with holder.transaction():
+                await holder.execute("SELECT id FROM clubs_club WHERE id = $1 FOR UPDATE", club_id)
+
+                async def join():
+                    async with adorm.atomic():
+                        await Membership.objects.create(
+                            club_id=club_id, member_id=member_id, since=datetime.date(2026, 1, 1), fee=Decimal(0)
+                        )
+
+                task = asyncio.create_task(join())
+                wait = await wait_for_lock(task, timeout=5)
+                assert wait.request.method == "commit"
+                assert wait.operation is None
+                assert wait.running.sender is task
+                assert holder.get_server_pid() in wait.blocking_pids
+            await task
+            assert pool.in_use == 0
+            assert await Membership.objects.filter(club_id=club_id, member_id=member_id).count() == 1
+    finally:
+        await holder.close()

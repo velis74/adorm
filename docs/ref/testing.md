@@ -1,7 +1,7 @@
 # Testing
 
 `adorm.testing` holds helpers, defined in `adorm.testing.waits`, that wait until an operation has reached the
-database or waits there for a lock. `adorm.testing.django` is the test mode of the
+database or a request waits there for a lock. `adorm.testing.django` is the test mode of the
 [Django driver](/topics/django-driver): adorm runs inside Django's `TestCase` and `TransactionTestCase` without changes
 to the test classes. The [testing topic](/topics/testing) shows both in use. `adorm.testing` imports no ORM;
 `adorm.testing.django` imports Django.
@@ -16,10 +16,11 @@ from adorm.testing.django import find_test_database, in_test_environment
 The helpers select operations by the task that sent them (`task`, the task that awaits the operation, also inside a
 transaction) and by their session (`session`); without either, any operation of the running event loop counts. An
 operation awaited through `asyncio.gather()`, a `TaskGroup` or, on Python 3.11, `asyncio.wait_for()` is sent by a
-child task and matches only that task; `session` selects it. An operation runs from the moment its
-slot hands it to the driver connection ([running requests](/ref/pool#running-requests)); `begin`, `commit` and
-savepoint calls do not count. On a connection that shares its database session with others (the shared test connection
-of Django's `TestCase`), it has reached the database only once its call holds that session
+child task and matches only that task; `session` selects it. An operation runs from the moment its slot hands it to
+the driver connection ([running requests](/ref/pool#running-requests)); `begin`, `commit` and savepoint calls do not
+count, except in `wait_for_lock()`, which selects every request. On a connection that shares its database session
+with others (the shared test connection of Django's `TestCase`), it has reached the database only once its call holds
+that session
 ([`RunningRequest.in_session`](/ref/pool#adorm-executor-runningrequest)).
 
 ### `adorm.testing.running_operations(task=None, *, session=None)`
@@ -49,21 +50,23 @@ task.cancel()              # cancelled once the update is in the database, not w
 
 ### `adorm.testing.wait_for_lock(task=None, *, session=None, timeout=10.0, interval=0.01)`
 
-A coroutine: waits until a selected operation waits for a lock in the database
+A coroutine: waits until a selected request waits for a lock in the database
 ([`BackendActivity.waiting_for_lock`](/ref/drivers#adorm-drivers-backendactivity)) and returns the
-[`LockWait`](#adorm-testing-lockwait). Each check reads the database sessions
-([`backend_pid`](/ref/drivers#backend-pid)) of the selected operations that run then with their database session
+[`LockWait`](#adorm-testing-lockwait). Every request of a slot counts, not only operations: a `commit` waits for the
+locks a deferred constraint takes there, such as a Django foreign key's lock on the referenced row. `task` and
+`session` select requests as they select operations. Each check reads the database sessions
+([`backend_pid`](/ref/drivers#backend-pid)) of the selected requests that run then with their database session
 (`RunningRequest.in_session`) through a
 [`DatabaseMonitor`](/ref/drivers#adorm-drivers-databasemonitor) of their pool's driver, one per pool, opened on first
 use and closed when the helper returns, raises or is cancelled. Checks repeat every `interval` seconds and whenever a
-selected operation starts. A wait is not reported when, during the read, its operation ended or its connection
+selected request starts. A wait is not reported when, during the read, its request ended or its connection
 released or took its shared session again.
 
 | Raises | When |
 |---|---|
-| `NotSupportedError` | the driver of a selected operation does not report its connections' sessions (`backend_pid` is `None`) or cannot open a monitor ([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)) |
+| `NotSupportedError` | the driver of a selected request does not report its connections' sessions (`backend_pid` is `None`) or cannot open a monitor ([`Driver.open_monitor()`](/ref/drivers#async-open-monitor-profile)) |
 | `RuntimeError` | `task` finishes first, for example because it did not wait at all; chained to the task's exception when it raised one |
-| `TimeoutError` | no selected operation waited for a lock within `timeout` seconds |
+| `TimeoutError` | no selected request waited for a lock within `timeout` seconds |
 
 The Django driver on PostgreSQL and the native PostgreSQL driver report sessions and monitor them on a connection of
 their own (`pg_stat_activity`), also inside Django's `TestCase`, where the monitor's connection is not the test's. On
@@ -78,15 +81,23 @@ async with adorm.atomic():
     wait.blocking_pids    # (pid of this transaction's session,)
 ```
 
+```python
+task = asyncio.create_task(join(club_id, member_id))   # inserts a membership in an atomic() block
+wait = await wait_for_lock(task)                        # the club row is locked by another transaction
+wait.request.method   # "commit": the deferred foreign key checks the club at commit
+wait.operation        # None
+```
+
 ### `adorm.testing.LockWait`
 
-A frozen dataclass: an operation waiting for a lock.
+A frozen dataclass: a request waiting for a lock.
 
 | Member | Value |
 |---|---|
-| `running` | the operation's [`RunningRequest`](/ref/pool#adorm-executor-runningrequest) |
+| `running` | the request's [`RunningRequest`](/ref/pool#adorm-executor-runningrequest) |
 | `activity` | its session's [`BackendActivity`](/ref/drivers#adorm-drivers-backendactivity) as the monitor read it |
-| `operation` | `running.operation` |
+| `request` | `running.request`: the [`Request`](/ref/pool#adorm-executor-request-method-args-request-id-options-none) that waits; `request.method` is `"execute"` for an operation, else the transaction call, such as `"commit"` |
+| `operation` | `running.operation`: the operation of an `execute` request, `None` for the other methods |
 | `blocking_pids` | `activity.blocking_pids`: the sessions holding the locks it waits for |
 
 ## Finding the test's connection
