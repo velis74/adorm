@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.4 - 2026-11-18
+
+- `adorm.testing.wait_for_lock()` reports a lock wait of every request a slot runs, not only of operations: a
+  `commit` that waits for the lock of a deferred foreign key is reported. `LockWait.request` is the waiting request;
+  `LockWait.operation` is `None` for requests that are not an `execute`.
+- A slot closed in the loop step in which its connection call ends delivers that call's outcome to the caller and
+  stops serving. Before, the caller got `TypeError: invalid exception object` or `Slot.close()` and the event loop's
+  shutdown never finished.
+
 ## 0.0.3 - 2026-11-17
 
 - Deadlock detection checks each pool of the waiting tasks once per pass instead of once per waiting task: with
