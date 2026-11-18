@@ -12,6 +12,7 @@ import adorm
 from adorm import create_session, IntegrityError, OperationalError, TransactionClosed
 from adorm.events import CallbackEvent, ON_COMMIT
 from adorm.executor import CloseReason, Pool, Router, set_runner
+from adorm.executor.slot import running_requests
 from tests.executor_fakes import FakeConnection, FakeDriver, Op, Profile
 
 REPEAT = range(20)
@@ -651,3 +652,47 @@ async def test_a_slot_closed_while_a_request_runs_answers_it_and_the_queued_ones
     assert pool.size == 0
     async with asyncio.timeout(GUARD):
         assert await flow.execute(Op("next")) == "next"
+
+
+def _close_on_completion(slots, go):
+    """An ``effect`` that records the running slot and wakes a task closing it, so that `Slot.close()` cancels the
+    slot's server in the loop step after the connection call has finished."""
+
+    def effect(connection):  # noqa: ARG001
+        slots.append(running_requests()[0].slot)
+        go.set()
+
+    return effect
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (None, None),
+        (IntegrityError("duplicate key"), (IntegrityError, "duplicate key")),
+        (asyncio.CancelledError(), (adorm.InterfaceError, "cancelled by the driver")),
+    ],
+    ids=["result", "error", "driver-cancelled"],
+)
+async def test_closing_a_slot_as_its_call_finishes_delivers_the_outcome_and_stops_serving(setup, error, expected):
+    setup.pool(max_connections=1)
+    flow = session()
+    slots, go = [], asyncio.Event()
+
+    async def closer():
+        await go.wait()
+        await slots[0].close()
+
+    closing = asyncio.create_task(closer())
+    operation = Op("done", error=error, effect=_close_on_completion(slots, go))
+    async with asyncio.timeout(GUARD):
+        if expected is None:
+            assert await flow.execute(operation) == "done"
+        else:
+            with pytest.raises(expected[0], match=expected[1]):
+                await flow.execute(operation)
+        await closing
+    slot = slots[0]
+    assert slot.close_reason is CloseReason.POOL_CLOSED
+    assert slot.connection.closed
+    assert slot.lease is None or slot.lease.released

@@ -642,8 +642,9 @@ Whether the slot can serve another lease: not closed, its connection usable and 
 #### `async close(reason=CloseReason.POOL_CLOSED)`
 
 Stops serving and closes the connection; `close_reason` becomes `reason`. The running, queued and later requests
-fail with `InterfaceError`; a lease holding the slot frees the pool's capacity when it is released. Errors are logged,
-not raised; a second call does nothing.
+fail with `InterfaceError`; a running request whose connection call has already ended gets that call's outcome
+instead. A lease holding the slot frees the pool's capacity when it is released. Errors are logged, not raised; a
+second call does nothing.
 
 ## Running requests
 
