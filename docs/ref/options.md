@@ -16,6 +16,7 @@ from adorm.executor.options import (
     resolve_options,
     ResolvedOptions,
     ROLE_OPTION,
+    SEARCH_PATH_OPTION,
     session_options,
     set_session_options,
     TIMEOUT_OPTIONS,
@@ -32,6 +33,7 @@ from adorm.executor.options import (
 | `lock_timeout` | database | as `statement_timeout` | the database, through the driver |
 | `idle_in_transaction_session_timeout` | database | as `statement_timeout` | the database, through the driver |
 | `role` | database | a role name, a non-empty string, or `None` for the database's default | the database, through the driver (PostgreSQL's `SET ROLE`) |
+| `search_path` | database | a non-empty list or tuple of schema names (non-empty strings), kept as a tuple, or `None` for the database's default | the database, through the driver (PostgreSQL's `search_path`) |
 | a custom option, such as `app.user_id` | database | a string, or `None` for the database's default | the database, through a driver that declares custom options |
 | any other name | database | what the driver accepts, or `None` for the database's default | the database, through the driver |
 
@@ -63,7 +65,8 @@ A database option is sent only to a driver that declares it in
 raises [`NotSupportedError`](/ref/exceptions) before it takes a slot. An option whose value is `None` is not sent and
 needs no declaration. The [Django driver](/topics/django-driver) on PostgreSQL and the
 [native PostgreSQL driver](/topics/postgresql-driver) declare `statement_timeout`, `lock_timeout`,
-`idle_in_transaction_session_timeout`, `role` and custom options; the Django driver on other databases declares none
+`idle_in_transaction_session_timeout`, `role`, `search_path` and custom options; the Django driver on other databases
+declares none
 ([databases](/topics/django-driver#databases)).
 
 ### `adorm.connection_options(**options)`
@@ -157,6 +160,7 @@ Returns the mapping `options`, checked, as a read-only mapping. Raises `TypeErro
 - a `commit_timeout` that is neither that nor `None`;
 - a value of a `TIMEOUT_OPTIONS` option that is neither a number of seconds from 0 to `MAX_TIMEOUT_OPTION` nor `None`;
 - a `role` that is neither a non-empty string without NUL nor `None`;
+- a `search_path` that is neither a non-empty list or tuple of such strings nor `None`;
 - a custom option whose value is neither a string without NUL nor `None`.
 
 Other values are checked by the driver that sets them.
@@ -233,6 +237,10 @@ value `check_options()` checks as a number of seconds.
 ### `adorm.executor.options.ROLE_OPTION`
 
 `"role"`: the database option naming the role the connection acts as.
+
+### `adorm.executor.options.SEARCH_PATH_OPTION`
+
+`"search_path"`: the database option naming the schemas unqualified table names resolve in, in order.
 
 ### `adorm.executor.options.MAX_TIMEOUT_OPTION`
 

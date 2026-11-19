@@ -303,3 +303,56 @@ async def test_a_custom_option_from_a_hook_reaches_the_connection(driver, make_r
 
     for _ in REPEAT:
         assert [await who(name) for name in ("alice", "bob", None, "alice")] == ["alice", "bob", "", "alice"]
+
+
+TENANT_SCHEMA = "adorm_test_tenant"
+
+
+@pytest.fixture
+async def tenant_schema(driver, club_data):
+    """A schema with a clubs' table holding the club in Koper only; dropped afterwards."""
+    declares(driver, "search_path")
+    conn = await asyncpg.connect(club_data)
+    try:
+        await conn.execute(
+            f"DROP SCHEMA IF EXISTS {TENANT_SCHEMA} CASCADE; CREATE SCHEMA {TENANT_SCHEMA}; "
+            f"CREATE TABLE {TENANT_SCHEMA}.clubs_club (LIKE public.clubs_club INCLUDING ALL); "
+            f"INSERT INTO {TENANT_SCHEMA}.clubs_club SELECT * FROM public.clubs_club WHERE city = 'Koper'"
+        )
+        yield TENANT_SCHEMA
+    finally:
+        await conn.execute(f"DROP SCHEMA IF EXISTS {TENANT_SCHEMA} CASCADE")
+        await conn.close()
+
+
+async def test_search_path_resolves_tables_in_its_schemas_and_ends_with_its_block(make_router, tenant_schema):
+    pool = make_router(max_connections=1, acquire_timeout=5).pools[0]
+    for _ in REPEAT:
+        with adorm.connection_options(search_path=[tenant_schema, "public"]):
+            assert await Club.objects.count() == 1
+        assert await Club.objects.count() == 3
+        async with adorm.atomic():
+            with adorm.connection_options(search_path=(tenant_schema, "public")):
+                assert await Club.objects.count() == 1
+            assert await Club.objects.count() == 3
+        assert await Club.objects.count() == 3
+    assert (pool.size, pool.in_use) == (1, 0)
+
+
+async def test_search_path_from_an_on_acquire_hook(make_router, tenant_schema):
+    tenant: contextvars.ContextVar[str | None] = contextvars.ContextVar("tenant", default=None)
+
+    def on_acquire(connection, profile, session):  # noqa: ARG001 - the hook's signature
+        schema = tenant.get()
+        return None if schema is None else {"search_path": (schema, "public")}
+
+    make_router(profile={"on_acquire": on_acquire}, max_connections=1, acquire_timeout=5)
+    for _ in REPEAT:
+        token = tenant.set(tenant_schema)
+        try:
+            assert await Club.objects.count() == 1
+            async with adorm.atomic():
+                assert await Club.objects.count() == 1
+        finally:
+            tenant.reset(token)
+        assert await Club.objects.count() == 3

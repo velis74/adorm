@@ -231,13 +231,13 @@ INVALID = [
         id="async-hook-on-threaded-driver-path",
     ),
     pytest.param(
-        {"profiles": {"default": {"driver": DEFAULT_DRIVER, "options": {"search_path": "x"}}}},
-        r"\['default'\]: unsupported connection options: search_path",
+        {"profiles": {"default": {"driver": DEFAULT_DRIVER, "options": {"work_mem": "1MB"}}}},
+        r"\['default'\]: unsupported connection options: work_mem",
         id="option-the-driver-does-not-declare",
     ),
     pytest.param(
-        {"profiles": {"default": ConnectionProfile("default", DEFAULT_DRIVER, options={"search_path": "x"})}},
-        r"\['default'\]: unsupported connection options: search_path",
+        {"profiles": {"default": ConnectionProfile("default", DEFAULT_DRIVER, options={"work_mem": "1MB"})}},
+        r"\['default'\]: unsupported connection options: work_mem",
         id="profile-instance-with-driver-path",
     ),
     pytest.param({"providers": "tests.test_django_settings.first_provider"}, "is a list", id="providers-string"),

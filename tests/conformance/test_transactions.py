@@ -19,6 +19,7 @@ OPTIONS: dict[str, object] = {
     "lock_timeout": 2,
     "idle_in_transaction_session_timeout": 60,
     "role": None,  # the login role (`option_value()`)
+    "search_path": ("public",),
 }
 """A value for every connection option a driver of the suite declares; `test_set_options` sets each one."""
 

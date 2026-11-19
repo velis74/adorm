@@ -75,6 +75,7 @@ export default defineConfig({
         items: [
           { text: 'How-to guides', link: '/howto/' },
           { text: 'Multiple database users', link: '/howto/multiple-database-users' },
+          { text: 'Schema per tenant', link: '/howto/schema-per-tenant' },
           { text: 'Writing a driver', link: '/howto/writing-a-driver' },
           { text: 'Generating models', link: '/howto/generating-models' },
         ],

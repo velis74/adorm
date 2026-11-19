@@ -480,8 +480,8 @@ class AsyncpgConnection(DriverConnection):
         await self._command("ROLLBACK")
 
     async def _set_options(self, options: dict[str, Any], local: bool) -> None:
-        """Set the connection options (time limits, `role`, custom options) with `set_options_sql()`, in one
-        simple-protocol message."""
+        """Set the connection options (time limits, `role`, `search_path`, custom options) with `set_options_sql()`,
+        in one simple-protocol message."""
         sql = set_options_sql(options, local)
         if sql:
             await self._command(sql)

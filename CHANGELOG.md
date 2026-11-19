@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.5 - 2026-11-19
+
+- Connection option `search_path` (PostgreSQL's `search_path`): a list or tuple of schema names, set like `role` from
+  the profile, the session, a `connection_options()` block or an `on_acquire` hook. Recipe: schema per tenant.
+
 ## 0.0.4 - 2026-11-18
 
 - `adorm.testing.wait_for_lock()` reports a lock wait of every request a slot runs, not only of operations: a
