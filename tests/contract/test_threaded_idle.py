@@ -3,11 +3,13 @@
 import asyncio
 import socket
 import threading
+import time
 
 import pytest
 
 from adorm.drivers import Capabilities, ThreadedConnection, ThreadedDriver
 from adorm.events import BackendEvent, CONNECTION_LOST, NOTIFY
+from adorm.exceptions import OperationalError
 from tests.contract.drivers import Profile, Recorder
 
 TIMEOUT = 10
@@ -102,6 +104,64 @@ async def received(recorder, count):
             recorder.arrived.clear()
             await recorder.arrived.wait()
     return recorder.events
+
+
+class ConnectProbe(IdleConnection):
+    """Records each ``idle_fileno()`` asked before ``connect_sync()`` has returned; ``connect_fails`` makes
+    ``connect_sync()`` raise."""
+
+    connect_fails = False
+
+    def __init__(self, *args, **kwargs):
+        self.connected = False
+        self.early = []
+        super().__init__(*args, **kwargs)
+
+    def connect_sync(self):
+        time.sleep(0.05)
+        if self.connect_fails:
+            raise OSError("connect failed")
+        super().connect_sync()
+        self.connected = True
+
+    def idle_fileno(self):
+        if not self.connected:
+            self.early.append(threading.get_ident())
+            return None
+        return super().idle_fileno()
+
+    def close_sync(self):
+        if self.connected:
+            super().close_sync()
+
+
+class FailingConnectProbe(ConnectProbe):
+    connect_fails = True
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["thread", "direct"])
+async def test_idle_fileno_is_not_asked_before_connect_sync_succeeds(direct):
+    driver = IdleDriver(direct=direct)
+    driver.connection_class = ConnectProbe
+    conn = await driver.open_connection(Profile("default"), Recorder())
+    try:
+        await conn.listen("bytes")
+        conn.writer.send(b"\x01")
+        assert conn.early == []
+    finally:
+        await conn.close()
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["thread", "direct"])
+async def test_idle_fileno_is_not_asked_when_connect_sync_fails(direct):
+    driver = IdleDriver(direct=direct)
+    driver.connection_class = FailingConnectProbe
+    connection = driver.connection_class(driver, Profile("default"), Recorder())
+    with pytest.raises(OperationalError, match="connect failed"):
+        await connection.start()
+    if not direct:
+        connection.thread.join(TIMEOUT)
+    assert connection.early == []
 
 
 async def test_data_arriving_between_calls_is_read_on_the_connection_thread(idle):

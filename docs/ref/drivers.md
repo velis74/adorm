@@ -652,7 +652,7 @@ caller's context variables are visible, changes made inside the call are not pro
 | `set_options_sync(options, local)` | no | connection options, `None` values to their default; raises `NotSupportedError` for any option unless overridden |
 | `prepare_call_sync()` | no | runs before every other `*_sync` method and every hook, in the same context copy, to prepare that context; an exception it raises is the call's; does nothing unless overridden |
 | `listen_sync(channel)`, `unlisten_sync(channel)` | no | start and stop listening (`listen()`, `unlisten()`); raise `NotSupportedError` unless overridden |
-| `idle_fileno()` | no | a file descriptor to watch while no call runs, `None` for none (the default); asked after every call, not watched once the connection is closed or unusable |
+| `idle_fileno()` | no | a file descriptor to watch while no call runs, `None` for none (the default); asked after every call once `connect_sync()` has succeeded, not watched once the connection is closed or unusable |
 | `idle_sync()` | no | reads what arrived on `idle_fileno()`, such as notifications, and emits it; runs between calls when the descriptor is readable. An exception it raises makes the connection unusable, is logged and is emitted as `BackendEvent("connection_lost", payload=<the mapped error's text>)` |
 
 `cancel_sync()` is the only method that runs on another thread, while a call is running. It asks the target to
