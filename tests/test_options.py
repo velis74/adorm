@@ -137,6 +137,11 @@ async def hold_slot(session, holding, done):
         ("role", "a\x00b"),
         ("app.user_id", 7),
         ("app.user_id", "a\x00b"),
+        ("search_path", "acme, public"),
+        ("search_path", ()),
+        ("search_path", ("acme", "")),
+        ("search_path", ("acme", 5)),
+        ("search_path", ("a\x00b",)),
     ],
 )
 def test_invalid_values_are_refused(name, value):
@@ -170,6 +175,14 @@ def test_role_and_custom_options_are_kept():
         "role_x": None,
     }
     assert check_options({"role": None, "app.user_id": None}) == {"role": None, "app.user_id": None}
+
+
+def test_search_path_is_kept_as_a_tuple():
+    assert check_options({"search_path": ["acme", "public"]}) == {"search_path": ("acme", "public")}
+    assert check_options({"search_path": ("$user",)}) == {"search_path": ("$user",)}
+    assert check_options({"search_path": None}) == {"search_path": None}
+    with adorm.connection_options(search_path=["acme", "public"]) as layer:
+        assert layer == {"search_path": ("acme", "public")}
 
 
 @pytest.mark.parametrize("name", ["", "1x", "a-b", 3, "App.user", "app.", ".app", "app..x", "app.1x", "app.user-id"])
@@ -754,7 +767,7 @@ def connection_role(connection):
         ({"commit_timeout": 1}, ValueError, "cannot set commit_timeout"),
         ({"role": ""}, ValueError, "role"),
         ({"app.user_id": 7}, ValueError, "app.user_id"),
-        ({"search_path": "x"}, NotSupportedError, "search_path"),
+        ({"temp_buffers": "8MB"}, NotSupportedError, "temp_buffers"),
     ],
 )
 async def test_a_hook_returning_bad_options_fails_the_acquisition_and_discards_the_slot(setup, result, error, match):

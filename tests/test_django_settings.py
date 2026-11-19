@@ -170,6 +170,21 @@ def test_hooks_and_providers_are_imported_from_their_paths():
     assert adorm.settings.profiles.providers == (second_provider, first_provider)
 
 
+def content_types_key(profile, session):  # noqa: ARG001 - the hook's signature
+    return None
+
+
+@override_settings(
+    ADORM={
+        "profiles": {
+            "default": {"driver": DEFAULT_DRIVER, "content_types_key": "tests.test_django_settings.content_types_key"}
+        }
+    }
+)
+def test_content_types_key_is_imported_from_its_path():
+    assert settings_configuration()["profiles"]["default"].content_types_key is content_types_key
+
+
 def test_import_object():
     assert import_object("tests.test_django_settings.on_acquire") is on_acquire
     assert import_object("tests.test_django_settings:on_release") is on_release
@@ -231,13 +246,13 @@ INVALID = [
         id="async-hook-on-threaded-driver-path",
     ),
     pytest.param(
-        {"profiles": {"default": {"driver": DEFAULT_DRIVER, "options": {"search_path": "x"}}}},
-        r"\['default'\]: unsupported connection options: search_path",
+        {"profiles": {"default": {"driver": DEFAULT_DRIVER, "options": {"work_mem": "1MB"}}}},
+        r"\['default'\]: unsupported connection options: work_mem",
         id="option-the-driver-does-not-declare",
     ),
     pytest.param(
-        {"profiles": {"default": ConnectionProfile("default", DEFAULT_DRIVER, options={"search_path": "x"})}},
-        r"\['default'\]: unsupported connection options: search_path",
+        {"profiles": {"default": ConnectionProfile("default", DEFAULT_DRIVER, options={"work_mem": "1MB"})}},
+        r"\['default'\]: unsupported connection options: work_mem",
         id="profile-instance-with-driver-path",
     ),
     pytest.param({"providers": "tests.test_django_settings.first_provider"}, "is a list", id="providers-string"),

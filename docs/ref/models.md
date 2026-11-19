@@ -586,6 +586,10 @@ The cache key:
 - the profile's name, for a session whose profile is not registered;
 - the executor object, for any other executor.
 
+A profile's [`content_types_key`](./settings#adorm-connectionprofile) splits the cache of the first two further:
+lookups share it only when the function returns equal values, e.g. the current tenant when each tenant's schema has
+its own content type table.
+
 Each lookup that misses runs its own operation; concurrent lookups do not wait for one another, and a cancelled one
 leaves the others running. The Django and asyncpg drivers connect Django's `post_migrate` signal to `clear()`:
 `migrate` and `flush` (run by a `TransactionTestCase` after each test) recreate the rows with other ids.

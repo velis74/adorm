@@ -26,8 +26,8 @@ __all__ = [
 POSTGRESQL_TIMEOUTS = frozenset({"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"})
 """PostgreSQL's time limits among `POSTGRESQL_OPTIONS`, in seconds."""
 
-POSTGRESQL_OPTIONS = POSTGRESQL_TIMEOUTS | {"role"}
-"""The named connection options `set_options_sql()` sets: PostgreSQL's time limits and ``role``."""
+POSTGRESQL_OPTIONS = POSTGRESQL_TIMEOUTS | {"role", "search_path"}
+"""The named connection options `set_options_sql()` sets: PostgreSQL's time limits, ``role`` and ``search_path``."""
 
 
 @dataclass(frozen=True)
@@ -107,6 +107,10 @@ def _value_sql(name: str, value: Any) -> str:
         if value == "":
             raise ValueError("role is a non-empty string, not ''")
         return quote_identifier(_text(name, value))
+    if name == "search_path":
+        if not isinstance(value, (list, tuple)) or not value or "" in value:
+            raise ValueError(f"search_path is a non-empty sequence of non-empty schema names, not {value!r}")
+        return ", ".join(quote_identifier(_text(name, schema)) for schema in value)
     if name in POSTGRESQL_TIMEOUTS:
         return str(_milliseconds(name, value))
     return quote_literal(_text(name, value))
@@ -122,10 +126,11 @@ def set_options_sql(options: Mapping[str, Any], local: bool) -> str:
     """The statements, separated by ``;``, that set ``options`` on a PostgreSQL connection: ``SET`` or, with
     ``local``, ``SET LOCAL``. The names are those of `POSTGRESQL_OPTIONS` and custom options
     (`adorm.drivers.base.is_custom_option()`). A time limit's value is in seconds, ``0`` for no limit; a positive value
-    below one millisecond becomes one millisecond. ``role``'s value is a role name, a custom option's a string. A value
-    of ``None`` resets the option to its default: ``RESET``, or ``SET LOCAL … TO DEFAULT``. A custom option's name is
-    quoted part by part, so parts that are SQL keywords (``app.user``) are valid. Raises `ValueError` for
-    another name or a value of another form; an empty string for no options."""
+    below one millisecond becomes one millisecond. ``role``'s value is a role name, ``search_path``'s a list or tuple
+    of schema names (each quoted as an identifier), a custom option's a string. A value of ``None`` resets the option
+    to its default: ``RESET``, or ``SET LOCAL … TO DEFAULT``. A custom option's name is quoted part by part, so parts
+    that are SQL keywords (``app.user``) are valid. Raises `ValueError` for another name or a value of another form;
+    an empty string for no options."""
     statements = []
     for name, value in options.items():
         if name not in POSTGRESQL_OPTIONS and not (isinstance(name, str) and is_custom_option(name)):

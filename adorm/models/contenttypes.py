@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 import weakref
 
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from typing import Any, TYPE_CHECKING
 
 from adorm.exceptions import ObjectDoesNotExist
@@ -59,9 +59,10 @@ def _executor(session: Executor | None) -> Executor:
 
 
 def _database_key(executor: Executor) -> Any:
-    """What identifies the database of ``executor``: for a session, its profile driver's `Driver.database_key()`,
-    else its registered connection profile (the name of its profile while none is registered); otherwise the
-    executor itself."""
+    """What identifies the content type cache of ``executor``: for a session, its profile driver's
+    `Driver.database_key()`, else its registered connection profile (the name of its profile while none is
+    registered), with the value of the profile's ``content_types_key`` when it has one; otherwise the executor itself.
+    Raises `TypeError` when ``content_types_key`` returns an unhashable value."""
     from adorm.executor.sessions import Session
 
     if isinstance(executor, Session):
@@ -74,7 +75,15 @@ def _database_key(executor: Executor) -> Any:
             key = profile.get_driver().database_key(profile)
         except Exception:  # noqa: BLE001 - a driver that cannot tell keeps a cache per profile
             key = None
-        return profile if key is None else ("database", key)
+        database = profile if key is None else ("database", key)
+        if profile.content_types_key is None:
+            return database
+        part = profile.content_types_key(profile, executor)
+        if not isinstance(part, Hashable):
+            raise TypeError(
+                f"content_types_key of profile {profile.name!r} returns a hashable value, not {type(part).__name__}"
+            )
+        return ("split", database, part)
     return executor
 
 
@@ -97,7 +106,8 @@ class ContentTypes:
     current session; inside a transaction of that session it reads on the transaction's slot. The cache belongs to
     the database the session's profile names (`Driver.database_key()`): profiles whose drivers name the same database
     share it. For a profile whose driver names none, it belongs to the profile: sessions of that profile share it, and
-    a profile that is replaced or unregistered starts with an empty one. ``content_type_model`` is the label of the
+    a profile that is replaced or unregistered starts with an empty one. A profile's ``content_types_key`` splits the
+    cache further: lookups share one only when it returns equal values. ``content_type_model`` is the label of the
     content type model. The cache holds what was read; a lookup that misses runs a query on every call until one
     succeeds. Thread-safe.
     """

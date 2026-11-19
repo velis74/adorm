@@ -3,7 +3,7 @@
 adorm has two kinds of limits:
 
 - **connection options**: session parameters of the database connection (`statement_timeout`, `lock_timeout`,
-  `role`, custom options such as `app.user_id`, …) and limits adorm enforces on slots (`acquire_timeout`,
+  `role`, `search_path`, custom options such as `app.user_id`, …) and limits adorm enforces on slots (`acquire_timeout`,
   `commit_timeout`), set in layers;
 - **`adorm.timeout()`**: a client-side limit on everything a block of code does with adorm; on expiry it reports
   the phase the operation was in.
@@ -83,6 +83,18 @@ with adorm.connection_options(**{"app.tenant_id": "17"}):
 `role=None` runs as the login role. The [multiple database users](/howto/multiple-database-users) recipe sets the
 current user's role from an `on_acquire` hook.
 
+### Search path
+
+`search_path` names the schemas in which unqualified table names resolve, in order (PostgreSQL's `search_path`). Its
+value is a list or tuple of schema names; each is quoted as an identifier. `None` is the database's default.
+
+```python
+with adorm.connection_options(search_path=("acme", "public")):
+    await Member.objects.count()                    # SET search_path = "acme", "public"
+```
+
+The [schema per tenant](/howto/schema-per-tenant) recipe sets it from an `on_acquire` hook.
+
 ### Options from a profile hook
 
 The profile's `on_acquire` hook returns the hook layer, or `None` for none. It runs in the context of the task that
@@ -128,8 +140,8 @@ A driver declares the options it supports in [`Capabilities.connection_options`]
 - An option whose value is `None` needs no declaration: on a driver that does not declare it nothing is sent; on one
   that does, it resets a value set earlier.
 - The Django driver on PostgreSQL and the native PostgreSQL driver declare `statement_timeout`, `lock_timeout`,
-  `idle_in_transaction_session_timeout`, `role` and custom options; the Django driver on other databases declares
-  none ([databases](/topics/django-driver#databases)).
+  `idle_in_transaction_session_timeout`, `role`, `search_path` and custom options; the Django driver on other
+  databases declares none ([databases](/topics/django-driver#databases)).
 - On PostgreSQL, a `DATABASES` entry's `OPTIONS["assume_role"]` starts the profile's `role`: the drivers set it on
   every new connection, so a block that ends restores it.
 

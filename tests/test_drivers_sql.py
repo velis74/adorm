@@ -66,7 +66,22 @@ def test_set_options_sql():
     )
     assert set_options_sql({}, local=False) == ""
     assert set_options_sql({"lock_timeout": 2147483.647}, local=False) == "SET lock_timeout = 2147483647"
-    assert {"statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout", "role"} == POSTGRESQL_OPTIONS
+    assert {
+        "statement_timeout",
+        "lock_timeout",
+        "idle_in_transaction_session_timeout",
+        "role",
+        "search_path",
+    } == POSTGRESQL_OPTIONS
+
+
+def test_set_options_sql_for_search_path():
+    assert set_options_sql({"search_path": ("acme", "public")}, local=False) == 'SET search_path = "acme", "public"'
+    assert set_options_sql({"search_path": ['Ac"me', "$user"]}, local=True) == (
+        'SET LOCAL search_path = "Ac""me", "$user"'
+    )
+    assert set_options_sql({"search_path": None}, local=False) == "RESET search_path"
+    assert set_options_sql({"search_path": None}, local=True) == "SET LOCAL search_path TO DEFAULT"
 
 
 def test_set_options_sql_for_role_and_custom_options():
@@ -99,10 +114,14 @@ def test_set_options_sql_for_role_and_custom_options():
         {"role": "a\x00"},
         {"app.user_id": 7},
         {"app.user_id": "a\x00"},
+        {"search_path": "acme"},
+        {"search_path": ()},
+        {"search_path": ("acme", "")},
+        {"search_path": ("a\x00",)},
         {"App.user": "x"},
         {"app.user-id": "x"},
     ],
 )
 def test_set_options_sql_refuses_other_names_and_values(options):
-    with pytest.raises(ValueError, match="work_mem|seconds|role|string|PostgreSQL connection option"):
+    with pytest.raises(ValueError, match="work_mem|seconds|role|search_path|string|PostgreSQL connection option"):
         set_options_sql(options, local=False)

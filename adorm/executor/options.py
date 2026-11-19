@@ -26,6 +26,7 @@ __all__ = [
     "ADORM_OPTIONS",
     "MAX_TIMEOUT_OPTION",
     "ROLE_OPTION",
+    "SEARCH_PATH_OPTION",
     "TIMEOUT_OPTIONS",
     "ResolvedOptions",
     "Timeout",
@@ -51,6 +52,10 @@ MAX_TIMEOUT_OPTION = 2147483.647
 ROLE_OPTION = "role"
 """The database option naming the role the connection acts as (PostgreSQL's ``SET ROLE``): a non-empty string."""
 
+SEARCH_PATH_OPTION = "search_path"
+"""The database option naming the schemas unqualified names resolve in, in order (PostgreSQL's ``search_path``): a
+non-empty list or tuple of non-empty strings, kept as a tuple."""
+
 
 _EMPTY: Mapping[str, Any] = MappingProxyType({})
 
@@ -68,6 +73,21 @@ def _check_text(name: str, value: Any) -> Any:
     return value
 
 
+def _check_search_path(value: Any) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, (list, tuple))
+        or not value
+        or not all(isinstance(schema, str) and schema and "\x00" not in schema for schema in value)
+    ):
+        raise ValueError(
+            f"search_path is a non-empty list or tuple of schema names, non-empty strings without NUL, or None, "
+            f"not {value!r}"
+        )
+    return tuple(value)
+
+
 def _check_option(name: Any, value: Any) -> Any:
     if not isinstance(name, str) or not (name.isidentifier() or is_custom_option(name)):
         raise ValueError(
@@ -79,6 +99,8 @@ def _check_option(name: Any, value: Any) -> Any:
         if value == "":
             raise ValueError("role is a non-empty string or None, not ''")
         return _check_text(name, value)
+    if name == SEARCH_PATH_OPTION:
+        return _check_search_path(value)
     if name == "acquire_timeout":
         return check_timeout(value, name)
     if name == "commit_timeout":
@@ -95,8 +117,9 @@ def check_options(options: Mapping[str, Any]) -> Mapping[str, Any]:
     custom option name (`is_custom_option()`), for an
     ``acquire_timeout`` that is not a positive, finite number of seconds, for a ``commit_timeout`` that is neither
     that nor ``None``, for a value of `TIMEOUT_OPTIONS` that is neither a number of seconds from 0 to
-    `MAX_TIMEOUT_OPTION` nor ``None``, for a ``role`` that is neither a non-empty string without NUL nor ``None`` and
-    for a custom option (`is_custom_option()`) whose value is neither a string without NUL nor ``None``. Other values
+    `MAX_TIMEOUT_OPTION` nor ``None``, for a ``role`` that is neither a non-empty string without NUL nor ``None``, for a
+    ``search_path`` that is neither a non-empty list or tuple of such strings (kept as a tuple) nor ``None`` and for a
+    custom option (`is_custom_option()`) whose value is neither a string without NUL nor ``None``. Other values
     are checked by the driver that sets them."""
     if not isinstance(options, Mapping):
         raise TypeError(f"connection options are a mapping, not {type(options).__name__}")

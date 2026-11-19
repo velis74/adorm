@@ -58,7 +58,7 @@ adorm.configure(
 ### `adorm.ConnectionProfile`
 
 `ConnectionProfile(name, driver, alias="default", params={}, connect=None, on_acquire=None, on_release=None,
-pool=None, options={})`
+pool=None, options={}, content_types_key=None)`
 
 A named connection profile, frozen. It satisfies the driver contract's
 [`Profile`](/ref/drivers#adorm-drivers-profile) protocol.
@@ -72,6 +72,7 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `connect` | `None`, or `connect(profile)` returning a new connection in place of the one the driver opens; each driver documents what it returns (the [Django driver](/ref/drivers#adorm-drivers-django-djangoconnection): the DB-API connection Django's wrapper uses; the [native PostgreSQL driver](/ref/drivers#adorm-drivers-asyncpg-asyncpgdriver): an `asyncpg.Connection` or an awaitable of one) |
 | `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request; it returns `None` or a mapping of database [connection options](/ref/options) for the session's lease, the layer between `options` and the session's ([hooks](/topics/profiles#hooks)) |
 | `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool; its return value is ignored |
+| `content_types_key` | `None`, or a plain function `content_types_key(profile, session)` returning a hashable value; [content type](/ref/models) lookups of the profile share a cache only when it returns equal values. It runs in the context of the lookup, so it can read a context variable (the current tenant). An unhashable value raises `TypeError` in the lookup |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
 | `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
 
@@ -272,7 +273,7 @@ a missing setting or `None` is an empty mapping.
 
 | Key | Value |
 |---|---|
-| `profiles` | as in `configure()`; a profile mapping's `connect`, `on_acquire` and `on_release` may also be import paths. Missing or `None`: [`default_profiles()`](#adorm-contrib-django-default-profiles); `{}`: no profile |
+| `profiles` | as in `configure()`; a profile mapping's `connect`, `on_acquire`, `on_release` and `content_types_key` may also be import paths. Missing or `None`: [`default_profiles()`](#adorm-contrib-django-default-profiles); `{}`: no profile |
 | `providers` | a list of profile providers or their import paths |
 | `pool` | the default `PoolSettings` or a mapping of its arguments |
 | `debug` | the executor's [debug switch](/ref/transactions#debug-mode), a bool or `None`; missing: `None` |

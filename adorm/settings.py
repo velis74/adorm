@@ -9,7 +9,7 @@ import logging
 import threading
 import weakref
 
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Hashable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, TYPE_CHECKING
@@ -126,7 +126,10 @@ class ConnectionProfile:
     - ``on_acquire(connection, profile, session)`` runs when a slot is assigned to a session, before its first
       request, and returns ``None`` or a mapping of database connection options for the session's lease, the layer
       between ``options`` and the session's (`adorm.executor.Pool`);
-    - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool.
+    - ``on_release(connection, profile, session)`` runs when the session returns a usable slot to the pool;
+    - ``content_types_key(profile, session)`` returns a hashable value that splits the profile's content type cache
+      (`adorm.content_types`): lookups with equal values share a cache. It is a plain function, called in the context
+      of the lookup, e.g. to read the current tenant from a context variable.
 
     ``connection`` is the target's connection. SQL a hook runs on it that the driver sees
     (`DriverConnection.call_hook()`) is custom SQL: the slot leaves the pool when the lease ends. A threaded driver runs
@@ -147,6 +150,7 @@ class ConnectionProfile:
     on_release: Hook | None = None
     pool: PoolSettings | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
+    content_types_key: Callable[[Any, Any], Hashable] | None = None
 
     def __post_init__(self) -> None:
         for what in ("name", "alias"):
@@ -166,6 +170,9 @@ class ConnectionProfile:
         mode = None if isinstance(driver, str) else getattr(driver, "mode", None)
         for what in ("connect", "on_acquire", "on_release"):
             check_hook(getattr(self, what), what, self.name, mode)
+        key = self.content_types_key
+        if key is not None and (not callable(key) or inspect.iscoroutinefunction(key)):
+            raise TypeError(f"content_types_key of profile {self.name!r} is a plain function or None, not {key!r}")
         options = check_profile_options(self.options, self.name)
         object.__setattr__(self, "options", options)
         capabilities = None if isinstance(driver, str) else getattr(driver, "capabilities", None)
