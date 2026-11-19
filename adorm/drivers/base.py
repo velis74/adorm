@@ -811,6 +811,7 @@ class ThreadedConnection(DriverConnection):
         self._inline_events: list[Event] | None = None
         self._after: list[Callable[[], Any]] = []
         self._usable = True
+        self._connected = False
         self._stuck = False
         self._closed = False
         self._settling: concurrent.futures.Future[None] | None = None
@@ -886,7 +887,8 @@ class ThreadedConnection(DriverConnection):
 
     def idle_fileno(self) -> int | None:
         """A file descriptor to watch while no call runs, ``None`` (the default) for none. Asked on the connection's
-        thread after every call; it is not watched once the connection is closed or unusable."""
+        thread after every call once ``connect_sync()`` has succeeded; it is not watched once the connection is closed
+        or unusable."""
         return None
 
     def idle_sync(self) -> None:  # noqa: B027 - optional hook
@@ -1135,6 +1137,8 @@ class ThreadedConnection(DriverConnection):
             asyncio._set_running_loop(None)
         try:
             ok, value = True, call.context.run(self._run_prepared, call.fn, call.args)
+            if call.fn == self.connect_sync:
+                self._connected = True
         except Exception as exc:
             ok, value = False, self._map(exc) if map_errors else exc
         except BaseException as exc:
@@ -1250,8 +1254,8 @@ class ThreadedConnection(DriverConnection):
                     pass
 
     def _watched_fileno(self) -> int | None:
-        """``idle_fileno()`` of a usable, open connection; ``None`` when it fails."""
-        if self._closed or not self._usable:
+        """``idle_fileno()`` of a connected, usable, open connection; ``None`` when it fails."""
+        if not self._connected or self._closed or not self._usable:
             return None
         try:
             return self.idle_fileno()

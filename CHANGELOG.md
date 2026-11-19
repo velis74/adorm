@@ -6,6 +6,8 @@
   the profile, the session, a `connection_options()` block or an `on_acquire` hook. Recipe: schema per tenant.
 - `ConnectionProfile.content_types_key(profile, session)`: splits the profile's content type cache, e.g. per tenant
   when each tenant's schema has its own content type table.
+- A threaded connection asks `idle_fileno()` only once `connect_sync()` has succeeded, not before it runs or after
+  it fails.
 
 ## 0.0.4 - 2026-11-18
 
