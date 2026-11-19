@@ -156,13 +156,16 @@ async def test_data_racing_calls_is_all_read_in_order(idle, repeat):  # noqa: AR
             if value % 7 == 0:
                 stop.wait(0.0001)
 
+    # A direct call does not yield to the loop; the pause blocks in the loop's select, so the loop does not hold the
+    # GIL the writer needs.
+    pause = 0.0001 if conn.driver.direct else 0
     writer = threading.Thread(target=write)
     writer.start()
     try:
         async with asyncio.timeout(TIMEOUT):
             while writer.is_alive():
                 await conn.execute(Op())
-                await asyncio.sleep(0)  # a direct call does not yield to the loop
+                await asyncio.sleep(pause)
     finally:
         writer.join(TIMEOUT)
     events = await received(recorder, count)
