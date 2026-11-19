@@ -36,6 +36,31 @@ with adorm.connection_options(search_path=(tenant.schema_name, "public")):
     await Member.objects.count()
 ```
 
+## Content types
+
+When `django.contrib.contenttypes` is in each tenant's schema (django-tenants' `TENANT_APPS`, needed when
+`django.contrib.auth` is there), the content type ids differ between tenants. The profile's `content_types_key`
+gives each tenant a [content type cache](/ref/models#adorm-contenttypes) of its own:
+
+```python
+def content_types_key(profile, session):
+    return current_schema.get()
+```
+
+```python
+ADORM = {
+    "profiles": {
+        "default": {
+            "driver": "adorm.drivers.asyncpg.AsyncpgDriver",
+            "on_acquire": "myapp.tenants.on_acquire",
+            "content_types_key": "myapp.tenants.content_types_key",
+        },
+    },
+}
+```
+
+With `django.contrib.contenttypes` in `public` only, every tenant reads the same ids and the profile needs no key.
+
 ## What the application ensures
 
 adorm sets the search path on its own slots only:

@@ -25,7 +25,7 @@ DEFAULT_DRIVER = "adorm.drivers.django.DjangoDriver"
 """The driver of the profiles `default_profiles()` builds."""
 
 _KEYS = ("profiles", "providers", "pool", "debug")
-_HOOKS = ("connect", "on_acquire", "on_release")
+_HOOKS = ("connect", "on_acquire", "on_release", "content_types_key")
 _ERRORS = (TypeError, ValueError, ImportError, NotSupportedError)
 
 

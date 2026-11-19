@@ -356,3 +356,49 @@ async def test_search_path_from_an_on_acquire_hook(make_router, tenant_schema):
         finally:
             tenant.reset(token)
         assert await Club.objects.count() == 3
+
+
+async def test_content_types_key_gives_each_tenant_its_content_type_ids(driver, tenant_schema, club_data):
+    import tests.clubmodels.contenttypes  # noqa: F401 - registers the content type model
+
+    from adorm.executor import set_runner
+    from adorm.settings import close_pools
+    from tests.clubmodels.clubs import Membership
+
+    conn = await asyncpg.connect(club_data)
+    try:
+        await conn.execute(
+            f"CREATE TABLE {tenant_schema}.django_content_type (LIKE public.django_content_type INCLUDING ALL); "
+            f"INSERT INTO {tenant_schema}.django_content_type (id, app_label, model) "
+            f"SELECT id + 1000, app_label, model FROM public.django_content_type"
+        )
+    finally:
+        await conn.close()
+    tenant: contextvars.ContextVar[str | None] = contextvars.ContextVar("tenant", default=None)
+
+    def on_acquire(connection, profile, session):  # noqa: ARG001 - the hook's signature
+        schema = tenant.get()
+        return None if schema is None else {"search_path": (schema, "public")}
+
+    def content_types_key(profile, session):  # noqa: ARG001 - the hook's signature
+        return tenant.get()
+
+    profile = adorm.ConnectionProfile("default", driver, on_acquire=on_acquire, content_types_key=content_types_key)
+    previous = set_runner(None)
+    adorm.configure(profiles={"default": profile}, pool={"max_connections": 1, "acquire_timeout": 5})
+    adorm.content_types.clear()
+    try:
+        public_id = await adorm.content_types.get_id(Membership)
+        token = tenant.set(tenant_schema)
+        try:
+            assert adorm.content_types.cached_id(Membership) is None
+            assert await adorm.content_types.get_id(Membership) == public_id + 1000
+            assert await adorm.content_types.get_model(public_id + 1000) is Membership
+        finally:
+            tenant.reset(token)
+        assert adorm.content_types.cached_id(Membership) == public_id
+    finally:
+        adorm.content_types.clear()
+        await close_pools()
+        adorm.configure()
+        set_runner(previous)

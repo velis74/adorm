@@ -170,6 +170,21 @@ def test_hooks_and_providers_are_imported_from_their_paths():
     assert adorm.settings.profiles.providers == (second_provider, first_provider)
 
 
+def content_types_key(profile, session):  # noqa: ARG001 - the hook's signature
+    return None
+
+
+@override_settings(
+    ADORM={
+        "profiles": {
+            "default": {"driver": DEFAULT_DRIVER, "content_types_key": "tests.test_django_settings.content_types_key"}
+        }
+    }
+)
+def test_content_types_key_is_imported_from_its_path():
+    assert settings_configuration()["profiles"]["default"].content_types_key is content_types_key
+
+
 def test_import_object():
     assert import_object("tests.test_django_settings.on_acquire") is on_acquire
     assert import_object("tests.test_django_settings:on_release") is on_release

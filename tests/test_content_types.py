@@ -3,6 +3,7 @@ validation without a database, and the cache and the writes on the executor with
 lookups, cancellation, a cache cleared mid-lookup, transactions on one slot, several databases)."""
 
 import asyncio
+import contextvars
 import copy
 import pickle
 
@@ -367,6 +368,39 @@ async def test_the_cache_belongs_to_the_profile(db):  # noqa: ARG001
     assert await content_types.get_id(Membership) == 1
     content_types.clear()
     assert content_types.cached_id(Membership) is None
+
+
+async def _coroutine_key(profile, session):  # noqa: ARG001 - the hook's signature
+    return None
+
+
+@pytest.mark.parametrize("key", [42, _coroutine_key])
+def test_content_types_key_is_a_plain_function(key):
+    with pytest.raises(TypeError, match="content_types_key of profile 'default' is a plain function or None"):
+        adorm.ConnectionProfile("default", memory.MemoryDriver(None), content_types_key=key)
+
+
+async def test_content_types_key_splits_the_cache_of_a_profile(db):  # noqa: ARG001
+    tenant = contextvars.ContextVar("tenant", default="a")
+    profile = adorm.settings.get_profile("default")
+    adorm.settings.register_profile(
+        profile.replace(content_types_key=lambda _profile, _session: tenant.get()), replace=True
+    )
+    assert await content_types.get_id(Membership) == 1
+    token = tenant.set("b")
+    try:
+        assert content_types.cached_id(Membership) is None, "another tenant has a cache of its own"
+        assert await content_types.get_id(Membership) == 1
+    finally:
+        tenant.reset(token)
+    assert content_types.cached_id(Membership) == 1
+
+
+async def test_an_unhashable_content_types_key_raises(db):  # noqa: ARG001
+    profile = adorm.settings.get_profile("default")
+    adorm.settings.register_profile(profile.replace(content_types_key=lambda _profile, _session: []), replace=True)
+    with pytest.raises(TypeError, match="returns a hashable value, not list"):
+        await content_types.get_id(Membership)
 
 
 async def test_each_database_has_its_own_content_type_ids(two_databases):
