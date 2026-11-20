@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.0 - 2026-11-20
+
+- Breaking: the native PostgreSQL driver refuses a write Django would send `pre_save`, `post_save`, `pre_delete` or
+  `post_delete` for, with `NotSupportedError` before anything is written, when the signal has a live receiver for the
+  sender. Such a write used to run without the receivers. List the receivers whose work the application does itself
+  in the new profile setting `ConnectionProfile.covered_receivers` (dotted paths, `module.qualname`), or write the
+  model on a Django driver profile, where the receivers run. A model with delete receivers is not fast-deleted.
+- Breaking: `build_lookup()` keeps `exact` and `iexact` with `None` as `Exact` / `IExact` nodes (`rhs_accepts_none`)
+  instead of building `IsNull`. On a field, relation or expression it still matches NULL; at a key inside a JSON
+  field (`address__note=None`) it matches JSON `null`, as in Django. `address=None` on the JSON field itself matches
+  SQL NULL.
+- Transforms in field paths: `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`,
+  `hour`, `minute`, `second`, `date` and `time`, chained, in lookup keys, `F()`, `values()`, `values_list()`,
+  `order_by()`, `distinct()` and grouping, computed in the current time zone for a datetime. `register_transform()`,
+  `Transform`, `TRANSFORMS`; construct names `transform.<name>`.
+- JSON fields: list indexes in field paths (`tags__0`) and the lookups `contained_by`, `has_key`, `has_keys` and
+  `has_any_keys`.
+- Database functions: `Cast`, `Collate`, `Greatest`, `Least`, `NullIf`, `JSONArray`, `JSONObject`, `Extract` and
+  the `Extract*` functions, the math functions (`Abs` to `Sqrt`, `Pi`, `Random`), the text functions (`Chr`, `Ord`,
+  `Left`, `Right`, `LPad`, `RPad`, `LTrim`, `RTrim`, `Trim`, `Repeat`, `Replace`, `Reverse`, `StrIndex`, `Substr`),
+  the hash functions (`MD5`, `SHA1` to `SHA512`), `UUID4` and `UUID7`.
+- `Model.refresh_from_db(fields=None)`: reloads the loaded fields, or the named ones, and clears cached relations and
+  prefetched rows, as Django does.
+- An unknown last segment of a key that names its lookup (`joined__yeer__exact`) is reported as an unsupported
+  transform, as `resolve_lookup()` does. `orm_path()` takes `implicit`.
+- The asyncpg compiler writes the time zone name and the `DATE_TRUNC` precision into the SQL as literals, so a
+  `distinct()` on a datetime transform matches its `order_by()`.
+
 ## 0.0.5 - 2026-11-19
 
 - Connection option `search_path` (PostgreSQL's `search_path`): a list or tuple of schema names, set like `role` from
