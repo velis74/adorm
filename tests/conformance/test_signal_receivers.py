@@ -93,7 +93,7 @@ def connect():
 
 
 async def tag_names(prefix="sig"):
-    return sorted([tag.name async for tag in Tag.objects.filter(name__startswith=prefix)])
+    return sorted([tag.name async for tag in Tag.objects.filter(name__istartswith=prefix)])
 
 
 async def club_with_activities(slug: str, *, activities: int = 2) -> tuple[Club, Member]:
@@ -361,11 +361,11 @@ async def test_delete_of_a_model_with_a_receiver(conformance_driver, router, con
         with pytest.raises(NotSupportedError, match=refusal(SIGNAL_NAMES[signal], "activities.Tag", on_tag_saved)):
             await night.delete()
         with pytest.raises(NotSupportedError, match=refusal(SIGNAL_NAMES[signal], "activities.Tag", on_tag_saved)):
-            await Tag.objects.filter(name__startswith="sig").delete()
+            await Tag.objects.filter(name__istartswith="sig").delete()
         assert await tag_names() == ["sig-night", "sig-noon"]
     else:
         assert await night.delete() == (1, {"activities.Tag": 1})
-        assert await Tag.objects.filter(name__startswith="sig").delete() == (1, {"activities.Tag": 1})
+        assert await Tag.objects.filter(name__istartswith="sig").delete() == (1, {"activities.Tag": 1})
         assert await tag_names() == []
     expected = [
         (SIGNAL_NAMES[signal], "activities.Tag", "sig-night"),
