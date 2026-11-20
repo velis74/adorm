@@ -27,9 +27,11 @@
   driver was imported. `adorm.drivers.django.register_translation()` registers a translation into a Django expression
   for both drivers; `register_sqlite_function()` registers a Python function on the Django driver's SQLite
   connections. `adorm.query.sql_constructs()`, `adorm.drivers.Constructs`. Recipe: own expressions.
-- `UUID4` and `UUID7` run on PostgreSQL and SQLite with Django 5.2 and 6: Django's function where Django and the
-  database have it, else `GEN_RANDOM_UUID()` and a version 7 UUID built in SQL (with `shift`) on PostgreSQL and
-  SQLite functions of adorm's on SQLite.
+- `UUID4` and `UUID7` with Django 5.2 and 6: Django's function where Django and the database have it, else
+  `GEN_RANDOM_UUID()` and PostgreSQL 18's `UUIDV7()` on PostgreSQL (`UUID7` is refused before 18) and SQLite functions
+  of adorm's, generated in Python, on SQLite.
+- `adorm.uuid7()`: a version 7 UUID generated in Python (`uuid.uuid7()` from Python 3.14 on), e.g. as a field
+  default (`default=adorm.uuid7`).
 - A transform's `applies_to()` and `output_type()` get the field's type without `Annotated` and `Optional`.
 - `Concat` without `output_type` concatenates arguments of different text fields on the Django-based drivers.
 - `Model.refresh_from_db(fields=None)`: reloads the loaded fields, or the named ones, and clears cached relations and

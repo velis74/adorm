@@ -1,6 +1,7 @@
 """Own expressions on every driver: functions, lookups and transforms an application defines with SQL templates (one
 template or one per database vendor), functions with a translation registered for the Django-based drivers, and the
-built-in `UUID4` and `UUID7` on every database and Django version the suite runs with.
+built-in `UUID4` and `UUID7` on every database and Django version the suite runs with (`UUID7` refused on PostgreSQL
+before 18, which has no function for it).
 
 The SQL-based drivers (Django, native PostgreSQL) render templates and run registered translations and declare their
 construct names; a vendor without a template and a driver without SQL (the test suite's memory driver) refuse the
@@ -347,6 +348,22 @@ def now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+async def uuid7_in_database() -> bool:
+    """Whether the database generates version 7 UUIDs: SQLite (a Python function on the connection) and PostgreSQL 18
+    or later. PostgreSQL before 18 has no such function, and UUID7 is refused there."""
+    from tests.library_data import in_thread
+
+    return vendor() == "sqlite" or await in_thread(lambda: connection.pg_version >= 180000)
+
+
+async def assert_uuid7_refused(awaitable, pool) -> None:
+    """``awaitable`` raises `NotSupportedError` naming UUID7, and the pool serves the next operation."""
+    with pytest.raises(adorm.NotSupportedError, match="UUID7"):
+        await awaitable
+    assert pool.in_use == 0
+    assert await Member.objects.count() == 12
+
+
 def assert_version(values: list, version: int) -> None:
     assert len(values) == 12
     assert len(set(values)) == 12
@@ -368,10 +385,13 @@ async def test_uuid4_gives_a_version_4_uuid_per_row():
     assert_version(await rows(Member.objects.annotate(u=UUID4()).values_list("u", flat=True)), 4)
 
 
-@pytest.mark.usefixtures("club_data", "sql_driver", "router")
-async def test_uuid7_gives_a_version_7_uuid_per_row_with_the_current_time():
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_uuid7_gives_a_version_7_uuid_per_row_with_the_current_time(pool):
     from adorm.query import UUID7
 
+    if not await uuid7_in_database():
+        await assert_uuid7_refused(rows(Member.objects.annotate(u=UUID7())), pool)
+        return
     before = now_ms()
     values = await rows(Member.objects.annotate(u=UUID7()).values_list("u", flat=True))
     after = now_ms()
@@ -384,6 +404,8 @@ async def test_uuid7_gives_a_version_7_uuid_per_row_with_the_current_time():
 async def test_uuid7_values_of_later_milliseconds_sort_later():
     from adorm.query import UUID7
 
+    if not await uuid7_in_database():
+        pytest.skip("PostgreSQL before 18 refuses UUID7")
     query = Member.objects.filter(first_name="Ana").annotate(u=UUID7()).values_list("u", flat=True)
     (first,) = await rows(query)
     passed = now_ms()
@@ -399,7 +421,8 @@ async def test_uuid7_values_of_later_milliseconds_sort_later():
 async def test_uuid_functions_in_an_update():
     from adorm.query import Cast, UUID4, UUID7
 
-    for function, version in ((UUID4, 4), (UUID7, 7)):
+    functions = ((UUID4, 4), (UUID7, 7)) if await uuid7_in_database() else ((UUID4, 4),)
+    for function, version in functions:
         changed = await Member.objects.filter(first_name__in=["Ana", "Eva"]).update(last_name=Cast(function(), str))
         assert changed == 2
         stored = await rows(Member.objects.filter(first_name__in=["Ana", "Eva"]).values_list("last_name", flat=True))
@@ -413,6 +436,9 @@ async def test_uuid7_with_a_shift_moves_its_timestamp_or_is_refused_by_name(pool
 
     shift = datetime.timedelta(days=1)
     query = Member.objects.filter(first_name="Ana").annotate(u=UUID7(shift)).values_list("u", flat=True)
+    if not await uuid7_in_database():
+        await assert_uuid7_refused(rows(query), pool)
+        return
     before = now_ms()
     refusal = None
     try:

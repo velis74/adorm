@@ -187,20 +187,34 @@ A driver that does not translate with Django (another ORM's) refuses `Masked` un
 
 The bundled [`UUID4`](/ref/expressions#adorm-uuid4) and
 [`UUID7`](/ref/expressions#adorm-uuid7-shift-none) are translations registered the same way. Each gives Django's
-function where the installed Django and the database have it, and otherwise:
+function where the installed Django and the database have it, and otherwise the database's own function or a Python
+function registered as in section 3:
 
 | Function | PostgreSQL | SQLite |
 |---|---|---|
 | `UUID4` | `GEN_RANDOM_UUID()` | `ADORM_UUID4()`, a registered SQLite function (`uuid.uuid4()`) |
-| `UUID7` | a version 4 UUID with the Unix time in milliseconds in its first 48 bits and the version bits 0111 | `ADORM_UUID7()`, a registered SQLite function (an RFC 9562 version 7 UUID) |
-
-So both give valid UUIDs on PostgreSQL 13 and later and on SQLite, with Django 5.2 and 6. `UUID7(shift)` moves the
-timestamp on PostgreSQL; on SQLite a shift raises `NotSupportedError`, as Django's `UUID7` does there.
+| `UUID7` | `UUIDV7()` from PostgreSQL 18; before 18 `NotSupportedError` | `ADORM_UUID7()`, a registered SQLite function ([`adorm.uuid7()`](/ref/expressions#adorm-uuid7)); a shift raises `NotSupportedError` |
 
 ```python
-from adorm.query import UUID7
+from adorm.query import UUID4
 
-query = Member.objects.filter(first_name="Ana").annotate(code=UUID7())
+query = Member.objects.filter(first_name="Ana").annotate(code=UUID4())
 codes = [code async for code in query.values_list("code", flat=True)]
-# [UUID("019aa0f2-…")], codes[0].version == 7
+# [UUID("6f1c…")], codes[0].version == 4
+```
+
+A column of version 7 UUIDs gets its values from a Python default: [`adorm.uuid7()`](/ref/expressions#adorm-uuid7)
+generates one in the application (`uuid.uuid7()` from Python 3.14 on), so the value is filled on insert on every
+database and driver. A database default (`db_default`) would need the database's own function, which PostgreSQL has
+from version 18 on only.
+
+```python
+from django.db import models
+
+import adorm
+
+# a field of a Django model
+code = models.UUIDField(default=adorm.uuid7, editable=False, unique=True)
+
+adorm.uuid7().version   # 7
 ```

@@ -611,13 +611,25 @@ A version 7 (time-ordered) UUID, a new one for each row, as a `uuid.UUID`. `shif
 of a duration) moves its timestamp.
 
 The Django driver and the native PostgreSQL driver run both on PostgreSQL and SQLite with every Django version they
-support, with Django's function where Django and the database have it and with SQL or a SQLite function of adorm's
-otherwise ([UUID4 and UUID7](/ref/drivers#uuid4-and-uuid7)). A `UUID7` value holds the Unix time in milliseconds in its
-first 48 bits, so values of later milliseconds sort later. On SQLite `shift` raises `NotSupportedError`. Other
-databases have them where Django does.
+support, with Django's function where Django and the database have it and otherwise with the database's own function
+or a SQLite function of adorm's ([UUID4 and UUID7](/ref/drivers#uuid4-and-uuid7)). PostgreSQL has a function for
+`UUID7` from version 18 on; before 18 the query raises `NotSupportedError`. On SQLite `shift` raises
+`NotSupportedError`. A `UUID7` value holds the Unix time in milliseconds in its first 48 bits, so values of later
+milliseconds sort later. Other databases have them where Django does.
 
 ```python
 Query("library.Note").update(code=UUID4())
+```
+
+#### `adorm.uuid7()`
+
+Returns a new version 7 UUID (RFC 9562) generated in Python: the Unix time in milliseconds in the first 48 bits, the
+version and variant bits, the rest random; `uuid.uuid7()` of the standard library from Python 3.14 on. As a field
+default (`models.UUIDField(default=adorm.uuid7)`) it fills the column on insert on every database; the Django driver's
+SQLite function behind `UUID7` calls it. Defined in `adorm.uuids`.
+
+```python
+adorm.uuid7()   # UUID('019aa0f2-7c3e-7a1b-9f4d-2b8e1c0d3a5f')
 ```
 
 ## Aggregates

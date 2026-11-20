@@ -1686,7 +1686,7 @@ registered with `register_translation()`. Each gives Django's function where the
 | Function | PostgreSQL | SQLite | Other vendors |
 |---|---|---|---|
 | `UUID4` | `GEN_RANDOM_UUID()` | `ADORM_UUID4()`, registered with `register_sqlite_function()`: `uuid.uuid4()` | Django's `UUID4`, which refuses a database without one |
-| `UUID7` | the bytes of `GEN_RANDOM_UUID()` with the first 48 bits replaced by the Unix time in milliseconds of `CLOCK_TIMESTAMP()` plus the shift, and the version bits set to 0111 | `ADORM_UUID7()`, registered with `register_sqlite_function()`: `uuid.uuid7()`, or an RFC 9562 version 7 UUID of adorm's before Python 3.14; a shift raises Django's `NotSupportedError` | Django's `UUID7`, which refuses a database without one |
+| `UUID7` | `UUIDV7()` (with the shift as an `interval`) on PostgreSQL 18 and later; before 18 Django's `NotSupportedError` (`UUID7 requires PostgreSQL version 18 or later.`) | `ADORM_UUID7()`, registered with `register_sqlite_function()`: [`adorm.uuid7()`](/ref/expressions#adorm-uuid7); a shift raises Django's `NotSupportedError` | Django's `UUID7`, which refuses a database without one |
 
 Where the installed Django has no such function, both are declared on PostgreSQL and SQLite only; with it, on every
 vendor.

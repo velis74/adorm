@@ -70,4 +70,5 @@ async def test_the_recipe_s_queries_give_the_values_it_states():
     assert namespace["masked"] == ["a***@example.com"]
     (code,) = namespace["codes"]
     assert isinstance(code, uuid.UUID)
-    assert code.version == 7
+    assert code.version == 4
+    assert namespace["code"].default is namespace["adorm"].uuid7

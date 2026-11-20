@@ -99,11 +99,13 @@ def test_a_template_that_is_not_a_string_is_refused_when_the_class_is_defined():
         type("BadTemplate", (Lookup,), {"lookup_name": "bad_template", "template": ["x"]})
 
 
-def test_adorm_s_uuid7_is_a_version_7_uuid_with_the_current_time():
-    from adorm.drivers.django.translation import _uuid7
+@pytest.mark.parametrize("own", [True, False], ids=["own", "stdlib-or-own"])
+def test_uuid7_is_a_version_7_uuid_with_the_current_time(own):
+    from adorm.uuids import _uuid7
 
+    generate = _uuid7 if own else adorm.uuid7
     before = time.time_ns() // 1_000_000
-    values = [_uuid7() for _ in range(100)]
+    values = [generate() for _ in range(100)]
     after = time.time_ns() // 1_000_000
     assert len(set(values)) == 100
     for value in values:

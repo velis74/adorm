@@ -65,7 +65,8 @@ def test_postgresql_declares_everything_the_translation_supports():
 def test_other_databases_declare_no_postgresql_features(capabilities):
     assert capabilities.operations == CAPABILITIES.operations
     assert not capabilities.constructs & POSTGRESQL_ONLY
-    assert capabilities.constructs < CAPABILITIES.constructs
+    # The bundled constructs; own expressions may have SQL for one vendor only.
+    assert capabilities.constructs.names < CAPABILITIES.constructs.names
     assert capabilities.connection_options == frozenset()
     assert capabilities.backend_events == frozenset()
     assert capabilities.max_channel_length is None

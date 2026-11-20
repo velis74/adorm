@@ -15,10 +15,8 @@ import contextvars
 import datetime
 import decimal
 import itertools
-import os
 import re
 import threading
-import time
 import uuid
 import weakref
 
@@ -41,6 +39,7 @@ from adorm.query import expressions as ax
 from adorm.query.expressions import _has_sql, split_field_path, sql_constructs
 from adorm.query.lookups import _apply_transforms, build_lookup, Exact, Lookup, split_lookup, TRANSFORMS
 from adorm.query.query import Query
+from adorm.uuids import uuid7
 
 __all__ = [
     "AGGREGATES",
@@ -632,23 +631,11 @@ def _apply_own_transforms(expression: Any, names: Sequence[str]) -> Any:
     return expression
 
 
-# UUID4 and UUID7: Django's own functions where the database has them, else SQL or a SQLite function of adorm's
+# UUID4 and UUID7: Django's functions where Django and the database have them, else the database's own function or a
+# SQLite function of adorm's that generates the value in Python
 
 _DJANGO_UUID4: Any = getattr(djf, "UUID4", None)
 _DJANGO_UUID7: Any = getattr(djf, "UUID7", None)
-
-
-def _uuid7() -> uuid.UUID:
-    """A version 7 UUID (RFC 9562): the Unix time in milliseconds in the first 48 bits, then the version, 12 random
-    bits, the variant and 62 random bits."""
-    milliseconds = time.time_ns() // 1_000_000
-    value = (milliseconds & (1 << 48) - 1) << 80 | int.from_bytes(os.urandom(10), "big")
-    value = value & ~(0xF << 76) | 0x7 << 76
-    value = value & ~(0x3 << 62) | 0x2 << 62
-    return uuid.UUID(int=value)
-
-
-_UUID7_FUNCTION: Callable[[], uuid.UUID] = getattr(uuid, "uuid7", _uuid7)
 
 
 def _sqlite_uuid4() -> str:
@@ -656,15 +643,7 @@ def _sqlite_uuid4() -> str:
 
 
 def _sqlite_uuid7() -> str:
-    return _UUID7_FUNCTION().hex
-
-
-_POSTGRESQL_UUID7 = (
-    "ENCODE(SET_BIT(SET_BIT(OVERLAY(UUID_SEND(GEN_RANDOM_UUID()) PLACING SUBSTRING(INT8SEND(FLOOR(EXTRACT(EPOCH FROM "
-    "{now}) * 1000)::BIGINT) FROM 3) FROM 1 FOR 6), 52, 1), 53, 1), 'hex')::UUID"
-)
-"""A version 7 UUID from a random version 4 one: the first 48 bits replaced by the Unix time in milliseconds of
-``{now}``, the version bits 0100 set to 0111; the variant bits stay."""
+    return uuid7().hex
 
 
 class _UUID4(dj.Func):
@@ -684,14 +663,14 @@ class _UUID4(dj.Func):
 
 
 class _UUID7(dj.Func):
-    """``UUID7``: Django's where the database has it natively; else on PostgreSQL `_POSTGRESQL_UUID7` at
-    ``CLOCK_TIMESTAMP()`` plus the shift, on SQLite ``ADORM_UUID7()`` without a shift."""
+    """``UUID7``: Django's where Django and the database have it; else PostgreSQL 18's ``UUIDV7()`` and
+    ``ADORM_UUID7()`` on SQLite (without a shift). PostgreSQL before 18 refuses it."""
 
     output_field = dj.UUIDField()
 
     def native(self, connection: Any) -> Any:
         """Django's ``UUID7`` of the same arguments when the database has the function, else ``None``."""
-        if _DJANGO_UUID7 is None or not connection.features.supports_uuid7_function:
+        if _DJANGO_UUID7 is None or not getattr(connection.features, "supports_uuid7_function", False):
             return None
         return _DJANGO_UUID7(*self.get_source_expressions(), output_field=self.output_field)
 
@@ -704,8 +683,9 @@ class _UUID7(dj.Func):
         native = self.native(connection)
         if native is not None:
             return compiler.compile(native)
-        shifted = "CLOCK_TIMESTAMP() + CAST(%(expressions)s AS INTERVAL)"
-        template = _POSTGRESQL_UUID7.format(now=shifted if self.source_expressions else "CLOCK_TIMESTAMP()")
+        if connection.pg_version < 180000:
+            raise DjangoNotSupportedError("UUID7 requires PostgreSQL version 18 or later.")
+        template = "UUIDV7(CAST(%(expressions)s AS INTERVAL))" if self.source_expressions else "UUIDV7()"
         return dj.Func.as_sql(self, compiler, connection, template=template, **extra_context)
 
     def as_sqlite(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:
