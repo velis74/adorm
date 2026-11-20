@@ -20,7 +20,19 @@ from types import MappingProxyType, UnionType
 from typing import Annotated, Any, ClassVar, get_args, get_origin, is_typeddict, TYPE_CHECKING, Union
 
 from adorm.exceptions import FieldError
-from adorm.query.expressions import _expression, Expression, F, freeze_value, Node, OuterRef, split_field_path, Subquery
+from adorm.query.expressions import (
+    _check_sql,
+    _DEFAULT_TEMPLATE,
+    _expression,
+    _sql_template,
+    Expression,
+    F,
+    freeze_value,
+    Node,
+    OuterRef,
+    split_field_path,
+    Subquery,
+)
 from adorm.query.query import as_query, check_model_label, Query
 
 if TYPE_CHECKING:
@@ -91,6 +103,9 @@ class Lookup(Expression):
     `Query` or an object with a ``query`` attribute that is one) becomes a `Subquery`. A plain value is copied
     (`freeze_value`). ``None`` is rejected unless ``rhs_accepts_none``: a NULL test is `IsNull`. The construct name is
     ``lookup.<lookup_name>``.
+
+    A lookup of the application's own declares its SQL in ``template`` (or ``templates``, one per database vendor)
+    with ``%(lhs)s`` and ``%(rhs)s``; drivers that render SQL run it.
     """
 
     lookup_name: ClassVar[str | None] = None
@@ -105,10 +120,22 @@ class Lookup(Expression):
     lhs: Expression
     rhs: Any
 
+    template: ClassVar[str | None] = None
+    """The SQL template for every vendor without one in ``templates``."""
+    templates: ClassVar[Mapping[str, str] | None] = None
+    """SQL templates by database vendor."""
+
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if cls.lookup_name is not None and "construct" not in cls.__dict__:
             cls.construct = f"lookup.{cls.lookup_name}"
+        _check_sql(cls)
+
+    @classmethod
+    def sql_template(cls, vendor: str) -> str | None:
+        """The SQL template on databases of ``vendor``: ``templates[vendor]``, else ``template``; ``None`` without
+        one."""
+        return _sql_template(cls, vendor)
 
     def __init__(self, lhs: Any, rhs: Any) -> None:
         if self.lookup_name is None:
@@ -202,21 +229,37 @@ class Transform:
     """Base class of transforms: a named function of a field's value that a field path applies after the field, before
     the lookup (``joined__year__gte``) or at the end of a path in ``F()``, ``values()`` and ``order_by()``.
 
-    A transform is named in field paths, not instantiated. Its construct name is ``transform.<lookup_name>``. Drivers
-    apply a transform by its name, so a custom transform needs a transform of the same name in the target ORM.
+    A transform is named in field paths, not instantiated. Its construct name is ``transform.<lookup_name>``. A
+    transform of the application's own declares its SQL as a `Func` does: ``function``, ``template`` with
+    ``%(expressions)s`` (the transformed value) or ``templates``, one per database vendor; drivers that render SQL run
+    it. The bundled transforms have no SQL here: drivers apply them by name.
     """
 
     lookup_name: ClassVar[str | None] = None
     construct: ClassVar[str | None] = None
+    function: ClassVar[str | None] = None
+    """The SQL function's name."""
+    template: ClassVar[str | None] = None
+    """The SQL template for every vendor without one in ``templates``."""
+    templates: ClassVar[Mapping[str, str] | None] = None
+    """SQL templates by database vendor."""
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         if isinstance(cls.lookup_name, str) and cls.lookup_name and "construct" not in cls.__dict__:
             cls.construct = f"transform.{cls.lookup_name}"
+        _check_sql(cls)
+
+    @classmethod
+    def sql_template(cls, vendor: str) -> str | None:
+        """The SQL template on databases of ``vendor``: ``templates[vendor]``, else ``template``, else
+        ``%(function)s(%(expressions)s)`` when the class names a ``function``; ``None`` without one."""
+        return _sql_template(cls, vendor, _DEFAULT_TEMPLATE)
 
     @classmethod
     def applies_to(cls, field_type: Any) -> bool:  # noqa: ARG003 - any field by default
-        """Whether the transform applies to a value of ``field_type`` (``None`` when unknown); ``True`` by default."""
+        """Whether the transform applies to a value of ``field_type`` (without ``Annotated`` and ``Optional``; ``None``
+        when unknown); ``True`` by default."""
         return True
 
     @classmethod
@@ -817,10 +860,12 @@ def _apply_transforms(
     target: str, field_type: Any, names: tuple[str, ...], key: str, model: str | None, *, lookup_hint: bool
 ) -> tuple[tuple[str, ...], Any]:
     """The transforms ``names`` applied to a value of ``field_type`` at ``target`` (as error messages name it), and
-    the type of the result. Raises `adorm.FieldError` for a name that is no transform applying to the value there;
-    ``lookup_hint``: the last name may also have been meant as a lookup, as the message then calls it."""
+    the type of the result; each transform gets the type without ``Annotated`` and ``Optional``. Raises
+    `adorm.FieldError` for a name that is no transform applying to the value there; ``lookup_hint``: the last name
+    may also have been meant as a lookup, as the message then calls it."""
     for index, name in enumerate(names):
         transform = _TRANSFORMS.get(name)
+        field_type = _base_type(field_type)
         if transform is not None and transform.applies_to(field_type):
             field_type = transform.output_type(field_type)
             target = f"{target}__{name}"

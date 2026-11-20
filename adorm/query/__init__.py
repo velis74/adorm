@@ -82,6 +82,7 @@ from adorm.query.expressions import (
     SHA512,
     Sign,
     Sin,
+    sql_constructs,
     Sqrt,
     Star,
     StrIndex,
@@ -314,4 +315,5 @@ __all__ = [
     "register_transform",
     "resolve_lookup",
     "split_lookup",
+    "sql_constructs",
 ]
