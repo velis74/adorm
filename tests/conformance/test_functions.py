@@ -21,7 +21,7 @@ FUNCTIONS = """Cast Collate Greatest Least NullIf JSONArray JSONObject Extract E
 ExtractMonth ExtractWeek ExtractDay ExtractWeekDay ExtractIsoWeekDay ExtractHour ExtractMinute ExtractSecond Abs ACos
 ASin ATan ATan2 Ceil Cos Cot Degrees Exp Floor Ln Log Mod Pi Power Radians Random Round Sign Sin Sqrt Tan Chr Left
 LPad LTrim MD5 Ord Repeat Replace Reverse Right RPad RTrim SHA1 SHA224 SHA256 SHA384 SHA512 StrIndex Substr Trim
-UUID4""".split()
+UUID4 UUID7""".split()
 
 
 @pytest.fixture
@@ -41,10 +41,7 @@ def test_function_names_are_all_distinct():
 
 
 async def test_bundled_drivers_declare_every_function(driver):
-    from django.db.models import functions
-
-    names = {name for name in FUNCTIONS if hasattr(functions, name)}  # UUID4 since Django 6.0
-    missing = {f"function.{name}" for name in names} - driver.capabilities.constructs
+    missing = {f"function.{name}" for name in FUNCTIONS} - driver.capabilities.constructs
     assert missing == set()
 
 

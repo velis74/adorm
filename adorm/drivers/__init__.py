@@ -8,6 +8,7 @@ from adorm.drivers.base import (
     BackendActivity,
     Capabilities,
     check_channel,
+    Constructs,
     DatabaseMonitor,
     Driver,
     DriverConnection,
@@ -25,6 +26,7 @@ from adorm.drivers.base import (
 __all__ = [
     "BackendActivity",
     "Capabilities",
+    "Constructs",
     "DatabaseMonitor",
     "Driver",
     "DriverConnection",

@@ -347,6 +347,7 @@ class DjangoConnection(ThreadedConnection):
     _listen_channels: frozenset[str] = frozenset()
     vendor: Vendor = _POSTGRESQL
     _configured_raw: Any = None
+    _sqlite_functions: Any = None
     _cancelled_call: Any = None
     _waiting_for_write_lock = False
     _transaction_ended = False
@@ -418,13 +419,16 @@ class DjangoConnection(ThreadedConnection):
         self._watch_backend()
 
     def _configure(self) -> None:
-        """Configure a DB-API connection the wrapper opened since the last call (`Vendor.connected()`); not the shared
-        connection of a ``TestCase``, which `connect_sync()` does not open."""
+        """Configure a DB-API connection the wrapper opened since the last call (`Vendor.connected()`), not the shared
+        connection of a ``TestCase``, which `connect_sync()` does not open; then prepare the connection for the call
+        (`Vendor.prepare_call()`)."""
         raw = self.db.connection
-        if self._configured_raw is None or raw is None or raw is self._configured_raw:
+        if raw is None:
             return
-        self.vendor.connected(self)
-        self._configured_raw = raw
+        if self._configured_raw is not None and raw is not self._configured_raw:
+            self.vendor.connected(self)
+            self._configured_raw = raw
+        self.vendor.prepare_call(self)
 
     def _read_backend_pid(self) -> int | None:
         raw = self.db.connection

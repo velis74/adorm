@@ -31,6 +31,7 @@ from adorm.drivers.django.vendors import (
     sqlite_integrity_details,
     Vendor,
     vendor,
+    with_own_constructs,
 )
 from adorm.exceptions import IntegrityError, InterfaceError, OperationalError, wrap_driver_error
 from adorm.executor import Pool, Router, set_runner
@@ -184,7 +185,7 @@ def test_another_backend_declares_what_its_feature_flags_allow():
     bare = features_capabilities(NoLocks)
     assert not {name for name in bare.constructs if name.startswith("clause.select_for_update")}
     assert not bare.savepoints
-    assert Vendor("cockroachdb", Features).capabilities() == capabilities
+    assert Vendor("cockroachdb", Features).capabilities() == with_own_constructs(capabilities, "cockroachdb")
     assert vendor("cockroachdb", Features).name == "cockroachdb"
 
 

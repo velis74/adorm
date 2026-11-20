@@ -24,6 +24,7 @@ from adorm.drivers.django.driver import (
     wrapper_vendor,
 )
 from adorm.drivers.django.schema import expected_tables, model_schema_hash
+from adorm.drivers.django.translation import register_sqlite_function, register_translation
 
 __all__ = [
     "CAPABILITIES",
@@ -43,5 +44,7 @@ __all__ = [
     "model_schema_hash",
     "notice_event",
     "profile_vendor",
+    "register_sqlite_function",
+    "register_translation",
     "wrapper_vendor",
 ]

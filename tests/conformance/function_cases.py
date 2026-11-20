@@ -20,8 +20,6 @@ from typing import Any
 
 import pytest
 
-import adorm
-
 from adorm import F, Value
 from adorm.query import Concat, Count, Exact, Length, Lower, Max, Min, Sum, Upper
 from tests.clubmodels.activities import Activity, Competition
@@ -951,18 +949,9 @@ def _django_uuid7():
 
 @case("select", "clause.annotate", "function.UUID7", expected=(12, True, 12), django=_django_uuid7)
 async def scenario_function_uuid7():
-    """Version 7 UUIDs where the database has the function; elsewhere the database's refusal is a
-    `NotSupportedError` naming UUID7 (a capability refusal propagates)."""
     from adorm.query import UUID7
 
-    supported = await in_thread(_uuid7_supported)
-    try:
-        values = await rows(Member.objects.annotate(u=UUID7()).values_list("u", flat=True))
-    except adorm.NotSupportedError as exc:
-        if exc.unsupported or supported:
-            raise
-        return 12, "UUID7" in str(exc), 12
-    return _uuid_outcome(values, 7)
+    return _uuid_outcome(await rows(Member.objects.annotate(u=UUID7()).values_list("u", flat=True)), 7)
 
 
 # Functions in the places a query uses expressions

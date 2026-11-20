@@ -1257,9 +1257,6 @@ def _django_cast(n):
     return n.Cast("capacity", CharField())
 
 
-# Django's UUID7 needs PostgreSQL 18, and Python 3.14 on SQLite.
-_UUID7_REFUSALS = {"django": "PostgreSQL version 18|Python version 3.14", "asyncpg": "PostgreSQL version 18"}
-
 # (name, further constructs, the function over Spring regatta (capacity 30, price 25.00, starts 2026-03-22 07:00 UTC)
 # built from a namespace of the functions, Value and F, expected, refusals, results that differ by vendor)
 FUNCTION_VALUES = [
@@ -1353,7 +1350,7 @@ FUNCTION_VALUES = [
         {},
     ),
     ("UUID4", (), lambda n: n.UUID4(), 4, {}, {}),
-    ("UUID7", (), lambda n: n.UUID7(), 7, _UUID7_REFUSALS, {}),
+    ("UUID7", (), lambda n: n.UUID7(), 7, {}, {}),
 ]
 for name, further, build, value, refusals, on_vendor in FUNCTION_VALUES:
     mirror = _django_function_values(

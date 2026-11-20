@@ -149,7 +149,9 @@ def test_every_driver_declares_only_known_names_and_each_has_a_case(conformance)
     assert capabilities.constructs <= construct_names()
     covered = set().union(*(case.uses for case in CASES))
     assert (capabilities.operations - UNCATALOGUED_KINDS) - covered == set()
-    assert capabilities.constructs - covered == set()
+    # The functions, lookups and transforms the test suite defines with SQL templates are declared too.
+    own = construct_names() - adorm_constructs()
+    assert capabilities.constructs - own - covered == set()
 
 
 def test_the_suite_runs_every_bundled_driver():

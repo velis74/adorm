@@ -22,7 +22,7 @@ import socket
 import threading
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Set
 from dataclasses import dataclass, fields
 from typing import Any, cast, ClassVar, Literal, Protocol, runtime_checkable, TYPE_CHECKING
 
@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 __all__ = [
     "BackendActivity",
     "Capabilities",
+    "Constructs",
     "DatabaseMonitor",
     "Driver",
     "DriverConnection",
@@ -103,11 +104,51 @@ class Profile(Protocol):
     def connect(self) -> Callable[[Profile], Any] | None: ...
 
 
+class Constructs(Set[str]):
+    """A set of construct names: the fixed ``names`` and, each time the set is read, those ``extra()`` returns.
+
+    A driver declares constructs an application defines (functions with SQL templates, registered translations) with
+    ``extra``, so a construct defined after the driver's module was imported is declared too. Set operations with
+    another set give a ``frozenset``.
+    """
+
+    __slots__ = ("extra", "names")
+
+    def __init__(self, names: Iterable[str] = (), extra: Callable[[], Set[str]] | None = None) -> None:
+        if isinstance(names, str):
+            raise TypeError("names must be an iterable of names, not a string")
+        self.names = frozenset(names)
+        self.extra = extra
+
+    def _extra(self) -> Set[str]:
+        return frozenset() if self.extra is None else self.extra()
+
+    def __contains__(self, name: object) -> bool:
+        return name in self.names or name in self._extra()
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.names | self._extra())
+
+    def __len__(self) -> int:
+        return len(self.names | self._extra())
+
+    def __hash__(self) -> int:
+        return hash((self.names, self.extra))
+
+    @classmethod
+    def _from_iterable(cls, iterable: Iterable[str]) -> frozenset[str]:
+        return frozenset(iterable)
+
+    def __repr__(self) -> str:
+        return f"Constructs({sorted(self.names)!r}, extra={self.extra!r})"
+
+
 @dataclass(frozen=True)
 class Capabilities:
     """What a driver supports.
 
-    ``operations`` and ``constructs`` are the names `Operation` reports, ``connection_options`` the options
+    ``operations`` and ``constructs`` are the names `Operation` reports (``constructs`` is a ``frozenset``, or a
+    `Constructs` that also declares names defined later), ``connection_options`` the options
     ``set_options()`` accepts and ``backend_events`` the `BackendEvent` names the driver emits. ``custom_options``
     tells whether ``set_options()`` also accepts custom options (`is_custom_option()`, names
     such as ``app.user_id``); it defaults to ``False``. ``savepoints`` and
@@ -117,7 +158,7 @@ class Capabilities:
     """
 
     operations: frozenset[str] = frozenset()
-    constructs: frozenset[str] = frozenset()
+    constructs: frozenset[str] | Constructs = frozenset()
     connection_options: frozenset[str] = frozenset()
     backend_events: frozenset[str] = frozenset()
     savepoints: bool = False
@@ -128,7 +169,7 @@ class Capabilities:
     def __post_init__(self) -> None:
         for field in fields(self):
             value = getattr(self, field.name)
-            if value is None or isinstance(value, (bool, int)):
+            if value is None or isinstance(value, (bool, int, Constructs)):
                 continue
             if isinstance(value, str):
                 raise TypeError(f"{field.name} must be an iterable of names, not a string")
