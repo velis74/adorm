@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 from adorm import operations
-from adorm.drivers import Capabilities, Operation as OperationProtocol
+from adorm.drivers import Capabilities, Constructs, Operation as OperationProtocol
 from adorm.exceptions import FieldError, NotSupportedError
 from adorm.operations import (
     Create,
@@ -706,3 +706,25 @@ def test_check_table_names():
         operations.CheckTable("club.Member", ["club__name"])
     with pytest.raises(ValueError, match="fields and many_to_many are lists of names"):
         Operation.from_dict({"operation": "check_table", "model": "club.Member", "fields": "id", "many_to_many": []})
+
+
+def test_constructs_compare_and_hash_by_their_definition():
+    defined: set[str] = set()
+
+    def extra() -> frozenset[str]:
+        return frozenset(defined)
+
+    first, second = Constructs({"lookup.exact"}, extra), Constructs({"lookup.exact"}, extra)
+    assert first == second
+    assert hash(first) == hash(second)
+    assert len({first, second}) == 1
+    assert first != Constructs({"lookup.exact"}, lambda: frozenset(defined))
+    assert first != frozenset({"lookup.exact"})
+    assert frozenset(first) == {"lookup.exact"}
+    defined.add("function.Late")
+    assert first == second
+    assert frozenset(first) == {"lookup.exact", "function.Late"}
+    capabilities = Capabilities(constructs=first)
+    assert capabilities == Capabilities(constructs=second)
+    assert hash(capabilities) == hash(Capabilities(constructs=second))
+    assert capabilities != Capabilities(constructs=frozenset(first))

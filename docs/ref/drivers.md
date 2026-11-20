@@ -335,7 +335,10 @@ A read-only set of construct names: the fixed `names` (any iterable of strings; 
 and, each time the set is read (`in`, iteration, `len()`), those the callable `extra()` returns. A driver declares
 the constructs an application defines with it: functions, lookups and transforms with SQL templates
 ([`sql_constructs()`](/ref/expressions#adorm-query-sql-constructs-vendor)) and registered translations. A set
-operation with another set (`-`, `|`, `&`) gives a `frozenset` of the names at that moment.
+operation with another set (`-`, `|`, `&`) gives a `frozenset` of the names at that moment. Equality and hash
+follow the definition, not the current contents: two `Constructs` are equal when their `names` are equal and their
+`extra` is the same callable, and a `Constructs` never equals a plain set (`frozenset(constructs)` compares the
+contents). A `Capabilities` holding one stays hashable, its hash consistent with its equality.
 
 ```python
 from adorm.query import sql_constructs

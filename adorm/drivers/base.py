@@ -109,7 +109,8 @@ class Constructs(Set[str]):
 
     A driver declares constructs an application defines (functions with SQL templates, registered translations) with
     ``extra``, so a construct defined after the driver's module was imported is declared too. Set operations with
-    another set give a ``frozenset``.
+    another set give a ``frozenset``. Equality and hash follow the definition (``names`` and ``extra``), not the
+    current contents: a `Constructs` never equals a plain set.
     """
 
     __slots__ = ("extra", "names")
@@ -131,6 +132,11 @@ class Constructs(Set[str]):
 
     def __len__(self) -> int:
         return len(self.names | self._extra())
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Constructs):
+            return NotImplemented
+        return self.names == other.names and self.extra == other.extra
 
     def __hash__(self) -> int:
         return hash((self.names, self.extra))
