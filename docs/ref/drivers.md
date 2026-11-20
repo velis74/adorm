@@ -1330,19 +1330,19 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   rows selects the fields of `values()` or `values_list()` given after the set operation; the rows are built as the
   first combined query's rows, keyed by those names column by column (a different number of names raises
   `ProgrammingError`). As a subquery, a combined query of model rows selects its primary key.
-- A node of a class with a [registered translation](#adorm-drivers-django-register-translation-cls-vendors-none)
-  becomes what the translation returns, before anything else; with `vendors`, and a SQL template of the class, a
-  Django expression that compiles the translation on those vendors and the template on another. A `Func` subclass (not an aggregate) with SQL of its
-  own (`function`, `template`, `templates`) becomes a Django `Func` that renders the template for the connection's
-  vendor, its arguments translated, the parameters repeated for each `%(expressions)s`; a vendor without a template
-  raises Django's `NotSupportedError`. A `Lookup` subclass with a template becomes a Django lookup whose parameters
-  follow `%(lhs)s` and `%(rhs)s` in the template; a path through a `Transform` with SQL of its own or a registered
-  translation becomes Django's `F` of the path before it, wrapped per transform from there on in a Django `Transform`
-  that renders the template or in what the translation returns (a built-in transform after it raises
+- A node of a class with a [registered translation](#adorm-drivers-django-register-translation-cls-vendors-none) becomes
+  what the translation returns, before anything else; with `vendors`, and a SQL template of the class, a Django
+  expression that compiles the translation on those vendors and the template on another. A `Func` subclass (not an
+  aggregate) with SQL of its own (`function`, `template`, `templates`) becomes a Django `Func` that renders the template
+  for the connection's vendor, its arguments translated, the parameters repeated for each `%(expressions)s`; a vendor
+  without a template raises Django's `NotSupportedError`. A `Lookup` subclass with a template becomes a Django lookup
+  whose parameters follow `%(lhs)s` and `%(rhs)s` in the template; a path through a `Transform` with SQL of its own or a
+  registered translation becomes Django's `F` of the path before it, wrapped per transform from there on in a Django
+  `Transform` that renders the template or in what the translation returns (a built-in transform after it raises
   `NotSupportedError`), also in `values()` and as a lookup's left-hand side. In the grouping of `values()` before
   `annotate()` and in `distinct()` with fields such a path is an annotation of its own, which `order_by()` of the same
-  path refers to; a subquery with `distinct()` on such a path raises `NotSupportedError`.
-  `get_or_create()` and `update_or_create()` take no such lookup or transform (`NotSupportedError`).
+  path refers to; a subquery with `distinct()` on such a path raises `NotSupportedError`. `get_or_create()` and
+  `update_or_create()` take no such lookup or transform (`NotSupportedError`).
 - `Concat` without an `output_type` gets a `TextField` output field, so arguments of different text fields concatenate.
 - A node without a translation (a function or aggregate class of a driver's own without SQL) raises
   `NotSupportedError`; a `select_related()` path that is not a relation of the adorm model, or not a
