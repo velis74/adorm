@@ -18,7 +18,10 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
+
+import pytest
 
 import adorm
 
@@ -1203,6 +1206,182 @@ for name, kind, function, value, matching in TRUNCATIONS:
     run.__name__ = f"function_{name.lower()}"
     mirror = _django_truncated(name, kind, value)
     case("count", "lookup.exact", f"function.{name}", expected=matching, django=mirror)(run)
+
+
+def _collation() -> str:
+    from django.db import connection
+
+    return "BINARY" if connection.vendor == "sqlite" else "C"
+
+
+def _result(value):
+    """A function's result in a form equal on every driver and database: floats rounded, UUIDs as their version."""
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, uuid.UUID):
+        return value.version
+    return value
+
+
+def _function_values(name, build):
+    async def run():
+        query = Activity.objects.filter(name="Spring regatta").annotate(v=build(adorm))
+        return [_result(value) async for value in query.values_list("v", flat=True)]
+
+    run.__name__ = f"function_{name.lower()}"
+    return run
+
+
+def _django_function_values(build, postgresql_version=0):
+    def mirror():
+        from django.db import connection
+        from django.db.models import F as DjangoF, functions, Value as DjangoValue
+
+        from tests.djangoproject.activities.models import Activity as DjangoActivity
+
+        if connection.vendor == "postgresql" and connection.pg_version < postgresql_version:
+            pytest.skip(f"Django refuses the function before PostgreSQL {postgresql_version // 10000}")
+        function = build(SimpleNamespace(**vars(functions), Value=DjangoValue, F=DjangoF))
+        query = DjangoActivity.objects.filter(name="Spring regatta").annotate(v=function)
+        return [_result(value) for value in query.values_list("v", flat=True)]
+
+    return mirror
+
+
+def _django_cast(n):
+    from django.db.models import CharField
+
+    return n.Cast("capacity", CharField())
+
+
+_BEFORE_POSTGRESQL_18 = {"django": "PostgreSQL version 18", "asyncpg": "PostgreSQL version 18"}
+
+# (name, further constructs, the function over Spring regatta (capacity 30, price 25.00, starts 2026-03-22 07:00 UTC)
+# built from a namespace of the functions, Value and F, expected, refusals, results that differ by vendor)
+FUNCTION_VALUES = [
+    ("Cast", (), lambda n: n.Cast("capacity", str), "30", {}, {}),
+    ("Collate", (), lambda n: n.Collate("name", _collation()), "Spring regatta", {}, {}),
+    ("Greatest", (), lambda n: n.Greatest("capacity", n.Value(12)), 30, {}, {}),
+    ("Least", (), lambda n: n.Least("capacity", n.Value(12)), 12, {}, {}),
+    ("NullIf", (), lambda n: n.NullIf("capacity", n.Value(30)), None, {}, {}),
+    ("JSONArray", (), lambda n: n.JSONArray("name", "capacity"), ["Spring regatta", 30], {}, {}),
+    ("JSONObject", (), lambda n: n.JSONObject(n="name", c="capacity"), {"c": 30, "n": "Spring regatta"}, {}, {}),
+    ("Extract", (), lambda n: n.Extract("starts_at", "month"), 3, {}, {}),
+    ("ExtractYear", (), lambda n: n.ExtractYear("starts_at"), 2026, {}, {}),
+    ("ExtractIsoYear", (), lambda n: n.ExtractIsoYear("starts_at"), 2026, {}, {}),
+    ("ExtractQuarter", (), lambda n: n.ExtractQuarter("starts_at"), 1, {}, {}),
+    ("ExtractMonth", (), lambda n: n.ExtractMonth("starts_at"), 3, {}, {}),
+    ("ExtractWeek", (), lambda n: n.ExtractWeek("starts_at"), 12, {}, {}),
+    ("ExtractDay", (), lambda n: n.ExtractDay("starts_at"), 22, {}, {}),
+    ("ExtractWeekDay", (), lambda n: n.ExtractWeekDay("starts_at"), 1, {}, {}),
+    ("ExtractIsoWeekDay", (), lambda n: n.ExtractIsoWeekDay("starts_at"), 7, {}, {}),
+    ("ExtractHour", (), lambda n: n.ExtractHour("starts_at"), 7, {}, {}),
+    ("ExtractMinute", (), lambda n: n.ExtractMinute("starts_at"), 0, {}, {}),
+    ("ExtractSecond", (), lambda n: n.ExtractSecond("starts_at"), 0, {}, {}),
+    ("Abs", ("expression.CombinedExpression",), lambda n: n.Abs(n.F("capacity") - n.Value(40)), 10, {}, {}),
+    ("Ceil", (), lambda n: n.Ceil(n.Value(2.5)), 3.0, {}, {}),
+    ("Floor", (), lambda n: n.Floor(n.Value(2.5)), 2.0, {}, {}),
+    ("Round", (), lambda n: n.Round(n.Value(2.345), 2), 2.35, {}, {}),
+    ("Sign", ("expression.CombinedExpression",), lambda n: n.Sign(n.F("capacity") - n.Value(40)), -1, {}, {}),
+    ("ACos", (), lambda n: n.ACos(n.Value(0.5)), 1.047198, {}, {}),
+    ("ASin", (), lambda n: n.ASin(n.Value(0.5)), 0.523599, {}, {}),
+    ("ATan", (), lambda n: n.ATan("capacity"), 1.537475, {}, {}),
+    ("ATan2", (), lambda n: n.ATan2("capacity", "capacity"), 0.785398, {}, {}),
+    ("Cos", (), lambda n: n.Cos("capacity"), 0.154251, {}, {}),
+    ("Cot", (), lambda n: n.Cot("capacity"), -0.15612, {}, {}),
+    ("Sin", (), lambda n: n.Sin("capacity"), -0.988032, {}, {}),
+    ("Tan", (), lambda n: n.Tan("capacity"), -6.405331, {}, {}),
+    ("Degrees", (), lambda n: n.Degrees("capacity"), 1718.873385, {}, {}),
+    ("Radians", (), lambda n: n.Radians("capacity"), 0.523599, {}, {}),
+    ("Exp", (), lambda n: n.Exp(n.Value(1.0)), 2.718282, {}, {}),
+    ("Ln", (), lambda n: n.Ln("capacity"), 3.401197, {}, {}),
+    ("Log", (), lambda n: n.Log(n.Value(10.0), n.Value(1000.0)), 3.0, {}, {}),
+    ("Mod", (), lambda n: n.Mod("capacity", n.Value(7)), 2.0, {}, {}),
+    ("Power", (), lambda n: n.Power("capacity", n.Value(2)), 900.0, {}, {}),
+    ("Sqrt", (), lambda n: n.Sqrt(n.Value(2.25)), 1.5, {}, {}),
+    ("Pi", (), lambda n: n.Pi(), 3.141593, {}, {}),
+    ("Chr", (), lambda n: n.Chr(n.Value(65)), "A", {}, {}),
+    ("Ord", (), lambda n: n.Ord("name"), 83, {}, {}),
+    ("Left", (), lambda n: n.Left("name", 6), "Spring", {}, {}),
+    ("Right", (), lambda n: n.Right("name", 7), "regatta", {}, {}),
+    ("LPad", (), lambda n: n.LPad("kind", 13, n.Value("*")), "**competition", {}, {}),
+    ("RPad", (), lambda n: n.RPad("kind", 13, n.Value("*")), "competition**", {}, {}),
+    ("LTrim", (), lambda n: n.LTrim(n.Value("  x  ")), "x  ", {}, {}),
+    ("RTrim", (), lambda n: n.RTrim(n.Value("  x  ")), "  x", {}, {}),
+    ("Trim", (), lambda n: n.Trim(n.Value("  x  ")), "x", {}, {}),
+    ("Repeat", (), lambda n: n.Repeat(n.Value("ab"), 3), "ababab", {}, {}),
+    ("Replace", (), lambda n: n.Replace("name", n.Value("Spring"), n.Value("Autumn")), "Autumn regatta", {}, {}),
+    ("Reverse", (), lambda n: n.Reverse("kind"), "noititepmoc", {}, {}),
+    ("StrIndex", (), lambda n: n.StrIndex("name", n.Value("regatta")), 8, {}, {}),
+    ("Substr", (), lambda n: n.Substr("name", 1, 6), "Spring", {}, {}),
+    ("MD5", (), lambda n: n.MD5("kind"), "3190dbf13beaf51d8852bdd9bc4cdf89", {}, {}),
+    ("SHA1", (), lambda n: n.SHA1("kind"), "1b44f6ddeeb852b788de04473d4b25c1544356d5", {}, {}),
+    (
+        "SHA224",
+        (),
+        lambda n: n.SHA224("kind"),
+        "13784b0c3f169c20be81cb3872176066f7ecad08ebca5e766997884c",
+        {},
+        {},
+    ),
+    (
+        "SHA256",
+        (),
+        lambda n: n.SHA256("kind"),
+        "4721819b2bf3e332787f1f24ae4ac77237e6cae3df24427ee3a7acdcd808fe23",
+        {},
+        {},
+    ),
+    (
+        "SHA384",
+        (),
+        lambda n: n.SHA384("kind"),
+        "89c917ddb6c95cc1298afc987aa75f07eabc5edb426881ca7cbad5a022ee0f8a40554601bb46109aa3a556f7e0654a0d",
+        {},
+        {},
+    ),
+    (
+        "SHA512",
+        (),
+        lambda n: n.SHA512("kind"),
+        "e0d786fb64ef26839233b47342731d461b40fcf5c8e8cf45cbbcc9ed651ee565f5bb2e7940fac249a34e541fd50bdd9cf42593f0f209b20525d148f8f8d6618b",
+        {},
+        {},
+    ),
+    ("UUID4", (), lambda n: n.UUID4(), 4, {}, {}),
+    ("UUID7", (), lambda n: n.UUID7(), 7, _BEFORE_POSTGRESQL_18, {}),
+]
+for name, further, build, value, refusals, on_vendor in FUNCTION_VALUES:
+    mirror = _django_function_values(
+        _django_cast if name == "Cast" else build, postgresql_version=180000 if name == "UUID7" else 0
+    )
+    case(
+        "select",
+        "lookup.exact",
+        "clause.annotate",
+        f"function.{name}",
+        *further,
+        expected=[value],
+        refusals=refusals,
+        django=mirror,
+        on_vendor=on_vendor,
+    )(_function_values(name, build))
+
+
+def _django_function_random():
+    from django.db.models.functions import Random as DjangoRandom
+    from django.db.models.lookups import LessThan as DjangoLessThan
+
+    from tests.djangoproject.activities.models import Activity as DjangoActivity
+
+    return DjangoActivity.objects.filter(DjangoLessThan(DjangoRandom(), 1)).count()
+
+
+@case("count", "lookup.lt", "function.Random", expected=7, django=_django_function_random)
+async def function_random():
+    from adorm.query import LessThan
+
+    return await Activity.objects.filter(LessThan(adorm.Random(), 1)).count()
 
 
 def _django_case_when():
