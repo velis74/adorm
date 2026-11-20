@@ -34,7 +34,7 @@ from adorm.query import (
     F,
     ForUpdate,
     Func,
-    IsNull,
+    IExact,
     Length,
     Lookup,
     Lower,
@@ -347,8 +347,8 @@ def test_lookups_are_typed_by_the_queried_model():
 
 
 def test_a_path_past_a_scalar_field_is_refused():
-    with pytest.raises(FieldError, match=r"club\.Member\.joined is neither a relation nor a JSON field; 'date'"):
-        MEMBERS.filter(joined__date__gte=1).to_dict(SCHEMA)
+    with pytest.raises(FieldError, match=r"unsupported transform 'date' for club\.Member\.name"):
+        MEMBERS.filter(name__date__gte=1).to_dict(SCHEMA)
 
 
 @pytest.mark.parametrize(
@@ -384,6 +384,18 @@ def test_a_path_past_a_scalar_field_is_refused():
         (Q(status__icontains="act"), {"value": "act"}),
         (Q(name__endswith="n"), {"value": "n"}),
         (Q(club__address__name="x"), {"type": "str", "value": "x"}),
+        (Q(joined__year=2026), {"value": 2026}),
+        (Q(joined__year__in=[2025, "2026"]), {"items": [{"value": 2025}, {"value": 2026}]}),
+        (Q(joined__date=datetime.date(2026, 1, 2)), {"value": "2026-01-02"}),
+        (Q(joined__date__year__gte="2026"), {"value": 2026}),
+        (Q(joined__time__lt=datetime.time(7)), {"value": "07:00:00"}),
+        (Q(club__founded__month__range=(1, 3)), {"items": [{"value": 1}, {"value": 3}]}),
+        (Q(joined__hour__isnull=True), {"value": True}),
+        (Q(tags__0="a"), {"type": "str", "value": "a"}),
+        (Q(club__address__has_key="city"), {"value": "city"}),
+        (Q(club__address__has_keys=["city", "street"]), {"items": [{"value": "city"}, {"value": "street"}]}),
+        (Q(club__address__has_any_keys=("city",)), {"items": [{"value": "city"}]}),
+        (Q(tags__contained_by=["a"]), {"value": ["a"]}),
     ],
 )
 def test_lookup_values(condition, rhs):
@@ -610,9 +622,12 @@ def test_nodes_with_non_json_attributes_are_refused():
         Weird("a", factor=1.5).to_dict()
 
 
-def test_isnull_from_none_round_trips():
-    q = MEMBERS.filter(club=None)
-    assert q.where.children == (IsNull("club", True),)
+@pytest.mark.parametrize(
+    ("q", "node"),
+    [(MEMBERS.filter(club=None), Exact("club", None)), (MEMBERS.filter(name__iexact=None), IExact("name", None))],
+)
+def test_a_lookup_from_none_round_trips(q, node):
+    assert q.where.children == (node,)
     assert Query.from_dict(roundtrip(q.to_dict(SCHEMA)), SCHEMA) == q
 
 

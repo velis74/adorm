@@ -473,8 +473,9 @@ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycop
 
 - Every method raises adorm exceptions only; `asyncio.CancelledError` passes through.
 - A field path or lookup key the target cannot resolve raises `FieldError` without a SQLSTATE, before any statement
-  runs: an unknown field or relation, a segment after a field that is neither a relation nor a JSON field (never
-  passed on as a transform of the target ORM) and a lookup on a relation whose `on_relations` is false. The
+  runs: an unknown field or relation, a segment after a field that is neither a relation nor a JSON field and is no
+  registered transform applying there (`Transform.applies_to()`), and a lookup on a relation whose `on_relations` is
+  false. A transform the driver runs is declared as the construct `transform.<name>`. The
   transaction it is raised in stays usable; an error the database reports for a missing column keeps its SQLSTATE
   (`42703`, a `ProgrammingError`).
 - An `IntegrityError` describes the violation (`constraint_name`, `table_name`, `schema_name`, `columns`, `values`,

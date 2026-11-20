@@ -88,7 +88,7 @@ def resolve(key, label="club.Member", source=SCHEMA, **kwargs):
         ("age", "in", [3, 1], Q(age__in=[3, 1])),
         ("club__name", "istartswith", "ch", Q(club__name__istartswith="ch")),
         ("club", "isnull", True, Q(club__isnull=True)),
-        ("name", "exact", None, Q(name__isnull=True)),
+        ("name", "exact", None, Q(name=None)),
         ("joined", "range", (1, 2), Q(joined__range=(1, 2))),
     ],
 )
@@ -126,7 +126,7 @@ def test_a_dynamic_filter_round_trips_through_the_codec():
     assert decode_node(encode_node(query, SCHEMA), SCHEMA) == query
 
 
-@pytest.mark.parametrize("key", ["", "name__", "__name", "a____b", "name__0", "name-x", "name__in__"])
+@pytest.mark.parametrize("key", ["", "name__", "__name", "a____b", "0__name", "name-x", "name__in__"])
 def test_malformed_keys_raise_value_error(key):
     with pytest.raises(ValueError, match="not a field path"):
         Q(**{key: 1})
@@ -197,9 +197,9 @@ def test_a_field_named_like_a_lookup():
         ("zzz", r"^club\.Member has no field or relation 'zzz'$"),
         ("name__icontain", r"unsupported lookup 'icontain' for club\.Member\.name; perhaps you meant 'icontains'"),
         ("name__zzz", r"^unsupported lookup 'zzz' for club\.Member\.name$"),
-        ("joined__year__gte", r"club\.Member\.joined is neither a relation nor a JSON field; 'year' cannot follow"),
-        ("name__a__b", r"club\.Member\.name is neither a relation nor a JSON field; 'a__b' cannot follow"),
-        ("club__name__exact__exact", r"'exact' cannot follow"),
+        ("joined__yeer__gte", r"unsupported transform 'yeer' for club\.Member\.joined; perhaps you meant 'year'"),
+        ("name__a__b", r"^unsupported transform 'a' for club\.Member\.name$"),
+        ("club__name__exact__exact", r"unsupported transform 'exact' for club\.Club\.name"),
         ("club_id__name", r"unsupported lookup 'name' for club\.Member\.club_id"),
         ("name__overlap", r"^unsupported lookup 'overlap' for club\.Member\.name$"),
     ],
@@ -433,8 +433,8 @@ def test_check_lookups_accepts_resolvable_conditions():
         (Exact(Lower("nmae"), "x"), "no field or relation 'nmae'"),
         (Q(age__gt=F("age") * F("club__fe")), r"club\.Club has no field or relation 'fe'"),
         (Exact(Case(When(nmae="a", then=Value(1)), default=Value(0)), 1), "'nmae'"),
-        (Q(joined__year=2026), r"unsupported lookup 'year' for club\.Member\.joined"),
-        (IContains(F("joined__year"), "x"), r"'year' cannot follow"),
+        (Q(joined__yeer=2026), r"unsupported lookup 'yeer' for club\.Member\.joined"),
+        (IContains(F("name__year"), "x"), r"unsupported transform 'year' for club\.Member\.name"),
         (Q(name=None, nmae=None), "'nmae'"),
     ],
 )
@@ -481,3 +481,19 @@ def test_concurrent_resolution_in_threads_on_a_fresh_registry():
 def test_field_error_is_exported():
     assert adorm.FieldError is FieldError
     assert issubclass(FieldError, adorm.ProgrammingError)
+
+
+def test_constructs_name_the_transforms_the_field_paths_of_a_query_apply():
+    from adorm.query.lookups import transform_constructs
+
+    query = (
+        MEMBERS.filter(joined__year=2026, club__address__year=1, nmae__week=1)
+        .annotate(m=F("joined__month"), q=F("club__founded__quarter"))
+        .filter(m__gt=F("joined__iso_week_day"))
+        .order_by("joined__day")
+        .values("name", "joined__hour", "joined__date")
+    )
+    assert transform_constructs(query, SCHEMA) == {
+        f"transform.{name}" for name in ("year", "month", "quarter", "iso_week_day", "day", "hour", "date")
+    }
+    assert transform_constructs(MEMBERS.filter(Exists(MEMBERS.filter(joined__minute=1))), SCHEMA) == set()

@@ -179,7 +179,7 @@ def test_f_path():
     assert repr(OuterRef("pk")) == "OuterRef('pk')"
 
 
-@pytest.mark.parametrize("name", ["", "a__", "__a", "a____b", "a b", "a-b", "1a", "a__1"])
+@pytest.mark.parametrize("name", ["", "a__", "__a", "a____b", "a b", "a-b", "1a", "1__a", "a__-1"])
 def test_invalid_field_paths(name):
     with pytest.raises(ValueError, match="not a field path"):
         F(name)

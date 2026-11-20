@@ -162,11 +162,20 @@ def split_field_path(name: str) -> list[str]:
 
 
 def check_field_path(name: Any) -> str:
-    """Return ``name`` when it is a field path (``"name"``, ``"club__owner__name"``); raise otherwise."""
+    """Return ``name`` when it is a field path (``"name"``, ``"club__owner__name"``, ``"tags__0"``); raise otherwise.
+
+    Segments are identifiers; a segment after the first may also be a list index (digits)."""
     if not isinstance(name, str):
         raise TypeError(f"a field path is a string, not {type(name).__name__}")
-    if not all(segment.isidentifier() and "__" not in segment for segment in split_field_path(name)):
-        raise ValueError(f"{name!r} is not a field path: segments are identifiers separated by '__'")
+    segments = split_field_path(name)
+    if not all(
+        "__" not in segment and (segment.isidentifier() or (index and segment.isascii() and segment.isdigit()))
+        for index, segment in enumerate(segments)
+    ):
+        raise ValueError(
+            f"{name!r} is not a field path: segments are identifiers or list indexes separated by '__',"
+            " the first an identifier"
+        )
     return name
 
 

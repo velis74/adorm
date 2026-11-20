@@ -65,19 +65,19 @@ database in a rolled-back transaction and compares its result with `expected`, a
 completion. Every write case has a mirror, and so does every case that no driver of the suite runs to completion; a
 coverage test fails for a case with neither.
 
-The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`, `none()`), every lookup, `Q`
-combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
+The cases cover the reads (row types, `get`, `first`, `last`, `count`, `exists`, `none()`), every lookup and transform,
+`Q` combinations and negation of NULL fields, comparison with fields, arithmetic and model instances, ordering with NULL
 placement, slicing, `distinct()` and `DISTINCT ON`, the row formats, `only()` and `defer()`, foreign keys, reverse and
 many-to-many relations, multi-table inheritance, generic relations, JSON keys, subqueries, annotations, every function
-and aggregate, `select_for_update()` with its options, set operations (`union()` with and without `all`, `intersection()`,
-`difference()`, combinations left with a single query after empty ones), `prefetch_related()` (reverse, forward and many-to-many
-relations, a `Prefetch` query set into `to_attr`, across a generic foreign key), generic foreign key objects,
-content type lookups and generic foreign key assignment (also in `get_or_create()` and `update_or_create()` defaults),
-`in_bulk()`, `full_clean()`, and the writes (`create`, `bulk_create` with generated primary keys, defaults, batches that
-insert every row or none, `ignore_conflicts` and `update_conflicts`, `update_fields` and `unique_fields` ignored without
-`update_conflicts`, `create_from_parent`, `save` also with arithmetic, `update`, `delete` of a query set and of an
-instance, a delete refused with `ProtectedError`, also caught inside a transaction that then commits, `get_or_create`,
-`update_or_create`).
+and aggregate, `select_for_update()` with its options, set operations (`union()` with and without `all`,
+`intersection()`, `difference()`, combinations left with a single query after empty ones), `prefetch_related()`
+(reverse, forward and many-to-many relations, a `Prefetch` query set into `to_attr`, across a generic foreign key),
+generic foreign key objects, content type lookups and generic foreign key assignment (also in `get_or_create()` and
+`update_or_create()` defaults), `in_bulk()`, `full_clean()`, and the writes (`create`, `bulk_create` with generated
+primary keys, defaults, batches that insert every row or none, `ignore_conflicts` and `update_conflicts`,
+`update_fields` and `unique_fields` ignored without `update_conflicts`, `create_from_parent`, `save` also with
+arithmetic, `update`, `delete` of a query set and of an instance, a delete refused with `ProtectedError`, also caught
+inside a transaction that then commits, `get_or_create`, `update_or_create`).
 
 Coverage tests fail when:
 

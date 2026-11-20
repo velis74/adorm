@@ -111,9 +111,13 @@ def test_build_lookup():
     assert build_lookup("age__gt", F("min_age")) == GreaterThan(F("age"), F("min_age"))
 
 
-@pytest.mark.parametrize("key", ["club", "club__exact", "name__iexact"])
-def test_none_with_exact_becomes_isnull(key):
-    assert build_lookup(key, None) == IsNull(F(key.split("__")[0]), True)
+@pytest.mark.parametrize("key", ["club", "club__exact"])
+def test_none_with_exact_stays_exact(key):
+    assert build_lookup(key, None) == Exact(F("club"), None)
+
+
+def test_none_with_iexact_stays_iexact():
+    assert build_lookup("name__iexact", None) == IExact(F("name"), None)
 
 
 @pytest.mark.parametrize("name", sorted(set(BUILT_IN) - {"exact", "iexact", "isnull"}))
@@ -122,9 +126,8 @@ def test_none_is_refused(name):
         build_lookup(f"a__{name}", None)
 
 
-def test_exact_class_refuses_none():
-    with pytest.raises(ValueError, match="use isnull"):
-        Exact("a", None)
+def test_exact_class_takes_none():
+    assert Exact("a", None).rhs is None
 
 
 def test_lhs_can_be_an_expression():

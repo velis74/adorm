@@ -1,12 +1,12 @@
 # Lookups
 
-Field lookups, importable from `adorm.query` (defined in `adorm.query.lookups`). [Making
+Field lookups and transforms, importable from `adorm.query` (defined in `adorm.query.lookups`). [Making
 queries](/topics/queries#field-lookups) shows them in context.
 
 ```python
 from adorm.query import (
-    LOOKUPS, Exact, IContains, In, ResolvedLookup, build_lookup, check_lookups, register_lookup, resolve_lookup,
-    split_lookup,
+    LOOKUPS, TRANSFORMS, Exact, IContains, In, ResolvedLookup, Transform, build_lookup, check_lookups,
+    register_lookup, register_transform, resolve_lookup, split_lookup,
 )
 ```
 
@@ -22,11 +22,16 @@ A lookup key is a field path followed by an optional lookup name, joined with `_
 | `club__owner__name__startswith` | `club__owner__name` | `startswith` |
 | `range` | `range` | `exact` (a single segment is always a field) |
 | `range__exact` | `range` | `exact` |
-| `joined__year` | `joined__year` | `exact` (`year` is not a registered lookup; every driver refuses a path past the scalar field `joined` with `FieldError`) |
+| `joined__year` | `joined__year` (the field `joined`, then the [transform](#transforms) `year`) | `exact` |
+| `joined__date__gte` | `joined__date` | `gte` |
+| `address__owner__name` | `address__owner__name` (the keys `owner`, `name` inside the JSON field `address`) | `exact` |
+| `tags__0` | `tags__0` (the first item of the JSON list `tags`) | `exact` |
+| `address__has_key` | `address` | `has_key` |
 
 The last segment is the lookup name when the key has more than one segment and the segment is a registered lookup.
-A field named like a lookup needs an explicit lookup (`range__exact`). Segments are identifiers; a key with an empty
-segment (`a__`) or a segment containing `__` (`a____b`) raises `ValueError`.
+A field named like a lookup needs an explicit lookup (`range__exact`). Segments are identifiers; a segment after the
+first may also be a list index (digits: `tags__0`). A key with an empty segment (`a__`), a segment containing `__`
+(`a____b`) or a first segment that is not an identifier (`0__name`) raises `ValueError`.
 
 A separator is the last `__` of a run of underscores, so a segment may end in `_`, as names in
 [generated models](/howto/generating-models#name-clashes) do:
@@ -47,12 +52,11 @@ split_lookup("club__name")              # ('club__name', 'exact')
 
 ### `adorm.query.build_lookup(key, value)`
 
-The lookup node for `filter(key=value)`. `exact` and `iexact` with `None` become `IsNull(path, True)`. `Q` and
-`Query.filter()` build their lookups with it.
+The lookup node for `filter(key=value)`. `Q` and `Query.filter()` build their lookups with it.
 
 ```python
 build_lookup("club__name__icontains", "chess")   # IContains(F('club__name'), 'chess')
-build_lookup("club", None)                       # IsNull(F('club'), True)
+build_lookup("club", None)                       # Exact(F('club'), None)
 ```
 
 ### Keys built at run time
@@ -88,9 +92,13 @@ and needs no session.
 | `annotations` | further annotation names, or a mapping of annotation names to their types |
 | `source` | the [`SchemaSource`](./encoding#adorm-schema-schemasource) the models are resolved in; the model registry (every model class with `_meta`) by default |
 
-Every segment of the field path but the last is a relation, until a JSON or record field (`dict`, `list`, `Any`, a
-pydantic model or a `TypedDict`, also inside `Optional`): the segments after it are keys inside its value. `pk` stands
-for the primary key at any segment. A key that is not a lookup key raises `ValueError`, as in `split_lookup()`.
+The field path is relations, then a field. After a JSON or record field (`dict`, `list`, `Any`, a pydantic model or a
+`TypedDict`, also inside `Optional`) the segments are keys inside its value, a key named like a transform included
+(`address__year`). After any other field they are [transforms](#transforms), each applying to the value the previous
+one gives (`joined__date__year`). A path starting with an annotation continues with transforms, unless the
+annotation's type is a JSON or record type, or is unknown and a following segment is not a transform name: then with
+keys. `pk` stands for the primary key at any segment. A key that is not a lookup key raises `ValueError`, as in
+`split_lookup()`.
 
 [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) is raised
 for:
@@ -100,9 +108,17 @@ for:
 | `frist_name__icontains` | `clubs.Member has no field or relation 'frist_name'; perhaps you meant 'first_name'` |
 | `memberships__rol` | `clubs.Membership has no field or relation 'rol'; perhaps you meant 'role'` |
 | `first_name__icontain` | `unsupported lookup 'icontain' for clubs.Member.first_name; perhaps you meant 'icontains'` |
-| `joined__year__gte` | `clubs.Member.joined is neither a relation nor a JSON field; 'year' cannot follow` |
+| `joined__yeer` | `unsupported lookup 'yeer' for clubs.Member.joined; perhaps you meant 'year'` |
+| `joined__yeer__gte`, `joined__yeer__exact` | `unsupported transform 'yeer' for clubs.Member.joined; perhaps you meant 'year'` |
+| `birth_date__year__gtee` | `unsupported lookup 'gtee' for clubs.Member.birth_date__year; perhaps you meant 'gte'` |
+| `birth_date__hour`, `first_name__year` | `unsupported transform 'hour' for clubs.Member.birth_date`: a transform whose `applies_to()` refuses the field (`hour` of a date) |
+| `first_name__has_key` | `unsupported lookup 'has_key' for clubs.Member.first_name` |
 | `memberships__club__icontains` | `unsupported lookup 'icontains' for the relation clubs.Membership.club; a relation takes exact, gt, gte, lt, lte, in, isnull` |
 | `first_name__overlap`, `tags__overlap` | `unsupported lookup 'overlap' for clubs.Member.first_name` (`.tags`): a lookup whose `applies_to()` refuses the field |
+
+A suggestion names a transform that applies at that point, or for the last segment of a key without an explicit lookup
+also a lookup. A misspelt JSON lookup after a JSON field is a key (`address__has_kye` compares the key `has_kye`), as
+in Django.
 
 A path that ends at a relation compares the target's primary key and takes only the lookups whose `on_relations`
 is true: `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`, `memberships__isnull`). The operation
@@ -119,6 +135,7 @@ from adorm.query import resolve_lookup
 resolved = resolve_lookup(Member, "memberships__club__city__icontains")
 resolved.model, resolved.field, resolved.lookup     # ('clubs.Club', 'city', IContains)
 resolve_lookup(Club, "address__street").keys        # ('street',): a key inside the JSON field address
+resolve_lookup(Member, "joined__date__gte").transforms   # ('date',)
 resolve_lookup(Member.objects.annotate(n=Count("memberships")), "n__gte").field   # None: an annotation
 ```
 
@@ -155,8 +172,9 @@ A frozen dataclass, the result of `resolve_lookup()`:
 | `lookup` | the lookup class |
 | `model` | the label of the model whose field or relation the path ends at; `None` for an annotation or after a model the source does not know |
 | `field` | that field or relation (`pk` resolved to the primary key's name), `None` likewise |
-| `field_type` | the type of the compared values: the field's type hint, the target's primary key type for a relation, an annotation's given type; `None` when unknown, always when `keys` is not empty |
+| `field_type` | the type of the compared values: the field's type hint, the target's primary key type for a relation, an annotation's given type, the `output_type()` of the last transform; `None` when unknown, always when `keys` is not empty |
 | `keys` | the segments after a JSON or record field, `()` otherwise |
+| `transforms` | the names of the transforms after the field or annotation, in order; `()` without |
 | `value_type` | a property: the type of a right-hand side value (of each value for `in`, `range` and `overlap`), `lookup.rhs_type(field_type)` |
 
 ```python
@@ -166,6 +184,8 @@ resolve_lookup(Member, "pk__in")
 resolve_lookup(Member, "birth_date__isnull").value_type    # bool
 resolve_lookup(Member, "joined__startswith").value_type    # str: a text pattern
 resolve_lookup(Club, "disciplines__overlap").value_type    # str: an item of the list[str] field
+resolve_lookup(Member, "joined__year__in").value_type      # int: a year
+resolve_lookup(Member, "joined__date").value_type          # datetime.date
 ```
 
 ### `adorm.query.check_lookups(target, condition, *, annotations=(), source=None)`
@@ -175,8 +195,8 @@ with the arguments of `resolve_lookup()`, and raises
 [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none) for the
 first that does not resolve; anything other than a query node raises `TypeError`. A lookup's left-hand side `F` is
 resolved with the lookup, every other `F` (a right-hand side, a function argument, a `When` condition) as a field
-path. An `OuterRef` and the nodes of a query inside the condition (a `Subquery`, `Exists`, an `in` query) are not
-checked.
+path, transforms included (`F("joined__year")`). An `OuterRef` and the nodes of a query inside the condition (a
+`Subquery`, `Exists`, an `in` query) are not checked.
 
 ```python
 from adorm.query import check_lookups
@@ -190,8 +210,8 @@ members = Member.objects.filter(condition)
 
 | Lookup | Class | Condition | Right-hand side |
 |---|---|---|---|
-| `exact` | `Exact` | equal | any value; `None` becomes `isnull` |
-| `iexact` | `IExact` | equal, ignoring case | any value; `None` becomes `isnull` |
+| `exact` | `Exact` | equal | any value; `None`: NULL, JSON `null` at a JSON key |
+| `iexact` | `IExact` | equal, ignoring case | any value; `None` as for `exact` |
 | `gt` | `GreaterThan` | greater than | any value |
 | `gte` | `GreaterThanOrEqual` | greater than or equal | any value |
 | `lt` | `LessThan` | less than | any value |
@@ -208,8 +228,13 @@ members = Member.objects.filter(condition)
 | `regex` | `Regex` | matches the regular expression (the database's syntax) | a string or an expression |
 | `iregex` | `IRegex` | matches the regular expression, ignoring case | a string or an expression |
 | `overlap` | `Overlap` | an array with at least one item in common | an iterable (stored as a tuple without `None`), a query or an array expression |
+| `contained_by` | `ContainedBy` | a JSON value or array contained in the right-hand side | a JSON value or a list |
+| `has_key` | `HasKey` | a JSON object with the key | a key name |
+| `has_keys` | `HasKeys` | a JSON object with every key | an iterable of key names |
+| `has_any_keys` | `HasAnyKeys` | a JSON object with at least one of the keys | an iterable of key names |
 
-Except for `isnull`, `regex` and `iregex`, a right-hand side may also be an expression (`F("other")`,
+Except for `isnull`, `regex`, `iregex`, `has_key`, `has_keys` and `has_any_keys`, a right-hand side may also be an
+expression (`F("other")`,
 `Lower("name")` …) or a query (a [`Query`](./query) or an object whose `query` attribute is one), which becomes a
 [`Subquery`](./expressions#subqueries). `None` raises `ValueError` except where the table says otherwise. A plain
 value is copied when the lookup is built; later changes to the caller's list or dict do not affect the lookup. A
@@ -227,14 +252,15 @@ Class members that type the right-hand side for the [operation codec](./encoding
 
 | Member | Meaning |
 |---|---|
-| `rhs_is_sequence` | `True` when `rhs` is a tuple of values, each typed on its own (`in`, `range`, `overlap`) |
+| `rhs_is_sequence` | `True` when `rhs` is a tuple of values, each typed on its own (`in`, `range`, `overlap`, `has_keys`, `has_any_keys`) |
 | `applies_to(field_type, keys)` | whether the lookup applies to a field of `field_type` (`None` when unknown) or to the keys `keys` inside a JSON or record field; `True` by default, for `overlap` only an array field or a field of unknown type; `resolve_lookup()` and `check_lookups()` raise `FieldError` when it is false |
 | `rhs_type(field_type)` | the type of a right-hand side value for a field of `field_type` (which may be `None`); `field_type` itself by default, `bool` for `isnull`, `str` for `regex`, `iregex` and the text pattern lookups (`None` for them when `field_type` is `None`), the item type for `overlap`; see `Contains` and `Overlap` for their exceptions |
 
 The class attribute `on_relations` states whether the lookup applies to a path that ends at a relation (compared
 by the target's primary key): `True` for `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull`, `False` by default.
 [`resolve_lookup()`](#adorm-query-resolve-lookup-target-key-annotations-source-none) refuses the others on a
-relation.
+relation. The class attribute `rhs_accepts_none` states whether `None` is a right-hand side: `True` for `exact` and
+`iexact`, `False` by default.
 
 A lookup instance is a condition and is accepted wherever `Q` is, with any expression on the left.
 
@@ -244,6 +270,10 @@ Query("club.Member").filter(GreaterThan("ends", F("starts")) | IsNull("ends", Tr
 ```
 
 ### `adorm.query.Exact(lhs, rhs)`
+
+The attribute `implicit` is `True` on an `Exact` that `build_lookup()` built from a key without a lookup name
+(`joined__yeer`); an unknown last segment of its path is then reported as a lookup. It is not part of the node's value
+(equality, hash, encoding).
 
 ### `adorm.query.IExact(lhs, rhs)`
 
@@ -354,6 +384,150 @@ Book.objects.filter(keywords__overlap=Value(["spice", "worm"]))
 takes a slot. The Django and the native PostgreSQL drivers also refuse it on an annotation that refers to a JSON field
 (`annotate(e=F("extra"))`), where Django would read the name as a key.
 
+### `adorm.query.ContainedBy(lhs, rhs)`
+
+A JSON field whose value is contained in `rhs` (PostgreSQL's `<@`: every key and value of an object, every item of a
+list, occurs in `rhs`), or an array field whose items all occur in the list `rhs`. It applies to a JSON, record or
+array field, a key inside a JSON field and a field of unknown type; `resolve_lookup()` refuses it elsewhere. The
+operation codec encodes `rhs` with the field's type for a container field, else with its inferred types.
+
+```python
+Club.objects.filter(address__contained_by={"street": "Stenska ulica 4", "city": "Maribor"})
+Member.objects.filter(tags__contained_by=["junior", "coach"])     # also members without tags
+```
+
+### `adorm.query.HasKey(lhs, rhs)`
+
+### `adorm.query.HasKeys(lhs, rhs)`
+
+### `adorm.query.HasAnyKeys(lhs, rhs)`
+
+A JSON object that has the key `rhs` (`has_key`), every key of `rhs` (`has_keys`) or at least one key of `rhs`
+(`has_any_keys`). A key holding JSON `null` counts as present. `has_key` takes a string; `has_keys` and `has_any_keys`
+take an iterable of strings, stored as a tuple; anything else raises `TypeError`. They apply to a JSON field (`Any`, a
+dict or a record), a key inside one (`address__owner__has_key`) and a field of unknown type; on another field
+`resolve_lookup()` raises `FieldError`. A misspelt name after a JSON field is read as a key, as in Django.
+
+```python
+Club.objects.filter(address__has_key="owner")
+Club.objects.filter(address__owner__has_key="since")
+Club.objects.filter(address__has_keys=["owner", "items"])
+Club.objects.exclude(address__has_any_keys=["note", "rating"])
+```
+
+`contains` on a JSON field (`address__contains={"owner": {"name": "Ana"}}`) is the [`Contains`](#adorm-query-contains-lhs-rhs)
+lookup: an object containing the given keys and values, a list containing the given items.
+
+## Transforms
+
+A transform is a function of a field's value named in a field path after the field: in a lookup key before the lookup
+(`joined__year__gte`), in `F()`, `values()`, `values_list()`, `order_by()` and grouping. Transforms chain: each
+applies to the value the previous one gives (`joined__date__year`).
+
+```python
+Member.objects.filter(birth_date__year=1982)
+Member.objects.exclude(birth_date__month__in=[1, 2])               # also keeps members without a birth date
+Member.objects.filter(joined__date=date(2026, 3, 2), joined__hour__in=[7, 8])
+Member.objects.filter(birth_date__year__lt=F("joined__year") - 40)
+Member.objects.values("joined__year").annotate(n=Count("pk")).order_by("joined__year")
+Member.objects.order_by("-joined__hour", "first_name")
+```
+
+| Transform | Class | Applies to | Value |
+|---|---|---|---|
+| `year` | `Year` | a date or datetime | the year (`int`) |
+| `iso_year` | `IsoYear` | a date or datetime | the ISO 8601 week-numbering year |
+| `quarter` | `Quarter` | a date or datetime | the quarter, 1 to 4 |
+| `month` | `Month` | a date or datetime | the month, 1 to 12 |
+| `week` | `Week` | a date or datetime | the ISO 8601 week number, 1 to 53 |
+| `week_day` | `WeekDay` | a date or datetime | the day of the week, 1 (Sunday) to 7 (Saturday) |
+| `iso_week_day` | `IsoWeekDay` | a date or datetime | the ISO 8601 day of the week, 1 (Monday) to 7 (Sunday) |
+| `day` | `Day` | a date or datetime | the day of the month |
+| `hour` | `Hour` | a time or datetime | the hour, 0 to 23 |
+| `minute` | `Minute` | a time or datetime | the minute |
+| `second` | `Second` | a time or datetime | the second |
+| `date` | `Date` | a datetime | the date (`datetime.date`) |
+| `time` | `Time` | a datetime | the time (`datetime.time`) |
+
+Every transform of a datetime is computed in the current time zone (Django's active time zone): under
+`timezone.override("Asia/Tokyo")`, a member who joined at 23:30 UTC has `joined__hour` 8 and `joined__date` the next
+day. Every transform also applies to a value of unknown type (an annotation without a known type). The value of a
+transform of NULL is NULL: `filter(birth_date__year=None)` and `birth_date__year__isnull=True` match a NULL birth
+date, and `exclude()` keeps such rows, as in Django.
+
+Each transform has the construct name `transform.<name>`. An operation reports it for every transform a field path of
+its query applies (resolved against the model registry), next to `path.nested`; a driver that does not declare it
+refuses the operation with [`NotSupportedError`](./exceptions). The Django driver and the native PostgreSQL driver
+declare the built-in transforms on every database they run on.
+
+### `adorm.query.Transform`
+
+Base class of transforms. A transform is named in field paths, not instantiated. A subclass sets `lookup_name`,
+which gives it the construct name `transform.<lookup_name>`, and may override:
+
+| Class method | Meaning |
+|---|---|
+| `applies_to(field_type)` | whether the transform applies to a value of `field_type` (`None` when unknown); `True` by default; `resolve_lookup()`, `check_lookups()` and the drivers raise `FieldError` when it is false |
+| `output_type(field_type)` | the type of the transformed value, which types the right-hand side of the lookup after it; `None` (unknown) by default |
+
+### `adorm.query.Year`
+
+### `adorm.query.IsoYear`
+
+### `adorm.query.Quarter`
+
+### `adorm.query.Month`
+
+### `adorm.query.Week`
+
+### `adorm.query.WeekDay`
+
+### `adorm.query.IsoWeekDay`
+
+### `adorm.query.Day`
+
+### `adorm.query.Hour`
+
+### `adorm.query.Minute`
+
+### `adorm.query.Second`
+
+### `adorm.query.Date`
+
+### `adorm.query.Time`
+
+The built-in transforms of the table above.
+
+### `adorm.query.TRANSFORMS`
+
+A read-only mapping of transform name to class, holding the built-in transforms and every registered one.
+
+### `adorm.query.register_transform(cls)`
+
+Registers a `Transform` subclass under its `lookup_name` and returns it; usable as a class decorator. Registering the
+same class again does nothing. A different class under a taken name, a name a lookup is registered under, and a name
+that is not an identifier or contains `__` raise `ValueError` (`register_lookup()` likewise refuses a transform's
+name). A driver applies a transform by its name: the Django driver and the native PostgreSQL driver pass it to
+Django, so a custom transform needs a Django transform registered under the same name on the field's class, and the
+driver must declare its construct name.
+
+```python
+@register_transform
+class Unaccented(Transform):
+    lookup_name = "unaccent"
+
+    @classmethod
+    def applies_to(cls, field_type):
+        return field_type in (str, None)
+
+    @classmethod
+    def output_type(cls, field_type):
+        return str
+
+
+Member.objects.filter(last_name__unaccent__icontains="zupancic")   # constructs: transform.unaccent
+```
+
 ## Registry
 
 ### `adorm.query.LOOKUPS`
@@ -369,11 +543,11 @@ its construct name to run it.
 
 ```python
 @register_lookup
-class Unaccent(Lookup):
-    lookup_name = "unaccent"
+class Similar(Lookup):
+    lookup_name = "similar"
 
 
-Query("club.Member").filter(name__unaccent="Zoe")   # constructs: lookup.unaccent
+Query("club.Member").filter(name__similar="Zoe")   # constructs: lookup.similar
 ```
 
 A lookup whose right-hand side has a type of its own overrides `rhs_type()`:

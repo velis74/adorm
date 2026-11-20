@@ -133,14 +133,14 @@ UNRESOLVED = {
     "frist_name__icontains": "x",
     "nickname": "x",
     "first_name__nope": "x",
-    "birth_date__year": "x",
+    "birth_date__hour": 7,
     "memberships__regex": "x",
     "first_name__overlap": ["x"],
     "tags__overlap": ["x"],
 }
 """Keys a dynamic filter may build that the model does not resolve, with a value: a misspelled field, an unknown
-field, an unknown lookup name, a transform after a scalar field, a lookup a relation does not take, and an array lookup
-on a text field and on a JSON field; every driver reports them as `FieldError`."""
+field, an unknown lookup name, a transform that does not apply to the field, a lookup a relation does not take, and an
+array lookup on a text field and on a JSON field; every driver reports them as `FieldError`."""
 
 
 def unresolved(n):

@@ -10,7 +10,7 @@ from django.db import connection
 import adorm
 
 from adorm.operations import OPERATIONS
-from adorm.query import construct_names, Node
+from adorm.query import construct_names, Node, TRANSFORMS
 from tests.bundled_drivers import bundled_driver_classes
 from tests.conformance.cases import CASES
 from tests.conformance.drivers import DRIVERS
@@ -31,7 +31,7 @@ def declared(driver) -> frozenset[str]:
 
 
 def adorm_constructs() -> set[str]:
-    """The construct names of adorm's own node classes, without those the test suite defines."""
+    """The construct names of adorm's own node classes and transforms, without those the test suite defines."""
     names = set(construct_names())
     pending = [Node]
     while pending:
@@ -39,6 +39,7 @@ def adorm_constructs() -> set[str]:
         pending.extend(cls.__subclasses__())
         if cls.construct and not cls.__module__.startswith("adorm."):
             names.discard(cls.construct)
+    names -= {cls.construct for cls in TRANSFORMS.values() if not cls.__module__.startswith("adorm.")}
     return names
 
 

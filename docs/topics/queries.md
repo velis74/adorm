@@ -64,8 +64,51 @@ Query("club.Member").filter(club__isnull=True)
 Query("club.Club").filter(disciplines__overlap=["Lead", "Dinghy"])   # an array field sharing an item
 ```
 
-`name=None` and `name__iexact=None` become `name__isnull=True`; any other lookup with `None` raises `ValueError`.
+`name=None` and `name__iexact=None` match NULL, as `name__isnull=True` does; at a key inside a JSON field they match
+JSON `null` (below). Any other lookup with `None` raises `ValueError`.
 The [lookup reference](/ref/lookups) lists every lookup.
+
+### Transforms
+
+A date, time or datetime field path continues with a transform before the lookup, as in Django: `year`, `iso_year`,
+`quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, and `date` and `time`
+of a datetime. Transforms chain, and also apply in `F()`, `values()`, `values_list()` and `order_by()`:
+
+```python
+Member.objects.filter(birth_date__year=1982)
+Member.objects.filter(birth_date__year__gte=1990, birth_date__month__lte=6)
+Member.objects.exclude(birth_date__month__in=[1, 2])        # keeps rows whose birth_date is NULL
+Member.objects.filter(joined__date=date(2026, 3, 2))
+Member.objects.filter(joined__hour__in=[7, 8], joined__date__year=2026)
+Member.objects.filter(joined__month=F("birth_date__month"))
+Member.objects.values_list("first_name", "birth_date__year")
+Member.objects.order_by("-joined__hour")
+```
+
+A transform that does not apply to the field (`birth_date__hour` on a date, `first_name__year`) and an unknown name
+raise `FieldError` with a suggestion (`joined__yeer`: `perhaps you meant 'year'`). The
+[transform reference](/ref/lookups#transforms) lists them and shows how to register a custom one.
+
+### JSON fields
+
+A path continues into the value of a JSON field with keys and list indexes; `has_key`, `has_keys`, `has_any_keys`,
+`contains` and `contained_by` test the value's structure:
+
+```python
+Club.objects.filter(address__owner__name="Ana")
+Club.objects.filter(address__owner__name__icontains="an")
+Club.objects.filter(address__items__0="boat")              # the first item of a list
+Club.objects.filter(address__items__1__isnull=True)        # a list with fewer than two items, or no list
+Club.objects.filter(address__has_key="owner")
+Club.objects.filter(address__has_any_keys=["note", "rating"])
+Club.objects.filter(address__contains={"owner": {"name": "Ana"}})
+Member.objects.filter(tags__contained_by=["junior", "coach"])
+Club.objects.values_list("slug", "address__owner__name")
+```
+
+After a JSON field every segment but a trailing lookup name is a key, a key named like a transform included
+(`address__year`). `address__note=None` matches a key holding JSON `null`, `address__note__isnull=True` a missing key.
+On the JSON field itself, `address=None` matches SQL NULL, as `address__isnull=True` does.
 
 ### Relation traversal
 
@@ -161,8 +204,9 @@ for field, ops in DECLARED.items():
 members = Member.objects.filter(condition)
 ```
 
-Building a query checks only the key's syntax: segments are identifiers joined with `__`; any other key
-(`"name__"`, `"tags__0"`) raises `ValueError`. Whether the fields exist is checked against the model's schema:
+Building a query checks only the key's syntax: segments are identifiers joined with `__`, a segment after the first
+may also be a list index (`"tags__0"`); any other key (`"name__"`, `"0__name"`) raises `ValueError`. Whether the
+fields exist is checked against the model's schema:
 [`resolve_lookup()`](/ref/lookups#adorm-query-resolve-lookup-target-key-annotations-source-none) checks one key,
 [`check_lookups()`](/ref/lookups#adorm-query-check-lookups-target-condition-annotations-source-none) a whole condition.
 Both raise [`FieldError`](/ref/exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
@@ -177,10 +221,10 @@ resolve_lookup(Member, "memberships__club__city__icontains").field_type   # str 
 resolve_lookup(Member, "level__in").value_type     # Literal['beginner', 'intermediate', 'advanced']
 ```
 
-A path that ends at a relation takes only `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`). A path
-cannot continue past a scalar field: adorm has no transforms, and `joined__year` raises `FieldError` on every driver.
-An unchecked key that does not resolve raises `FieldError` from the driver when it builds the statement; the error
-does not affect the [transaction](/topics/transactions#a-failed-operation) it is raised in.
+A path that ends at a relation takes only `exact`, `gt`, `gte`, `lt`, `lte`, `in` and `isnull` (`club__in`). After a
+scalar field a path continues only with [transforms](#transforms) that apply to it. An unchecked key that does not
+resolve raises `FieldError` from the driver when it builds the statement; the error does not affect the
+[transaction](/topics/transactions#a-failed-operation) it is raised in.
 
 ## Referring to fields with `F`
 
@@ -194,7 +238,7 @@ Query("club.Member").filter(paid__lt=F("fee") * 0.5)
 Query("club.Member").annotate(age_next_year=F("age") + 1)
 ```
 
-`F` paths cross relations as lookups do: `F("club__owner__name")`.
+`F` paths cross relations and apply transforms as lookups do: `F("club__owner__name")`, `F("joined__year")`.
 
 ## Functions, aggregates and conditional expressions
 
@@ -446,4 +490,10 @@ sorted(set(query.constructs()))
 ```
 
 A set operation adds `clause.union`, `clause.intersection` or `clause.difference` to the construct names of its
-queries, and `clause.combinator.slice` when one of them is sliced.
+queries, and `clause.combinator.slice` when one of them is sliced. A field path with several segments reports
+`path.nested`, and each [transform](#transforms) it applies `transform.<name>`, resolved against the model registry:
+
+```python
+sorted(set(Member.objects.filter(birth_date__year__gte=1990).query.constructs()))
+# ['lookup.gte', 'path.nested', 'transform.year']
+```

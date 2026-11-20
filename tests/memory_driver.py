@@ -364,6 +364,8 @@ class _Rows:
             value = self.value(node.lhs, row)
             if node.lookup_name == "isnull":
                 return (value is None) is node.rhs
+            if node.lookup_name in ("exact", "iexact") and node.rhs is None:
+                return value is None
             if node.rhs_is_sequence and isinstance(node.rhs, tuple):
                 rhs = tuple(self.value(item, row) for item in node.rhs)
             else:

@@ -906,13 +906,13 @@ The [`Vendor`](#adorm-drivers-django-vendors-vendor-name-features-none) of Djang
 ### `adorm.drivers.django.CAPABILITIES`
 
 The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver` on PostgreSQL, with psycopg 3. The constructs
-are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON fields); the
-other databases have the [capabilities of their vendor](#adorm-drivers-django-vendors).
+are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` and `contained_by` on array and JSON
+fields); the other databases have the [capabilities of their vendor](#adorm-drivers-django-vendors).
 
 | Field | Value |
 |---|---|
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean`, `check_table` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`, `has_key`, `has_keys`, `has_any_keys`, `contained_by`; `transform.<name>` for `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, `date`, `time`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `role` |
 | `custom_options` | `True` |
@@ -1166,8 +1166,9 @@ table and column of `ORA-01400`. Untested.
 `BEGIN IMMEDIATE` on, which keeps other writers off the rows `select_for_update()` reads; Django sends no
 `FOR UPDATE`), the [`POSTGRESQL_ONLY`](#adorm-drivers-django-vendors-postgresql-only)
 constructs, `clause.combinator.slice` (Django refuses a sliced query in a set operation), `lookup.contains`,
-`lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII letters), connection options and
-backend events. It has `clause.on_conflict.ignore` and `.update`, the set operations, savepoints and cancellation.
+`lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII letters), `lookup.contained_by`
+(Django has no JSON containment on SQLite), connection options and backend events. It has `clause.on_conflict.ignore`
+and `.update`, the set operations, savepoints and cancellation.
 
 #### `adorm.drivers.django.vendors.MYSQL_CAPABILITIES`
 
@@ -1178,8 +1179,9 @@ name does not tell MariaDB apart without connecting), `clause.select_for_update.
 
 #### `adorm.drivers.django.vendors.ORACLE_CAPABILITIES`
 
-`CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `clause.select_for_update.no_key`, `clause.on_conflict.ignore`,
-`clause.on_conflict.update`, connection options and backend events.
+`CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `lookup.contained_by` (Django has no JSON containment on
+Oracle), `clause.select_for_update.no_key`, `clause.on_conflict.ignore`, `clause.on_conflict.update`, connection
+options and backend events.
 
 #### `adorm.drivers.django.vendors.POSTGRESQL_ONLY`
 
@@ -1222,10 +1224,11 @@ connecting. Raises `ImportError` or `ImproperlyConfigured` for a backend that do
 #### `adorm.drivers.django.vendors.features_capabilities(features)`
 
 The capabilities of a backend without a vendor of its own, from its `DatabaseFeatures` class: `CAPABILITIES` without
-connection options, backend events, cancellation and the `POSTGRESQL_ONLY` constructs; a row lock, `ON CONFLICT` and
-set operation only when its flag (`has_select_for_update`, `has_select_for_update_nowait`, …,
+connection options, backend events, cancellation and the `POSTGRESQL_ONLY` constructs; a row lock, `ON CONFLICT`, set
+operation and `lookup.contained_by` only when its flag (`has_select_for_update`, `has_select_for_update_nowait`, …,
 `supports_ignore_conflicts`, `supports_update_conflicts_with_target`, `supports_select_union`, …,
-`supports_slicing_ordering_in_compound` for `clause.combinator.slice`) is `True` on the class; savepoints
+`supports_slicing_ordering_in_compound` for `clause.combinator.slice`, `supports_json_field_contains` for
+`lookup.contained_by`) is `True` on the class; savepoints
 when `uses_savepoints` is. A flag the backend computes per connection (a property) counts as `False`.
 
 ```python
@@ -1267,8 +1270,9 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   grouping names and `annotate()` of the annotations with one, as Django groups `values().annotate()`.
 - Each of `Query.filters` is one Django `filter()` call, so a multi-valued relation is joined once per filter, as
   in Django.
-- Field paths go through [`orm_path()`](#adorm-drivers-django-translation-orm-path-model-path-annotations); a model
-  instance as a value stands for its primary key, or, compared with a foreign key whose `to_field` is another field,
+- Field paths go through
+  [`orm_path()`](#adorm-drivers-django-translation-orm-path-model-path-annotations-lookup-none-implicit-false); a
+  model instance as a value stands for its primary key, or, compared with a foreign key whose `to_field` is another field,
   for that field's value; a `Value` with `output_type` gets
   [`output_field(output_type)`](#adorm-drivers-django-translation-output-field-output-type); a query in an `in`
   lookup becomes a Django query set ([`subquery()`](#adorm-drivers-django-translation-subquery-query)).
@@ -1322,12 +1326,15 @@ keys up to [`SELECT_RELATED_DEPTH`](#adorm-drivers-django-translation-select-rel
 `values()` / `values_list()` row is keyed by the selected names, as written; without names by the model's fields
 and the annotations. A model without a registered adorm model has its Django fields by attname.
 
-### `adorm.drivers.django.translation.orm_path(model, path, annotations=())`
+### `adorm.drivers.django.translation.orm_path(model, path, annotations=(), lookup=None, *, implicit=False)`
 
 Returns Django's query path for the adorm field path `path` on the Django model `model`. Each segment is renamed
 with the `orm_names` of the adorm model registered for the Django model that segment is on; a reverse relation's
 accessor name becomes its query name. A path whose first segment is in `annotations` is returned unchanged; a
-segment Django does not know is kept for Django to report.
+segment Django does not know is kept for Django to report. Segments after a scalar field are transforms; one that is
+no registered transform applying there raises `FieldError`, as does a `lookup` class whose `applies_to()` refuses the
+field. `implicit` tells that the key named no lookup (`joined__yeer`): the message then calls an unknown last
+transform name a lookup.
 
 ```python
 orm_path(Note, "copy___title")          # "copy__title"
@@ -2148,6 +2155,8 @@ One instance can be shared by threads and tasks.
 - `params` replace keys of the entry for this compiler, as a connection profile's `params` do; the resulting entry is
   the attribute `settings_dict`.
 - Parameters are bound for the entry's `OPTIONS["server_side_binding"]` (attribute `server_side_binding`).
+- The time zone name of a date or time function (`AT TIME ZONE`) and the precision of `DATE_TRUNC` compile as string
+  literals, not parameters, so that two copies of one expression (`DISTINCT ON` and `ORDER BY`) have the same SQL.
 - The wrapper's `features.max_query_params` is [`MAX_QUERY_PARAMS`](#adorm-drivers-asyncpg-compiler-max-query-params):
   on Django 6 `compiler.connection.ops.bulk_batch_size(fields, objs)` returns batch sizes asyncpg accepts; Django
   5.2's PostgreSQL backend does not read it.

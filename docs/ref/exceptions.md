@@ -332,8 +332,10 @@ affects a row twice, `RAISE EXCEPTION` in PL/pgSQL (SQLSTATE classes `42`, `21`,
 A field path or lookup key does not resolve on its model, as Django's `FieldError`:
 
 - a segment that is neither a field nor a relation;
-- a segment after a field that is neither a relation nor a JSON field: an unknown lookup name
-  (`first_name__icontain`), a Django transform (`joined__year`);
+- a segment after a field that is neither a relation nor a JSON field and is no transform applying there: an
+  unknown lookup or transform name (`first_name__icontain`, `joined__yeer`), a transform of another type
+  (`birth_date__hour` on a date);
+- a lookup that does not apply to the field (`first_name__has_key`, `first_name__overlap`);
 - a lookup a relation does not take (`club__icontains`).
 
 `model` is the label of the model the failing segment was resolved on, `key` the path or key; both are `None` when

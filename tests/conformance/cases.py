@@ -384,6 +384,139 @@ async def lookup_overlap_with_a_query():
     return await club_slugs(Club.objects.filter(disciplines__overlap=Competition.objects.values("discipline")))
 
 
+# Transforms (birth_date: the 10th of month i + 1 of year 1970 + 3i; joined: START minus 40 days per member)
+
+
+@case(
+    "select",
+    "lookup.exact",
+    "lookup.gte",
+    "path.nested",
+    "transform.year",
+    expected=(["Eva"], ["Jana", "Klemen", "Lara"]),
+)
+async def transform_year():
+    return (
+        await first_names(Member.objects.filter(birth_date__year=1982)),
+        await first_names(Member.objects.filter(birth_date__year__gte=1997)),
+    )
+
+
+@case("select", "lookup.exact", "path.nested", "transform.iso_year", expected=["Lara"])
+async def transform_iso_year():
+    return await first_names(Member.objects.filter(joined__iso_year=2024))
+
+
+@case("select", "lookup.exact", "path.nested", "transform.quarter", expected=["David", "Eva", "Filip"])
+async def transform_quarter():
+    return await first_names(Member.objects.filter(birth_date__quarter=2))
+
+
+@case("select", "lookup.in", "path.nested", "transform.month", expected=["Bojan", "Cvetka", "David", "Eva"])
+async def transform_month_excluded():
+    return await first_names(Member.objects.exclude(birth_date__month__in=[1, 6, 7, 8, 9, 10, 11, 12]))
+
+
+@case("select", "lookup.exact", "path.nested", "transform.week", expected=(["Ana", "Jana"], ["Bojan", "Klemen"]))
+async def transform_week():
+    return (
+        await first_names(Member.objects.filter(joined__week=10)),
+        await first_names(Member.objects.filter(joined__week=4)),
+    )
+
+
+@case("select", "lookup.exact", "path.nested", "transform.week_day", expected=["Ana", "Bojan", "Hana", "Igor"])
+async def transform_week_day():
+    return await first_names(Member.objects.filter(birth_date__week_day=7))
+
+
+@case("select", "lookup.exact", "path.nested", "transform.iso_week_day", expected=["David", "Klemen"])
+async def transform_iso_week_day():
+    return await first_names(Member.objects.filter(joined__iso_week_day=7))
+
+
+@case("select", "path.nested", "transform.day", expected=[("Ana", 2), ("Bojan", 21), ("Cvetka", 12)])
+async def transform_day_in_values():
+    return [row async for row in Member.objects.order_by("first_name").values_list("first_name", "joined__day")[:3]]
+
+
+@case("count", "lookup.exact", "lookup.lt", "path.nested", "transform.hour", expected=(12, 0))
+async def transform_hour():
+    return (
+        await Member.objects.filter(joined__hour=7).count(),
+        await Member.objects.filter(joined__hour__lt=7).count(),
+    )
+
+
+@case("select", "clause.annotate", "path.nested", "transform.minute", expected=[0])
+async def transform_minute_annotated():
+    return sorted({row.minute async for row in Member.objects.annotate(minute=F("joined__minute"))})
+
+
+@case("select", "path.nested", "transform.second", "transform.month", expected=["Lara", "Klemen", "Jana"])
+async def transform_in_ordering():
+    return await ordered(Member.objects.order_by("joined__second", "-birth_date__month")[:3])
+
+
+@case(
+    "select", "lookup.exact", "lookup.range", "path.nested", "transform.date", expected=(["Ana"], ["Bojan", "Cvetka"])
+)
+async def transform_date():
+    return (
+        await first_names(Member.objects.filter(joined__date=datetime.date(2026, 3, 2))),
+        await first_names(
+            Member.objects.filter(joined__date__range=(datetime.date(2025, 12, 1), datetime.date(2026, 2, 1)))
+        ),
+    )
+
+
+@case("count", "lookup.exact", "path.nested", "transform.time", expected=12)
+async def transform_time():
+    return await Member.objects.filter(joined__time=datetime.time(7)).count()
+
+
+# JSON lookups (addresses: a street for ljubljana-rowing and maribor-climbing, {} for koper-sailing)
+
+
+@case("select", "lookup.has_key", expected=(["ljubljana-rowing", "maribor-climbing"], ["koper-sailing"]))
+async def lookup_has_key():
+    return (
+        await club_slugs(Club.objects.filter(address__has_key="street")),
+        await club_slugs(Club.objects.exclude(address__has_key="street")),
+    )
+
+
+@case("select", "lookup.has_keys", expected=(["ljubljana-rowing", "maribor-climbing"], []))
+async def lookup_has_keys():
+    return (
+        await club_slugs(Club.objects.filter(address__has_keys=["street"])),
+        await club_slugs(Club.objects.filter(address__has_keys=["street", "city"])),
+    )
+
+
+@case("select", "lookup.has_any_keys", expected=(["ljubljana-rowing", "maribor-climbing"], []))
+async def lookup_has_any_keys():
+    return (
+        await club_slugs(Club.objects.filter(address__has_any_keys=["city", "street"])),
+        await club_slugs(Club.objects.filter(address__has_any_keys=["city"])),
+    )
+
+
+@case(
+    "select",
+    "lookup.contained_by",
+    expected=(
+        ["Ana", "Bojan", "Cvetka", "David", "Filip", "Gaja", "Hana", "Jana", "Klemen"],
+        ["koper-sailing", "ljubljana-rowing"],
+    ),
+)
+async def lookup_contained_by():
+    return (
+        await first_names(Member.objects.filter(tags__contained_by=["junior", "coach"])),
+        await club_slugs(Club.objects.filter(address__contained_by={"street": "Veslaška pot 1", "city": "Ljubljana"})),
+    )
+
+
 # Conditions
 
 

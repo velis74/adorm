@@ -41,6 +41,7 @@ from adorm import (
 )
 from adorm.drivers.django import adopt_context_locals, map_django_error, model_row
 from adorm.drivers.django.translation import (
+    _Translator,
     aggregation,
     django_model,
     field_kwargs,
@@ -83,6 +84,9 @@ MENTOR_RATING = Query(AUTHOR).filter(pk=OuterRef("mentor")).values("rating")
         (dj.Tagging, "book_id", "book_id"),
         (dj.Author, "nothing__name", "nothing__name"),
         (dj.Book, "extra__a__b", "extra__a__b"),
+        (dj.Book, "published__date__year", "published__date__year"),
+        (dj.Edition, "released__month", "released__month"),
+        (dj.Book, "authors__born__iso_week_day", "authors__born__iso_week_day"),
     ],
 )
 def test_orm_paths_rename_each_segment_on_the_model_it_reaches(model, path, expected):
@@ -90,8 +94,8 @@ def test_orm_paths_rename_each_segment_on_the_model_it_reaches(model, path, expe
 
 
 @pytest.mark.parametrize("path", ["name__nothing", "name__lower", "pupils__name__year"])
-def test_orm_paths_refuse_segments_after_a_scalar_field(path):
-    with pytest.raises(FieldError, match=r"library\.Author\.name is neither a relation nor a JSON field") as caught:
+def test_orm_paths_refuse_a_segment_after_a_scalar_field_that_is_no_transform_of_it(path):
+    with pytest.raises(FieldError, match=r"unsupported transform '\w+' for library\.Author\.name") as caught:
         orm_path(dj.Author, path)
     assert caught.value.sqlstate is None
 
@@ -183,6 +187,23 @@ def test_conditions_become_django_q_objects():
     where = translate(query).queryset.query.where
     assert str(where).count("OR") == 1
     assert "NOT" in str(where)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (Query("library.Book").filter(extra__a=None), "(AND: ('extra__a__exact', None))"),
+        (Query("library.Book").filter(extra__a__iexact=None), "(AND: ('extra__a__iexact', None))"),
+        (Query("library.Book").filter(extra=None), "(AND: ('extra__isnull', True))"),
+        (Query("library.Book").filter(weight=None), "(AND: ('weight__isnull', True))"),
+        (Query("library.Book").filter(weight__iexact=None), "(AND: ('weight__isnull', True))"),
+        (Query("library.Book").filter(edition=None), "(AND: ('edition__isnull', True))"),
+        (Query("library.Book").filter(Exact(Lower("schema_"), None)), "(AND: ('_adorm0__isnull', True))"),
+    ],
+)
+def test_none_matches_json_null_only_at_a_json_key(query, expected):
+    translator = _Translator(query)
+    assert str(translator.lookup(query.where.children[0])) == expected
 
 
 def test_each_filter_is_a_django_filter_call_of_its_own():
