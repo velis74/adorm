@@ -1038,7 +1038,7 @@ class _Translator:
             return self.path(path), None
         q = self.lookup(build_lookup(key, value))
         (child,) = q.children
-        if not isinstance(child, tuple) or child[0] in self.aliases:
+        if not isinstance(child, tuple) or child[0].partition("__")[0] in self.aliases:
             raise NotSupportedError(
                 f"{key!r}: get_or_create() and update_or_create() take no lookup or transform with SQL of its own or "
                 "a translation"

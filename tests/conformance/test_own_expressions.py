@@ -316,6 +316,21 @@ async def test_an_own_transform_in_a_lookup_key_and_in_values(pool):
     assert initials == [("A",), ("L",)]
 
 
+@pytest.mark.usefixtures("club_data", "sql_driver", "router")
+@pytest.mark.parametrize(
+    ("method", "key"),
+    [
+        ("get_or_create", "first_name__initial"),
+        ("get_or_create", "first_name__initial__exact"),
+        ("update_or_create", "first_name__initial"),
+    ],
+)
+async def test_get_or_create_refuses_an_own_transform(method, key):
+    with pytest.raises(adorm.NotSupportedError, match="get_or_create"):
+        await getattr(Member.objects, method)(**{key: "A"}, defaults={"last_name": "X"})
+    assert await Member.objects.count() == 12
+
+
 # Translations registered for the Django-based drivers
 
 
