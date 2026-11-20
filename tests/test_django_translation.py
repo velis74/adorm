@@ -2,6 +2,7 @@
 database access in these tests)."""
 
 import contextvars
+import decimal
 import threading
 import uuid
 import zoneinfo
@@ -282,6 +283,69 @@ def test_truncations_become_djangos(node, django_class, kind):
     assert type(annotation).__name__ == django_class
     if kind is not None:
         assert annotation.kind == kind
+
+
+def test_casts_carry_their_field_options():
+    from adorm.query import Cast
+
+    query = Query("library.Book").annotate(
+        short=Cast("title", str, max_length=5),
+        text=Cast("pages", str),
+        amount=Cast("pages", decimal.Decimal, max_digits=6, decimal_places=1),
+    )
+    annotations = translate(query).queryset.query.annotations
+    assert (type(annotations["short"].output_field).__name__, annotations["short"].output_field.max_length) == (
+        "CharField",
+        5,
+    )
+    assert type(annotations["text"].output_field).__name__ == "TextField"
+    field = annotations["amount"].output_field
+    assert (type(field).__name__, field.max_digits, field.decimal_places) == ("DecimalField", 6, 1)
+    sql = str(translate(query).queryset.query)
+    assert "::varchar(5)" in sql
+    assert "::numeric(6, 1)" in sql
+
+
+def test_functions_with_their_own_arguments_translate():
+    from adorm.query import Collate, Extract, ExtractIsoYear, JSONObject
+
+    query = Query("library.Book").annotate(
+        c=Collate("title", "C"),
+        e=Extract("published", "week_day"),
+        y=ExtractIsoYear("published"),
+        j=JSONObject(t="title"),
+    )
+    annotations = translate(query).queryset.query.annotations
+    assert annotations["c"].collation == "C"
+    assert (type(annotations["e"]).__name__, annotations["e"].lookup_name) == ("Extract", "week_day")
+    assert type(annotations["y"]).__name__ == "ExtractIsoYear"
+    assert type(annotations["j"]).__name__ == "JSONObject"
+
+
+def test_a_function_output_type_becomes_its_output_field():
+    from django.db.models import FloatField
+
+    from adorm.query import Round
+
+    annotation = translate(Query("library.Book").annotate(r=Round("pages", output_type=float))).queryset.query
+    assert isinstance(annotation.annotations["r"].output_field, FloatField)
+
+
+def test_a_value_beside_a_field_of_another_type_needs_an_output_type():
+    from django.core.exceptions import FieldError
+    from django.db.models import DecimalField
+
+    from adorm.query import NullIf
+
+    mixed = translate(Query("library.Book").annotate(n=NullIf("price", Value(0)))).queryset.query.annotations["n"]
+    with pytest.raises(FieldError, match="mixed types"):
+        _ = mixed.output_field
+    for function in (
+        NullIf("price", Value(0, output_type=decimal.Decimal)),
+        NullIf("price", Value(0), output_type=decimal.Decimal),
+    ):
+        annotation = translate(Query("library.Book").annotate(n=function)).queryset.query.annotations["n"]
+        assert isinstance(annotation.output_field, DecimalField)
 
 
 def test_aggregates_carry_distinct_filter_default_and_output_type():

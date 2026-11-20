@@ -208,6 +208,21 @@ Query("club.Member").annotate(display=Concat("first_name", Value(" "), "last_nam
 Query("club.Member").annotate(label=Coalesce("nick", "name"))
 ```
 
+adorm has the database functions of Django's `django.db.models.functions` except the window functions: comparison
+and conversion (`Cast`, `Collate`, `Greatest`, `Least`, `NullIf`, `Coalesce`), JSON (`JSONArray`, `JSONObject`),
+dates and times (`Extract…`, `Trunc…`, `Now`), math (`Abs`, `Round`, `Power`, `Sqrt` …), text (`Left`, `Substr`,
+`Replace`, `LPad`, `MD5` …) and UUIDs (`UUID4`, `UUID7`). A function stands wherever an expression can: in
+`annotate()`, `filter()`, `order_by()`, `update()` and as an aggregate's argument; `values()` selects its result by
+the annotation name.
+
+```python
+from adorm import Cast, ExtractYear, Left, Round, Value
+
+Query("club.Member").annotate(born=ExtractYear("birth_date")).filter(born__gte=2000)
+Query("club.Member").order_by(Left("last_name", 1), Cast("joined", datetime.date))
+Query("club.Activity").update(capacity=Round(F("capacity") * Value(1.1)))
+```
+
 Aggregates take `distinct=`, `filter=` and `default=`:
 
 ```python

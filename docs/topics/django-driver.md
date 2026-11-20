@@ -229,7 +229,7 @@ The driver translates an adorm [`Query`](/ref/query) into a Django query set
 | lookups (`exact` … `iregex`, `overlap`) | the lookup of the same name on the field, so `contains` on an `ArrayField` or `JSONField` is Django's containment and `overlap` is the `ArrayField` lookup; a lookup that a `JSONField` or `HStoreField` does not have (`overlap`) raises `FieldError` on the field, on a key inside it and on an annotation that refers to the field (`annotate(e=F("extra"))`), where Django would read the name as a key |
 | the values of `overlap` (`disciplines__overlap=["Lead", "Dinghy"]`) | a list, also when empty |
 | a lookup on an expression (`Exact(Lower("name"), "ann")`) | the expression as an `alias()` and the lookup on it |
-| `F`, `Value`, `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc…` | the Django class of the same name; a `Value` with `output_type` gets the Django field for it (`int` → `IntegerField` …); `Trunc(x, "date")` / `"time"` is `TruncDate` / `TruncTime` |
+| `F`, `Value` and the functions (`Lower`, `Coalesce`, `Trunc…`, `Extract…`, `Cast` …) | the Django class of the same name; a `Value` or a function with `output_type` gets the Django field for it (`int` → `IntegerField` …); `Trunc(x, "date")` / `"time"` is `TruncDate` / `TruncTime`; `Cast` with `max_length` casts to a `CharField`, with `max_digits` and `decimal_places` to a `DecimalField`; `UUID4` and `UUID7` need Django 6.0 |
 | `Count`, `Sum`, `Avg`, `Min`, `Max` with `distinct`, `filter`, `default` | the Django aggregate with the same options; `Count("*")` counts rows |
 | `Case`, `When` | `Case`, `When` |
 | `annotate()` / `alias()` | `annotate()` / `alias()`, in the order added |

@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import copy
 import datetime
+import decimal
 import re
+import uuid
 
 from collections.abc import Iterable, Iterator, Mapping, Set
 from typing import Any, ClassVar, Self, TYPE_CHECKING
@@ -19,6 +21,70 @@ if TYPE_CHECKING:
     from adorm.schema import SchemaSource
 
 __all__ = [
+    "Cast",
+    "Collate",
+    "Greatest",
+    "Least",
+    "NullIf",
+    "JSONArray",
+    "JSONObject",
+    "Extract",
+    "ExtractYear",
+    "ExtractIsoYear",
+    "ExtractQuarter",
+    "ExtractMonth",
+    "ExtractWeek",
+    "ExtractDay",
+    "ExtractWeekDay",
+    "ExtractIsoWeekDay",
+    "ExtractHour",
+    "ExtractMinute",
+    "ExtractSecond",
+    "Abs",
+    "ACos",
+    "ASin",
+    "ATan",
+    "ATan2",
+    "Ceil",
+    "Cos",
+    "Cot",
+    "Degrees",
+    "Exp",
+    "Floor",
+    "Ln",
+    "Log",
+    "Mod",
+    "Pi",
+    "Power",
+    "Radians",
+    "Random",
+    "Round",
+    "Sign",
+    "Sin",
+    "Sqrt",
+    "Tan",
+    "Chr",
+    "Left",
+    "LPad",
+    "LTrim",
+    "MD5",
+    "Ord",
+    "Repeat",
+    "Replace",
+    "Reverse",
+    "Right",
+    "RPad",
+    "RTrim",
+    "SHA1",
+    "SHA224",
+    "SHA256",
+    "SHA384",
+    "SHA512",
+    "StrIndex",
+    "Substr",
+    "Trim",
+    "UUID4",
+    "UUID7",
     "Aggregate",
     "Avg",
     "Case",
@@ -468,14 +534,19 @@ class OrderBy(Node):
 class Func(Expression):
     """Base class of functions. Arguments that are strings are field references; use `Value` for a literal string.
 
-    A subclass sets ``arity`` (exact number of arguments) or ``min_args``, and ``default_output_type``. Its construct
+    A subclass sets ``arity`` (exact number of arguments) or ``min_args`` and ``max_args``, and
+    ``default_output_type``. ``output_from`` names where the type of a function without an output type comes from:
+    ``"arguments"`` (the first argument of a known type; every argument has the result's type), ``"first"`` (the
+    first argument) or ``"numeric"`` (``Decimal`` when an argument is a ``Decimal``, else ``float``). Its construct
     name is ``function.<class name>``.
     """
 
     category: ClassVar[str] = "function"
     arity: ClassVar[int | None] = None
     min_args: ClassVar[int] = 0
+    max_args: ClassVar[int | None] = None
     default_output_type: ClassVar[type | None] = None
+    output_from: ClassVar[str | None] = None
     _fields = ("expressions", "output_type")
     expressions: tuple[Expression, ...]
 
@@ -492,6 +563,8 @@ class Func(Expression):
             raise TypeError(f"{name} takes {self.arity} argument(s), got {len(expressions)}")
         if len(expressions) < self.min_args:
             raise TypeError(f"{name} takes at least {self.min_args} arguments, got {len(expressions)}")
+        if self.max_args is not None and len(expressions) > self.max_args:
+            raise TypeError(f"{name} takes at most {self.max_args} arguments, got {len(expressions)}")
         self._init(
             expressions=tuple(_expression(e, fields=True) for e in expressions),
             output_type=check_output_type(output_type) or self.default_output_type,
@@ -504,6 +577,10 @@ class Func(Expression):
         count = len(self.expressions)
         _require(self.arity is None or count == self.arity, f"{name} takes {self.arity} argument(s), got {count}")
         _require(count >= self.min_args, f"{name} takes at least {self.min_args} arguments, got {count}")
+        _require(
+            self.max_args is None or count <= self.max_args,
+            f"{name} takes at most {self.max_args} arguments, got {count}",
+        )
 
     def get_source_expressions(self) -> tuple[Node, ...]:
         return self.expressions
@@ -540,6 +617,7 @@ class Coalesce(Func):
     """The first argument that is not NULL."""
 
     min_args = 2
+    output_from = "arguments"
 
 
 class Concat(Func):
@@ -650,6 +728,623 @@ class TruncTime(_FixedTrunc):
     """The time part of a date and time."""
 
     fixed_kind = "time"
+
+
+def _check_literal(value: Any, name: str, minimum: int, message: str) -> None:
+    """Raise ``ValueError`` with ``message`` when ``value`` is a literal number below ``minimum``."""
+    if isinstance(value, int | float) and not isinstance(value, bool) and value < minimum:
+        raise ValueError(f"{name!r} {message}")
+
+
+# Comparison and conversion functions
+
+
+class Cast(Func):
+    """The expression converted to ``output_type`` in the database. ``max_length`` makes a cast to ``str`` a
+    ``varchar(max_length)``; ``max_digits`` and ``decimal_places`` (both or neither) give a cast to ``Decimal`` its
+    precision and scale."""
+
+    arity = 1
+    _fields = ("expressions", "output_type", "max_length", "max_digits", "decimal_places")
+    max_length: int | None
+    max_digits: int | None
+    decimal_places: int | None
+
+    def __init__(
+        self,
+        expression: Any,
+        output_type: type,
+        *,
+        max_length: int | None = None,
+        max_digits: int | None = None,
+        decimal_places: int | None = None,
+    ) -> None:
+        if output_type is None:
+            raise TypeError("Cast needs an output type")
+        super().__init__(expression, output_type=output_type)
+        self._init(max_length=max_length, max_digits=max_digits, decimal_places=decimal_places)
+        self._check_options(TypeError)
+
+    def _check_options(self, error: type[Exception]) -> None:
+        def size(value: Any) -> bool:
+            return value is None or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
+
+        if self.output_type is None:
+            raise error("Cast needs an output type")
+        if not all(size(v) for v in (self.max_length, self.max_digits, self.decimal_places)):
+            raise ValueError("max_length, max_digits and decimal_places are non-negative integers")
+        if self.max_length is not None and self.output_type is not str:
+            raise error("max_length is for a cast to str")
+        if (self.max_digits is None) != (self.decimal_places is None):
+            raise error("max_digits and decimal_places are given together")
+        if self.max_digits is not None:
+            if self.output_type is not decimal.Decimal:
+                raise error("max_digits and decimal_places are for a cast to Decimal")
+            if self.decimal_places > self.max_digits:
+                raise ValueError("decimal_places cannot exceed max_digits")
+
+    def _check_decoded(self) -> None:
+        super()._check_decoded()
+        self._check_options(ValueError)
+
+    def __repr__(self) -> str:
+        options = "".join(
+            f", {name}={getattr(self, name)!r}"
+            for name in ("max_length", "max_digits", "decimal_places")
+            if getattr(self, name) is not None
+        )
+        return f"Cast({self.expressions[0]!r}, {self.output_type.__name__}{options})"
+
+
+_COLLATION = re.compile(r"^[\w-]+\Z")
+
+
+class Collate(Func):
+    """The expression with the collation ``collation``, a name of letters, digits, ``_`` and ``-``."""
+
+    arity = 1
+    output_from = "first"
+    _fields = ("expressions", "collation", "output_type")
+    collation: str
+
+    def __init__(self, expression: Any, collation: str) -> None:
+        if not isinstance(collation, str) or not _COLLATION.match(collation):
+            raise ValueError(f"invalid collation name {collation!r}")
+        super().__init__(expression)
+        self._init(collation=collation)
+
+    def _check_decoded(self) -> None:
+        super()._check_decoded()
+        _require(isinstance(self.collation, str) and bool(_COLLATION.match(self.collation)), "invalid collation name")
+
+
+class Greatest(Func):
+    """The largest argument. On PostgreSQL NULL arguments are ignored; on other databases a NULL argument makes the
+    result NULL."""
+
+    min_args = 2
+    output_from = "arguments"
+
+
+class Least(Func):
+    """The smallest argument; NULL arguments as for `Greatest`."""
+
+    min_args = 2
+    output_from = "arguments"
+
+
+class NullIf(Func):
+    """NULL when the two arguments are equal, else the first."""
+
+    arity = 2
+    output_from = "arguments"
+
+
+# JSON functions
+
+
+class JSONArray(Func):
+    """A JSON array of the arguments."""
+
+    default_output_type = list
+
+
+class JSONObject(Func):
+    """A JSON object with a key for each keyword argument; the values are expressions (strings are field
+    references)."""
+
+    default_output_type = dict
+    _fields = ("keys", "expressions", "output_type")
+    keys: tuple[str, ...]
+
+    def __init__(self, **fields: Any) -> None:
+        super().__init__(*fields.values())
+        self._init(keys=tuple(fields))
+
+    def _check_decoded(self) -> None:
+        super()._check_decoded()
+        _require(
+            isinstance(self.keys, tuple)
+            and all(isinstance(key, str) for key in self.keys)
+            and len(self.keys) == len(self.expressions),
+            "a JSONObject has a string key for each expression",
+        )
+
+    def __repr__(self) -> str:
+        fields = ", ".join(f"{key}={value!r}" for key, value in zip(self.keys, self.expressions, strict=True))
+        return f"JSONObject({fields})"
+
+
+# Date and time functions
+
+
+class Extract(Func):
+    """A component of a date, time, date and time or duration as an ``int``. ``lookup_name`` is ``year``,
+    ``iso_year``, ``quarter``, ``month``, ``week``, ``day``, ``week_day`` (1 for Sunday to 7), ``iso_week_day``
+    (1 for Monday to 7), ``hour``, ``minute`` or ``second``; a date and time is taken in the current time zone."""
+
+    KINDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "year",
+            "iso_year",
+            "quarter",
+            "month",
+            "week",
+            "day",
+            "week_day",
+            "iso_week_day",
+            "hour",
+            "minute",
+            "second",
+        }
+    )
+    arity = 1
+    default_output_type = int
+    _fields = ("expressions", "lookup_name", "output_type")
+    lookup_name: str
+
+    def __init__(self, expression: Any, lookup_name: str, output_type: type | None = None) -> None:
+        if lookup_name not in self.KINDS:
+            raise ValueError(f"unknown extract lookup name {lookup_name!r}")
+        super().__init__(expression, output_type=output_type)
+        self._init(lookup_name=lookup_name)
+
+    def _check_decoded(self) -> None:
+        super()._check_decoded()
+        if self.lookup_name not in self.KINDS:
+            raise ValueError(f"unknown extract lookup name {self.lookup_name!r}")
+
+
+class _FixedExtract(Extract):
+    construct = None
+    fixed_lookup_name: ClassVar[str]
+
+    def __init__(self, expression: Any, output_type: type | None = None) -> None:
+        super().__init__(expression, self.fixed_lookup_name, output_type)
+
+    def _check_decoded(self) -> None:
+        super()._check_decoded()
+        _require(self.lookup_name == self.fixed_lookup_name, f"{type(self).__name__} extracts {self.fixed_lookup_name}")
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.expressions[0]!r})"
+
+
+class ExtractYear(_FixedExtract):
+    """``Extract(expression, "year")``."""
+
+    fixed_lookup_name = "year"
+
+
+class ExtractIsoYear(_FixedExtract):
+    """``Extract(expression, "iso_year")``: the ISO 8601 week-numbering year."""
+
+    fixed_lookup_name = "iso_year"
+
+
+class ExtractQuarter(_FixedExtract):
+    """``Extract(expression, "quarter")``."""
+
+    fixed_lookup_name = "quarter"
+
+
+class ExtractMonth(_FixedExtract):
+    """``Extract(expression, "month")``."""
+
+    fixed_lookup_name = "month"
+
+
+class ExtractWeek(_FixedExtract):
+    """``Extract(expression, "week")``: the ISO 8601 week number."""
+
+    fixed_lookup_name = "week"
+
+
+class ExtractDay(_FixedExtract):
+    """``Extract(expression, "day")``."""
+
+    fixed_lookup_name = "day"
+
+
+class ExtractWeekDay(_FixedExtract):
+    """``Extract(expression, "week_day")``: 1 for Sunday to 7 for Saturday."""
+
+    fixed_lookup_name = "week_day"
+
+
+class ExtractIsoWeekDay(_FixedExtract):
+    """``Extract(expression, "iso_week_day")``: 1 for Monday to 7 for Sunday."""
+
+    fixed_lookup_name = "iso_week_day"
+
+
+class ExtractHour(_FixedExtract):
+    """``Extract(expression, "hour")``."""
+
+    fixed_lookup_name = "hour"
+
+
+class ExtractMinute(_FixedExtract):
+    """``Extract(expression, "minute")``."""
+
+    fixed_lookup_name = "minute"
+
+
+class ExtractSecond(_FixedExtract):
+    """``Extract(expression, "second")``."""
+
+    fixed_lookup_name = "second"
+
+
+# Math functions
+
+
+class Abs(Func):
+    """The absolute value."""
+
+    arity = 1
+    output_from = "first"
+
+
+class ACos(Func):
+    """The arccosine, in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class ASin(Func):
+    """The arcsine, in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class ATan(Func):
+    """The arctangent, in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class ATan2(Func):
+    """The arctangent of the first argument divided by the second, in radians."""
+
+    arity = 2
+    output_from = "numeric"
+
+
+class Ceil(Func):
+    """The smallest integer not less than the value."""
+
+    arity = 1
+    output_from = "first"
+
+
+class Cos(Func):
+    """The cosine of an angle in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Cot(Func):
+    """The cotangent of an angle in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Degrees(Func):
+    """Radians converted to degrees."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Exp(Func):
+    """*e* raised to the value."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Floor(Func):
+    """The largest integer not greater than the value."""
+
+    arity = 1
+    output_from = "first"
+
+
+class Ln(Func):
+    """The natural logarithm."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Log(Func):
+    """The logarithm of the second argument to the base of the first."""
+
+    arity = 2
+    output_from = "numeric"
+
+
+class Mod(Func):
+    """The remainder of the first argument divided by the second."""
+
+    arity = 2
+    output_from = "numeric"
+
+
+class Pi(Func):
+    """The number π."""
+
+    arity = 0
+    default_output_type = float
+
+
+class Power(Func):
+    """The first argument raised to the second."""
+
+    arity = 2
+    output_from = "numeric"
+
+
+class Radians(Func):
+    """Degrees converted to radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Random(Func):
+    """A random number from 0 (included) to 1 (excluded), a new one for each row."""
+
+    arity = 0
+    default_output_type = float
+
+
+class Round(Func):
+    """The value rounded to ``precision`` decimal places; a negative precision rounds to tens, hundreds …"""
+
+    arity = 2
+    output_from = "first"
+
+    def __init__(self, expression: Any, precision: Any = 0, output_type: type | None = None) -> None:
+        super().__init__(expression, precision, output_type=output_type)
+
+
+class Sign(Func):
+    """-1, 0 or 1 for a negative, zero or positive value."""
+
+    arity = 1
+    output_from = "first"
+
+
+class Sin(Func):
+    """The sine of an angle in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Sqrt(Func):
+    """The square root."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+class Tan(Func):
+    """The tangent of an angle in radians."""
+
+    arity = 1
+    output_from = "numeric"
+
+
+# Text functions
+
+
+class Chr(Func):
+    """The character with the Unicode code point given."""
+
+    arity = 1
+    default_output_type = str
+
+
+class Left(Func):
+    """The first ``length`` characters (more than 0) of the string."""
+
+    arity = 2
+    default_output_type = str
+
+    def __init__(self, expression: Any, length: Any, output_type: type | None = None) -> None:
+        _check_literal(length, "length", 1, "must be greater than 0")
+        super().__init__(expression, length, output_type=output_type)
+
+
+class Right(Left):
+    """The last ``length`` characters (more than 0) of the string."""
+
+
+class LPad(Func):
+    """The string padded on the left with ``fill_text`` (a space by default) to ``length`` characters; a longer
+    string is cut to ``length``."""
+
+    arity = 3
+    default_output_type = str
+
+    def __init__(self, expression: Any, length: Any, fill_text: Any = None, output_type: type | None = None) -> None:
+        _check_literal(length, "length", 0, "must be greater than or equal to 0")
+        fill = Value(" ") if fill_text is None else fill_text
+        super().__init__(expression, length, fill, output_type=output_type)
+
+
+class RPad(LPad):
+    """The string padded on the right, as `LPad`."""
+
+
+class LTrim(Func):
+    """The string without leading spaces."""
+
+    arity = 1
+    output_from = "first"
+
+
+class RTrim(Func):
+    """The string without trailing spaces."""
+
+    arity = 1
+    output_from = "first"
+
+
+class Trim(Func):
+    """The string without leading and trailing spaces."""
+
+    arity = 1
+    output_from = "first"
+
+
+class MD5(Func):
+    """The MD5 hash of the string, in hexadecimal."""
+
+    arity = 1
+    default_output_type = str
+
+
+class SHA1(Func):
+    """The SHA-1 hash of the string, in hexadecimal; on PostgreSQL it needs the ``pgcrypto`` extension."""
+
+    arity = 1
+    default_output_type = str
+
+
+class SHA224(Func):
+    """The SHA-224 hash of the string, in hexadecimal; on PostgreSQL it needs the ``pgcrypto`` extension."""
+
+    arity = 1
+    default_output_type = str
+
+
+class SHA256(Func):
+    """The SHA-256 hash of the string, in hexadecimal; on PostgreSQL it needs the ``pgcrypto`` extension."""
+
+    arity = 1
+    default_output_type = str
+
+
+class SHA384(Func):
+    """The SHA-384 hash of the string, in hexadecimal; on PostgreSQL it needs the ``pgcrypto`` extension."""
+
+    arity = 1
+    default_output_type = str
+
+
+class SHA512(Func):
+    """The SHA-512 hash of the string, in hexadecimal; on PostgreSQL it needs the ``pgcrypto`` extension."""
+
+    arity = 1
+    default_output_type = str
+
+
+class Ord(Func):
+    """The Unicode code point of the first character of the string."""
+
+    arity = 1
+    default_output_type = int
+
+
+class Repeat(Func):
+    """The string repeated ``number`` times (0 or more)."""
+
+    arity = 2
+    default_output_type = str
+
+    def __init__(self, expression: Any, number: Any, output_type: type | None = None) -> None:
+        _check_literal(number, "number", 0, "must be greater than or equal to 0")
+        super().__init__(expression, number, output_type=output_type)
+
+
+class Replace(Func):
+    """The string with every occurrence of ``text`` replaced by ``replacement`` (removed by default); case
+    sensitive."""
+
+    arity = 3
+    output_from = "first"
+
+    def __init__(self, expression: Any, text: Any, replacement: Any = None, output_type: type | None = None) -> None:
+        replacement = Value("") if replacement is None else replacement
+        super().__init__(expression, text, replacement, output_type=output_type)
+
+
+class Reverse(Func):
+    """The string with its characters in reverse order."""
+
+    arity = 1
+    output_from = "first"
+
+
+class StrIndex(Func):
+    """The position (from 1) of the first occurrence of ``substring`` in the string, 0 when there is none; case
+    sensitive."""
+
+    arity = 2
+    default_output_type = int
+
+
+class Substr(Func):
+    """``length`` characters of the string from position ``pos`` (from 1); to the end without ``length``."""
+
+    min_args = 2
+    max_args = 3
+    default_output_type = str
+
+    def __init__(self, expression: Any, pos: Any, length: Any = None, output_type: type | None = None) -> None:
+        _check_literal(pos, "pos", 1, "must be greater than 0")
+        arguments = (expression, pos) if length is None else (expression, pos, length)
+        super().__init__(*arguments, output_type=output_type)
+
+
+# UUID functions
+
+
+class UUID4(Func):
+    """A random version 4 UUID, a new one for each row."""
+
+    arity = 0
+    default_output_type = uuid.UUID
+
+
+class UUID7(Func):
+    """A version 7 (time-ordered) UUID, a new one for each row; ``shift`` (a ``timedelta`` or an expression of one)
+    moves its timestamp."""
+
+    max_args = 1
+    default_output_type = uuid.UUID
+
+    def __init__(self, shift: Any = None, output_type: type | None = None) -> None:
+        super().__init__(*(() if shift is None else (shift,)), output_type=output_type)
 
 
 class Aggregate(Func):

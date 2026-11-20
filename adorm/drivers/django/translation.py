@@ -85,10 +85,25 @@ FUNCTIONS: Mapping[str, type[dj.Func]] = MappingProxyType(
         "TruncSecond": djf.TruncSecond,
         "TruncDate": djf.TruncDate,
         "TruncTime": djf.TruncTime,
+        **{
+            name: getattr(djf, name)
+            for name in (
+                *("Cast", "Collate", "Greatest", "Least", "NullIf", "JSONArray", "JSONObject", "Extract"),
+                *("ExtractYear", "ExtractIsoYear", "ExtractQuarter", "ExtractMonth", "ExtractWeek", "ExtractDay"),
+                *("ExtractWeekDay", "ExtractIsoWeekDay", "ExtractHour", "ExtractMinute", "ExtractSecond"),
+                *("Abs", "ACos", "ASin", "ATan", "ATan2", "Ceil", "Cos", "Cot", "Degrees", "Exp", "Floor", "Ln"),
+                *("Log", "Mod", "Pi", "Power", "Radians", "Random", "Round", "Sign", "Sin", "Sqrt", "Tan"),
+                *("Chr", "Left", "LPad", "LTrim", "MD5", "Ord", "Repeat", "Replace", "Reverse", "Right", "RPad"),
+                *("RTrim", "SHA1", "SHA224", "SHA256", "SHA384", "SHA512", "StrIndex", "Substr", "Trim"),
+                *("UUID4", "UUID7"),
+            )
+            if hasattr(djf, name)
+        },
     }
 )
 """Django's function class for each adorm function class name the translation knows; `Trunc` translates to Django's
-``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds."""
+``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds. A function the installed Django lacks (``UUID4`` and
+``UUID7`` before Django 6.0) is missing."""
 
 AGGREGATES: Mapping[str, type[dj.Aggregate]] = MappingProxyType(
     {"Count": dj.Count, "Sum": dj.Sum, "Avg": dj.Avg, "Min": dj.Min, "Max": dj.Max}
@@ -358,6 +373,16 @@ class TranslatedQuery:
         return [self._plan.build(values) for values in records]
 
 
+def _cast_field(node: ax.Cast) -> dj.Field:
+    """The Django field ``node`` casts to: a ``CharField`` with ``max_length``, a ``DecimalField`` with
+    ``max_digits`` and ``decimal_places``, else `output_field`."""
+    if node.max_length is not None:
+        return dj.CharField(max_length=node.max_length)
+    if node.max_digits is not None:
+        return dj.DecimalField(max_digits=node.max_digits, decimal_places=node.decimal_places)
+    return output_field(node.output_type)
+
+
 def _output_options(node: Any, implied: Any = None) -> dict[str, Any]:
     """``output_field`` for a node whose ``output_type`` differs from the type its class or arguments imply."""
     output_type = node.output_type
@@ -543,8 +568,16 @@ class _Translator:
                 return function(source, **_output_options(node, implied))
             return djf.Trunc(source, node.kind, **_output_options(node))
         if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate) and name in FUNCTIONS:
+            arguments = [self.expression(e) for e in node.expressions]
+            if isinstance(node, ax.Cast):
+                return djf.Cast(arguments[0], _cast_field(node))
+            if isinstance(node, ax.Collate):
+                return djf.Collate(arguments[0], node.collation)
+            if isinstance(node, ax.JSONObject):
+                return djf.JSONObject(**dict(zip(node.keys, arguments, strict=True)))
+            if type(node) is ax.Extract:
+                return djf.Extract(arguments[0], node.lookup_name, **_output_options(node))
             implied = {"TruncDate": datetime.date, "TruncTime": datetime.time}.get(name)
-            arguments = (self.expression(e) for e in node.expressions)
             return FUNCTIONS[name](*arguments, **_output_options(node, implied))
         raise NotSupportedError(f"the Django driver does not translate {name}")
 
