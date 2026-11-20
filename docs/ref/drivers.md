@@ -1331,9 +1331,10 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   own (`function`, `template`, `templates`) becomes a Django `Func` that renders the template for the connection's
   vendor, its arguments translated, the parameters repeated for each `%(expressions)s`; a vendor without a template
   raises Django's `NotSupportedError`. A `Lookup` subclass with a template becomes a Django lookup whose parameters
-  follow `%(lhs)s` and `%(rhs)s` in the template; a path through a `Transform` with SQL of its own becomes Django's
-  `F` of the path before it, wrapped in a Django `Transform` per transform from there on (one without SQL of its own
-  after it raises `NotSupportedError`), also in `values()` and as a lookup's left-hand side.
+  follow `%(lhs)s` and `%(rhs)s` in the template; a path through a `Transform` with SQL of its own or a registered
+  translation becomes Django's `F` of the path before it, wrapped per transform from there on in a Django `Transform`
+  that renders the template or in what the translation returns (a built-in transform after it raises
+  `NotSupportedError`), also in `values()` and as a lookup's left-hand side.
   `get_or_create()` and `update_or_create()` take no such lookup or transform (`NotSupportedError`).
 - `Concat` without an `output_type` gets a `TextField` output field, so arguments of different text fields concatenate.
 - A node without a translation (a function or aggregate class of a driver's own without SQL) raises
@@ -1621,18 +1622,23 @@ A read-only mapping from adorm aggregate class names to Django aggregate classes
 
 ### `adorm.drivers.django.register_translation(cls, *, vendors=None)`
 
-Registers a translation of the adorm expression class `cls` (a `Func`, `Lookup` or other `Node` subclass with a
-construct name) for the Django driver and the native PostgreSQL driver, and returns a decorator of the translation,
-a callable `translation(node, translate)`:
+Registers a translation of the adorm class `cls` (a `Func`, `Lookup` or other `Node` subclass, or a `Transform`
+subclass, with a construct name) for the Django driver and the native PostgreSQL driver, and returns a decorator of
+the translation:
 
-- `node` is a node of exactly `cls`; `translate(child)` returns the Django expression of a child node, one of
-  `node.get_source_expressions()`;
-- the result is the Django expression of the node; it replaces the class's SQL template and the bundled translation;
+- for a `Node` subclass, a callable `translation(node, translate)`: `node` is a node of exactly `cls`;
+  `translate(child)` returns the Django expression of a child node, one of `node.get_source_expressions()`; the
+  result is the Django expression of the node;
+- for a `Transform` subclass, a callable `translation(lhs)`: `lhs` is the Django expression of the transformed
+  value; the result is the Django expression of the transformed value. It applies wherever the transform's SQL
+  template would (lookup keys, `values()`, `F()`), and the same transforms may follow it;
+- the translation replaces the class's SQL template and the bundled translation;
 - both drivers declare `cls.construct` on databases of the vendors in `vendors` (Django's vendor names), on every
   vendor by default, from the registration on;
 - a later registration for `cls` replaces the earlier one.
 
-A `cls` that is not an adorm expression class with a construct name, and a string `vendors`, raise `TypeError`.
+A `cls` that is not an adorm expression or transform class with a construct name, and a string `vendors`, raise
+`TypeError`.
 Defined in `adorm.drivers.django.translation`. Recipe: [Own expressions](/howto/own-expressions).
 
 ```python

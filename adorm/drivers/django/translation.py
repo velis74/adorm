@@ -37,7 +37,7 @@ from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
 from adorm.query import expressions as ax
 from adorm.query.expressions import _has_sql, split_field_path, sql_constructs
-from adorm.query.lookups import _apply_transforms, build_lookup, Exact, Lookup, split_lookup, TRANSFORMS
+from adorm.query.lookups import _apply_transforms, build_lookup, Exact, Lookup, split_lookup, Transform, TRANSFORMS
 from adorm.query.query import Query
 from adorm.uuids import uuid7
 
@@ -440,7 +440,7 @@ def _output_options(node: Any, implied: Any = None) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _Translation:
-    function: Callable[[Any, Callable[[Any], Any]], Any]
+    function: Callable[..., Any]
     vendors: frozenset[str] | None
 
 
@@ -448,18 +448,21 @@ _TRANSLATIONS: weakref.WeakKeyDictionary[type, _Translation] = weakref.WeakKeyDi
 
 
 def register_translation(cls: type, *, vendors: Iterable[str] | None = None) -> Callable[[Any], Any]:
-    """Register a translation of the adorm expression class ``cls`` for the Django-based drivers; returns a decorator
-    of the translation, ``translation(node, translate)``.
+    """Register a translation of the adorm expression or transform class ``cls`` for the Django-based drivers; returns
+    a decorator of the translation, ``translation(node, translate)`` for an expression class, ``translation(lhs)`` for
+    a `Transform` subclass.
 
-    The translation gets a node of exactly ``cls`` and ``translate``, which translates a child node (one of
-    ``node.get_source_expressions()``) into a Django expression, and returns the Django expression of the node. It
-    runs instead of the node's SQL template and the bundled translation. The Django driver and the native PostgreSQL
-    driver declare ``cls.construct`` on databases of ``vendors`` (Django's vendor names; every vendor by default). A
-    later registration for ``cls`` replaces the earlier one. Raises ``TypeError`` when ``cls`` is not an adorm
-    expression class with a construct name, or ``vendors`` is a string.
+    An expression's translation gets a node of exactly ``cls`` and ``translate``, which translates a child node (one of
+    ``node.get_source_expressions()``) into a Django expression, and returns the Django expression of the node. A
+    transform's translation gets the Django expression of the transformed value and returns the Django expression of
+    the transformed value. A translation runs instead of the class's SQL template and the bundled translation. The
+    Django driver and the native PostgreSQL driver declare ``cls.construct`` on databases of ``vendors`` (Django's
+    vendor names; every vendor by default). A later registration for ``cls`` replaces the earlier one. Raises
+    ``TypeError`` when ``cls`` is not an adorm expression or transform class with a construct name, or ``vendors`` is
+    a string.
     """
-    if not (isinstance(cls, type) and issubclass(cls, ax.Node) and cls.construct):
-        raise TypeError(f"{cls!r} is not an adorm expression class with a construct name")
+    if not (isinstance(cls, type) and issubclass(cls, (ax.Node, Transform)) and cls.construct):
+        raise TypeError(f"{cls!r} is not an adorm expression or transform class with a construct name")
     if isinstance(vendors, str):
         raise TypeError("vendors is an iterable of vendor names, not a string")
     names = None if vendors is None else frozenset(vendors)
@@ -604,27 +607,32 @@ _TemplateLookup = _template_lookup_class()
 
 
 def _own_transform(name: str) -> type | None:
-    """The registered transform ``name`` when it has SQL of its own."""
+    """The registered transform ``name`` when it has SQL of its own or a registered translation."""
     cls = TRANSFORMS.get(name)
-    return cls if cls is not None and _has_sql(cls) else None
+    return cls if cls is not None and (cls in _TRANSLATIONS or _has_sql(cls)) else None
 
 
 def _first_own_transform(names: Sequence[str], start: int | None) -> int | None:
-    """The index of the first transform with SQL of its own in the Django path segments ``names``, whose transforms
-    begin at ``start``."""
+    """The index of the first transform with SQL of its own or a translation in the Django path segments ``names``,
+    whose transforms begin at ``start``."""
     if start is None:
         return None
     return next((index for index in range(start, len(names)) if _own_transform(names[index])), None)
 
 
 def _apply_own_transforms(expression: Any, names: Sequence[str]) -> Any:
-    """``expression`` with the transforms ``names`` applied, the first of which has SQL of its own."""
+    """``expression`` with the transforms ``names`` applied, the first of which has SQL of its own or a translation."""
     for name in names:
         cls = _own_transform(name)
         if cls is None:
             raise NotSupportedError(
-                f"the Django driver applies the transform {name!r} only before a transform with SQL of its own"
+                f"the Django driver applies the transform {name!r} only before a transform with SQL of its own or a "
+                "translation"
             )
+        translation = _TRANSLATIONS.get(cls)
+        if translation is not None:
+            expression = translation.function(expression)
+            continue
         output_type = cls.output_type(None)
         options = {} if output_type is None else {"output_field": output_field(output_type)}
         expression = _django_class(cls, _TemplateTransform)(expression, **options)
@@ -738,14 +746,14 @@ class _Translator:
 
     def own_transform(self, name: str) -> tuple[list[str], int] | None:
         """The Django path segments of the adorm path ``name`` and the index of its first transform with SQL of its
-        own; ``None`` without one."""
+        own or a translation; ``None`` without one."""
         names, start = _orm_names(self.model, name, self.annotation_names)
         index = _first_own_transform(names, start)
         return None if index is None else (names, index)
 
     def reference(self, name: str) -> Any:
         """Django's expression for the adorm field path ``name``: an ``F`` of its Django path, with the transforms
-        from the first one with SQL of its own on applied as expressions."""
+        from the first one with SQL of its own or a translation on applied as expressions."""
         own = self.own_transform(name)
         if own is None:
             return dj.F(self.path(name))
@@ -754,7 +762,7 @@ class _Translator:
 
     def column(self, name: str) -> Any:
         """The ``values_list()`` argument that selects the adorm name ``name``: an annotation's name, a Django path,
-        or the expression of a path with a transform that has SQL of its own."""
+        or the expression of a path with a transform that has SQL of its own or a translation."""
         if name in self.annotation_names:
             return name
         return self.reference(name) if self.own_transform(name) is not None else self.path(name)
@@ -1024,7 +1032,8 @@ class _Translator:
         (child,) = q.children
         if not isinstance(child, tuple) or child[0] in self.aliases:
             raise NotSupportedError(
-                f"{key!r}: get_or_create() and update_or_create() take no lookup or transform with SQL of its own"
+                f"{key!r}: get_or_create() and update_or_create() take no lookup or transform with SQL of its own or "
+                "a translation"
             )
         django_key, django_value = child
         if key == path:

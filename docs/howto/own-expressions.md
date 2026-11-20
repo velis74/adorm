@@ -13,8 +13,8 @@ target ORM to have them:
   per database vendor in `templates`;
 - a [`Lookup`](/ref/lookups#adorm-query-lookup-lhs-rhs) or [`Transform`](/ref/lookups#adorm-query-transform) subclass
   with a template;
-- for SQL a template cannot express, a translation into a Django expression, registered with
-  [`register_translation()`](/ref/drivers#adorm-drivers-django-register-translation-cls-vendors-none);
+- for SQL a template cannot express, a translation of a function, lookup or transform into a Django expression,
+  registered with [`register_translation()`](/ref/drivers#adorm-drivers-django-register-translation-cls-vendors-none);
 - a Python function on SQLite connections, registered with
   [`register_sqlite_function()`](/ref/drivers#adorm-drivers-django-register-sqlite-function-name-num-params-function-deterministic-false).
 
@@ -159,6 +159,7 @@ from django.db.models import TextField, Value
 from django.db.models.functions import Concat, Left, StrIndex, Substr
 
 from adorm.drivers.django import register_translation
+from adorm.query import register_transform, Transform
 
 
 class Masked(Func):
@@ -179,6 +180,34 @@ def translate_masked(node, translate):
 query = Member.objects.filter(first_name="Ana").annotate(m=Masked("email"))
 masked = [address async for address in query.values_list("m", flat=True)]
 # ["a***@example.com"]
+```
+
+A transform's translation gets the Django expression of the transformed value and returns the transformed one. The
+drivers declare `transform.domain`; a transform with SQL of its own or a translation may follow it in a path, a
+built-in one (`year` …) may not.
+
+```python
+@register_transform
+class Domain(Transform):
+    """The domain of an e-mail address."""
+
+    lookup_name = "domain"
+
+    @classmethod
+    def output_type(cls, field_type):
+        return str
+
+
+@register_translation(Domain)
+def translate_domain(lhs):
+    return Substr(lhs, StrIndex(lhs, Value("@")) + 1)
+```
+
+```python
+domains = [domain async for domain in Member.objects.filter(email__domain="example.com", first_name="Ana").values_list(
+    "email__domain", flat=True
+)]
+# ["example.com"]
 ```
 
 A driver that does not translate with Django (another ORM's) refuses `Masked` until it declares the construct.

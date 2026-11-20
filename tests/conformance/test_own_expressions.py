@@ -121,6 +121,35 @@ def shout(node, translate):
     return DjangoConcat(DjangoUpper(translate(argument)), DjangoValue("!"), output_field=TextField())
 
 
+@register_transform
+class Itself(Transform):
+    """The value itself, of unknown type."""
+
+    lookup_name = "itself"
+    template = "%(expressions)s"
+
+
+@register_transform
+class Loud(Transform):
+    """A transform without SQL of its own: the Django-based drivers run the translation `loud()` registers."""
+
+    lookup_name = "loud"
+
+    @classmethod
+    def applies_to(cls, field_type):
+        return field_type in (str, None)
+
+    @classmethod
+    def output_type(cls, field_type):  # noqa: ARG003 - the base class's signature
+        return str
+
+
+def loud(lhs):
+    from django.db.models.functions import Upper as DjangoUpper
+
+    return DjangoUpper(lhs)
+
+
 _registered: set[type] = set()
 
 
@@ -334,6 +363,27 @@ async def test_the_memory_driver_refuses_a_registered_translation(driver_name, p
     register_shout()
     assert "function.Shout" not in constructs(pool)
     await assert_refused(rows(Member.objects.annotate(s=Shout("first_name"))), "function.Shout", driver_name, pool)
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_a_registered_translation_of_a_transform_in_a_lookup_key_and_in_values(pool):
+    from adorm.drivers.django import register_translation
+
+    if Loud not in _registered:
+        register_translation(Loud)(loud)
+        _registered.add(Loud)
+    assert "transform.loud" in constructs(pool)
+    result = await rows(Member.objects.filter(first_name__loud="ANA").values_list("last_name", flat=True))
+    assert result == ["Novak"]
+    names = await rows(Member.objects.filter(first_name="Eva").values_list("first_name__loud__initial", flat=True))
+    assert names == ["E"]
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_a_built_in_transform_after_an_own_transform_is_refused(pool):
+    with pytest.raises(adorm.NotSupportedError, match="'year' only before a transform with SQL of its own"):
+        await Member.objects.filter(birth_date__itself__year=1970).count()
+    assert pool.in_use == 0
 
 
 # UUID4 and UUID7 on every database, Django and Python version

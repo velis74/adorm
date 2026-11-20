@@ -68,6 +68,7 @@ async def test_the_recipe_s_queries_give_the_values_it_states():
     assert namespace["same_start"] == ["Gaja"]
     assert namespace["short"] == ["Ana", "Eva"]
     assert namespace["masked"] == ["a***@example.com"]
+    assert namespace["domains"] == ["example.com"]
     (code,) = namespace["codes"]
     assert isinstance(code, uuid.UUID)
     assert code.version == 4
