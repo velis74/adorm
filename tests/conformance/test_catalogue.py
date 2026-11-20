@@ -12,6 +12,7 @@ import adorm
 from adorm.operations import OPERATIONS
 from adorm.query import construct_names, Node, TRANSFORMS
 from tests.bundled_drivers import bundled_driver_classes
+from tests.conformance import function_cases  # noqa: F401 - registers the function cases in CASES
 from tests.conformance.cases import CASES
 from tests.conformance.drivers import DRIVERS
 from tests.library_data import in_thread

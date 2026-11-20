@@ -18,6 +18,8 @@ from collections.abc import Callable, Mapping
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 import adorm
 
 from adorm import F, Value
@@ -169,7 +171,7 @@ def function_case(
         matched = list(base.filter(DjangoExact(expression, match)).order_by("id").values_list(label, flat=True))
         return annotated, ordered, matched
 
-    run.__name__ = case_id
+    run.__name__ = f"scenario_{case_id}"
     case(*sorted(names), expected=expected, django=mirror, on_vendor=on_vendor)(run)
 
 
@@ -894,12 +896,21 @@ MEMBER_NAMES = sorted(
 
 
 @case("select", "clause.annotate", "function.Random", expected=(12, True, MEMBER_NAMES), django=_django_random)
-async def function_random():
+async def scenario_function_random():
     from adorm.query import Random
 
     values = await rows(Member.objects.annotate(r=Random()).values_list("r", flat=True))
     shuffled = await rows(Member.objects.order_by(Random()).values_list("first_name", flat=True))
     return _random_outcome(values, shuffled)
+
+
+def _django_function(name: str) -> Any:
+    """Django's function ``name``; the mirror is skipped when the installed Django has none."""
+    from django.db.models import functions
+
+    if not hasattr(functions, name):
+        pytest.skip(f"the installed Django has no {name}")
+    return getattr(functions, name)
 
 
 def _uuid_outcome(values: list[Any], version: int) -> tuple[int, bool, int]:
@@ -908,15 +919,15 @@ def _uuid_outcome(values: list[Any], version: int) -> tuple[int, bool, int]:
 
 
 def _django_uuid4():
-    from django.db.models.functions import UUID4 as DJANGO_UUID4
+    django_uuid4 = _django_function("UUID4")
 
     from tests.djangoproject.clubs.models import Member as DjangoMember
 
-    return _uuid_outcome(list(DjangoMember.objects.annotate(u=DJANGO_UUID4()).values_list("u", flat=True)), 4)
+    return _uuid_outcome(list(DjangoMember.objects.annotate(u=django_uuid4()).values_list("u", flat=True)), 4)
 
 
 @case("select", "clause.annotate", "function.UUID4", expected=(12, True, 12), django=_django_uuid4)
-async def function_uuid4():
+async def scenario_function_uuid4():
     from adorm.query import UUID4
 
     return _uuid_outcome(await rows(Member.objects.annotate(u=UUID4()).values_list("u", flat=True)), 4)
@@ -925,21 +936,21 @@ async def function_uuid4():
 def _uuid7_supported() -> bool:
     from django.db import connection
 
-    return bool(connection.features.supports_uuid7_function)
+    return bool(getattr(connection.features, "supports_uuid7_function", False))
 
 
 def _django_uuid7():
-    from django.db.models.functions import UUID7 as DJANGO_UUID7
+    django_uuid7 = _django_function("UUID7")
 
     from tests.djangoproject.clubs.models import Member as DjangoMember
 
     if not _uuid7_supported():
         return 12, True, 12
-    return _uuid_outcome(list(DjangoMember.objects.annotate(u=DJANGO_UUID7()).values_list("u", flat=True)), 7)
+    return _uuid_outcome(list(DjangoMember.objects.annotate(u=django_uuid7()).values_list("u", flat=True)), 7)
 
 
 @case("select", "clause.annotate", "function.UUID7", expected=(12, True, 12), django=_django_uuid7)
-async def function_uuid7():
+async def scenario_function_uuid7():
     """Version 7 UUIDs where the database has the function; elsewhere the database's refusal is a
     `NotSupportedError` naming UUID7 (a capability refusal propagates)."""
     from adorm.query import UUID7
@@ -974,7 +985,7 @@ def _django_annotation_in_a_keyword_lookup():
     expected=[("Klemen", 2000), ("Lara", 2003)],
     django=_django_annotation_in_a_keyword_lookup,
 )
-async def function_annotation_in_a_keyword_lookup():
+async def scenario_function_annotation_in_a_keyword_lookup():
     from adorm.query import ExtractYear
 
     query = Member.objects.annotate(y=ExtractYear("birth_date")).filter(y__gte=2000)
@@ -1002,7 +1013,7 @@ def _django_function_annotation_on_a_fetched_instance():
     expected=(5, "1982-05-10"),
     django=_django_function_annotation_on_a_fetched_instance,
 )
-async def function_annotation_on_a_fetched_instance():
+async def scenario_function_annotation_on_a_fetched_instance():
     from adorm.query import Cast, ExtractMonth
 
     eva = await Member.objects.annotate(month=ExtractMonth("birth_date"), born=Cast("birth_date", str)).get(
@@ -1031,7 +1042,7 @@ def _django_function_in_an_alias():
     expected=["Bojan", "David", "Gaja", "Klemen"],
     django=_django_function_in_an_alias,
 )
-async def function_in_an_alias():
+async def scenario_function_in_an_alias():
     from adorm.query import Left
 
     query = Member.objects.alias(initial=Left("last_name", 1)).filter(initial="K")
@@ -1054,7 +1065,7 @@ def _django_order_by_a_function_descending():
     expected=["Lara", "Klemen", "Jana"],
     django=_django_order_by_a_function_descending,
 )
-async def function_order_by_descending():
+async def scenario_function_order_by_descending():
     from adorm.query import ExtractMonth
 
     return (
@@ -1081,7 +1092,7 @@ def _django_grouping_by_a_function():
     expected=[(1, 3), (2, 3), (3, 3), (4, 3)],
     django=_django_grouping_by_a_function,
 )
-async def function_grouping_by_a_function():
+async def scenario_function_grouping_by_a_function():
     from adorm.query import ExtractQuarter
 
     groups = Member.objects.annotate(q=ExtractQuarter("birth_date")).values("q")
@@ -1112,7 +1123,7 @@ def _django_function_as_an_aggregate_argument():
     expected=({"oldest": 1970, "youngest": 2003}, {"squares": 3069.0}),
     django=_django_function_as_an_aggregate_argument,
 )
-async def function_as_an_aggregate_argument():
+async def scenario_function_as_an_aggregate_argument():
     from adorm.query import ExtractYear, Power
 
     years = await Member.objects.aggregate(
@@ -1139,7 +1150,7 @@ def _django_function_aggregate_over_no_rows():
     expected={"y": None},
     django=_django_function_aggregate_over_no_rows,
 )
-async def function_aggregate_over_no_rows():
+async def scenario_function_aggregate_over_no_rows():
     from adorm.query import ExtractYear
 
     return await Member.objects.filter(first_name="Nobody").aggregate(y=Max(ExtractYear("birth_date")))
@@ -1164,7 +1175,7 @@ def _django_function_in_an_aggregate_over_a_relation():
     expected=[("koper-sailing", 1994), ("ljubljana-rowing", 1970), ("maribor-climbing", 1976)],
     django=_django_function_in_an_aggregate_over_a_relation,
 )
-async def function_in_an_aggregate_over_a_relation():
+async def scenario_function_in_an_aggregate_over_a_relation():
     from adorm.query import ExtractYear
 
     query = Club.objects.annotate(oldest=Min(ExtractYear("memberships__member__birth_date")))
@@ -1199,7 +1210,7 @@ def _django_update_with_functions():
     expected=(1, "Zupancic", 1, Decimal("96.00")),
     django=_django_update_with_functions,
 )
-async def function_update_with_functions():
+async def scenario_function_update_with_functions():
     from adorm.query import Ceil, Replace
 
     renamed = await Member.objects.filter(first_name="Eva").update(
@@ -1255,7 +1266,7 @@ def _django_functions_nested():
     on_vendor={"sqlite": ["BOž-010", "NOV-010"]},
     django=_django_functions_nested,
 )
-async def function_nested_functions():
+async def scenario_function_nested_functions():
     from adorm.query import Cast, ExtractDay, Left, LPad
 
     code = Concat(Upper(Left("last_name", 3)), Value("-"), LPad(Cast(ExtractDay("birth_date"), str), 3, Value("0")))
@@ -1322,7 +1333,7 @@ def _django_functions_of_null():
     expected=[(None,) * 12],
     django=_django_functions_of_null,
 )
-async def function_of_null_is_null():
+async def scenario_function_of_null_is_null():
     from adorm.query import Abs, Cast, ExtractYear, Left, LPad, MD5, Mod, Power, Reverse, Round, Sqrt, StrIndex
 
     query = Activity.objects.filter(name="Spring regatta").annotate(
@@ -1376,7 +1387,7 @@ def _django_null_arguments_of_comparisons():
     },
     django=_django_null_arguments_of_comparisons,
 )
-async def function_null_arguments_of_comparisons():
+async def scenario_function_null_arguments_of_comparisons():
     from adorm.query import Greatest, Least, NullIf
 
     deadline = Value(datetime.date(2026, 3, 1))
@@ -1420,7 +1431,7 @@ def _django_empty_inputs():
     expected=[([], {}, "", "", "", "d41d8cd98f00b204e9800998ecf8427e", 0)],
     django=_django_empty_inputs,
 )
-async def function_of_empty_inputs():
+async def scenario_function_of_empty_inputs():
     from adorm.query import JSONArray, JSONObject, Left, MD5, Reverse, StrIndex, Trim
 
     query = Member.objects.filter(first_name="Ana").annotate(
@@ -1447,7 +1458,7 @@ def _django_function_over_no_rows():
 @case(
     "select", "clause.annotate", "lookup.exact", "function.Reverse", expected=[], django=_django_function_over_no_rows
 )
-async def function_over_no_rows():
+async def scenario_function_over_no_rows():
     from adorm.query import Reverse
 
     query = Member.objects.filter(first_name="Nobody").annotate(r=Reverse("last_name"))
@@ -1476,8 +1487,9 @@ def _django_result_types():
         Round,
         Sqrt,
         StrIndex,
-        UUID4,
     )
+
+    uuid4 = _django_function("UUID4")
 
     from tests.djangoproject.activities.models import Activity as DjangoActivity
 
@@ -1490,7 +1502,7 @@ def _django_result_types():
         md5=MD5("name"),
         array=JSONArray("name"),
         object=JSONObject(name="name"),
-        code=UUID4(),
+        code=uuid4(),
         index=StrIndex("name", DjangoValue("a")),
         ord=Ord("name"),
         pi=Pi(),
@@ -1553,7 +1565,7 @@ START_OF_2026 = datetime.datetime(2026, 1, 1, tzinfo=UTC)
     ],
     django=_django_result_types,
 )
-async def function_result_types():
+async def scenario_function_result_types():
     from adorm.query import (
         Cast,
         ExtractYear,
@@ -1633,7 +1645,7 @@ _SHA256_OF_ANA = hashlib.sha256(b"ana.0@example.com").hexdigest()
     expected=(["Ana"], 12),
     django=_django_conditions_compare_with_function_results,
 )
-async def function_conditions_compare_with_function_results():
+async def scenario_function_conditions_compare_with_function_results():
     from adorm.query import Cast, GreaterThan, SHA256
 
     await in_thread(install_pgcrypto)
