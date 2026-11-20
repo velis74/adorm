@@ -313,7 +313,8 @@ written. Result: the child's row as stored, the parent's fields included.
 
 The Django driver reads the parent and saves the child with `save_base(raw=True, force_insert=True)` after its
 fields' `pre_save()`. The native PostgreSQL driver inserts the child's table as Django's save does, without the
-model's methods and signals.
+model's methods and signals; it refuses the operation when the child's `pre_save` or `post_save` has a receiver the
+profile does not cover.
 
 ```python
 CreateFromParent("activities.Competition", 3, {"discipline": "Climbing"})

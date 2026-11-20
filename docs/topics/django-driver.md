@@ -482,7 +482,9 @@ async with adorm.atomic() as tx:
 Django's signals (`pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` …) fire on the slot's thread,
 in a copy of the awaiting task's context; a receiver reads the caller's context variables and Django's active
 language. adorm has no signals of its own, and Django's produce no event on the client. Reads build no Django model
-instances, so `pre_init` and `post_init` fire only for writes.
+instances, so `pre_init` and `post_init` fire only for writes. The driver ignores a profile's `covered_receivers`:
+every receiver runs. The native PostgreSQL driver sends no signals and refuses a write whose signals have a receiver
+the profile does not cover ([signal receivers](/topics/postgresql-driver#signal-receivers)).
 
 ## Errors
 

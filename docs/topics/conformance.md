@@ -131,7 +131,7 @@ calls. `ConformanceDriver.driver_code` (one of `DRIVER_CODE`) states what the dr
 | `driver_code` | Driver | A model's `save()` / `delete()` override, a query set's `create()` / `update()` override, a custom `on_delete` handler | Django's signals, Django's `on_commit()` callbacks |
 |---|---|---|---|
 | `"runs"` | Django | runs on the driver side | `pre_save`, `post_save`, `pre_delete`, `post_delete` fire; `on_commit()` callbacks run after the commit |
-| `"refused"` | native PostgreSQL | the write raises `NotSupportedError` naming the override or handler; nothing is written | do not fire; none is registered |
+| `"refused"` | native PostgreSQL | the write raises `NotSupportedError` naming the override or handler; nothing is written | not sent; a write with a receiver the profile does not cover is refused ([signal receivers](#signal-receivers)); none is registered |
 | `"not run"` | memory | not run; the write goes ahead (a delete that would reach the handler is refused, as the driver does not cascade) | do not fire; none is registered |
 
 `pre_init` and `post_init` fire on the Django and the native PostgreSQL driver, which build Django model instances,
@@ -148,12 +148,12 @@ After the data is seeded, the tests:
 |---|---|
 | `create()`, `save()` and `get_or_create()` with the `save()` override | the stored names and the override's calls the driver's `driver_code` implies; afterwards a transaction refuses the write (`"refused"`) and still commits its other writes |
 | `delete()` of an instance with the `delete()` override | `(0, {})` with the row kept (`"runs"`), `NotSupportedError` with the row kept (`"refused"`), the row deleted (`"not run"`); a query set delete runs no model's `delete()` on any driver |
-| create, save and delete with signal receivers | the receivers see six calls on the Django driver and none on the others |
+| create, save and delete with signal receivers, listed in `covered_receivers` | the receivers see six calls on the Django driver and none on the others |
 | `create()` and `update()` with the query set overrides | the override's calls and stored names on `"runs"`, `NotSupportedError` with nothing written on `"refused"`, the plain write on `"not run"` |
 | `bulk_create()` with the query set's `bulk_create()` override | the same, for `bulk_create` |
 | `bulk_create()` with the `save()` override and `pre_save` / `post_save` receivers | on every driver: no `save()` call, no signal, the names stored as given |
 | deleting a coach with the custom `on_delete` handler | the handler runs and the coach is deleted (`"runs"`); `NotSupportedError` with nothing deleted (`"refused"`, `"not run"`) |
-| a `post_save` receiver that registers `transaction.on_commit()` inside `adorm.atomic()` | the callback runs after the commit, not inside the block or after a rollback, on `"runs"`; never on the others |
+| a `post_save` receiver, listed in `covered_receivers`, that registers `transaction.on_commit()` inside `adorm.atomic()` | the callback runs after the commit, not inside the block or after a rollback, on `"runs"`; never on the others |
 | `create()` with `pre_init` and `post_init` receivers | both fire once on the Django and the native PostgreSQL driver, never on the memory driver |
 
 ```python
@@ -164,6 +164,34 @@ async def test_a_models_save_override(conformance_driver, router, calls):
         with pytest.raises(NotSupportedError, match=r"overrides save\(\)"):
             await Tag.objects.create(name="night")
 ```
+
+## Signal receivers
+
+`tests/conformance/test_signal_receivers.py` connects `pre_save`, `post_save`, `pre_delete` and `post_delete`
+receivers and writes through each driver. The Django driver runs them; the native PostgreSQL driver refuses the write
+with `NotSupportedError` naming the signal, the model and the receiver's dotted path, before anything is written,
+unless the profile's `covered_receivers` lists the receiver; the memory driver runs none and refuses nothing. Tests
+that need cascades or multi-table inheritance are skipped on the memory driver.
+
+| Test | What holds |
+|---|---|
+| `create()` with a `post_save` receiver | refused with nothing inserted; inserted and the receiver run once on the Django driver |
+| the receiver in `covered_receivers` | inserted on every driver; the receiver runs on the Django driver only |
+| `create`, `save` of a new and of a stored instance, `get_or_create` of a new row, `update_or_create` of a new and of a stored row, with a `pre_save` and with a `post_save` receiver | each refused with no row changed |
+| a covered `post_save` and an uncovered `pre_save` receiver | the message names only the uncovered one |
+| receivers of another model | saves and deletes of `Tag` are not refused |
+| a receiver for every sender (`sender=None`) | refuses writes of every model; covered, none |
+| a lazy sender (`"activities.Tag"`) with a `dispatch_uid`, a bound method receiver | refused and named (a bound method by its class); covered, written |
+| a garbage-collected weak receiver, a disconnected receiver | not refused |
+| a refusal inside `adorm.atomic()` | the transaction's later `update()` and `bulk_create()` commit |
+| `create()` of a multi-table inheritance child with save receivers on its parent | not refused, no receiver runs |
+| `bulk_create()` and `update()` (also of no rows) with all four signals connected | not refused, no receiver runs |
+| `obj.delete()` and `qs.delete()` with a `pre_delete` or `post_delete` receiver | refused with the rows kept; Django's counts and one call per row on the Django driver |
+| deleting a club whose cascaded activities have a receiver, by `obj.delete()` and `qs.delete()` | refused with the club, its activities and memberships kept; covered, the same counts as Django |
+| that refusal inside `adorm.atomic()` | nothing deleted, the transaction commits its later writes |
+| deleting a member an activity's `coach` (`SET_NULL`) refers to | not refused, no receiver runs, `coach` set to NULL |
+| deleting a multi-table inheritance child whose parent has a `pre_delete` receiver | refused; `(2, {...})` and one call for the parent on the Django driver |
+| `covered_receivers` on the profile | kept as given, empty by default; a string, a non-string entry (`TypeError`), an empty entry or one without a dot (`ValueError`) refused for both drivers |
 
 ## Integrity errors
 

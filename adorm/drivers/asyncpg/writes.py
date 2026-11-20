@@ -3,10 +3,14 @@
 `Writer` runs one write operation of an `AsyncpgConnection`. It follows the steps of Django's ``Model.save()``,
 ``QuerySet.update()``, ``QuerySet.delete()`` (its collector), ``get_or_create()`` and ``update_or_create()`` with
 Django's queries, fields and model instances, and awaits every statement on the connection instead of running it
-through Django's connection. Django's ``pre_save``, ``post_save``, ``pre_delete`` and ``post_delete`` signals are not
-sent. Python code that overrides one of the Django methods a write would call (a model's ``save()`` or
-``delete()``, a query set's or manager's ``create()``, ``update()``, ``delete()`` …) cannot run here: such a write
-raises `NotSupportedError` before any statement runs.
+through Django's connection. Python code that overrides one of the Django methods a write would call (a model's
+``save()`` or ``delete()``, a query set's or manager's ``create()``, ``update()``, ``delete()`` …) cannot run here:
+such a write raises `NotSupportedError` before any statement runs.
+
+Django's ``pre_save``, ``post_save``, ``pre_delete`` and ``post_delete`` signals are not sent. A save whose signals
+have live receivers for the instance's model, and a delete whose collected rows (cascades and multi-table parents
+included) belong to a model with live delete receivers, raise `NotSupportedError` before they write, unless the
+profile's ``covered_receivers`` lists every such receiver.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from operator import or_
 from typing import Any
 
 from django.db import DatabaseError as DjangoDatabaseError, models
-from django.db.models import deletion, sql
+from django.db.models import deletion, signals, sql
 from django.db.models.constants import OnConflict
 from django.db.models.expressions import DatabaseDefault
 from django.db.models.fields import Field
@@ -57,7 +61,7 @@ from adorm.exceptions import (
     TransactionManagementError,
 )
 
-__all__ = ["BATCH_SIZE", "MAX_VALIDATION_STATEMENTS", "Collector", "WRITES", "Writer"]
+__all__ = ["BATCH_SIZE", "MAX_VALIDATION_STATEMENTS", "Collector", "WRITES", "Writer", "receiver_path"]
 
 MAX_VALIDATION_STATEMENTS = 100
 """How many statements one ``full_clean`` may run; more raise `NotSupportedError`."""
@@ -135,6 +139,46 @@ def _require_manager_methods(manager: models.Manager, *names: str) -> None:
     _require_queryset_methods(manager.get_queryset(), *names)
 
 
+_SAVE_SIGNALS = (("pre_save", signals.pre_save), ("post_save", signals.post_save))
+_DELETE_SIGNALS = (("pre_delete", signals.pre_delete), ("post_delete", signals.post_delete))
+
+
+def receiver_path(receiver: Any) -> str:
+    """The dotted path of a signal receiver, ``module.qualname``; a bound method's names its class."""
+    function = getattr(receiver, "__func__", receiver)
+    module = getattr(function, "__module__", None) or type(function).__module__
+    qualname = getattr(function, "__qualname__", None) or type(function).__qualname__
+    return f"{module}.{qualname}"
+
+
+def _has_delete_receivers(model: type[models.Model]) -> bool:
+    """Django's ``Collector._has_signal_listeners()``: whether ``pre_delete`` or ``post_delete`` has live receivers
+    for ``model``, covered or not."""
+    return any(signal.has_listeners(model) for _, signal in _DELETE_SIGNALS)
+
+
+def _require_no_receivers(
+    model: type[models.Model], sent: Iterable[tuple[str, Any]], covered: frozenset[str], profile: str
+) -> None:
+    """Raise `NotSupportedError` when a signal of ``sent`` has a live receiver for ``model`` that ``covered`` does
+    not list. Django sends no signal for an auto-created model (a many-to-many table)."""
+    if model._meta.auto_created:
+        return
+    uncovered = []
+    for name, signal in sent:
+        sync, asynchronous = signal._live_receivers(model)
+        for receiver in (*sync, *asynchronous):
+            path = receiver_path(receiver)
+            if path not in covered:
+                uncovered.append(f"{name}: {path}")
+    if uncovered:
+        raise NotSupportedError(
+            f"Django signal receivers of {model._meta.label} ({', '.join(uncovered)}); the asyncpg driver does not "
+            f"send the target ORM's signals, the Django driver does. A receiver whose work the application does is "
+            f"listed in covered_receivers of profile {profile!r}"
+        )
+
+
 def _manager(model: type[models.Model], name: str | None) -> models.Manager:
     if name is None:
         return model._base_manager
@@ -157,6 +201,9 @@ class Writer:
         self.connection = connection
         self.alias: str = connection.compiler.alias
         self.features = connection.compiler.connection.features
+        profile = connection.profile
+        self.profile_name: str = profile.name
+        self.covered = frozenset(getattr(profile, "covered_receivers", ()))
 
     # Statements
 
@@ -251,6 +298,11 @@ class Writer:
         if status == "ROLLBACK":
             raise TransactionManagementError("the transaction failed earlier, so it was rolled back")
 
+    def require_no_receivers(self, model: type[models.Model], sent: Iterable[tuple[str, Any]]) -> None:
+        """Raise `NotSupportedError` when a signal of ``sent`` has a receiver for ``model`` the profile does not
+        cover."""
+        _require_no_receivers(model, sent, self.covered, self.profile_name)
+
     # Saving (Model.save())
 
     async def save_instance(
@@ -261,7 +313,8 @@ class Writer:
         force_update: bool = False,
         update_fields: Iterable[str] | None = None,
     ) -> None:
-        """Save ``instance`` as Django's ``Model.save()`` does, without the model's ``save()`` and signals."""
+        """Save ``instance`` as Django's ``Model.save()`` does, without the model's ``save()`` and signals; raises
+        `NotSupportedError` before it writes when the signals have receivers the profile does not cover."""
         opts = instance._meta
         if force_insert and (force_update or update_fields):
             raise ValueError("Cannot force both insert and updating in model saving.")
@@ -282,6 +335,7 @@ class Writer:
             if loaded:
                 update_fields = frozenset(loaded)
         cls = type(instance)
+        self.require_no_receivers(cls, _SAVE_SIGNALS)
         if cls._meta.proxy:
             cls = cls._meta.concrete_model
         block = self.atomic(savepoint=False) if cls._meta.parents else contextlib.nullcontext()
@@ -689,6 +743,7 @@ class Writer:
         link = parent_link_field(model)
         parent = await self.get(link.related_model._base_manager.all(), {"pk": operation.parent_pk})
         instance = child_instance(operation, parent)
+        self.require_no_receivers(model, _SAVE_SIGNALS)
         await self._save_table(instance, model, True, False, None)
         instance._state.db = self.alias
         instance._state.adding = False
@@ -832,9 +887,10 @@ def _protected_message(model: type[models.Model], keys: Iterable[str], kind: str
 
 class Collector:
     """Django's deletion ``Collector`` on a `Writer`: collects the rows a delete removes, updates or is refused by,
-    then deletes them, by primary key. It sends no signals and runs only Django's own ``on_delete`` handlers
-    (``CASCADE``, ``PROTECT``, ``RESTRICT``, ``SET_NULL``, ``SET_DEFAULT``, ``SET()``, ``DO_NOTHING`` and the
-    ``DB_*`` ones the database applies); another handler raises `NotSupportedError`."""
+    then deletes them, by primary key. It runs only Django's own ``on_delete`` handlers (``CASCADE``, ``PROTECT``,
+    ``RESTRICT``, ``SET_NULL``, ``SET_DEFAULT``, ``SET()``, ``DO_NOTHING`` and the ``DB_*`` ones the database applies);
+    another handler raises `NotSupportedError`. It sends no signals: a collected model with an uncovered
+    ``pre_delete`` or ``post_delete`` receiver raises `NotSupportedError` in `delete()` before anything is deleted."""
 
     def __init__(self, writer: Writer) -> None:
         self.writer = writer
@@ -867,9 +923,10 @@ class Collector:
         self.data.setdefault(dependency, {})
 
     def can_fast_delete(self, model: type[models.Model], from_field: Any = None) -> bool:
-        """Whether rows of ``model`` can be deleted with one statement, without collecting them: Django's rule,
-        without its check for signal receivers."""
+        """Whether rows of ``model`` can be deleted with one statement, without collecting them: Django's rule."""
         if from_field is not None and from_field.remote_field.on_delete is not deletion.CASCADE:
+            return False
+        if _has_delete_receivers(model):
             return False
         opts = model._meta
         return (
@@ -1070,6 +1127,9 @@ class Collector:
 
     async def delete(self) -> tuple[int, dict[str, int]]:
         """Delete what was collected: Django's ``Collector.delete()``. Returns ``(total, {label: count})``."""
+        for model, keys in self.data.items():
+            if keys:
+                self.writer.require_no_receivers(model, _DELETE_SIGNALS)
         data = {model: sorted(keys) for model, keys in self.data.items()}
         self.data = data  # type: ignore[assignment]
         self.sort()

@@ -86,7 +86,8 @@ class Profile(Protocol):
     ``connect(profile)`` returns the target's connection; an async driver awaits the result. The pool also reads the
     optional ``on_acquire`` and ``on_release`` attributes, when present and not ``None``: hooks called as
     ``hook(connection, profile, session)`` with the connection's `DriverConnection.target`, and the optional
-    ``options`` attribute, the profile's database connection options.
+    ``options`` attribute, the profile's database connection options. The native PostgreSQL driver reads the optional
+    ``covered_receivers`` attribute, the dotted paths of Django signal receivers it writes despite.
     """
 
     @property

@@ -252,7 +252,7 @@ methods), no direct call reaches the test's connection, and adorm does not suppo
 | Django ORM | native PostgreSQL (asyncpg) | SQLAlchemy |
 |---|---|---|
 | the model from its label (`apps.get_model`), adorm lookups and expressions turned into Django's, a `QuerySet` evaluated with `values()` | the same Django query set, compiled without a connection by [`DjangoCompiler`](/ref/drivers#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none) ([SQL compilation for asyncpg](./sql-compilation)), run with `fetch()` | Core `select()` / `update()` / `insert()` / `delete()` on the mapped tables |
-| writes through the model's and the query set's methods (`save()`, `delete()`, `update()` …), Django's signals included | Django's write logic on Django's queries and model instances ([`Writer`](/ref/drivers#adorm-drivers-asyncpg-writes-writer-connection)), each statement compiled and awaited; no model method, override or signal runs | Core statements |
+| writes through the model's and the query set's methods (`save()`, `delete()`, `update()` …), Django's signals included | Django's write logic on Django's queries and model instances ([`Writer`](/ref/drivers#adorm-drivers-asyncpg-writes-writer-connection)), each statement compiled and awaited; no model method, override or signal runs, and a write that would run one is refused unless its signal receivers are [covered](/topics/postgresql-driver#signal-receivers) | Core statements |
 | rows from `values_list()`, keyed by adorm field names (`orm_names`) | [`DjangoStatement.rows()`](/ref/drivers#rows-records): tuples in select order with Django's converters applied, keyed by adorm field names as on the Django driver | `Row._mapping` to dict |
 
 ### Transactions and savepoints

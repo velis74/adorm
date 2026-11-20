@@ -353,6 +353,7 @@ A runtime-checkable protocol for the connection profile a connection is opened f
 | `connect` | `None`, or a callable that opens the target's connection in place of the driver's default: `connect(profile)` returns the target's connection. A threaded driver calls it in `connect_sync()` on the connection's thread; an async driver awaits its result in `open_connection()` |
 | `on_acquire`, `on_release` | optional; when present and not `None`, [hooks](/topics/profiles#hooks) the pool calls as `hook(connection, profile, session)` with the connection's [`target`](#adorm-drivers-driverconnection) |
 | `options` | optional; when present and not `None`, the profile's database [connection options](/ref/options), which the pool reads |
+| `covered_receivers` | optional; the dotted paths of Django signal receivers the [native PostgreSQL driver](/topics/postgresql-driver#signal-receivers) writes despite |
 
 ### `adorm.drivers.is_connection_error(exc)`
 
@@ -1713,7 +1714,8 @@ Django's, built with the model's constructor or `Model.from_db()`.
 | `bulk_create_instances(model, objs, *, batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None, unique_fields=None)` | `QuerySet.bulk_create()` of the installed Django version: the instances with a primary key (one a field default generates is set first) and those without inserted separately, in batches of at most `batch_size` rows and at most `MAX_QUERY_PARAMS // columns` rows, `RETURNING` the fields the database sets (not under `ignore_conflicts`); `ON CONFLICT DO NOTHING` or `DO UPDATE`; more than one statement in `atomic(savepoint=False)`; on Django 6 the `_order` of a model with `order_with_respect_to` numbered first |
 | `create_from_parent(operation)` | `save_base(raw=True)` of a multi-table inheritance child: the parent's row read with `get()`, the child's table inserted as `Model.save()` inserts it |
 | `full_clean(operation)` | `Model.full_clean()`, run as Python on the event loop with [`DjangoCompiler.replay()`](#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none): each statement the validation runs is awaited, then the validation runs again with its rows, so the model's `clean()` and overrides run as on the Django driver, once per statement plus once |
-| `save_instance(instance, *, force_insert=False, force_update=False, update_fields=None)` | `Model.save()`: parents' tables first, an `UPDATE` then an `INSERT` per table, `RETURNING` the primary key and the values the database sets |
+| `save_instance(instance, *, force_insert=False, force_update=False, update_fields=None)` | `Model.save()`: parents' tables first, an `UPDATE` then an `INSERT` per table, `RETURNING` the primary key and the values the database sets; `require_no_receivers()` for `pre_save` and `post_save` of the instance's model first |
+| `require_no_receivers(model, sent)` | raises `NotSupportedError` naming each live receiver of the signals `sent` (pairs of a name and a Django signal) for `model` that the profile's `covered_receivers` does not list; nothing for an auto-created model |
 | `create_instance(model, values)` | `QuerySet.create()` |
 | `update_queryset(queryset, values)`, `execute_update(query)` | `QuerySet.update()`, the update compiler; an update of multi-table inheritance parent fields selects the keys, then updates each table |
 | `delete_queryset(queryset)` | `QuerySet.delete()` with the [`Collector`](#adorm-drivers-asyncpg-writes-collector-writer) |
@@ -1725,8 +1727,10 @@ Django's, built with the model's constructor or `Model.from_db()`.
 
 A write whose model, manager or query set overrides the Django method it would call (`save()`, `save_base()`,
 `delete()`, `create()`, `bulk_create()`, `update()`, `get_or_create()`, `update_or_create()`, `get()`,
-`select_for_update()`), and a delete that reaches an `on_delete` handler other than Django's own, raise
-`NotSupportedError` before any statement changes data. A cancellation inside a transaction opened by `atomic()` makes
+`select_for_update()`), a delete that reaches an `on_delete` handler other than Django's own, and a write whose
+Django signals have a receiver the profile does not cover
+([signal receivers](/topics/postgresql-driver#signal-receivers)) raise `NotSupportedError` before any statement
+changes data. A cancellation inside a transaction opened by `atomic()` makes
 the connection unusable; the slot closes it and the server rolls the transaction back.
 
 ```python
@@ -1740,7 +1744,9 @@ total, counts = await writer.delete_queryset(dj.Author.objects.filter(slug="ann"
 
 Django's deletion `Collector` on a `Writer`: `collect_queryset(queryset)` and `collect(model, keys)` collect the rows
 a delete removes, the rows its `on_delete` handlers update and the references that refuse it, by primary key;
-`delete()` then runs the deletes and updates and returns `(total, {label: count})`. It sends no signals and runs only
+`delete()` then runs the deletes and updates and returns `(total, {label: count})`. It sends no signals: `delete()`
+first raises `NotSupportedError` when a model it collected rows of has a `pre_delete` or `post_delete` receiver the
+profile does not cover, and a model with any such receiver is never fast-deleted, as in Django. It runs only
 Django's own handlers (`CASCADE`, `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `SET()`, `DO_NOTHING` and the
 `DB_*` handlers, which the database applies); another handler raises `NotSupportedError` before anything is deleted.
 `ProtectedError` and `RestrictedError` carry the referencing rows as Django instances. Its statements stay within
@@ -1750,6 +1756,16 @@ Django's own handlers (`CASCADE`, `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAUL
 collector = Collector(Writer(connection))
 await collector.collect_queryset(dj.Author.objects.filter(slug="ann"))
 total, counts = await collector.delete()
+```
+
+### `adorm.drivers.asyncpg.writes.receiver_path(receiver)`
+
+The dotted path that names a Django signal receiver in a refusal and in a profile's `covered_receivers`:
+`module.qualname`; a bound method is named by its class, a callable instance by its class.
+
+```python
+receiver_path(index_reader)          # 'library.signals.index_reader'
+receiver_path(Indexer().on_saved)    # 'library.signals.Indexer.on_saved'
 ```
 
 ### `adorm.drivers.asyncpg.writes.WRITES`

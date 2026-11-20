@@ -24,7 +24,8 @@ When `HOST` is a host name, asyncio resolves it in the loop's default executor w
   functions, custom fields and their converters behave as on the Django driver, and a read returns the same rows on
   both.
 - Writes follow Django's write logic with Django's queries and model instances, without Django's model methods and
-  signals ([what runs and what does not](#what-runs-and-what-does-not)).
+  signals ([what runs and what does not](#what-runs-and-what-does-not)); a write whose signals have receivers is
+  refused unless the profile lists them as [covered](#signal-receivers).
 
 ```bash
 pip install "adorm[asyncpg]"     # asyncpg, Django and psycopg 3
@@ -287,7 +288,7 @@ The driver runs no Python code of the target ORM beyond building queries and ins
 | a model's `delete()` override | runs for `obj.delete()` | `obj.delete()` raises `NotSupportedError` before anything runs |
 | a manager's or query set's override of the method the write calls | runs | the write raises `NotSupportedError` before anything runs: `create()` for `create`; `bulk_create()` for `bulk_create`; `update()` for `update`; `delete()` for `qs.delete()`; `get_or_create()`, `get()`, `create()` for `get_or_create`; `update_or_create()`, `select_for_update()`, `get_or_create()`, `get()`, `create()` for `update_or_create` |
 | a manager's `get_queryset()` | applies | applies (it must only build a query) |
-| `pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` | fire on the slot's thread | do not fire |
+| `pre_save`, `post_save`, `pre_delete`, `post_delete` | fire on the slot's thread | are not sent; a write they would be sent for raises `NotSupportedError` before anything is written when they have a receiver the profile's `covered_receivers` does not list ([signal receivers](#signal-receivers)) |
 | `pre_init`, `post_init` | fire for every instance a write builds | fire for every instance a write builds, on the event loop |
 | Django's `transaction.on_commit()` | runs after the commit, on the slot's thread | no Django code runs that could register one |
 | an `on_delete` handler other than Django's own | runs | raises `NotSupportedError` before anything is deleted |
@@ -304,7 +305,7 @@ await fine.delete()            # NotSupportedError: library.Fine overrides delet
 await Fine.objects.filter(pk=fine.pk).delete()      # (1, {"library.Fine": 1}): no model's delete() is involved
 ```
 
-Write a model that needs its overrides or signals on a Django driver profile. Both drivers can serve the same
+Write a model that needs its overrides or signal receivers on a Django driver profile. Both drivers can serve the same
 database in one process:
 
 ```python
@@ -324,6 +325,54 @@ instance loaded on the native driver's profile is written there, also inside thi
 profile, load it there.
 
 The [conformance suite](/topics/conformance#python-code-of-the-target-orm) tests both drivers against this table.
+
+### Signal receivers
+
+Django sends `pre_save` and `post_save` for `create`, `save`, `create_from_parent` and the insert or update of
+`get_or_create` and `update_or_create`, with the instance's model (a proxy model, not its concrete model; a
+multi-table inheritance child, not its parents) as sender. It sends `pre_delete` and `post_delete` for every row its
+collector deletes, by `obj.delete()` and `qs.delete()`: cascaded rows and the parent rows of a multi-table inheritance
+child included. `bulk_create`, `update` and a `SET_NULL`, `SET_DEFAULT` or `SET()` update of a delete send no signal.
+adorm has no many-to-many writes, so no operation is due an `m2m_changed`; the rows of an auto-created many-to-many
+table a delete removes send no signal, as in Django.
+
+The native driver sends none of these signals. A write Django would send one for raises `NotSupportedError` before it
+writes anything, when the signal has a live receiver for the sender that the profile's
+[`covered_receivers`](/ref/settings#adorm-connectionprofile) does not list:
+
+- a save checks its model before its first statement; `get_or_create` and `update_or_create` check after the lookup,
+  so a `get_or_create` that finds the row is not refused;
+- a delete checks every model it collected rows of after the collection and before its first `DELETE` or `UPDATE`;
+  a model with any `pre_delete` or `post_delete` receiver, covered or not, is not fast-deleted: its rows' primary
+  keys are selected and the rows deleted by primary key, as Django's collector does;
+- receivers connected for every sender (`sender=None`) count for every model; a weak receiver that has been garbage
+  collected and a disconnected one do not count. Receivers are looked up with Django's `Signal._live_receivers()`.
+
+The message names the model, each uncovered receiver by dotted path (`module.qualname`; a bound method by its class,
+`module.Class.method`) and its signal. A refusal inside `adorm.atomic()` leaves the transaction usable.
+
+```python
+await Author.objects.create(name="Eve", slug="eve")
+# NotSupportedError: Django signal receivers of library.Author (post_save: library.signals.index_author); the asyncpg
+# driver does not send the target ORM's signals, the Django driver does. A receiver whose work the application does
+# is listed in covered_receivers of profile 'default'
+await shelf.delete()       # NotSupportedError: Django signal receivers of library.Placement (post_delete: ...) ...
+```
+
+`covered_receivers` lists receivers whose work the application does on the adorm side, e.g. after the adorm write;
+the native driver writes despite them and still does not call them. The Django driver ignores the setting: there the
+receivers run.
+
+```python
+adorm.configure(
+    profiles={
+        "default": {
+            "driver": "adorm.drivers.asyncpg.AsyncpgDriver",
+            "covered_receivers": ["library.signals.index_author"],
+        },
+    },
+)
+```
 
 ## Transactions and savepoints
 
@@ -467,7 +516,7 @@ task.cancel()          # neither the library_book row nor the library_edition ro
   operation).
 - The pool delivers `CallbackEvent("on_commit")` and `CallbackEvent("on_rollback")` for its transactions, as for every
   driver; the transaction's own `on_commit()` callbacks run on that event.
-- Django's signals do not fire and Django's `on_commit()` callbacks are not registered; neither produces an event.
+- Django's signals are not sent and Django's `on_commit()` callbacks are not registered; neither produces an event.
 - The driver consumes no events.
 
 Each connection emits three [backend events](/topics/events#backend-events):

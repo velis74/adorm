@@ -34,7 +34,7 @@ from adorm import (
 )
 from adorm.drivers import is_connection_error
 from adorm.drivers.asyncpg import AsyncpgConnection, AsyncpgDriver
-from adorm.drivers.asyncpg.writes import Writer
+from adorm.drivers.asyncpg.writes import receiver_path, Writer
 from adorm.executor import Pool, Router, set_runner
 from adorm.operations import Create, Select
 from adorm.query import Query
@@ -42,6 +42,7 @@ from tests.djangoproject.library import models as dj
 from tests.generated.library import (
     Author,
     Book,
+    BookProxy,
     Edition,
     Fine,
     Loan,
@@ -64,12 +65,13 @@ VOLATILE = frozenset({"added", "published", "date_joined", "last_login"})
 
 @pytest.fixture
 async def executor():
-    """``make(**pool)`` sets up a router with one pool of `AsyncpgDriver` slots for the profile ``default``."""
+    """``make(profile=None, **pool)`` sets up a router with one pool of `AsyncpgDriver` slots for the profile
+    ``default``, built with the keyword arguments in ``profile``."""
     routers = []
 
-    def make(**kwargs):
+    def make(*, profile=None, **kwargs):
         driver = AsyncpgDriver()
-        pool = Pool(driver, ConnectionProfile("default", driver), **kwargs)
+        pool = Pool(driver, ConnectionProfile("default", driver, **(profile or {})), **kwargs)
         router = Router([pool])
         routers.append(router)
         set_runner(router)
@@ -465,13 +467,18 @@ async def test_overrides_of_djangos_write_methods_are_refused(library, pool, mon
     assert pool.in_use == 0
 
 
-async def test_writes_send_no_signals_and_run_on_the_event_loop(library, pool, monkeypatch):  # noqa: ARG001
+async def test_writes_send_no_signals_and_run_on_the_event_loop(library, executor, monkeypatch):  # noqa: ARG001
     sent = []
     threads = set()
     original = Writer.__init__
 
     def receiver(sender, **kwargs):
         sent.append((sender, kwargs.get("instance")))
+
+    # A covered receiver lets the writes through; none of them sends it.
+    pool = executor(
+        profile={"covered_receivers": [f"{__name__}.{receiver.__qualname__}"]}, max_connections=2, acquire_timeout=5
+    )
 
     def init(self, connection):
         threads.add(threading.get_ident())
@@ -516,6 +523,83 @@ async def test_writes_send_no_signals_and_run_on_the_event_loop(library, pool, m
     assert threads == {threading.get_ident()}
     assert await tag_names() == ["rare"]
     assert pool.size <= 2
+
+
+async def test_an_async_receiver_refuses_a_save(library, pool):  # noqa: ARG001
+    async def receiver(sender, **kwargs):  # noqa: ARG001
+        pass
+
+    post_save.connect(receiver, sender=dj.Tag, weak=False)
+    try:
+        with pytest.raises(NotSupportedError, match=rf"post_save: {__name__}\.{receiver.__qualname__}"):
+            await Tag.objects.create(name="night")
+    finally:
+        post_save.disconnect(receiver, sender=dj.Tag)
+    assert await tag_names() == ["rare"]
+    assert pool.in_use == 0
+
+
+async def test_create_from_parent_is_refused_for_a_receiver_of_the_child(library, pool):  # noqa: ARG001
+    def receiver(sender, **kwargs):  # noqa: ARG001
+        pass
+
+    book = await Book.objects.get(pk=PHYSICS)
+    pre_save.connect(receiver, sender=dj.Edition, weak=False)
+    try:
+        with pytest.raises(NotSupportedError, match=r"library\.Edition \(pre_save: "):
+            await Edition.objects.create_from_parent(book, released=datetime.date(2024, 1, 1))
+    finally:
+        pre_save.disconnect(receiver, sender=dj.Edition)
+    assert not await Edition.objects.filter(pk=PHYSICS).exists()
+    assert pool.in_use == 0
+
+
+async def test_a_proxy_models_save_signals_have_the_proxy_as_sender(library, pool):  # noqa: ARG001
+    def receiver(sender, **kwargs):  # noqa: ARG001
+        pass
+
+    post_save.connect(receiver, sender=dj.BookProxy, weak=False)
+    try:
+        with pytest.raises(NotSupportedError, match=r"library\.BookProxy \(post_save: "):
+            await BookProxy.objects.create(isbn="9790000000010", title="P", pages=1)
+        book = await Book.objects.create(isbn="9790000000011", title="Q", pages=1)
+    finally:
+        post_save.disconnect(receiver, sender=dj.BookProxy)
+    assert not await Book.objects.filter(pk="9790000000010").exists()
+    assert await Book.objects.filter(pk=book.pk).exists()
+    assert pool.in_use == 0
+
+
+async def test_a_proxy_models_delete_signals_have_the_proxy_as_sender(library, pool):  # noqa: ARG001
+    def receiver(sender, **kwargs):  # noqa: ARG001
+        pass
+
+    proxy = await BookProxy.objects.create(isbn="9790000000012", title="P", pages=1)
+    pre_delete.connect(receiver, sender=dj.BookProxy, weak=False)
+    try:
+        with pytest.raises(NotSupportedError, match=r"library\.BookProxy \(pre_delete: "):
+            await proxy.delete()
+        with pytest.raises(NotSupportedError, match=r"library\.BookProxy \(pre_delete: "):
+            await BookProxy.objects.filter(pk=proxy.pk).delete()
+        assert await Book.objects.filter(pk=proxy.pk).exists()
+        assert await Book.objects.filter(pk=proxy.pk).delete() == (1, {"library.Book": 1})
+    finally:
+        pre_delete.disconnect(receiver, sender=dj.BookProxy)
+    assert pool.in_use == 0
+
+
+def test_a_receiver_is_named_by_module_and_qualname():
+    class Handler:
+        def __call__(self, sender, **kwargs):
+            pass
+
+        def method(self, sender, **kwargs):
+            pass
+
+    local = f"{__name__}.test_a_receiver_is_named_by_module_and_qualname.<locals>.Handler"
+    assert receiver_path(Handler().method) == f"{local}.method"
+    assert receiver_path(Handler()) == local
+    assert receiver_path(tag_names) == f"{__name__}.tag_names"
 
 
 # Row locks
