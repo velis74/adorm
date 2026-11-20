@@ -489,9 +489,11 @@ which gives it the construct name `transform.<lookup_name>`, and may override:
 | `sql_template(vendor)` | the SQL template on databases of `vendor`: `templates[vendor]`, else `template`, else `%(function)s(%(expressions)s)` with a `function`; `None` without one |
 
 A transform of the application's own declares its SQL as a function does: `function`, `template` with
-`%(expressions)s` (the transformed value) or `templates` by vendor. The drivers that render SQL apply it, and the
-transforms after it, as expressions, and declare `transform.<lookup_name>` on the vendors it has a template for. The
-built-in transforms have no SQL attributes: the drivers apply them by name.
+`%(expressions)s` (the transformed value) or `templates` by vendor, or has a translation registered with
+[`register_translation()`](/ref/drivers#adorm-drivers-django-register-translation-cls-vendors-none). The drivers that
+render SQL apply it as an expression and declare `transform.<lookup_name>` on the vendors it has a template or a
+translation for. Only transforms with SQL of their own or a translation may follow it in a path; a built-in transform
+after it raises `NotSupportedError`. The built-in transforms have no SQL attributes: the drivers apply them by name.
 
 ### `adorm.query.Year`
 
@@ -531,8 +533,8 @@ Registers a `Transform` subclass under its `lookup_name` and returns it; usable 
 same class again does nothing. A different class under a taken name, a name a lookup is registered under, and a name
 that is not an identifier or contains `__` raise `ValueError` (`register_lookup()` likewise refuses a transform's
 name). A driver must declare a transform's construct name to apply it: the Django driver and the native PostgreSQL
-driver declare a transform with SQL of its own and pass one without SQL to Django by its name, which needs a Django
-transform registered under that name on the field's class.
+driver declare and run a registered transform with SQL of its own or a registered translation, and refuse another
+one with `NotSupportedError`.
 
 ```python
 @register_transform

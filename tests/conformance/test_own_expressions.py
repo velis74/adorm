@@ -386,6 +386,16 @@ async def test_a_built_in_transform_after_an_own_transform_is_refused(pool):
     assert pool.in_use == 0
 
 
+@pytest.mark.usefixtures("club_data")
+async def test_a_transform_without_sql_or_a_translation_is_refused(driver_name, pool):
+    name = f"plain_{driver_name}"
+    register_transform(type(f"Plain{driver_name.capitalize()}", (Transform,), {"lookup_name": name}))
+    assert f"transform.{name}" not in constructs(pool)
+    await assert_refused(
+        Member.objects.filter(**{f"first_name__{name}": "x"}).count(), f"transform.{name}", driver_name, pool
+    )
+
+
 # UUID4 and UUID7 on every database, Django and Python version
 
 
