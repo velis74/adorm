@@ -131,7 +131,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
 # Short tracebacks leave out frame arguments, which include database URLs with their passwords.
-addopts = ["--strict-markers", "--tb=short"]
+addopts = ["--strict-markers", "--tb=short", "-n", "auto"]
 
 [tool.coverage.run]
 source = ["adorm"]
