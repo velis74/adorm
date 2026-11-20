@@ -195,6 +195,41 @@ assignment whose model has no content type row raises the content type model's `
 cancelled save leaves the instance unchanged, except for a content type field it resolved before the `Save`
 operation.
 
+#### `refresh_from_db(fields=None)`
+
+Coroutine: reload the instance's field values from its row with a [`Get`](./operations#adorm-operations-get-query)
+operation on the instance's executor (the one `save()` uses). The query starts from the model's rows without manager
+logic (Django's `_base_manager`) and runs in the executor's active transaction, so it sees that transaction's
+uncommitted writes. Returns `None`.
+
+- Without `fields`, the fields loaded now are reloaded; deferred fields stay deferred.
+- `fields` (any iterable of names) reloads only those fields, deferred ones included. `"pk"` stands for the primary
+  key, a foreign key's name for its column, a generic foreign key's name for both of its fields. A reverse or
+  many-to-many relation's name loads no field and clears that relation's cached rows. An empty `fields` does nothing
+  and runs no operation.
+- Reloaded fields replace the instance's values, assigned ones included, and join `model_fields_set`, so a later
+  `save()` writes them.
+- Cached relations are cleared as Django's `refresh_from_db()` clears them: a [`ForeignKey`](#adorm-foreignkey-target-column-none)'s
+  related instance when its column is reloaded; a [`ReverseOneToOne`](#adorm-reverseonetoone-target-column)
+  instance, the [prefetched rows](#prefetched-rows) of a reverse or many-to-many relation and a
+  [`GenericForeignKey`](#adorm-genericforeignkey-ct-field-content-type-fk-field-object-id-for-concrete-model-true)'s
+  instance (a pending assignment included) without `fields` or when `fields` names the relation. Annotations and
+  `to_attr` values stay.
+- The instance keeps the executor the operation ran on.
+
+```python
+club = await Club.objects.prefetch_related("memberships").get(pk=1)
+await club.refresh_from_db(fields=["founded"])      # Get(Query("club.Club").filter(pk=1).only("founded"))
+await club.refresh_from_db(fields=["memberships"])  # clears the prefetched memberships only, no operation
+club = await Club.objects.prefetch_related("memberships").get(pk=1)
+await club.refresh_from_db()                        # every loaded field; the prefetched memberships are cleared
+```
+
+Raises the model's `DoesNotExist` when the row is gone or the instance has no primary key value, `ValueError` for a
+name that is neither a field nor a relation and for one that contains `__`, `TypeError` for a string `fields` or a
+name that is not a string, and [`InterfaceError`](./exceptions) when no executor is available. Each of these leaves
+the instance unchanged.
+
 #### `full_clean(*, exclude=None, validate_unique=True, validate_constraints=True)`
 
 Coroutine: validate the instance as the target validates one before a save, with a
