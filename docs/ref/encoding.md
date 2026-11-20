@@ -79,15 +79,17 @@ A value is typed by:
 - the primary key of `Save` and `DeleteInstance`: the primary key's type;
 - `Value(value, output_type=...)`: the `output_type`;
 - a `Value` without `output_type`: the type of its position. A `Case` passes its `output_type`, or else its own
-  position's type, to the results of its `When` branches and its `default`; a `Coalesce` passes it to its arguments.
-  Other expressions (arithmetic, other functions, conditions) pass no type to their operands.
+  position's type, to the results of its `When` branches and its `default`; `Coalesce`, `Greatest`, `Least` and
+  `NullIf` (a function whose `output_from` is `"arguments"`) pass it to their arguments. Other expressions
+  (arithmetic, other functions, conditions) pass no type to their operands.
 
 The type of an expression is, in this order:
 
 - for `F`, the field's type in the queried model; for `OuterRef`, in the enclosing query's model;
 - for an annotation name, the annotation's type;
 - its `output_type`;
-- the first known type of a `Coalesce` argument or a `Case` result;
+- for a function, the type its `output_from` gives (see [`Func`](./expressions#adorm-func-expressions-output-type-none));
+- the first known type of a `Case` result;
 - for a one-column `Subquery`, the type of the selected field.
 
 The combined queries of a [set operation](./query#union-others-all-false) are typed by their own models at the level

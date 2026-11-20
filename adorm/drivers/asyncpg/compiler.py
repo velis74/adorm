@@ -341,6 +341,59 @@ def _result_timezone(wrapper: Any) -> tuple[datetime.tzinfo, bool]:
     return zoneinfo.ZoneInfo(wrapper.timezone_name), True
 
 
+_TRUNC_PREFIXES = ("DATE_TRUNC(%s", "EXTRACT(SECOND FROM DATE_TRUNC(%s")
+
+
+def _text_literal(value: str) -> str:
+    """``value`` as an SQL string literal in a statement whose ``%`` starts a placeholder."""
+    return "'" + value.replace("'", "''").replace("%", "%%") + "'"
+
+
+def _inline_precision(sql_text: str, params: Sequence[Any]) -> tuple[str, tuple[Any, ...]]:
+    if sql_text.startswith(_TRUNC_PREFIXES):
+        return sql_text.replace("%s", _text_literal(params[0]), 1), tuple(params[1:])
+    return sql_text, tuple(params)
+
+
+class _LiteralConstantsOperations:
+    """Django's PostgreSQL date and time operations with the time zone name and the ``DATE_TRUNC`` precision as
+    literals, as psycopg's client-side binding renders them. As parameters, each copy of one transform (in
+    ``DISTINCT ON`` and ``ORDER BY``) would get a placeholder of its own, and PostgreSQL would take the copies for
+    different expressions."""
+
+    def _convert_sql_to_tz(self, sql_text: str, params: Sequence[Any], tzname: str | None) -> tuple[str, tuple]:
+        converted, converted_params = super()._convert_sql_to_tz(sql_text, params, tzname)  # type: ignore[misc]
+        if len(converted_params) == len(params) + 1 and converted.endswith(" AT TIME ZONE %s"):
+            return converted[:-2] + _text_literal(converted_params[-1]), tuple(converted_params[:-1])
+        return converted, tuple(converted_params)
+
+    def date_trunc_sql(self, *args: Any, **kwargs: Any) -> tuple[str, tuple]:
+        return _inline_precision(*super().date_trunc_sql(*args, **kwargs))  # type: ignore[misc]
+
+    def datetime_trunc_sql(self, *args: Any, **kwargs: Any) -> tuple[str, tuple]:
+        return _inline_precision(*super().datetime_trunc_sql(*args, **kwargs))  # type: ignore[misc]
+
+    def time_trunc_sql(self, *args: Any, **kwargs: Any) -> tuple[str, tuple]:
+        return _inline_precision(*super().time_trunc_sql(*args, **kwargs))  # type: ignore[misc]
+
+    def datetime_extract_sql(self, *args: Any, **kwargs: Any) -> tuple[str, tuple]:
+        return _inline_precision(*super().datetime_extract_sql(*args, **kwargs))  # type: ignore[misc]
+
+    def time_extract_sql(self, *args: Any, **kwargs: Any) -> tuple[str, tuple]:
+        return _inline_precision(*super().time_extract_sql(*args, **kwargs))  # type: ignore[misc]
+
+
+_OPERATIONS: dict[type, type] = {}
+
+
+def _literal_constants_operations(ops_class: type) -> type:
+    """``ops_class`` with `_LiteralConstantsOperations` applied, one class per ``ops_class``."""
+    cls = _OPERATIONS.get(ops_class)
+    if cls is None:
+        cls = _OPERATIONS[ops_class] = type(ops_class.__name__, (_LiteralConstantsOperations, ops_class), {})
+    return cls
+
+
 class DjangoCompiler:
     """Compiles Django queries for a ``DATABASES`` entry into `DjangoStatement` objects, without a connection.
 
@@ -349,7 +402,8 @@ class DjangoCompiler:
     running event loop. ``server_version`` is PostgreSQL's ``server_version_num`` (``170006`` for 17.6); Django
     reads it to choose SQL for some constructs (``AnyValue``, ``JSONObject``, ``JSONArray``, ``UUID7``) and would
     otherwise connect to ask. ``params`` replace keys of the entry for this compiler, as a connection profile's
-    ``params`` do. Parameters are bound for the entry's ``OPTIONS["server_side_binding"]``. A construct that needs a
+    ``params`` do. Parameters are bound for the entry's ``OPTIONS["server_side_binding"]``; the time zone name and the
+    ``DATE_TRUNC`` precision of date and time functions compile as literals. A construct that needs a
     connection to compile (``SearchHeadline`` with options, which quotes them through psycopg) raises
     ``NotSupportedError``. The entry must use Django's PostgreSQL backend on psycopg 3.
     """
@@ -362,6 +416,7 @@ class DjangoCompiler:
         if not is_psycopg3:
             raise NotSupportedError("Django's PostgreSQL backend runs on psycopg2; DjangoCompiler needs psycopg 3")
         wrapper.__dict__["pg_version"] = server_version
+        wrapper.ops = _literal_constants_operations(type(wrapper.ops))(wrapper)
         wrapper.features.max_query_params = MAX_QUERY_PARAMS
         wrapper.ensure_connection = wrapper.connect = self._refuse_connection
         wrapper.cursor = wrapper.chunked_cursor = self._cursor

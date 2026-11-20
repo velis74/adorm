@@ -487,6 +487,93 @@ class Model(ModelExceptionsMixin, BaseModel):
         executor = self._executor()
         self._stored(await executor.execute(operation), executor)
 
+    async def refresh_from_db(self, fields: Iterable[str] | None = None) -> None:
+        """Reload the instance's field values from its row with a `Get` operation on the instance's executor (the one
+        `save()` uses), from the model's base query (no manager), inside the executor's active transaction.
+
+        Without ``fields`` the fields loaded now are reloaded and deferred fields stay deferred. ``fields`` names the
+        fields to reload, loaded or deferred: ``pk`` stands for the primary key, a foreign key's name for its column,
+        a generic foreign key's for both of its fields. A reverse or many-to-many relation's name loads nothing and
+        clears its cached rows; an empty ``fields`` does nothing. Reloaded fields join ``model_fields_set``.
+
+        Cached relations are cleared as Django's ``refresh_from_db()`` clears them: a foreign key's related instance
+        when its column is reloaded; a reverse one-to-one instance, the prefetched rows of a reverse or many-to-many
+        relation and a generic foreign key's instance (with a pending assignment) without ``fields`` or when
+        ``fields`` names the relation. Annotations and ``to_attr`` values stay.
+
+        Raises the model's ``DoesNotExist`` when the row is gone or the instance has no primary key value, leaving the
+        instance unchanged; ``ValueError`` for a name that is neither a field nor a relation or that contains ``__``;
+        ``TypeError`` for a string ``fields`` or a name that is not a string.
+        """
+        from adorm.query.query import Query
+        from adorm.query.queryset import QuerySet
+
+        meta = self._require_meta()
+        cls = type(self)
+        model_fields = cls.__pydantic_fields__
+        relations = cls.__adorm_relations__
+        generics = cls.__adorm_generic_foreign_keys__
+        load: list[str] = []
+        cleared: set[str] = set()
+        if fields is None:
+            cleared.update(name for name, relation in relations.items() if not isinstance(relation, ForeignKey))
+            cleared.update(generics)
+            deferred = self.get_deferred_fields() - {
+                generic.ct_column(cls) for name, generic in generics.items() if name in self._state.generic
+            }
+            load = [name for name in model_fields if name not in deferred and name != meta.pk]
+        else:
+            if isinstance(fields, str):
+                raise TypeError("fields is an iterable of field names, not a string")
+            names = list(fields)
+            for given in names:
+                if not isinstance(given, str):
+                    raise TypeError(f"fields holds field names, not {type(given).__name__}")
+                if "__" in given:
+                    raise ValueError(f"fields names {given!r}: relations and transforms (__) are not allowed")
+            for given in names:
+                relation = relations.get(given)
+                if given == "pk":
+                    load.append(meta.pk)
+                elif isinstance(relation, ForeignKey):
+                    load.append(relation.column)
+                elif given in generics:
+                    load.extend((generics[given].ct_column(cls), generics[given].fk_field))
+                    cleared.add(given)
+                elif relation is not None:
+                    cleared.add(given)
+                elif given in model_fields:
+                    load.append(given)
+                else:
+                    raise ValueError(f"{given!r} is not a field of {meta.label}")
+            if not load:
+                self._clear_cached_relations(cleared)
+                return
+        pk = self.pk
+        if pk is None:
+            raise cls.DoesNotExist(f"{cls.__name__} matching query does not exist.")
+        executor = self._executor()
+        queryset = QuerySet(cls, executor, Query(meta.label)).filter(pk=pk)
+        if fields is not None or len(load) < len(model_fields) - 1:
+            queryset = queryset.only(*dict.fromkeys(load))
+        fresh = await queryset.get()
+        reloaded = fresh.__dict__.keys() & {*load, meta.pk}
+        for name in reloaded:
+            self.__dict__[name] = fresh.__dict__[name]
+        self.__pydantic_fields_set__.update(reloaded)
+        for name, relation in relations.items():
+            if isinstance(relation, ForeignKey) and relation.column in reloaded:
+                cleared.add(name)
+        self._clear_cached_relations(cleared)
+        self._state.executor = executor
+
+    def _clear_cached_relations(self, names: Iterable[str]) -> None:
+        """Drop the cached values of the relations ``names`` and the pending assignments of generic foreign keys."""
+        state = self._state
+        for name in names:
+            state.related.pop(name, None)
+            state.generic.pop(name, None)
+
     async def full_clean(
         self, *, exclude: Iterable[str] | None = None, validate_unique: bool = True, validate_constraints: bool = True
     ) -> None:

@@ -34,7 +34,7 @@ from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
 from adorm.query import expressions as ax
 from adorm.query.expressions import split_field_path
-from adorm.query.lookups import build_lookup, Lookup, split_lookup
+from adorm.query.lookups import _apply_transforms, build_lookup, Exact, Lookup, split_lookup
 from adorm.query.query import Query
 
 __all__ = [
@@ -85,10 +85,25 @@ FUNCTIONS: Mapping[str, type[dj.Func]] = MappingProxyType(
         "TruncSecond": djf.TruncSecond,
         "TruncDate": djf.TruncDate,
         "TruncTime": djf.TruncTime,
+        **{
+            name: getattr(djf, name)
+            for name in (
+                *("Cast", "Collate", "Greatest", "Least", "NullIf", "JSONArray", "JSONObject", "Extract"),
+                *("ExtractYear", "ExtractIsoYear", "ExtractQuarter", "ExtractMonth", "ExtractWeek", "ExtractDay"),
+                *("ExtractWeekDay", "ExtractIsoWeekDay", "ExtractHour", "ExtractMinute", "ExtractSecond"),
+                *("Abs", "ACos", "ASin", "ATan", "ATan2", "Ceil", "Cos", "Cot", "Degrees", "Exp", "Floor", "Ln"),
+                *("Log", "Mod", "Pi", "Power", "Radians", "Random", "Round", "Sign", "Sin", "Sqrt", "Tan"),
+                *("Chr", "Left", "LPad", "LTrim", "MD5", "Ord", "Repeat", "Replace", "Reverse", "Right", "RPad"),
+                *("RTrim", "SHA1", "SHA224", "SHA256", "SHA384", "SHA512", "StrIndex", "Substr", "Trim"),
+                *("UUID4", "UUID7"),
+            )
+            if hasattr(djf, name)
+        },
     }
 )
 """Django's function class for each adorm function class name the translation knows; `Trunc` translates to Django's
-``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds."""
+``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds. A function the installed Django lacks (``UUID4`` and
+``UUID7`` before Django 6.0) is missing."""
 
 AGGREGATES: Mapping[str, type[dj.Aggregate]] = MappingProxyType(
     {"Count": dj.Count, "Sum": dj.Sum, "Avg": dj.Avg, "Min": dj.Min, "Max": dj.Max}
@@ -253,14 +268,24 @@ def _internal_type(field: Any) -> str | None:
     return None if get is None else get()
 
 
-def orm_path(model: type[dj.Model], path: str, annotations: Iterable[str] = ()) -> str:
+def orm_path(
+    model: type[dj.Model],
+    path: str,
+    annotations: Iterable[str] = (),
+    lookup: type[Lookup] | None = None,
+    *,
+    implicit: bool = False,
+) -> str:
     """Django's query path for the adorm field path ``path`` on ``model``.
 
     Each segment is renamed with the `ModelMeta.orm_names` of the adorm model registered for the Django model it is
     on, and a reverse relation's accessor name becomes its query name (``tagging_set`` → ``tagging``). A path whose
     first segment is one of ``annotations`` is returned unchanged; a segment Django does not know is kept, so Django
-    reports it. Segments after a field that is neither a relation nor a JSON field raise `FieldError`: Django's
-    transforms (``joined__year``) are not adorm constructs.
+    reports it. Segments after a field that is neither a relation nor a JSON field are transforms, kept by name
+    (``joined__year``); one that is no registered transform applying to the field's adorm type raises `FieldError`.
+    ``lookup`` is the lookup class the path is compared with: one whose ``applies_to()`` refuses the adorm type of a
+    scalar field (after its transforms) raises `FieldError` too. ``implicit`` tells that the key named no lookup
+    (``joined__yeer``): the message then calls an unknown last transform name a lookup.
     """
     segments = split_field_path(path)
     if segments[0] in annotations:
@@ -277,11 +302,24 @@ def orm_path(model: type[dj.Model], path: str, annotations: Iterable[str] = ()) 
         names.append(name if field is None else _query_name(field, name))
         follows = _follows(field, name)
         rest = segments[index + 1 :]
+        scalar = field is not None and not field.is_relation and _internal_type(field) not in _CONTAINER_FIELDS
+        if (rest or lookup is not None) and scalar:
+            label = current._meta.label if adorm is None else adorm._meta.label
+            schema = registry.model_schema(label) if adorm is not None else None
+            field_type = None if schema is None else schema.fields.get(segment)
+            _, field_type = _apply_transforms(
+                f"{label}.{segment}", field_type, tuple(rest), path, label, lookup_hint=implicit
+            )
+            if lookup is not None and schema is not None and not lookup.applies_to(field_type, ()):
+                target = "__".join((f"{label}.{segment}", *rest))
+                raise FieldError(f"unsupported lookup {lookup.lookup_name!r} for {target}", model=label, key=path)
+            names.extend(rest)
+            break
         if rest and field is not None and not follows and _internal_type(field) not in _CONTAINER_FIELDS:
             label = current._meta.label if adorm is None else adorm._meta.label
-            following = "__".join(rest)
-            message = f"{label}.{segment} is neither a relation nor a JSON field; {following!r} cannot follow"
-            raise FieldError(message, model=label, key=path)
+            _apply_transforms(f"{label}.{segment}", None, tuple(rest), path, label, lookup_hint=False)
+            names.extend(rest)
+            break
         current = field.related_model if follows else None
     return "__".join(names)
 
@@ -358,6 +396,16 @@ class TranslatedQuery:
         return [self._plan.build(values) for values in records]
 
 
+def _cast_field(node: ax.Cast) -> dj.Field:
+    """The Django field ``node`` casts to: a ``CharField`` with ``max_length``, a ``DecimalField`` with
+    ``max_digits`` and ``decimal_places``, else `output_field`."""
+    if node.max_length is not None:
+        return dj.CharField(max_length=node.max_length)
+    if node.max_digits is not None:
+        return dj.DecimalField(max_digits=node.max_digits, decimal_places=node.decimal_places)
+    return output_field(node.output_type)
+
+
 def _output_options(node: Any, implied: Any = None) -> dict[str, Any]:
     """``output_field`` for a node whose ``output_type`` differs from the type its class or arguments imply."""
     output_type = node.output_type
@@ -381,8 +429,8 @@ class _Translator:
         self._applied: set[str] = set()
         self._alias_numbers = itertools.count() if parent is None else parent._alias_numbers
 
-    def path(self, name: str) -> str:
-        return orm_path(self.model, name, self.annotation_names)
+    def path(self, name: str, lookup: type[Lookup] | None = None, *, implicit: bool = False) -> str:
+        return orm_path(self.model, name, self.annotation_names, lookup, implicit=implicit)
 
     def field_path(self, name: str) -> str | None:
         """The Django field path of the adorm path ``name``, following annotations that are plain field references;
@@ -543,8 +591,16 @@ class _Translator:
                 return function(source, **_output_options(node, implied))
             return djf.Trunc(source, node.kind, **_output_options(node))
         if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate) and name in FUNCTIONS:
+            arguments = [self.expression(e) for e in node.expressions]
+            if isinstance(node, ax.Cast):
+                return djf.Cast(arguments[0], _cast_field(node))
+            if isinstance(node, ax.Collate):
+                return djf.Collate(arguments[0], node.collation)
+            if isinstance(node, ax.JSONObject):
+                return djf.JSONObject(**dict(zip(node.keys, arguments, strict=True)))
+            if type(node) is ax.Extract:
+                return djf.Extract(arguments[0], node.lookup_name, **_output_options(node))
             implied = {"TruncDate": datetime.date, "TruncTime": datetime.time}.get(name)
-            arguments = (self.expression(e) for e in node.expressions)
             return FUNCTIONS[name](*arguments, **_output_options(node, implied))
         raise NotSupportedError(f"the Django driver does not translate {name}")
 
@@ -571,7 +627,7 @@ class _Translator:
         lhs = node.lhs
         field = None
         if isinstance(lhs, ax.F) and not isinstance(lhs, ax.OuterRef):
-            key = self.path(lhs.name)
+            key = self.path(lhs.name, type(node), implicit=isinstance(node, Exact) and node.implicit)
             field = _path_field(self.model, key)
             field_path = self.field_path(lhs.name)
             if field_path is not None:
@@ -580,6 +636,9 @@ class _Translator:
             key = f"_adorm{next(self._alias_numbers)}"
             self.aliases[key] = self.expression(lhs)
         rhs = node.rhs
+        if rhs is None and (field is not None or not isinstance(lhs, ax.F) or isinstance(lhs, ax.OuterRef)):
+            # At a key inside a JSON field Django matches JSON null; here None is SQL NULL.
+            return dj.Q(**{f"{key}__isnull": True})
         if isinstance(rhs, ax.Subquery) and not isinstance(rhs, ax.Exists) and node.lookup_name in ("in", "overlap"):
             value: Any = self.subquery(rhs.query)
             if node.lookup_name == "overlap" and (rhs.query.row_format == "model" or not rhs.query.select):

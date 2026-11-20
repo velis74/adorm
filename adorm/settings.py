@@ -112,6 +112,20 @@ logger = logging.getLogger("adorm.settings")
 _driver_lock = threading.Lock()
 
 
+def _covered_receivers(value: Any, profile: str) -> tuple[str, ...]:
+    """``value`` as a tuple of dotted paths; another value raises `TypeError`, a path without a module `ValueError`."""
+    where = f"covered_receivers of profile {profile!r}"
+    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
+        raise TypeError(f"{where} is a list of dotted paths, not {value!r}")
+    entries = tuple(value)
+    for entry in entries:
+        if not isinstance(entry, str):
+            raise TypeError(f"{where} lists dotted paths (module.qualname), not {entry!r}")
+        if "." not in entry or not all(entry.split(".")):
+            raise ValueError(f"{where} lists dotted paths (module.qualname), not {entry!r}")
+    return tuple(dict.fromkeys(entries))
+
+
 @dataclass(frozen=True, eq=False)
 class ConnectionProfile:
     """A named connection profile: what a session's ``using`` refers to.
@@ -130,6 +144,10 @@ class ConnectionProfile:
     - ``content_types_key(profile, session)`` returns a hashable value that splits the profile's content type cache
       (`adorm.content_types`): lookups with equal values share a cache. It is a plain function, called in the context
       of the lookup, e.g. to read the current tenant from a context variable.
+
+    ``covered_receivers`` lists Django signal receivers by dotted path (``module.qualname``; a bound method by its
+    class, ``module.Class.method``) whose work the application does itself: a driver that does not send Django's
+    signals writes despite them (`adorm.drivers.asyncpg`). Stored as a tuple.
 
     ``connection`` is the target's connection. SQL a hook runs on it that the driver sees
     (`DriverConnection.call_hook()`) is custom SQL: the slot leaves the pool when the lease ends. A threaded driver runs
@@ -151,6 +169,7 @@ class ConnectionProfile:
     pool: PoolSettings | None = None
     options: Mapping[str, Any] = field(default_factory=dict)
     content_types_key: Callable[[Any, Any], Hashable] | None = None
+    covered_receivers: Iterable[str] = ()
 
     def __post_init__(self) -> None:
         for what in ("name", "alias"):
@@ -173,6 +192,7 @@ class ConnectionProfile:
         key = self.content_types_key
         if key is not None and (not callable(key) or inspect.iscoroutinefunction(key)):
             raise TypeError(f"content_types_key of profile {self.name!r} is a plain function or None, not {key!r}")
+        object.__setattr__(self, "covered_receivers", _covered_receivers(self.covered_receivers, self.name))
         options = check_profile_options(self.options, self.name)
         object.__setattr__(self, "options", options)
         capabilities = None if isinstance(driver, str) else getattr(driver, "capabilities", None)

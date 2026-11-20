@@ -147,10 +147,11 @@ OrderBy(Lower("name"))
 ### `adorm.Func(*expressions, output_type=None)`
 
 Base class of functions. String arguments are field references; other plain arguments become `Value`. A subclass
-sets `arity` (the exact number of arguments) or `min_args`, and `default_output_type`. A wrong number of arguments
-raises `TypeError`, as does instantiating `Func`. `output_type`, here and on aggregates, types the values compared
-with the function when it is encoded and must be a type [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp)
-names, else `TypeError`. A subclass has the construct name `function.<class name>`; a function a driver adds:
+sets `arity` (the exact number of arguments) or `min_args` and `max_args`, `default_output_type` and `output_from`.
+A wrong number of arguments raises `TypeError`, as does instantiating `Func`. `output_type`, here and on aggregates,
+types the values compared with the function when it is encoded and must be a type
+[`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp) names, else `TypeError`. A subclass has the construct
+name `function.<class name>`; a function a driver adds:
 
 ```python
 from adorm.query import Exact, Func, Query
@@ -163,6 +164,26 @@ class Unaccent(Func):
 Query("club.Member").filter(Exact(Unaccent("name"), "Zoe"))   # constructs: function.Unaccent, lookup.exact
 ```
 
+`output_from` gives the type of a function without an `output_type`, used to encode the values compared with it:
+
+| `output_from` | Type |
+|---|---|
+| `None` | `default_output_type` |
+| `"arguments"` | the first argument of a known type (`Coalesce`, `Greatest`, `Least`, `NullIf`) |
+| `"first"` | the type of the first argument (`Abs`, `Round`, `Trim` …) |
+| `"numeric"` | `Decimal` when an argument is a `Decimal`, else `float` (`Sqrt`, `Power`, `Mod` …) |
+
+A `Value` argument of an `"arguments"` function without its own `output_type` is encoded with the function's
+`output_type`, else with the type of the function's position; the types of the other arguments do not type it. Django
+refuses arguments of different types (`NullIf("price", Value(0))` on a `Decimal` field raises `FieldError`): give the
+`Value` or the function an `output_type` (`NullIf("price", Value(0), output_type=Decimal)`).
+
+Every function below is importable from `adorm` and `adorm.query` and stands wherever an expression can:
+`annotate()`, `alias()`, `filter()` (a lookup's left-hand side or value), `order_by()`, `update()` and an aggregate's
+argument. `values()` selects a function's result by its annotation name (`annotate(y=ExtractYear("d")).values("y")`).
+The drivers that translate queries with Django run Django's function of the same name, with its SQL and its limits on
+each database.
+
 | Function | Arguments | Result |
 |---|---|---|
 | `Lower(expression)` | 1 | the string in lower case |
@@ -172,6 +193,23 @@ Query("club.Member").filter(Exact(Unaccent("name"), "Zoe"))   # constructs: func
 | `Concat(*expressions)` | 2 or more | the arguments concatenated; a NULL argument counts as empty |
 | `Now()` | none | the database's current date and time, `datetime.datetime` |
 | `Trunc(expression, kind, output_type=None)` | 1 and a kind | a date or time truncated to `kind` |
+| `Cast(expression, output_type, ...)` | 1 and a type | the value converted to `output_type` |
+| `Collate(expression, collation)` | 1 and a name | the value with another collation |
+| `Greatest(*expressions)`, `Least(*expressions)` | 2 or more | the largest / smallest argument |
+| `NullIf(expression1, expression2)` | 2 | NULL when the arguments are equal, else the first |
+| `JSONArray(*expressions)` | any | a JSON array, `list` |
+| `JSONObject(**fields)` | any, by key | a JSON object, `dict` |
+| `Extract(expression, lookup_name)`, `ExtractYear(expression)` … | 1 (and a name) | a date or time component, `int` |
+| `Abs`, `Ceil`, `Floor`, `Sign`, `Round(expression, precision=0)` | 1 (and a precision) | a number of the argument's type |
+| `ACos`, `ASin`, `ATan`, `Cos`, `Cot`, `Degrees`, `Exp`, `Ln`, `Radians`, `Sin`, `Sqrt`, `Tan` | 1 | a `float`, or a `Decimal` for a `Decimal` |
+| `ATan2`, `Log`, `Mod`, `Power` | 2 | a `float`, or a `Decimal` when an argument is a `Decimal` |
+| `Pi()`, `Random()` | none | `float` |
+| `Chr(expression)` | 1 | the character of a code point, `str` |
+| `Ord(expression)` | 1 | the code point of the first character, `int` |
+| `Left`, `Right`, `LPad`, `RPad`, `Repeat`, `Replace`, `StrIndex`, `Substr` | 2 or 3 | part of a string, a changed string or a position |
+| `LTrim`, `RTrim`, `Trim`, `Reverse` | 1 | the string trimmed or reversed |
+| `MD5`, `SHA1`, `SHA224`, `SHA256`, `SHA384`, `SHA512` | 1 | the hash in hexadecimal, `str` |
+| `UUID4()`, `UUID7(shift=None)` | none or a shift | a new UUID per row, `uuid.UUID` |
 
 ### `adorm.Lower(expression)`
 
@@ -244,6 +282,295 @@ Query("club.Payment").annotate(month=TruncMonth("paid_at")).filter(month__gte=st
 
 `TruncMonth("d")` and `Trunc("d", "month")` are different nodes with different construct names
 (`function.TruncMonth`, `function.Trunc`).
+
+### Comparison and conversion
+
+#### `adorm.Cast(expression, output_type, *, max_length=None, max_digits=None, decimal_places=None)`
+
+The value converted to `output_type` in the database (SQL `CAST`). `output_type` is required and must be a type
+[`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp) names, else `TypeError`; the Django-translating
+drivers cast to the column type of the Django field for it (`str` → `TextField`, `int` → `IntegerField` …).
+`max_length` makes a cast to `str` a `CharField(max_length)` (`varchar(n)` on PostgreSQL); `max_digits` and
+`decimal_places`, given together, make a cast to `Decimal` a `DecimalField` with that precision and scale. An option
+for another type, or only one of `max_digits` and `decimal_places`, raises `TypeError`; a negative size or
+`decimal_places` above `max_digits` raises `ValueError`.
+
+```python
+Query("activities.Activity").annotate(c=Cast("capacity", str)).filter(c__startswith="1")
+Query("clubs.Member").annotate(day=Cast("joined", datetime.date))
+Query("billing.Invoice").annotate(amount=Cast("total", Decimal, max_digits=6, decimal_places=0))
+```
+
+#### `adorm.Collate(expression, collation)`
+
+The value with the collation `collation` (SQL `COLLATE`), to order and compare by other rules than the column's.
+`collation` is a name of letters, digits, `_` and `-`, else `ValueError`; it must exist in the database.
+
+```python
+Query("clubs.Member").order_by(Collate("last_name", "C"))
+```
+
+#### `adorm.Greatest(*expressions)`
+
+#### `adorm.Least(*expressions)`
+
+The largest and the smallest of two or more arguments. On PostgreSQL a NULL argument is ignored (the result is NULL
+only when all are); on SQLite, MySQL and Oracle a NULL argument makes the result NULL.
+
+```python
+Query("billing.Invoice").annotate(last_change=Greatest("issued", "due"))
+```
+
+#### `adorm.NullIf(expression1, expression2)`
+
+NULL when the two arguments are equal, else the first one.
+
+```python
+Query("billing.Invoice").annotate(charged=NullIf("total", Value(Decimal(0))))
+```
+
+### JSON
+
+#### `adorm.JSONArray(*expressions)`
+
+A JSON array of the arguments' values, a `list` in Python.
+
+#### `adorm.JSONObject(**fields)`
+
+A JSON object with a key for each keyword argument, a `dict` in Python. The values are expressions; a string is a
+field path. A value without a JSON type is converted by the database: a date becomes an ISO 8601 string.
+
+```python
+Query("clubs.Member").annotate(card=JSONObject(name="first_name", born="birth_date"))
+Query("clubs.Member").annotate(pair=JSONArray("first_name", "last_name"))
+```
+
+### Date and time components
+
+#### `adorm.Extract(expression, lookup_name, output_type=None)`
+
+A component of a date, a time, a date and time or (on PostgreSQL) a duration, as an `int`. `lookup_name` is one of:
+
+| `lookup_name` | Component |
+|---|---|
+| `"year"` | the year |
+| `"iso_year"` | the ISO 8601 week-numbering year |
+| `"quarter"` | the quarter, 1 to 4 |
+| `"month"` | the month, 1 to 12 |
+| `"week"` | the ISO 8601 week number, 1 to 53 |
+| `"day"` | the day of the month |
+| `"week_day"` | the day of the week, 1 (Sunday) to 7 (Saturday) |
+| `"iso_week_day"` | the ISO day of the week, 1 (Monday) to 7 (Sunday) |
+| `"hour"`, `"minute"`, `"second"` | the time component |
+
+Any other name raises `ValueError`. A date and time is taken in the current time zone of the driver's ORM (Django's
+`TIME_ZONE` with `USE_TZ`). A time component of a date (`ExtractHour` of a `DateField`) raises `DatabaseError` when the
+query runs. The subclasses fix the name:
+
+#### `adorm.ExtractYear(expression, output_type=None)`
+
+#### `adorm.ExtractIsoYear(expression, output_type=None)`
+
+#### `adorm.ExtractQuarter(expression, output_type=None)`
+
+#### `adorm.ExtractMonth(expression, output_type=None)`
+
+#### `adorm.ExtractWeek(expression, output_type=None)`
+
+#### `adorm.ExtractDay(expression, output_type=None)`
+
+#### `adorm.ExtractWeekDay(expression, output_type=None)`
+
+#### `adorm.ExtractIsoWeekDay(expression, output_type=None)`
+
+#### `adorm.ExtractHour(expression, output_type=None)`
+
+#### `adorm.ExtractMinute(expression, output_type=None)`
+
+#### `adorm.ExtractSecond(expression, output_type=None)`
+
+```python
+Query("clubs.Member").annotate(y=ExtractYear("birth_date")).filter(y__gte=2000)
+Query("clubs.Member").annotate(age=ExtractYear("joined") - ExtractYear("birth_date"))
+```
+
+`ExtractYear("d")` and `Extract("d", "year")` are different nodes with different construct names
+(`function.ExtractYear`, `function.Extract`).
+
+### Math
+
+A math function of NULL is NULL. A value outside a function's domain (`Sqrt` of a negative number, `Ln` of 0)
+raises a database error.
+
+#### `adorm.Abs(expression)`
+
+The absolute value, of the argument's type.
+
+#### `adorm.Ceil(expression)`
+
+#### `adorm.Floor(expression)`
+
+The smallest integer not less than, and the largest integer not greater than, the value; of the argument's type.
+
+#### `adorm.Round(expression, precision=0, output_type=None)`
+
+The value rounded to `precision` decimal places, of the argument's type; a negative precision rounds to tens,
+hundreds … (not on SQLite, where the query raises `DatabaseError` when it runs).
+
+#### `adorm.Sign(expression)`
+
+-1, 0 or 1, of the argument's type.
+
+#### `adorm.ACos(expression)`
+
+#### `adorm.ASin(expression)`
+
+#### `adorm.ATan(expression)`
+
+#### `adorm.ATan2(expression1, expression2)`
+
+#### `adorm.Cos(expression)`
+
+#### `adorm.Cot(expression)`
+
+#### `adorm.Sin(expression)`
+
+#### `adorm.Tan(expression)`
+
+Trigonometric functions of angles in radians; `ATan2(y, x)` is the arctangent of `y / x` in the quadrant of the
+point `(x, y)`.
+
+#### `adorm.Degrees(expression)`
+
+#### `adorm.Radians(expression)`
+
+Radians converted to degrees, and degrees to radians.
+
+#### `adorm.Exp(expression)`
+
+#### `adorm.Ln(expression)`
+
+#### `adorm.Log(expression1, expression2)`
+
+*e* raised to the value, the natural logarithm, and the logarithm of `expression2` to the base `expression1`.
+
+#### `adorm.Mod(expression1, expression2)`
+
+#### `adorm.Power(expression1, expression2)`
+
+#### `adorm.Sqrt(expression)`
+
+The remainder of `expression1 / expression2`, `expression1` raised to `expression2`, and the square root. These and
+the trigonometric and logarithmic functions return a `float`, or a `Decimal` when an argument is a `Decimal`.
+
+#### `adorm.Pi()`
+
+The number π, a `float`.
+
+#### `adorm.Random()`
+
+A random `float` from 0 (included) to 1 (excluded), a new one for each row. `order_by(Random())` shuffles the rows.
+
+```python
+Query("activities.Activity").filter(capacity__lt=10).update(capacity=Round(Power("capacity", 2)))
+Query("billing.Invoice").annotate(rounded=Round("total", 1)).order_by(Abs(F("total") - 100))
+```
+
+### Text
+
+A text function of NULL is NULL. String arguments are field paths: a literal string is `Value("...")`.
+
+#### `adorm.Chr(expression)`
+
+The character with the Unicode code point the value gives, a `str`.
+
+#### `adorm.Ord(expression)`
+
+The Unicode code point of the first character, an `int`.
+
+#### `adorm.Left(expression, length, output_type=None)`
+
+#### `adorm.Right(expression, length, output_type=None)`
+
+The first and the last `length` characters. A literal `length` below 1 raises `ValueError`.
+
+#### `adorm.LPad(expression, length, fill_text=Value(" "), output_type=None)`
+
+#### `adorm.RPad(expression, length, fill_text=Value(" "), output_type=None)`
+
+The string padded on the left or on the right with `fill_text`, repeated, to `length` characters; a longer string is
+cut to `length`. A literal negative `length` raises `ValueError`.
+
+#### `adorm.LTrim(expression)`
+
+#### `adorm.RTrim(expression)`
+
+#### `adorm.Trim(expression)`
+
+The string without leading, trailing, or leading and trailing spaces.
+
+#### `adorm.Repeat(expression, number, output_type=None)`
+
+The string repeated `number` times. A literal negative `number` raises `ValueError`.
+
+#### `adorm.Replace(expression, text, replacement=Value(""), output_type=None)`
+
+The string with every occurrence of `text` replaced by `replacement`, or removed; case sensitive.
+
+#### `adorm.Reverse(expression)`
+
+The characters in reverse order.
+
+#### `adorm.StrIndex(string, substring)`
+
+The position (from 1) of the first occurrence of `substring`, 0 when there is none, as an `int`; case sensitive.
+
+#### `adorm.Substr(expression, pos, length=None, output_type=None)`
+
+`length` characters from position `pos` (from 1), or the rest of the string without `length`. A literal `pos` below
+1 raises `ValueError`.
+
+```python
+Query("clubs.Member").filter(first_name="Ana").update(last_name=LPad(Left("last_name", 1), 3, Value("*")))
+Query("clubs.Member").annotate(at=StrIndex("email", Value("@"))).filter(at__gt=0)
+Query("clubs.Member").annotate(initials=Concat(Substr("first_name", 1, 1), Substr("last_name", 1, 1)))
+```
+
+#### `adorm.MD5(expression)`
+
+#### `adorm.SHA1(expression)`
+
+#### `adorm.SHA224(expression)`
+
+#### `adorm.SHA256(expression)`
+
+#### `adorm.SHA384(expression)`
+
+#### `adorm.SHA512(expression)`
+
+The hash of the string's UTF-8 bytes in lower-case hexadecimal, a `str`. On PostgreSQL the SHA functions call
+`DIGEST()` of the `pgcrypto` extension, which the database must have (`CREATE EXTENSION pgcrypto`); without it the
+query raises `ProgrammingError`.
+
+### UUIDs
+
+#### `adorm.UUID4()`
+
+A random version 4 UUID, a new one for each row, as a `uuid.UUID`.
+
+#### `adorm.UUID7(shift=None)`
+
+A version 7 (time-ordered) UUID, a new one for each row, as a `uuid.UUID`. `shift` (a `timedelta` or an expression
+of a duration) moves its timestamp.
+
+The Django-translating drivers have both with Django 6.0 or later. With an older Django they are not among the
+driver's [capabilities](/topics/drivers#capabilities): a query that uses them raises `NotSupportedError` before it
+runs. `UUID7` needs PostgreSQL 18, or SQLite with Python 3.14 (without `shift`); on an older PostgreSQL the query
+raises `NotSupportedError`.
+
+```python
+Query("library.Note").update(code=UUID4())
+```
 
 ## Aggregates
 

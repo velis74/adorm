@@ -1,5 +1,6 @@
 import copy
 import datetime
+import decimal
 import pickle
 
 import pytest
@@ -178,7 +179,7 @@ def test_f_path():
     assert repr(OuterRef("pk")) == "OuterRef('pk')"
 
 
-@pytest.mark.parametrize("name", ["", "a__", "__a", "a____b", "a b", "a-b", "1a", "a__1"])
+@pytest.mark.parametrize("name", ["", "a__", "__a", "a____b", "a b", "a-b", "1a", "1__a", "a__-1"])
 def test_invalid_field_paths(name):
     with pytest.raises(ValueError, match="not a field path"):
         F(name)
@@ -624,3 +625,38 @@ def test_node_repr_default():
     assert repr(Thing(1)) == "Thing(x=1)"
     assert Thing(1) == Thing(1)
     assert Thing(1) != 1
+
+
+@pytest.mark.parametrize(
+    ("build", "error", "message"),
+    [
+        (lambda: adorm.Cast("a", int, max_length=3), TypeError, "max_length is for a cast to str"),
+        (lambda: adorm.Cast("a", decimal.Decimal, max_digits=3), TypeError, "given together"),
+        (lambda: adorm.Cast("a", float, max_digits=3, decimal_places=1), TypeError, "for a cast to Decimal"),
+        (lambda: adorm.Cast("a", decimal.Decimal, max_digits=3, decimal_places=4), ValueError, "cannot exceed"),
+        (lambda: adorm.Cast("a", str, max_length=-1), ValueError, "non-negative"),
+        (lambda: adorm.UUID7(1, 2, 3), TypeError, "positional"),
+        (lambda: adorm.Repeat("a", -1), ValueError, "'number'"),
+        (lambda: adorm.Left("a", 0), ValueError, "'length'"),
+    ],
+)
+def test_function_argument_errors(build, error, message):
+    with pytest.raises(error, match=message):
+        build()
+
+
+def test_function_reprs_name_their_own_arguments():
+    assert repr(adorm.Cast("a", str, max_length=3)) == "Cast(F('a'), str, max_length=3)"
+    assert repr(adorm.ExtractYear("a")) == "ExtractYear(F('a'))"
+    assert repr(adorm.JSONObject(k="a")) == "JSONObject(k=F('a'))"
+    assert repr(adorm.Collate("a", "C")) == "Collate(F('a'), collation='C')"
+    assert adorm.LPad("a", 3).expressions[2] == Value(" ")
+    assert adorm.Replace("a", Value("x")).expressions[2] == Value("")
+
+
+def test_fixed_extracts_take_their_output_type_positionally_and_the_expression_by_keyword():
+    assert adorm.ExtractYear("d", float) == adorm.ExtractYear(expression="d", output_type=float)
+    assert adorm.ExtractYear("d", float).output_type is float
+    assert adorm.ExtractYear("d", float).lookup_name == "year"
+    with pytest.raises(TypeError):
+        adorm.ExtractYear("d", float, "x")

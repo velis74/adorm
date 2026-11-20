@@ -159,6 +159,11 @@ result:
 - `Value(0.1) + Value(0.2)` is `numeric` `0.3` with client-side binding and `float8` `0.30000000000000004` with
   server-side binding.
 
+The time zone name of a date or time function (`AT TIME ZONE`) and the precision of `DATE_TRUNC` are string literals
+in the statement, as under client-side binding. As parameters, each copy of one expression would get its own `$n`, and
+PostgreSQL would refuse `DISTINCT ON (EXTRACT(YEAR FROM "joined" AT TIME ZONE $1)) … ORDER BY EXTRACT(YEAR FROM
+"joined" AT TIME ZONE $2)` because the two expressions differ.
+
 Naive datetimes: psycopg sends one as `timestamp`, which the server converts to `timestamptz` in the session's time
 zone; asyncpg's `timestamptz` encoder reads it as UTC. With the cast to `timestamp` the session's time zone applies,
 as under psycopg.

@@ -273,6 +273,23 @@ await Member.objects.bulk_create(members, update_conflicts=True, update_fields=[
 
 Under `ignore_conflicts` the database reports no primary keys, so the instances keep `None` for a generated one.
 
+## Reloading
+
+`await instance.refresh_from_db()` reloads the instance's fields from its row, on the instance's executor and in its
+session's open transaction, as `save()` writes. Values assigned since the load are replaced. Without `fields` it
+reloads the fields loaded now and deferred fields stay deferred; `fields` names the fields to reload, deferred ones
+included. A row that is gone raises the model's `DoesNotExist`.
+
+```python
+member = await Member.objects.only("name").get(pk=1)
+await member.refresh_from_db()                       # reloads name; fee and active stay deferred
+await member.refresh_from_db(fields=["fee"])         # loads fee as well
+```
+
+Cached relations are cleared as in Django: a foreign key's related instance when its column is reloaded, the reverse
+one-to-one instances and prefetched rows on a reload without `fields` or when `fields` names the relation. See
+[`refresh_from_db()`](/ref/models#refresh-from-db-fields-none) in the Model API.
+
 ## Validating
 
 Pydantic validates the values given to the constructor. `await instance.full_clean()` validates the instance as the

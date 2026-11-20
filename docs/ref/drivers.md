@@ -353,6 +353,7 @@ A runtime-checkable protocol for the connection profile a connection is opened f
 | `connect` | `None`, or a callable that opens the target's connection in place of the driver's default: `connect(profile)` returns the target's connection. A threaded driver calls it in `connect_sync()` on the connection's thread; an async driver awaits its result in `open_connection()` |
 | `on_acquire`, `on_release` | optional; when present and not `None`, [hooks](/topics/profiles#hooks) the pool calls as `hook(connection, profile, session)` with the connection's [`target`](#adorm-drivers-driverconnection) |
 | `options` | optional; when present and not `None`, the profile's database [connection options](/ref/options), which the pool reads |
+| `covered_receivers` | optional; the dotted paths of Django signal receivers the [native PostgreSQL driver](/topics/postgresql-driver#signal-receivers) writes despite |
 
 ### `adorm.drivers.is_connection_error(exc)`
 
@@ -906,13 +907,13 @@ The [`Vendor`](#adorm-drivers-django-vendors-vendor-name-features-none) of Djang
 ### `adorm.drivers.django.CAPABILITIES`
 
 The [`Capabilities`](#adorm-drivers-capabilities) of `DjangoDriver` on PostgreSQL, with psycopg 3. The constructs
-are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` on array and JSON fields); the
-other databases have the [capabilities of their vendor](#adorm-drivers-django-vendors).
+are those Django's PostgreSQL backend supports (`clause.distinct_on`, `contains` and `contained_by` on array and JSON
+fields); the other databases have the [capabilities of their vendor](#adorm-drivers-django-vendors).
 
 | Field | Value |
 |---|---|
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean`, `check_table` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`, `has_key`, `has_keys`, `has_any_keys`, `contained_by`; `transform.<name>` for `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, `date`, `time`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `role` |
 | `custom_options` | `True` |
@@ -1166,8 +1167,9 @@ table and column of `ORA-01400`. Untested.
 `BEGIN IMMEDIATE` on, which keeps other writers off the rows `select_for_update()` reads; Django sends no
 `FOR UPDATE`), the [`POSTGRESQL_ONLY`](#adorm-drivers-django-vendors-postgresql-only)
 constructs, `clause.combinator.slice` (Django refuses a sliced query in a set operation), `lookup.contains`,
-`lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII letters), connection options and
-backend events. It has `clause.on_conflict.ignore` and `.update`, the set operations, savepoints and cancellation.
+`lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII letters), `lookup.contained_by`
+(Django has no JSON containment on SQLite), connection options and backend events. It has `clause.on_conflict.ignore`
+and `.update`, the set operations, savepoints and cancellation.
 
 #### `adorm.drivers.django.vendors.MYSQL_CAPABILITIES`
 
@@ -1178,8 +1180,9 @@ name does not tell MariaDB apart without connecting), `clause.select_for_update.
 
 #### `adorm.drivers.django.vendors.ORACLE_CAPABILITIES`
 
-`CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `clause.select_for_update.no_key`, `clause.on_conflict.ignore`,
-`clause.on_conflict.update`, connection options and backend events.
+`CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `lookup.contained_by` (Django has no JSON containment on
+Oracle), `clause.select_for_update.no_key`, `clause.on_conflict.ignore`, `clause.on_conflict.update`, connection
+options and backend events.
 
 #### `adorm.drivers.django.vendors.POSTGRESQL_ONLY`
 
@@ -1222,10 +1225,11 @@ connecting. Raises `ImportError` or `ImproperlyConfigured` for a backend that do
 #### `adorm.drivers.django.vendors.features_capabilities(features)`
 
 The capabilities of a backend without a vendor of its own, from its `DatabaseFeatures` class: `CAPABILITIES` without
-connection options, backend events, cancellation and the `POSTGRESQL_ONLY` constructs; a row lock, `ON CONFLICT` and
-set operation only when its flag (`has_select_for_update`, `has_select_for_update_nowait`, …,
+connection options, backend events, cancellation and the `POSTGRESQL_ONLY` constructs; a row lock, `ON CONFLICT`, set
+operation and `lookup.contained_by` only when its flag (`has_select_for_update`, `has_select_for_update_nowait`, …,
 `supports_ignore_conflicts`, `supports_update_conflicts_with_target`, `supports_select_union`, …,
-`supports_slicing_ordering_in_compound` for `clause.combinator.slice`) is `True` on the class; savepoints
+`supports_slicing_ordering_in_compound` for `clause.combinator.slice`, `supports_json_field_contains` for
+`lookup.contained_by`) is `True` on the class; savepoints
 when `uses_savepoints` is. A flag the backend computes per connection (a property) counts as `False`.
 
 ```python
@@ -1267,8 +1271,9 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   grouping names and `annotate()` of the annotations with one, as Django groups `values().annotate()`.
 - Each of `Query.filters` is one Django `filter()` call, so a multi-valued relation is joined once per filter, as
   in Django.
-- Field paths go through [`orm_path()`](#adorm-drivers-django-translation-orm-path-model-path-annotations); a model
-  instance as a value stands for its primary key, or, compared with a foreign key whose `to_field` is another field,
+- Field paths go through
+  [`orm_path()`](#adorm-drivers-django-translation-orm-path-model-path-annotations-lookup-none-implicit-false); a
+  model instance as a value stands for its primary key, or, compared with a foreign key whose `to_field` is another field,
   for that field's value; a `Value` with `output_type` gets
   [`output_field(output_type)`](#adorm-drivers-django-translation-output-field-output-type); a query in an `in`
   lookup becomes a Django query set ([`subquery()`](#adorm-drivers-django-translation-subquery-query)).
@@ -1322,12 +1327,15 @@ keys up to [`SELECT_RELATED_DEPTH`](#adorm-drivers-django-translation-select-rel
 `values()` / `values_list()` row is keyed by the selected names, as written; without names by the model's fields
 and the annotations. A model without a registered adorm model has its Django fields by attname.
 
-### `adorm.drivers.django.translation.orm_path(model, path, annotations=())`
+### `adorm.drivers.django.translation.orm_path(model, path, annotations=(), lookup=None, *, implicit=False)`
 
 Returns Django's query path for the adorm field path `path` on the Django model `model`. Each segment is renamed
 with the `orm_names` of the adorm model registered for the Django model that segment is on; a reverse relation's
 accessor name becomes its query name. A path whose first segment is in `annotations` is returned unchanged; a
-segment Django does not know is kept for Django to report.
+segment Django does not know is kept for Django to report. Segments after a scalar field are transforms; one that is
+no registered transform applying there raises `FieldError`, as does a `lookup` class whose `applies_to()` refuses the
+field. `implicit` tells that the key named no lookup (`joined__yeer`): the message then calls an unknown last
+transform name a lookup.
 
 ```python
 orm_path(Note, "copy___title")          # "copy__title"
@@ -1706,7 +1714,8 @@ Django's, built with the model's constructor or `Model.from_db()`.
 | `bulk_create_instances(model, objs, *, batch_size=None, ignore_conflicts=False, update_conflicts=False, update_fields=None, unique_fields=None)` | `QuerySet.bulk_create()` of the installed Django version: the instances with a primary key (one a field default generates is set first) and those without inserted separately, in batches of at most `batch_size` rows and at most `MAX_QUERY_PARAMS // columns` rows, `RETURNING` the fields the database sets (not under `ignore_conflicts`); `ON CONFLICT DO NOTHING` or `DO UPDATE`; more than one statement in `atomic(savepoint=False)`; on Django 6 the `_order` of a model with `order_with_respect_to` numbered first |
 | `create_from_parent(operation)` | `save_base(raw=True)` of a multi-table inheritance child: the parent's row read with `get()`, the child's table inserted as `Model.save()` inserts it |
 | `full_clean(operation)` | `Model.full_clean()`, run as Python on the event loop with [`DjangoCompiler.replay()`](#adorm-drivers-asyncpg-compiler-djangocompiler-alias-default-server-version-params-none): each statement the validation runs is awaited, then the validation runs again with its rows, so the model's `clean()` and overrides run as on the Django driver, once per statement plus once |
-| `save_instance(instance, *, force_insert=False, force_update=False, update_fields=None)` | `Model.save()`: parents' tables first, an `UPDATE` then an `INSERT` per table, `RETURNING` the primary key and the values the database sets |
+| `save_instance(instance, *, force_insert=False, force_update=False, update_fields=None)` | `Model.save()`: parents' tables first, an `UPDATE` then an `INSERT` per table, `RETURNING` the primary key and the values the database sets; `require_no_receivers()` for `pre_save` and `post_save` of the instance's model first |
+| `require_no_receivers(model, sent)` | raises `NotSupportedError` naming each live receiver of the signals `sent` (pairs of a name and a Django signal) for `model` that the profile's `covered_receivers` does not list; nothing for an auto-created model |
 | `create_instance(model, values)` | `QuerySet.create()` |
 | `update_queryset(queryset, values)`, `execute_update(query)` | `QuerySet.update()`, the update compiler; an update of multi-table inheritance parent fields selects the keys, then updates each table |
 | `delete_queryset(queryset)` | `QuerySet.delete()` with the [`Collector`](#adorm-drivers-asyncpg-writes-collector-writer) |
@@ -1718,8 +1727,10 @@ Django's, built with the model's constructor or `Model.from_db()`.
 
 A write whose model, manager or query set overrides the Django method it would call (`save()`, `save_base()`,
 `delete()`, `create()`, `bulk_create()`, `update()`, `get_or_create()`, `update_or_create()`, `get()`,
-`select_for_update()`), and a delete that reaches an `on_delete` handler other than Django's own, raise
-`NotSupportedError` before any statement changes data. A cancellation inside a transaction opened by `atomic()` makes
+`select_for_update()`), a delete that reaches an `on_delete` handler other than Django's own, and a write whose
+Django signals have a receiver the profile does not cover
+([signal receivers](/topics/postgresql-driver#signal-receivers)) raise `NotSupportedError` before any statement
+changes data. A cancellation inside a transaction opened by `atomic()` makes
 the connection unusable; the slot closes it and the server rolls the transaction back.
 
 ```python
@@ -1733,7 +1744,9 @@ total, counts = await writer.delete_queryset(dj.Author.objects.filter(slug="ann"
 
 Django's deletion `Collector` on a `Writer`: `collect_queryset(queryset)` and `collect(model, keys)` collect the rows
 a delete removes, the rows its `on_delete` handlers update and the references that refuse it, by primary key;
-`delete()` then runs the deletes and updates and returns `(total, {label: count})`. It sends no signals and runs only
+`delete()` then runs the deletes and updates and returns `(total, {label: count})`. It sends no signals: `delete()`
+first raises `NotSupportedError` when a model it collected rows of has a `pre_delete` or `post_delete` receiver the
+profile does not cover, and a model with any such receiver is never fast-deleted, as in Django. It runs only
 Django's own handlers (`CASCADE`, `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT`, `SET()`, `DO_NOTHING` and the
 `DB_*` handlers, which the database applies); another handler raises `NotSupportedError` before anything is deleted.
 `ProtectedError` and `RestrictedError` carry the referencing rows as Django instances. Its statements stay within
@@ -1743,6 +1756,16 @@ Django's own handlers (`CASCADE`, `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAUL
 collector = Collector(Writer(connection))
 await collector.collect_queryset(dj.Author.objects.filter(slug="ann"))
 total, counts = await collector.delete()
+```
+
+### `adorm.drivers.asyncpg.writes.receiver_path(receiver)`
+
+The dotted path that names a Django signal receiver in a refusal and in a profile's `covered_receivers`:
+`module.qualname`; a bound method is named by its class, a callable instance by its class.
+
+```python
+receiver_path(index_reader)          # 'library.signals.index_reader'
+receiver_path(Indexer().on_saved)    # 'library.signals.Indexer.on_saved'
 ```
 
 ### `adorm.drivers.asyncpg.writes.WRITES`
@@ -2148,6 +2171,8 @@ One instance can be shared by threads and tasks.
 - `params` replace keys of the entry for this compiler, as a connection profile's `params` do; the resulting entry is
   the attribute `settings_dict`.
 - Parameters are bound for the entry's `OPTIONS["server_side_binding"]` (attribute `server_side_binding`).
+- The time zone name of a date or time function (`AT TIME ZONE`) and the precision of `DATE_TRUNC` compile as string
+  literals, not parameters, so that two copies of one expression (`DISTINCT ON` and `ORDER BY`) have the same SQL.
 - The wrapper's `features.max_query_params` is [`MAX_QUERY_PARAMS`](#adorm-drivers-asyncpg-compiler-max-query-params):
   on Django 6 `compiler.connection.ops.bulk_batch_size(fields, objs)` returns batch sizes asyncpg accepts; Django
   5.2's PostgreSQL backend does not read it.

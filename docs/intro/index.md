@@ -115,7 +115,8 @@ The following directions shape the current design but are not implemented yet.
 - adorm has no primitive that runs an arbitrary synchronous function. The application awaits a query or an
   operation; the driver decides how it runs.
 - adorm has no signals (`pre_save`, `post_save`, …). Signals of the target ORM fire inside the driver and are
-  not visible to adorm's client.
+  not visible to adorm's client. The native PostgreSQL driver sends none and refuses a write whose signals have
+  receivers the profile does not list as covered.
 - adorm has no migrations. With the Django driver the schema belongs to Django's migrations (`manage.py migrate`);
   the native PostgreSQL driver assumes the tables exist. adorm checks the schema instead: the schema hash when a model
   is used, and the tables and columns on `adorm.check_schema()`, `adorm check-schema` or a pool's start-up check

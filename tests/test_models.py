@@ -16,6 +16,7 @@ from pydantic import Field, ValidationError
 
 from adorm import (
     ForeignKey,
+    GenericForeignKey,
     InterfaceError,
     ManyToMany,
     Model,
@@ -1085,3 +1086,63 @@ async def test_saved_operation_encodes_with_the_registry():
 def test_validating_an_instance_returns_it():
     member = Member(name="Ana")
     assert Member.model_validate(member) is member
+
+
+# refresh_from_db()
+
+
+class Tagged(Model):
+    _meta = ModelMeta("modeltest.Tagged")
+    id: int | None = None
+    label: str = ""
+    target_type_id: int | None = None
+    target_id: int | None = None
+    target = GenericForeignKey("target_type", "target_id")
+
+
+async def test_refresh_from_db_without_a_primary_key_raises_without_an_operation():
+    recorder = Recorder()
+    club = Club(name="Unsaved")
+    club._state.executor = recorder
+    with pytest.raises(Club.DoesNotExist, match="Club matching query does not exist"):
+        await club.refresh_from_db()
+    assert recorder.operations == []
+    assert club.name == "Unsaved"
+
+
+async def test_refresh_from_db_reads_the_base_query_and_limits_it_only_for_deferred_or_named_fields():
+    recorder = Recorder(member_row(name="Bea"), member_row(name="Cene"), {"id": 1, "club_id": 8})
+    member = Member.from_row(member_row(), executor=recorder)
+    await member.refresh_from_db()
+    full = recorder.operations[0]
+    assert isinstance(full, Get)
+    assert (full.query.manager, full.query.only_fields) == (None, None)
+    assert member.name == "Bea"
+    del member.__dict__["fee"]
+    await member.refresh_from_db()
+    assert "fee" not in recorder.operations[1].query.only_fields
+    assert member.get_deferred_fields() == {"fee"}
+    await member.refresh_from_db(fields=["club", "pk"])
+    assert recorder.operations[2].query.only_fields == ("club_id", "id")
+    assert (member.name, member.club_id) == ("Cene", 8)
+
+
+async def test_refresh_from_db_clears_a_generic_foreign_key_and_its_pending_assignment():
+    row = {"id": 1, "label": "x", "target_type_id": 3, "target_id": 4}
+    recorder = Recorder(row, row, row, row)
+    tagged = Tagged.from_row(row, executor=recorder)
+    club = Club.from_row({"id": 4})
+    Tagged.target.cache(tagged, club)
+    await tagged.refresh_from_db(fields=["label"])
+    assert Tagged.target.cached(tagged) is club
+    await tagged.refresh_from_db()
+    assert "target" not in tagged._state.related
+    Tagged.target.cache(tagged, club)
+    await tagged.refresh_from_db(fields=["target"])
+    assert recorder.operations[-1].query.only_fields == ("target_type_id", "target_id")
+    assert "target" not in tagged._state.related
+    tagged.target = Member.from_row(member_row(id=4))
+    assert "target_type_id" not in tagged.__dict__
+    await tagged.refresh_from_db()
+    assert tagged._state.generic == {}
+    assert tagged.target_type_id == 3, "a content type a pending assignment left unset is reloaded"

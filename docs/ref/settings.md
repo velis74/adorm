@@ -58,7 +58,7 @@ adorm.configure(
 ### `adorm.ConnectionProfile`
 
 `ConnectionProfile(name, driver, alias="default", params={}, connect=None, on_acquire=None, on_release=None,
-pool=None, options={}, content_types_key=None)`
+pool=None, options={}, content_types_key=None, covered_receivers=())`
 
 A named connection profile, frozen. It satisfies the driver contract's
 [`Profile`](/ref/drivers#adorm-drivers-profile) protocol.
@@ -74,6 +74,7 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool; its return value is ignored |
 | `content_types_key` | `None`, or a plain function `content_types_key(profile, session)` returning a hashable value; [content type](/ref/models) lookups of the profile share a cache only when it returns equal values. It runs in the context of the lookup, so it can read a context variable (the current tenant). An unhashable value raises `TypeError` in the lookup |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
+| `covered_receivers` | the Django signal receivers whose work the application does on the adorm side, by dotted path (`module.qualname`; a bound method by its class, `module.Class.method`; [`receiver_path()`](/ref/drivers#adorm-drivers-asyncpg-writes-receiver-path-receiver)); the [native PostgreSQL driver](/topics/postgresql-driver#signal-receivers) writes despite them, other drivers ignore the setting. Stored as a tuple without duplicates. A string instead of a list or a non-string entry raises `TypeError`, an entry without a module (no dot, an empty part) `ValueError` |
 | `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
 
 `connection` is the target's connection ([`DriverConnection.target`](/ref/drivers#adorm-drivers-driverconnection)).

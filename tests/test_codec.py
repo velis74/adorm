@@ -34,7 +34,7 @@ from adorm.query import (
     F,
     ForUpdate,
     Func,
-    IsNull,
+    IExact,
     Length,
     Lookup,
     Lower,
@@ -347,8 +347,8 @@ def test_lookups_are_typed_by_the_queried_model():
 
 
 def test_a_path_past_a_scalar_field_is_refused():
-    with pytest.raises(FieldError, match=r"club\.Member\.joined is neither a relation nor a JSON field; 'date'"):
-        MEMBERS.filter(joined__date__gte=1).to_dict(SCHEMA)
+    with pytest.raises(FieldError, match=r"unsupported transform 'date' for club\.Member\.name"):
+        MEMBERS.filter(name__date__gte=1).to_dict(SCHEMA)
 
 
 @pytest.mark.parametrize(
@@ -384,6 +384,18 @@ def test_a_path_past_a_scalar_field_is_refused():
         (Q(status__icontains="act"), {"value": "act"}),
         (Q(name__endswith="n"), {"value": "n"}),
         (Q(club__address__name="x"), {"type": "str", "value": "x"}),
+        (Q(joined__year=2026), {"value": 2026}),
+        (Q(joined__year__in=[2025, "2026"]), {"items": [{"value": 2025}, {"value": 2026}]}),
+        (Q(joined__date=datetime.date(2026, 1, 2)), {"value": "2026-01-02"}),
+        (Q(joined__date__year__gte="2026"), {"value": 2026}),
+        (Q(joined__time__lt=datetime.time(7)), {"value": "07:00:00"}),
+        (Q(club__founded__month__range=(1, 3)), {"items": [{"value": 1}, {"value": 3}]}),
+        (Q(joined__hour__isnull=True), {"value": True}),
+        (Q(tags__0="a"), {"type": "str", "value": "a"}),
+        (Q(club__address__has_key="city"), {"value": "city"}),
+        (Q(club__address__has_keys=["city", "street"]), {"items": [{"value": "city"}, {"value": "street"}]}),
+        (Q(club__address__has_any_keys=("city",)), {"items": [{"value": "city"}]}),
+        (Q(tags__contained_by=["a"]), {"value": ["a"]}),
     ],
 )
 def test_lookup_values(condition, rhs):
@@ -610,9 +622,12 @@ def test_nodes_with_non_json_attributes_are_refused():
         Weird("a", factor=1.5).to_dict()
 
 
-def test_isnull_from_none_round_trips():
-    q = MEMBERS.filter(club=None)
-    assert q.where.children == (IsNull("club", True),)
+@pytest.mark.parametrize(
+    ("q", "node"),
+    [(MEMBERS.filter(club=None), Exact("club", None)), (MEMBERS.filter(name__iexact=None), IExact("name", None))],
+)
+def test_a_lookup_from_none_round_trips(q, node):
+    assert q.where.children == (node,)
     assert Query.from_dict(roundtrip(q.to_dict(SCHEMA)), SCHEMA) == q
 
 
@@ -819,6 +834,30 @@ def test_subquery_is_typed_by_the_field_it_selects():
     assert data["filters"][0]["children"][0]["rhs"] == {"value": "2026-01-01T00:00:00"}
 
 
+def test_function_types_follow_their_output_from():
+    from adorm.query import Abs, Greatest, NullIf, Power, Round, Sqrt
+
+    query = MEMBERS.annotate(
+        a=Abs("fee"), r=Round("age", 1), s=Sqrt("age"), p=Power("fee", 2), g=Greatest("joined", Value(None))
+    ).filter(a="1.5", r=3, s=2, p="4", g="2026-01-01T00:00:00", fee=NullIf("fee", Value("0")))
+    data = query.to_dict(SCHEMA)
+    rhs = {c["lhs"]["name"]: c["rhs"] for c in data["filters"][0]["children"]}
+    assert rhs["a"] == {"value": "1.5"}
+    assert rhs["r"] == {"value": 3}
+    assert rhs["s"] == {"value": 2.0}
+    assert rhs["p"] == {"value": "4"}
+    assert rhs["g"] == {"value": "2026-01-01T00:00:00"}
+    assert rhs["fee"]["expressions"][1]["value"] == {"value": "0"}
+    assert Query.from_dict(roundtrip(data), SCHEMA).to_dict(SCHEMA) == data
+
+
+def test_function_arguments_keep_their_inferred_types_outside_argument_typed_functions():
+    from adorm.query import Left
+
+    data = MEMBERS.filter(name=Left("name", 2)).to_dict(SCHEMA)
+    assert data["filters"][0]["children"][0]["rhs"]["expressions"][1]["value"] == {"type": "int", "value": 2}
+
+
 # structure of decoded nodes
 
 F_A = {"node": "F", "name": "a"}
@@ -908,6 +947,45 @@ ORDER = {"node": "OrderBy", "expression": F_A, "descending": False, "nulls_first
                 "output_type": None,
             },
             "cannot contain an aggregate",
+        ),
+        ({"node": "Substr", "expressions": [F_A, V_1, V_1, V_1], "output_type": "str"}, "at most 3"),
+        ({"node": "Extract", "expressions": [F_A], "lookup_name": "decade", "output_type": "int"}, "lookup name"),
+        ({"node": "ExtractYear", "expressions": [F_A], "lookup_name": "month", "output_type": "int"}, "extracts year"),
+        ({"node": "Collate", "expressions": [F_A], "collation": "a b", "output_type": None}, "collation"),
+        ({"node": "JSONObject", "keys": ["a"], "expressions": [], "output_type": "dict"}, "a string key for each"),
+        ({"node": "JSONObject", "keys": [1], "expressions": [F_A], "output_type": "dict"}, "a string key for each"),
+        (
+            {
+                "node": "Cast",
+                "expressions": [F_A],
+                "output_type": None,
+                "max_length": None,
+                "max_digits": None,
+                "decimal_places": None,
+            },
+            "needs an output type",
+        ),
+        (
+            {
+                "node": "Cast",
+                "expressions": [F_A],
+                "output_type": "int",
+                "max_length": 3,
+                "max_digits": None,
+                "decimal_places": None,
+            },
+            "max_length is for a cast to str",
+        ),
+        (
+            {
+                "node": "Cast",
+                "expressions": [F_A],
+                "output_type": "decimal",
+                "max_length": None,
+                "max_digits": 5,
+                "decimal_places": None,
+            },
+            "given together",
         ),
         ({"node": "F", "name": 5}, "a field path is a string"),
         ({"node": "ForUpdate", "nowait": "x", "skip_locked": False, "of": [], "no_key": False}, "bools"),

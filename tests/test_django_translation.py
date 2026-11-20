@@ -2,6 +2,7 @@
 database access in these tests)."""
 
 import contextvars
+import decimal
 import threading
 import uuid
 import zoneinfo
@@ -40,6 +41,7 @@ from adorm import (
 )
 from adorm.drivers.django import adopt_context_locals, map_django_error, model_row
 from adorm.drivers.django.translation import (
+    _Translator,
     aggregation,
     django_model,
     field_kwargs,
@@ -82,6 +84,9 @@ MENTOR_RATING = Query(AUTHOR).filter(pk=OuterRef("mentor")).values("rating")
         (dj.Tagging, "book_id", "book_id"),
         (dj.Author, "nothing__name", "nothing__name"),
         (dj.Book, "extra__a__b", "extra__a__b"),
+        (dj.Book, "published__date__year", "published__date__year"),
+        (dj.Edition, "released__month", "released__month"),
+        (dj.Book, "authors__born__iso_week_day", "authors__born__iso_week_day"),
     ],
 )
 def test_orm_paths_rename_each_segment_on_the_model_it_reaches(model, path, expected):
@@ -89,8 +94,8 @@ def test_orm_paths_rename_each_segment_on_the_model_it_reaches(model, path, expe
 
 
 @pytest.mark.parametrize("path", ["name__nothing", "name__lower", "pupils__name__year"])
-def test_orm_paths_refuse_segments_after_a_scalar_field(path):
-    with pytest.raises(FieldError, match=r"library\.Author\.name is neither a relation nor a JSON field") as caught:
+def test_orm_paths_refuse_a_segment_after_a_scalar_field_that_is_no_transform_of_it(path):
+    with pytest.raises(FieldError, match=r"unsupported transform '\w+' for library\.Author\.name") as caught:
         orm_path(dj.Author, path)
     assert caught.value.sqlstate is None
 
@@ -182,6 +187,23 @@ def test_conditions_become_django_q_objects():
     where = translate(query).queryset.query.where
     assert str(where).count("OR") == 1
     assert "NOT" in str(where)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        (Query("library.Book").filter(extra__a=None), "(AND: ('extra__a__exact', None))"),
+        (Query("library.Book").filter(extra__a__iexact=None), "(AND: ('extra__a__iexact', None))"),
+        (Query("library.Book").filter(extra=None), "(AND: ('extra__isnull', True))"),
+        (Query("library.Book").filter(weight=None), "(AND: ('weight__isnull', True))"),
+        (Query("library.Book").filter(weight__iexact=None), "(AND: ('weight__isnull', True))"),
+        (Query("library.Book").filter(edition=None), "(AND: ('edition__isnull', True))"),
+        (Query("library.Book").filter(Exact(Lower("schema_"), None)), "(AND: ('_adorm0__isnull', True))"),
+    ],
+)
+def test_none_matches_json_null_only_at_a_json_key(query, expected):
+    translator = _Translator(query)
+    assert str(translator.lookup(query.where.children[0])) == expected
 
 
 def test_each_filter_is_a_django_filter_call_of_its_own():
@@ -282,6 +304,69 @@ def test_truncations_become_djangos(node, django_class, kind):
     assert type(annotation).__name__ == django_class
     if kind is not None:
         assert annotation.kind == kind
+
+
+def test_casts_carry_their_field_options():
+    from adorm.query import Cast
+
+    query = Query("library.Book").annotate(
+        short=Cast("title", str, max_length=5),
+        text=Cast("pages", str),
+        amount=Cast("pages", decimal.Decimal, max_digits=6, decimal_places=1),
+    )
+    annotations = translate(query).queryset.query.annotations
+    assert (type(annotations["short"].output_field).__name__, annotations["short"].output_field.max_length) == (
+        "CharField",
+        5,
+    )
+    assert type(annotations["text"].output_field).__name__ == "TextField"
+    field = annotations["amount"].output_field
+    assert (type(field).__name__, field.max_digits, field.decimal_places) == ("DecimalField", 6, 1)
+    sql = str(translate(query).queryset.query)
+    assert "::varchar(5)" in sql
+    assert "::numeric(6, 1)" in sql
+
+
+def test_functions_with_their_own_arguments_translate():
+    from adorm.query import Collate, Extract, ExtractIsoYear, JSONObject
+
+    query = Query("library.Book").annotate(
+        c=Collate("title", "C"),
+        e=Extract("published", "week_day"),
+        y=ExtractIsoYear("published"),
+        j=JSONObject(t="title"),
+    )
+    annotations = translate(query).queryset.query.annotations
+    assert annotations["c"].collation == "C"
+    assert (type(annotations["e"]).__name__, annotations["e"].lookup_name) == ("Extract", "week_day")
+    assert type(annotations["y"]).__name__ == "ExtractIsoYear"
+    assert type(annotations["j"]).__name__ == "JSONObject"
+
+
+def test_a_function_output_type_becomes_its_output_field():
+    from django.db.models import FloatField
+
+    from adorm.query import Round
+
+    annotation = translate(Query("library.Book").annotate(r=Round("pages", output_type=float))).queryset.query
+    assert isinstance(annotation.annotations["r"].output_field, FloatField)
+
+
+def test_a_value_beside_a_field_of_another_type_needs_an_output_type():
+    from django.core.exceptions import FieldError
+    from django.db.models import DecimalField
+
+    from adorm.query import NullIf
+
+    mixed = translate(Query("library.Book").annotate(n=NullIf("price", Value(0)))).queryset.query.annotations["n"]
+    with pytest.raises(FieldError, match="mixed types"):
+        _ = mixed.output_field
+    for function in (
+        NullIf("price", Value(0, output_type=decimal.Decimal)),
+        NullIf("price", Value(0), output_type=decimal.Decimal),
+    ):
+        annotation = translate(Query("library.Book").annotate(n=function)).queryset.query.annotations["n"]
+        assert isinstance(annotation.output_field, DecimalField)
 
 
 def test_aggregates_carry_distinct_filter_default_and_output_type():

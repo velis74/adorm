@@ -80,15 +80,19 @@ CLAUSES: tuple[str, ...] = (
 `adorm.operations.BulkCreate`."""
 
 NESTED_PATH = "path.nested"
-"""The construct name of a field path with several segments (``club__name``): a relation or a transform. `F` reports
-it, and `Query` for its ``values()``, ``only()``, ``defer()`` and ``distinct()`` fields."""
+"""The construct name of a field path with several segments (``club__name``, ``joined__year``, ``address__street``): a
+relation, a transform or a key inside a JSON field. `F` reports it, and `Query` for its ``values()``, ``only()``,
+``defer()`` and ``distinct()`` fields. A transform the path applies is reported as ``transform.<name>`` too."""
 
 
 def construct_names() -> frozenset[str]:
     """Every construct name an operation can report: `CLAUSES`, ``aggregate.distinct`` and ``aggregate.filter``, and
-    `NESTED_PATH`, and the ``construct`` of every `Node` subclass defined so far (custom lookups and functions
-    included)."""
+    `NESTED_PATH`, the ``construct`` of every `Node` subclass defined so far (custom lookups and functions included)
+    and of every registered transform (``transform.<name>``)."""
+    from adorm.query.lookups import TRANSFORMS
+
     names = {*CLAUSES, NESTED_PATH, "aggregate.distinct", "aggregate.filter"}
+    names.update(cls.construct for cls in TRANSFORMS.values() if cls.construct)
     pending: list[type[Node]] = [Node]
     while pending:
         cls = pending.pop()
@@ -650,6 +654,9 @@ class Query(Node):
             yield "clause.select_related"
         if self.manager is not None:
             yield "clause.manager"
+        from adorm.query.lookups import transform_constructs
+
+        yield from sorted(transform_constructs(self))
 
     def _check_decoded(self) -> None:
         check_model_label(self.model)

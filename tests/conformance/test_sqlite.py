@@ -25,11 +25,14 @@ from adorm import (
     CancellationOutcome,
     ConnectionProfile,
     create_session,
+    DatabaseError,
     DataError,
     DeadlockError,
     IntegrityError,
     OperationalError,
+    Round,
     TransactionManagementError,
+    Value,
 )
 from adorm.drivers.django import DjangoDriver
 from adorm.drivers.django.vendors import PROGRESS_STEPS, SQLITE_CAPABILITIES, TRANSACTION_ENDED
@@ -378,6 +381,14 @@ async def test_an_integer_outside_sqlites_range_is_a_data_error(sqlite):
     assert isinstance(raised.value.original, OverflowError)
     assert (pool.size, pool.in_use) == (1, 0)
     assert await Club.objects.count() == 3
+
+
+@pytest.mark.parametrize("precision", [-1, Value(-1)])
+async def test_round_to_a_negative_precision_is_a_database_error(sqlite, precision):
+    pool = sqlite()
+    with pytest.raises(DatabaseError, match="negative precision"):
+        await Membership.objects.annotate(r=Round("fee", precision)).first()
+    assert (pool.size, pool.in_use) == (1, 0)
 
 
 async def test_errors_leave_the_slot_in_the_pool(sqlite):

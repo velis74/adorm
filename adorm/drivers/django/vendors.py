@@ -78,11 +78,32 @@ _LOOKUP_NAMES = (
     "regex",
     "iregex",
     "overlap",
+    "has_key",
+    "has_keys",
+    "has_any_keys",
+    "contained_by",
+)
+
+_TRANSFORM_NAMES = (
+    "year",
+    "iso_year",
+    "quarter",
+    "month",
+    "week",
+    "week_day",
+    "iso_week_day",
+    "day",
+    "hour",
+    "minute",
+    "second",
+    "date",
+    "time",
 )
 
 READ_CAPABILITIES = Capabilities(
     operations={"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"},
     constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
+    | {f"transform.{name}" for name in _TRANSFORM_NAMES}
     | {f"function.{name}" for name in FUNCTIONS}
     | {f"aggregate.{name}" for name in AGGREGATES}
     | {
@@ -173,7 +194,13 @@ SQLITE_CAPABILITIES = Capabilities(
     constructs=(
         READ_CAPABILITIES.constructs
         - POSTGRESQL_ONLY
-        - {"lookup.contains", "lookup.startswith", "lookup.endswith", "clause.combinator.slice"}
+        - {
+            "lookup.contains",
+            "lookup.startswith",
+            "lookup.endswith",
+            "lookup.contained_by",
+            "clause.combinator.slice",
+        }
     )
     | _ON_CONFLICT
     | _WRITE_LOCKED_ROWS,
@@ -182,9 +209,9 @@ SQLITE_CAPABILITIES = Capabilities(
 )
 """What `DjangoDriver` supports on SQLite: `CAPABILITIES` without ``nowait`` and ``skip_locked`` row locks, connection
 options, backend events,
-the constructs of `POSTGRESQL_ONLY`, a sliced query in a set operation (``clause.combinator.slice``) and the
+the constructs of `POSTGRESQL_ONLY`, a sliced query in a set operation (``clause.combinator.slice``), the
 case-sensitive pattern lookups ``contains``, ``startswith`` and ``endswith``, which SQLite's ``LIKE`` matches without
-regard to case."""
+regard to case, and ``contained_by``, which Django does not implement for SQLite's JSON."""
 
 MYSQL_CAPABILITIES = Capabilities(
     operations=CAPABILITIES.operations,
@@ -201,12 +228,13 @@ MYSQL_CAPABILITIES = Capabilities(
 
 ORACLE_CAPABILITIES = Capabilities(
     operations=CAPABILITIES.operations,
-    constructs=(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY) | _ROW_LOCKS,
+    constructs=(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - {"lookup.contained_by"}) | _ROW_LOCKS,
     savepoints=True,
     cancellation=True,
 )
 """What `DjangoDriver` supports on Oracle: `CAPABILITIES` without connection options, backend events,
-``FOR NO KEY UPDATE``, ``ON CONFLICT`` and the constructs of `POSTGRESQL_ONLY`."""
+``FOR NO KEY UPDATE``, ``ON CONFLICT``, the constructs of `POSTGRESQL_ONLY` and ``contained_by``, which Django does
+not implement for Oracle's JSON."""
 
 _FEATURE_CONSTRUCTS: tuple[tuple[str, str], ...] = (
     ("has_select_for_update", "clause.select_for_update"),
@@ -220,6 +248,7 @@ _FEATURE_CONSTRUCTS: tuple[tuple[str, str], ...] = (
     ("supports_select_intersection", "clause.intersection"),
     ("supports_select_difference", "clause.difference"),
     ("supports_slicing_ordering_in_compound", "clause.combinator.slice"),
+    ("supports_json_field_contains", "lookup.contained_by"),
 )
 """The Django feature flags that decide constructs of a backend without a `Vendor` of its own."""
 
@@ -229,14 +258,14 @@ _COMBINATORS = frozenset({"clause.union", "clause.intersection", "clause.differe
 def features_capabilities(features: type) -> Capabilities:
     """The capabilities of a backend without a `Vendor` of its own, from its ``DatabaseFeatures`` class
     ``features``: `CAPABILITIES` without connection options, backend events, cancellation, the constructs of
-    `POSTGRESQL_ONLY`, and without each row lock, ``ON CONFLICT`` and set operation whose feature flag is not ``True``
-    on the class; savepoints when ``uses_savepoints`` is ``True``. A flag the class computes per connection counts
-    as ``False``."""
+    `POSTGRESQL_ONLY`, and without each row lock, ``ON CONFLICT``, set operation and ``contained_by`` whose feature
+    flag is not ``True`` on the class; savepoints when ``uses_savepoints`` is ``True``. A flag the class computes per
+    connection counts as ``False``."""
 
     def flag(name: str) -> bool:
         return inspect.getattr_static(features, name, False) is True
 
-    constructs = set(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - _COMBINATORS)
+    constructs = set(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - _COMBINATORS - {"lookup.contained_by"})
     constructs |= {construct for name, construct in _FEATURE_CONSTRUCTS if flag(name)}
     if "clause.select_for_update" not in constructs:
         constructs -= _ROW_LOCKS

@@ -87,7 +87,7 @@ def test_resolve_field_type(label, path, expected):
     [
         (["missing"], "club.Member has no field or relation 'missing'"),
         (["club", "missing"], "club.Club has no"),
-        (["name", "length"], "club.Member.name is neither a relation nor a JSON field; 'length' cannot follow"),
+        (["name", "length"], "unsupported transform 'length' for club.Member.name"),
     ],
 )
 def test_resolve_field_type_rejects_unknown_fields_of_known_models(path, message):

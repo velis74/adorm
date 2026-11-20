@@ -255,6 +255,11 @@ INVALID = [
         r"\['default'\]: unsupported connection options: work_mem",
         id="profile-instance-with-driver-path",
     ),
+    pytest.param(
+        {"profiles": {"default": {"driver": DEFAULT_DRIVER, "covered_receivers": "myapp.signals.on_saved"}}},
+        r"\['default'\]: covered_receivers of profile 'default' is a list",
+        id="covered-receivers-string",
+    ),
     pytest.param({"providers": "tests.test_django_settings.first_provider"}, "is a list", id="providers-string"),
     pytest.param({"providers": [42]}, r"\['providers'\]\[0\]: a profile provider is", id="provider-not-callable"),
     pytest.param({"providers": ["tests.no_such_module.p"]}, r"\['providers'\]\[0\]", id="provider-missing"),

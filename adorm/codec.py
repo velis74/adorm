@@ -37,9 +37,9 @@ from pydantic import PlainSerializer, PlainValidator, TypeAdapter
 
 from adorm.query.expressions import (
     Case,
-    Coalesce,
     Expression,
     F,
+    Func,
     Node,
     OuterRef,
     split_field_path,
@@ -496,8 +496,8 @@ class _Codec:
 
     def expression_type(self, expression: Any) -> Any:
         """The type of ``expression``'s values: its field's type for `F` and `OuterRef`, else its ``output_type``,
-        else the first known type of a `Coalesce` argument or a `Case` result, or the type of the field a one-column
-        `Subquery` selects."""
+        else the type a function's ``output_from`` gives (see `Func`), the first known type of a `Case` result, or the
+        type of the field a one-column `Subquery` selects."""
         return self._expression_type(len(self._scopes), expression)
 
     def _expression_type(self, depth: int, expression: Any) -> Any:
@@ -509,8 +509,14 @@ class _Codec:
         if output_type is not None:
             return output_type
         candidates: tuple[Any, ...] = ()
-        if isinstance(expression, Coalesce):
+        output_from = getattr(expression, "output_from", None) if isinstance(expression, Func) else None
+        if output_from == "arguments":
             candidates = expression.expressions
+        elif output_from == "first":
+            candidates = expression.expressions[:1]
+        elif output_from == "numeric":
+            argument_types = [self._expression_type(depth, argument) for argument in expression.expressions]
+            return decimal.Decimal if decimal.Decimal in argument_types else float
         elif isinstance(expression, Case):
             candidates = (*(case.result for case in expression.cases), expression.default)
         elif isinstance(expression, Subquery):
@@ -531,9 +537,10 @@ class _Codec:
     @staticmethod
     def child_hint(cls: type[Node], output_type: Any, name: str, hint: Any) -> Any:
         """The type of the values in the attribute ``name`` of a ``cls`` node whose position has the type ``hint``:
-        the results of `Case` and `When` and the arguments of `Coalesce` have their node's type."""
+        the results of `Case` and `When` and the arguments of a function whose ``output_from`` is ``"arguments"``
+        (`Coalesce`, `Greatest` …) have their node's type."""
         if (issubclass(cls, Case) and name in ("cases", "default")) or (
-            issubclass(cls, Coalesce) and name == "expressions"
+            issubclass(cls, Func) and cls.output_from == "arguments" and name == "expressions"
         ):
             return output_type or hint
         if issubclass(cls, When) and name == "result":

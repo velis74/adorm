@@ -229,7 +229,7 @@ The driver translates an adorm [`Query`](/ref/query) into a Django query set
 | lookups (`exact` … `iregex`, `overlap`) | the lookup of the same name on the field, so `contains` on an `ArrayField` or `JSONField` is Django's containment and `overlap` is the `ArrayField` lookup; a lookup that a `JSONField` or `HStoreField` does not have (`overlap`) raises `FieldError` on the field, on a key inside it and on an annotation that refers to the field (`annotate(e=F("extra"))`), where Django would read the name as a key |
 | the values of `overlap` (`disciplines__overlap=["Lead", "Dinghy"]`) | a list, also when empty |
 | a lookup on an expression (`Exact(Lower("name"), "ann")`) | the expression as an `alias()` and the lookup on it |
-| `F`, `Value`, `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc…` | the Django class of the same name; a `Value` with `output_type` gets the Django field for it (`int` → `IntegerField` …); `Trunc(x, "date")` / `"time"` is `TruncDate` / `TruncTime` |
+| `F`, `Value` and the functions (`Lower`, `Coalesce`, `Trunc…`, `Extract…`, `Cast` …) | the Django class of the same name; a `Value` or a function with `output_type` gets the Django field for it (`int` → `IntegerField` …); `Trunc(x, "date")` / `"time"` is `TruncDate` / `TruncTime`; `Cast` with `max_length` casts to a `CharField`, with `max_digits` and `decimal_places` to a `DecimalField`; `UUID4` and `UUID7` need Django 6.0 |
 | `Count`, `Sum`, `Avg`, `Min`, `Max` with `distinct`, `filter`, `default` | the Django aggregate with the same options; `Count("*")` counts rows |
 | `Case`, `When` | `Case`, `When` |
 | `annotate()` / `alias()` | `annotate()` / `alias()`, in the order added |
@@ -482,7 +482,9 @@ async with adorm.atomic() as tx:
 Django's signals (`pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed` …) fire on the slot's thread,
 in a copy of the awaiting task's context; a receiver reads the caller's context variables and Django's active
 language. adorm has no signals of its own, and Django's produce no event on the client. Reads build no Django model
-instances, so `pre_init` and `post_init` fire only for writes.
+instances, so `pre_init` and `post_init` fire only for writes. The driver ignores a profile's `covered_receivers`:
+every receiver runs. The native PostgreSQL driver sends no signals and refuses a write whose signals have a receiver
+the profile does not cover ([signal receivers](/topics/postgresql-driver#signal-receivers)).
 
 ## Errors
 
@@ -493,7 +495,7 @@ The driver raises adorm's [exceptions](/ref/exceptions)
 |---|---|
 | `Model.DoesNotExist`, `Model.MultipleObjectsReturned` | `ObjectDoesNotExist`, `MultipleObjectsReturned`; the query set raises the adorm model's own |
 | `FieldError`, `FieldDoesNotExist` (an unknown field or lookup) | `FieldError` |
-| a segment after a field that is neither a relation nor a JSON field (a Django transform such as `joined__year`), refused before Django sees it | `FieldError` |
+| a segment after a field that is neither a relation nor a JSON field and is no adorm transform applying to it (`joined__yeer`, `birth_date__hour`), or a lookup that does not apply to the field, refused before Django sees it | `FieldError` |
 | `ValidationError` (a value Django rejects, such as an invalid UUID; a model's `save()` that calls `full_clean()`) | `ValidationError` with each error's message, `code` and `params`, keyed by the operation model's adorm field names |
 | `TransactionManagementError` | `TransactionManagementError` |
 | `ProtectedError`, `RestrictedError` | `ProtectedError`, `RestrictedError` with the referencing objects as instances of the registered models |

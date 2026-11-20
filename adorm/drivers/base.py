@@ -86,7 +86,8 @@ class Profile(Protocol):
     ``connect(profile)`` returns the target's connection; an async driver awaits the result. The pool also reads the
     optional ``on_acquire`` and ``on_release`` attributes, when present and not ``None``: hooks called as
     ``hook(connection, profile, session)`` with the connection's `DriverConnection.target`, and the optional
-    ``options`` attribute, the profile's database connection options.
+    ``options`` attribute, the profile's database connection options. The native PostgreSQL driver reads the optional
+    ``covered_receivers`` attribute, the dotted paths of Django signal receivers it writes despite.
     """
 
     @property
@@ -245,11 +246,21 @@ def is_refusal(exc: BaseException) -> bool:
 
 
 def _check_keys(operation: Operation) -> None:
-    from adorm.query import check_lookups, Query
+    from adorm.query import check_lookups, F, Query
 
     query = getattr(operation, "query", None)
-    if isinstance(query, Query) and query.where:
+    if not isinstance(query, Query):
+        return
+    if query.where:
         check_lookups(query, query.where)
+    annotations = {name for name, _ in query.annotations}
+    for _, expression in query.annotations:
+        check_lookups(query, expression)
+    for order in query.ordering:
+        check_lookups(query, order)
+    for path in (*query.select, *(query.group_by or ()), *query.distinct_fields):
+        if path not in annotations:
+            check_lookups(query, F(path))
 
 
 def operation_models(operation: Any) -> tuple[str, ...]:
@@ -572,7 +583,8 @@ class Driver(ABC):
         `adorm.operations.Call` of a method the registered model does not declare (`adorm.models.find_driver_method()`).
         Does no I/O.
 
-        When a construct is missing and a lookup of the operation's query does not resolve against the model registry
+        When a construct is missing and a lookup or field path of the operation's query (its filters, annotations,
+        ordering, ``values()``, grouping and ``distinct()`` fields) does not resolve against the model registry
         (`adorm.query.check_lookups()`), raises that `adorm.FieldError` instead. Then compares the schema hash the
         client expects of every model of `operation_models()` with the driver's (`check_schema_hash()`), which raises
         `SchemaMismatchError`. ``schema_hashes`` holds the client's hashes by label, as a client sends them when it

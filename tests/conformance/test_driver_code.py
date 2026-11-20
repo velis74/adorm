@@ -2,9 +2,10 @@
 overrides of ``create()``, ``update()`` and ``bulk_create()``, custom ``on_delete`` handlers, Django's signals and
 ``on_commit()`` callbacks. ``bulk_create()`` calls no ``save()`` and sends no signal on any driver. The Django driver
 runs the rest on the driver side; the native PostgreSQL driver runs none of it and refuses a write that would call an
-override or a custom handler, before anything is written; the memory driver runs none of it. Either way the client
-sees no signal and the pool and the transaction stay usable. ``pre_init`` and ``post_init`` fire on the drivers that
-build Django model instances."""
+override, a custom handler or a signal receiver the profile's ``covered_receivers`` does not list, before anything is
+written (`tests.conformance.test_signal_receivers`); the memory driver runs none of it. Either way the client sees no
+signal and the pool and the transaction stay usable. ``pre_init`` and ``post_init`` fire on the drivers that build
+Django model instances."""
 
 import asyncio
 import datetime
@@ -22,6 +23,11 @@ from tests.djangoproject.activities.models import Activity as DjangoActivity, Ta
 pytestmark = pytest.mark.django_db(transaction=True)
 
 REPEAT = range(3)
+
+
+def covered(receiver) -> dict:
+    """Profile arguments that list ``receiver`` as covered on the adorm side."""
+    return {"covered_receivers": [f"{receiver.__module__}.{receiver.__qualname__}"]}
 
 
 @pytest.fixture
@@ -165,13 +171,16 @@ async def test_a_models_delete_override(conformance_driver, router, calls, delet
     assert pool.in_use == 0
 
 
-async def test_signals_fire_on_the_django_driver_only(conformance_driver, router):
+async def test_signals_fire_on_the_django_driver_only(conformance_driver, make_router):
     from django.db.models.signals import post_delete, post_save, pre_delete, pre_save
 
     received = []
 
     def receiver(signal, sender, instance, **kwargs):  # noqa: ARG001
         received.append((signal, instance.name))
+
+    # Covered, the receiver does not refuse the native driver's writes.
+    router = make_router(profile=covered(receiver), max_connections=2, acquire_timeout=5)
 
     signals = (pre_save, post_save, pre_delete, post_delete)
     for signal in signals:
@@ -270,7 +279,7 @@ async def test_a_custom_on_delete_handler(conformance_driver, router, calls, mon
         assert pool.in_use == 0
 
 
-async def test_djangos_on_commit_callbacks_run_on_the_django_driver_only(conformance_driver, router):
+async def test_djangos_on_commit_callbacks_run_on_the_django_driver_only(conformance_driver, make_router):
     from django.db import transaction
     from django.db.models.signals import post_save
 
@@ -278,6 +287,8 @@ async def test_djangos_on_commit_callbacks_run_on_the_django_driver_only(conform
 
     def receiver(sender, instance, **kwargs):  # noqa: ARG001
         transaction.on_commit(lambda name=instance.name: committed.append(name))
+
+    router = make_router(profile=covered(receiver), max_connections=2, acquire_timeout=5)
 
     async def rolled_back(name):
         async with adorm.atomic():
