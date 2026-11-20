@@ -269,6 +269,23 @@ Query("club.Member").filter(Exact(Lower("name"), "ann"))
 Query("club.Member").filter(GreaterThan("ends", F("starts")) | IsNull("ends", True))
 ```
 
+A lookup of the application's own declares its SQL in `template`, with `%(lhs)s` and `%(rhs)s` (a literal `%` is
+`%%`), or in `templates`, a mapping from Django's vendor names to templates with `template` as the fallback; the
+class method `sql_template(vendor)` returns the one for a vendor, `None` without one. The drivers that render SQL
+(the Django driver and the native PostgreSQL driver) run it, with the parameters of each side in the order the
+template names them, and declare `lookup.<lookup_name>` on the vendors it has a template for. A template that is not
+a string raises `TypeError` when the class is defined.
+
+```python
+@register_lookup
+class SameStart(Lookup):
+    lookup_name = "same_start"
+    template = "SUBSTR(%(lhs)s, 1, 1) = SUBSTR(%(rhs)s, 1, 1)"
+
+
+Query("club.Member").filter(name__same_start="Gregor")   # constructs: lookup.same_start
+```
+
 ### `adorm.query.Exact(lhs, rhs)`
 
 The attribute `implicit` is `True` on an `Exact` that `build_lookup()` built from a key without a lookup name
@@ -467,8 +484,14 @@ which gives it the construct name `transform.<lookup_name>`, and may override:
 
 | Class method | Meaning |
 |---|---|
-| `applies_to(field_type)` | whether the transform applies to a value of `field_type` (`None` when unknown); `True` by default; `resolve_lookup()`, `check_lookups()` and the drivers raise `FieldError` when it is false |
+| `applies_to(field_type)` | whether the transform applies to a value of `field_type`, the type without `Annotated` and `Optional` (`None` when unknown); `True` by default; `resolve_lookup()`, `check_lookups()` and the drivers raise `FieldError` when it is false |
 | `output_type(field_type)` | the type of the transformed value, which types the right-hand side of the lookup after it; `None` (unknown) by default |
+| `sql_template(vendor)` | the SQL template on databases of `vendor`: `templates[vendor]`, else `template`, else `%(function)s(%(expressions)s)` with a `function`; `None` without one |
+
+A transform of the application's own declares its SQL as a function does: `function`, `template` with
+`%(expressions)s` (the transformed value) or `templates` by vendor. The drivers that render SQL apply it, and the
+transforms after it, as expressions, and declare `transform.<lookup_name>` on the vendors it has a template for. The
+built-in transforms have no SQL attributes: the drivers apply them by name.
 
 ### `adorm.query.Year`
 
@@ -507,14 +530,15 @@ A read-only mapping of transform name to class, holding the built-in transforms 
 Registers a `Transform` subclass under its `lookup_name` and returns it; usable as a class decorator. Registering the
 same class again does nothing. A different class under a taken name, a name a lookup is registered under, and a name
 that is not an identifier or contains `__` raise `ValueError` (`register_lookup()` likewise refuses a transform's
-name). A driver applies a transform by its name: the Django driver and the native PostgreSQL driver pass it to
-Django, so a custom transform needs a Django transform registered under the same name on the field's class, and the
-driver must declare its construct name.
+name). A driver must declare a transform's construct name to apply it: the Django driver and the native PostgreSQL
+driver declare a transform with SQL of its own and pass one without SQL to Django by its name, which needs a Django
+transform registered under that name on the field's class.
 
 ```python
 @register_transform
 class Unaccented(Transform):
     lookup_name = "unaccent"
+    templates = {"postgresql": "UNACCENT(%(expressions)s)"}  # the unaccent extension
 
     @classmethod
     def applies_to(cls, field_type):

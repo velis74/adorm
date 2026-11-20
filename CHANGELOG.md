@@ -21,6 +21,17 @@
   the `Extract*` functions, the math functions (`Abs` to `Sqrt`, `Pi`, `Random`), the text functions (`Chr`, `Ord`,
   `Left`, `Right`, `LPad`, `RPad`, `LTrim`, `RTrim`, `Trim`, `Repeat`, `Replace`, `Reverse`, `StrIndex`, `Substr`),
   the hash functions (`MD5`, `SHA1` to `SHA512`), `UUID4` and `UUID7`.
+- Own expressions: a `Func`, `Lookup` or `Transform` subclass declares its SQL in `function`, `template` (and
+  `arg_joiner`) or `templates`, one template per database vendor; the Django driver and the native PostgreSQL driver
+  render it and declare its construct name on the vendors it has a template for, also for classes defined after the
+  driver was imported. `adorm.drivers.django.register_translation()` registers a translation into a Django expression
+  for both drivers; `register_sqlite_function()` registers a Python function on the Django driver's SQLite
+  connections. `adorm.query.sql_constructs()`, `adorm.drivers.Constructs`. Recipe: own expressions.
+- `UUID4` and `UUID7` run on PostgreSQL and SQLite with Django 5.2 and 6: Django's function where Django and the
+  database have it, else `GEN_RANDOM_UUID()` and a version 7 UUID built in SQL (with `shift`) on PostgreSQL and
+  SQLite functions of adorm's on SQLite.
+- A transform's `applies_to()` and `output_type()` get the field's type without `Annotated` and `Optional`.
+- `Concat` without `output_type` concatenates arguments of different text fields on the Django-based drivers.
 - `Model.refresh_from_db(fields=None)`: reloads the loaded fields, or the named ones, and clears cached relations and
   prefetched rows, as Django does.
 - An unknown last segment of a key that names its lookup (`joined__yeer__exact`) is reported as an unsupported

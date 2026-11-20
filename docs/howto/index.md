@@ -8,3 +8,4 @@ Recipes for specific tasks:
 | [Schema per tenant](./schema-per-tenant) | the current tenant's schema in the `search_path` connection option, e.g. with django-tenants |
 | [Writing a driver](./writing-a-driver) | executing adorm operations on another ORM or database |
 | [Generating models](./generating-models) | writing adorm models from Django models with `adorm generate`, and checking them in CI |
+| [Own expressions](./own-expressions) | functions, lookups and transforms with SQL templates, translations for the Django drivers, SQLite functions |
