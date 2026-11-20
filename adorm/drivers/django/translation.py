@@ -747,6 +747,9 @@ class _Translator:
         self.selected_annotations = tuple(name for name in self.annotation_names if name not in query.aliases)
         self.aliases: dict[str, Any] = {}
         self._applied: set[str] = set()
+        # The annotation names that stand for paths through an own transform in grouping and DISTINCT ON
+        self.columns_by_alias: dict[str, str] = {}
+        self.distinct_aliases: list[str] = []
         self._alias_numbers = itertools.count() if parent is None else parent._alias_numbers
 
     def path(self, name: str, lookup: type[Lookup] | None = None, *, implicit: bool = False) -> str:
@@ -773,6 +776,8 @@ class _Translator:
         or the expression of a path with a transform that has SQL of its own or a translation."""
         if name in self.annotation_names:
             return name
+        if name in self.columns_by_alias:
+            return self.columns_by_alias[name]
         return self.reference(name) if self.own_transform(name) is not None else self.path(name)
 
     def field_path(self, name: str) -> str | None:
@@ -805,6 +810,11 @@ class _Translator:
                 parts.append(queryset.values_list("pk") if part.query.row_format == "model" else queryset)
             return self.combined(parts)
         queryset = self.base()
+        if self.distinct_aliases:
+            raise NotSupportedError(
+                "the Django driver applies distinct() on a path through a transform with SQL of its own or a "
+                "translation only in the outermost query"
+            )
         if query.row_format != "model" and query.select:
             queryset = queryset.values_list(*(self.column(n) for n in query.select))
         return queryset
@@ -1050,7 +1060,11 @@ class _Translator:
         return django_key, django_value
 
     def order(self, order: ax.OrderBy) -> Any:
-        expression = self.expression(order.expression)
+        node = order.expression
+        if type(node) is ax.F and node.name in self.columns_by_alias:
+            expression = dj.F(self.columns_by_alias[node.name])
+        else:
+            expression = self.expression(node)
         options = {"nulls_first": order.nulls_first, "nulls_last": order.nulls_last}
         return expression.desc(**options) if order.descending else expression.asc(**options)
 
@@ -1085,8 +1099,19 @@ class _Translator:
         after = [step for step in steps[first:] if not (step[0] == "annotate" and early(step[1]))]
         late = {name for name, _ in query.annotations[query.group_mark :]}
         queryset = self.replay(queryset, before)
-        names = (n if n in self.annotation_names else self.path(n) for n in query.group_by if n not in late)
-        return self.replay(queryset.values(*names), after)
+        names: list[str] = []
+        expressions: dict[str, Any] = {}
+        for name in query.group_by:
+            if name in late:
+                continue
+            if name in self.annotation_names:
+                names.append(name)
+            elif self.own_transform(name) is not None:
+                key = self.columns_by_alias[name] = f"_adorm{next(self._alias_numbers)}"
+                expressions[key] = self.reference(name)
+            else:
+                names.append(self.path(name))
+        return self.replay(queryset.values(*names, **expressions), after)
 
     def replay(self, queryset: Any, steps: Iterable[tuple[str, int]]) -> Any:
         """``queryset`` with the filters and annotations ``steps`` names by index, in that order. Each filter is a
@@ -1126,12 +1151,19 @@ class _Translator:
                 raise ProgrammingError(f"{query.model} has no Django manager {query.manager!r}")
             queryset = manager.all()
         queryset = self.annotated(queryset)
+        distinct = query.distinct_fields if query.is_distinct else ()
+        for name in distinct:
+            if name not in self.annotation_names and self.own_transform(name) is not None:
+                # DISTINCT ON takes names: a path through an own transform is a selected annotation.
+                key = self.columns_by_alias[name] = f"_adorm{next(self._alias_numbers)}"
+                queryset = queryset.annotate(**{key: self.reference(name)})
+                self.distinct_aliases.append(key)
         ordering = [self.order(order) for order in query.ordering]
         queryset = self.with_aliases(queryset)
         if ordering:
             queryset = queryset.order_by(*ordering)
         if query.is_distinct:
-            queryset = queryset.distinct(*(self.path(name) for name in query.distinct_fields))
+            queryset = queryset.distinct(*(self.columns_by_alias.get(name) or self.path(name) for name in distinct))
         if query.is_sliced:
             queryset = queryset[query.low_mark : query.high_mark]
         if query.is_none:
@@ -1258,6 +1290,8 @@ class _Translator:
             names = query.select or (*self.field_names(), *self.selected_annotations)
             fields = [(name, columns.add(self.column(name), name)) for name in names]
             plan = _RowPlan(fields, None)
+        for key in self.distinct_aliases:
+            columns.add(key)
         return TranslatedQuery(queryset.values_list(*columns.values), columns.paths, plan)
 
     def field_names(self) -> list[str]:

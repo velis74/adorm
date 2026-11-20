@@ -20,7 +20,7 @@ from django.db import connection
 
 import adorm
 
-from adorm import Value
+from adorm import Count, Value
 from adorm.query import Concat, Exact, Func, Lookup, register_lookup, register_transform, Transform
 from tests.clubmodels.clubs import Member
 
@@ -314,6 +314,34 @@ async def test_an_own_transform_in_a_lookup_key_and_in_values(pool):
         Member.objects.filter(first_name__in=["Ana", "Lara"]).order_by("first_name").values_list("first_name__initial")
     )
     assert initials == [("A",), ("L",)]
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_values_grouped_by_an_own_transform(pool):
+    query = Member.objects.values("last_name__initial").annotate(n=Count("id")).order_by("last_name__initial")
+    result = await rows(query.values_list("last_name__initial", "n"))
+    assert ("K", 4) in result
+    assert ("N", 1) in result
+    assert sum(n for _, n in result) == 12
+    assert len(result) == len({initial for initial, _ in result})
+    assert pool.in_use == 0
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_distinct_on_an_own_transform(pool):
+    if vendor() != "postgresql":
+        pytest.skip("DISTINCT ON is PostgreSQL's")
+    query = (
+        Member.objects.filter(last_name__initial="K")
+        .order_by("last_name__initial", "first_name")
+        .distinct("last_name__initial")
+    )
+    assert await rows(query.values_list("first_name", flat=True)) == ["Bojan"]
+    assert [member.first_name for member in await rows(query)] == ["Bojan"]
+    assert await query.count() == 1
+    with pytest.raises(adorm.NotSupportedError, match="outermost query"):
+        await Member.objects.filter(id__in=query.values("id")).count()
+    assert pool.in_use == 0
 
 
 @pytest.mark.usefixtures("club_data", "sql_driver", "router")

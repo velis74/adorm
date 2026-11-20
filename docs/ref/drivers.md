@@ -1338,7 +1338,9 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   follow `%(lhs)s` and `%(rhs)s` in the template; a path through a `Transform` with SQL of its own or a registered
   translation becomes Django's `F` of the path before it, wrapped per transform from there on in a Django `Transform`
   that renders the template or in what the translation returns (a built-in transform after it raises
-  `NotSupportedError`), also in `values()` and as a lookup's left-hand side.
+  `NotSupportedError`), also in `values()` and as a lookup's left-hand side. In the grouping of `values()` before
+  `annotate()` and in `distinct()` with fields such a path is an annotation of its own, which `order_by()` of the same
+  path refers to; a subquery with `distinct()` on such a path raises `NotSupportedError`.
   `get_or_create()` and `update_or_create()` take no such lookup or transform (`NotSupportedError`).
 - `Concat` without an `output_type` gets a `TextField` output field, so arguments of different text fields concatenate.
 - A node without a translation (a function or aggregate class of a driver's own without SQL) raises
