@@ -21,9 +21,12 @@ MAINTENANCE_DATABASES = ("", "postgres", "template0", "template1")
 
 def test_database_name(url: str) -> str:
     """The name of the test database: ``ADORM_TEST_DATABASE_NAME``, else the database ``url`` names, else
-    ``adorm_test``; never one of the server's maintenance databases."""
+    ``adorm_test``; never one of the server's maintenance databases. Under pytest-xdist the worker's name follows
+    (``adorm_test_gw0``), so workers share no database or role."""
     name = os.environ.get("ADORM_TEST_DATABASE_NAME") or unquote(urlsplit(url).path.lstrip("/"))
-    return "adorm_test" if name in MAINTENANCE_DATABASES else name
+    name = "adorm_test" if name in MAINTENANCE_DATABASES else name
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    return f"{name}_{worker}" if worker else name
 
 
 TEST_DATABASE_URL = os.environ.get("ADORM_TEST_DATABASE_URL", DEFAULT_DATABASE_URL)

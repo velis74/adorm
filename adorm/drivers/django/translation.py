@@ -15,16 +15,19 @@ import contextvars
 import datetime
 import decimal
 import itertools
+import re
 import threading
 import uuid
+import weakref
 
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
 from django.apps import apps
 from django.core.exceptions import FieldDoesNotExist
-from django.db import models as dj
+from django.db import models as dj, NotSupportedError as DjangoNotSupportedError
 from django.db.models import functions as djf
 from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.fields.reverse_related import ForeignObjectRel
@@ -33,9 +36,10 @@ from adorm.exceptions import DatabaseError, FieldError, NotSupportedError, Progr
 from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
 from adorm.query import expressions as ax
-from adorm.query.expressions import split_field_path
-from adorm.query.lookups import _apply_transforms, build_lookup, Exact, Lookup, split_lookup
+from adorm.query.expressions import _has_sql, split_field_path, sql_constructs
+from adorm.query.lookups import _apply_transforms, build_lookup, Exact, Lookup, split_lookup, Transform, TRANSFORMS
 from adorm.query.query import Query
+from adorm.uuids import uuid7
 
 __all__ = [
     "AGGREGATES",
@@ -59,8 +63,12 @@ __all__ = [
     "operation_model",
     "orm_path",
     "output_field",
+    "own_constructs",
     "parent_link_field",
     "pinned_alias",
+    "register_sqlite_function",
+    "register_translation",
+    "sqlite_functions",
     "validation_error",
     "subquery",
     "table_model",
@@ -95,15 +103,14 @@ FUNCTIONS: Mapping[str, type[dj.Func]] = MappingProxyType(
                 *("Log", "Mod", "Pi", "Power", "Radians", "Random", "Round", "Sign", "Sin", "Sqrt", "Tan"),
                 *("Chr", "Left", "LPad", "LTrim", "MD5", "Ord", "Repeat", "Replace", "Reverse", "Right", "RPad"),
                 *("RTrim", "SHA1", "SHA224", "SHA256", "SHA384", "SHA512", "StrIndex", "Substr", "Trim"),
-                *("UUID4", "UUID7"),
             )
             if hasattr(djf, name)
         },
     }
 )
 """Django's function class for each adorm function class name the translation knows; `Trunc` translates to Django's
-``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds. A function the installed Django lacks (``UUID4`` and
-``UUID7`` before Django 6.0) is missing."""
+``Trunc``, or to ``TruncDate`` / ``TruncTime`` for those kinds. ``UUID4`` and ``UUID7`` have registered translations
+(`register_translation()`)."""
 
 AGGREGATES: Mapping[str, type[dj.Aggregate]] = MappingProxyType(
     {"Count": dj.Count, "Sum": dj.Sum, "Avg": dj.Avg, "Min": dj.Min, "Max": dj.Max}
@@ -287,9 +294,21 @@ def orm_path(
     scalar field (after its transforms) raises `FieldError` too. ``implicit`` tells that the key named no lookup
     (``joined__yeer``): the message then calls an unknown last transform name a lookup.
     """
+    return "__".join(_orm_names(model, path, annotations, lookup, implicit=implicit)[0])
+
+
+def _orm_names(
+    model: type[dj.Model],
+    path: str,
+    annotations: Iterable[str] = (),
+    lookup: type[Lookup] | None = None,
+    *,
+    implicit: bool = False,
+) -> tuple[list[str], int | None]:
+    """The segments of `orm_path()` and the index of the first transform among them (``None`` without one)."""
     segments = split_field_path(path)
     if segments[0] in annotations:
-        return path
+        return segments, 1 if len(segments) > 1 else None
     names: list[str] = []
     current: type[dj.Model] | None = model
     for index, segment in enumerate(segments):
@@ -313,15 +332,13 @@ def orm_path(
             if lookup is not None and schema is not None and not lookup.applies_to(field_type, ()):
                 target = "__".join((f"{label}.{segment}", *rest))
                 raise FieldError(f"unsupported lookup {lookup.lookup_name!r} for {target}", model=label, key=path)
-            names.extend(rest)
-            break
+            return [*names, *rest], len(names) if rest else None
         if rest and field is not None and not follows and _internal_type(field) not in _CONTAINER_FIELDS:
             label = current._meta.label if adorm is None else adorm._meta.label
             _apply_transforms(f"{label}.{segment}", None, tuple(rest), path, label, lookup_hint=False)
-            names.extend(rest)
-            break
+            return [*names, *rest], len(names)
         current = field.related_model if follows else None
-    return "__".join(names)
+    return names, None
 
 
 def _level(paths: Iterable[str]) -> tuple[set[str], dict[str, list[str]]]:
@@ -338,17 +355,21 @@ def _level(paths: Iterable[str]) -> tuple[set[str], dict[str, list[str]]]:
 
 
 class _Columns:
-    """The ``values_list()`` paths of a translation, each once."""
+    """The ``values_list()`` arguments of a translation, each once: Django paths, or expressions keyed by the adorm
+    path they select."""
 
     def __init__(self) -> None:
         self.paths: list[str] = []
+        self.values: list[Any] = []
         self._index: dict[str, int] = {}
 
-    def add(self, path: str) -> int:
+    def add(self, value: Any, key: str | None = None) -> int:
+        path = value if isinstance(value, str) else key
         index = self._index.get(path)
         if index is None:
             index = self._index[path] = len(self.paths)
             self.paths.append(path)
+            self.values.append(value)
         return index
 
 
@@ -414,6 +435,339 @@ def _output_options(node: Any, implied: Any = None) -> dict[str, Any]:
     return {"output_field": output_field(output_type)}
 
 
+# Own expressions: SQL templates, registered translations and SQLite functions
+
+
+@dataclass(frozen=True)
+class _Translation:
+    function: Callable[..., Any]
+    vendors: frozenset[str] | None
+
+
+_TRANSLATIONS: weakref.WeakKeyDictionary[type, _Translation] = weakref.WeakKeyDictionary()
+
+
+def register_translation(cls: type, *, vendors: Iterable[str] | None = None) -> Callable[[Any], Any]:
+    """Register a translation of the adorm expression or transform class ``cls`` for the Django-based drivers; returns
+    a decorator of the translation, ``translation(node, translate)`` for an expression class, ``translation(lhs)`` for
+    a `Transform` subclass.
+
+    An expression's translation gets a node of exactly ``cls`` and ``translate``, which translates a child node (one of
+    ``node.get_source_expressions()``) into a Django expression, and returns the Django expression of the node. A
+    transform's translation gets the Django expression of the transformed value and returns the Django expression of
+    the transformed value. A translation runs on databases of ``vendors`` (Django's vendor names; every vendor by
+    default) instead of the class's SQL template and the bundled translation; on another vendor the class's SQL
+    template applies. The Django driver and the native PostgreSQL driver declare ``cls.construct`` on databases of
+    ``vendors``. A later registration for ``cls`` replaces the earlier one. Raises
+    ``TypeError`` when ``cls`` is not an adorm expression or transform class with a construct name, or ``vendors`` is
+    a string.
+    """
+    if not (isinstance(cls, type) and issubclass(cls, (ax.Node, Transform)) and cls.construct):
+        raise TypeError(f"{cls!r} is not an adorm expression or transform class with a construct name")
+    if isinstance(vendors, str):
+        raise TypeError("vendors is an iterable of vendor names, not a string")
+    names = None if vendors is None else frozenset(vendors)
+
+    def register(translation: Any) -> Any:
+        if not callable(translation):
+            raise TypeError(f"a translation is a callable, not {type(translation).__name__}")
+        _TRANSLATIONS[cls] = _Translation(translation, names)
+        return translation
+
+    return register
+
+
+def own_constructs(vendor: str) -> frozenset[str]:
+    """The constructs the Django-based drivers declare on databases of ``vendor`` beyond their bundled ones: those
+    with SQL for the vendor (`adorm.query.sql_constructs()`) and those with a translation registered for it."""
+    translated = {
+        cls.construct
+        for cls, translation in list(_TRANSLATIONS.items())
+        if translation.vendors is None or vendor in translation.vendors
+    }
+    return sql_constructs(vendor) | translated
+
+
+@dataclass(frozen=True)
+class _SQLiteFunction:
+    name: str
+    num_params: int
+    function: Callable[..., Any]
+    deterministic: bool
+
+
+_SQLITE_FUNCTIONS: dict[tuple[str, int], _SQLiteFunction] = {}
+
+
+def register_sqlite_function(
+    name: str, num_params: int, function: Callable[..., Any], *, deterministic: bool = False
+) -> Callable[..., Any]:
+    """Register the Python callable ``function`` as the SQL function ``name`` of ``num_params`` arguments (``-1`` for
+    any number) on the Django driver's SQLite connections, as ``sqlite3.Connection.create_function()`` does; an open
+    connection gets it before its next call. ``deterministic`` tells SQLite that the result depends on the arguments
+    only. A later registration of the same name (in any case) and number of arguments replaces the earlier one.
+    Returns ``function``."""
+    if not isinstance(name, str) or not name:
+        raise TypeError("name is the SQL function's name")
+    if not callable(function):
+        raise TypeError(f"function is a callable, not {type(function).__name__}")
+    entry = _SQLiteFunction(name, int(num_params), function, bool(deterministic))
+    _SQLITE_FUNCTIONS[(name.lower(), entry.num_params)] = entry
+    return function
+
+
+def sqlite_functions() -> list[tuple[tuple[str, int], Any]]:
+    """The registered SQLite functions (`register_sqlite_function()`) keyed by name in lower case and number of
+    arguments; each has ``name``, ``num_params``, ``function`` and ``deterministic``."""
+    return list(_SQLITE_FUNCTIONS.items())
+
+
+_DJANGO_CLASSES: weakref.WeakKeyDictionary[type, type] = weakref.WeakKeyDictionary()
+
+
+def _django_class(cls: type, base: type) -> Any:
+    """The Django class derived from ``base`` that renders the SQL of the adorm class ``cls``."""
+    found = _DJANGO_CLASSES.get(cls)
+    if found is None:
+        attrs: dict[str, Any] = {"_adorm": weakref.ref(cls), "__module__": __name__}
+        if getattr(cls, "lookup_name", None):
+            attrs["lookup_name"] = cls.lookup_name
+        found = _DJANGO_CLASSES[cls] = type(cls.__name__, (base,), attrs)
+    return found
+
+
+def _template(node: Any, connection: Any) -> tuple[type, str]:
+    """The adorm class of the Django node ``node`` and its SQL template for ``connection``'s vendor."""
+    cls = node._adorm()
+    template = None if cls is None else cls.sql_template(connection.vendor)
+    if template is None:
+        name = "the expression" if cls is None else cls.construct
+        raise DjangoNotSupportedError(f"{name} has no SQL template for {connection.vendor}")
+    return cls, template
+
+
+class _TemplateSQL:
+    """Renders the SQL template of an adorm function or transform; the arguments' parameters repeat for each
+    ``%(expressions)s`` in it."""
+
+    _adorm: Callable[[], type | None]
+
+    def as_sql(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:
+        for name in ("function", "template", "arg_joiner"):
+            extra_context.pop(name, None)
+        cls, template = _template(self, connection)
+        sql, params = super().as_sql(  # type: ignore[misc]
+            compiler,
+            connection,
+            function=getattr(cls, "function", None),
+            template=template,
+            arg_joiner=getattr(cls, "arg_joiner", ", "),
+            **extra_context,
+        )
+        count = template.count("%(expressions)s") + template.count("%(field)s")
+        return sql, params if count == 1 else params * count
+
+
+class _TemplateFunc(_TemplateSQL, dj.Func):
+    pass
+
+
+class _TemplateTransform(_TemplateSQL, dj.Transform):
+    pass
+
+
+_LOOKUP_PARTS = re.compile(r"%\((lhs|rhs)\)s")
+
+
+def _template_lookup_class() -> type:
+    from django.db.models.lookups import FieldGetDbPrepValueMixin
+
+    class _TemplateLookup(FieldGetDbPrepValueMixin, dj.Lookup):
+        """Renders the SQL template of an adorm lookup with ``%(lhs)s`` and ``%(rhs)s``; their parameters follow the
+        order in which they appear in it."""
+
+        _adorm: Callable[[], type | None]
+
+        def get_prep_lookup(self) -> Any:
+            # A value compared with an unresolved left-hand side stays a direct value until resolve_expression(),
+            # where the left-hand side's field prepares it.
+            rhs = self.rhs
+            if not hasattr(rhs, "resolve_expression") and not hasattr(self.lhs, "output_field"):
+                return dj.Value(rhs) if isinstance(rhs, tuple) else rhs
+            return super().get_prep_lookup()
+
+        def resolve_expression(self, *args: Any, **kwargs: Any) -> Any:
+            resolved = super().resolve_expression(*args, **kwargs)
+            resolved.rhs = resolved.get_prep_lookup()
+            return resolved
+
+        def as_sql(self, compiler: Any, connection: Any) -> tuple[str, Any]:
+            _, template = _template(self, connection)
+            lhs, lhs_params = self.process_lhs(compiler, connection)
+            rhs, rhs_params = self.process_rhs(compiler, connection)
+            parts = {"lhs": lhs_params, "rhs": rhs_params}
+            params = [param for name in _LOOKUP_PARTS.findall(template) for param in parts[name]]
+            return template % {"lhs": lhs, "rhs": rhs}, tuple(params) if isinstance(lhs_params, tuple) else params
+
+    return _TemplateLookup
+
+
+_TemplateLookup = _template_lookup_class()
+
+
+def _own_transform(name: str) -> type | None:
+    """The registered transform ``name`` when it has SQL of its own or a registered translation."""
+    cls = TRANSFORMS.get(name)
+    return cls if cls is not None and (cls in _TRANSLATIONS or _has_sql(cls)) else None
+
+
+def _first_own_transform(names: Sequence[str], start: int | None) -> int | None:
+    """The index of the first transform with SQL of its own or a translation in the Django path segments ``names``,
+    whose transforms begin at ``start``."""
+    if start is None:
+        return None
+    return next((index for index in range(start, len(names)) if _own_transform(names[index])), None)
+
+
+def _apply_own_transforms(expression: Any, names: Sequence[str]) -> Any:
+    """``expression`` with the transforms ``names`` applied, the first of which has SQL of its own or a translation."""
+    for name in names:
+        cls = _own_transform(name)
+        if cls is None:
+            raise NotSupportedError(
+                f"the Django driver applies the transform {name!r} only before a transform with SQL of its own or a "
+                "translation"
+            )
+        translation = _TRANSLATIONS.get(cls)
+        translated = None if translation is None else translation.function(expression)
+        if translation is not None and (translation.vendors is None or not _has_sql(cls)):
+            expression = translated
+            continue
+        output_type = cls.output_type(None)
+        options = {} if output_type is None else {"output_field": output_field(output_type)}
+        template = _django_class(cls, _TemplateTransform)(expression, **options)
+        expression = template if translation is None else _VendorTranslation(translation.vendors, translated, template)
+    return expression
+
+
+def _conditional(expression: Any) -> Any:
+    """``expression`` as a Django expression: a ``Q`` wrapped as a boolean expression."""
+    if isinstance(expression, dj.Q):
+        return dj.ExpressionWrapper(expression, output_field=dj.BooleanField())
+    return expression
+
+
+class _VendorTranslation(dj.Expression):
+    """A translation registered for some vendors, compiled on a database of one of them; the class's SQL template on
+    another."""
+
+    def __init__(self, vendors: frozenset[str], translated: Any, template: Any) -> None:
+        super().__init__()
+        self.vendors = vendors
+        self.translated = _conditional(translated)
+        self.template = _conditional(template)
+
+    def get_source_expressions(self) -> list[Any]:
+        return [self.translated, self.template]
+
+    def set_source_expressions(self, expressions: Sequence[Any]) -> None:
+        self.translated, self.template = expressions
+
+    def _resolve_output_field(self) -> Any:
+        found = self.translated._output_field_or_none
+        return found if found is not None else self.template._output_field_or_none
+
+    def as_sql(self, compiler: Any, connection: Any) -> tuple[str, Any]:
+        return compiler.compile(self.translated if connection.vendor in self.vendors else self.template)
+
+
+# UUID4 and UUID7: Django's functions where Django and the database have them, else the database's own function or a
+# SQLite function of adorm's that generates the value in Python
+
+_DJANGO_UUID4: Any = getattr(djf, "UUID4", None)
+_DJANGO_UUID7: Any = getattr(djf, "UUID7", None)
+
+
+def _sqlite_uuid4() -> str:
+    return uuid.uuid4().hex
+
+
+def _sqlite_uuid7() -> str:
+    return uuid7().hex
+
+
+class _UUID4(dj.Func):
+    """``UUID4`` where Django has none: ``GEN_RANDOM_UUID()`` on PostgreSQL, ``ADORM_UUID4()`` on SQLite."""
+
+    arity = 0
+    output_field = dj.UUIDField()
+
+    def as_sql(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:  # noqa: ARG002
+        raise DjangoNotSupportedError("UUID4 is not supported on this database backend.")
+
+    def as_postgresql(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:
+        return dj.Func.as_sql(self, compiler, connection, template="GEN_RANDOM_UUID()", **extra_context)
+
+    def as_sqlite(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:
+        return dj.Func.as_sql(self, compiler, connection, template="ADORM_UUID4()", **extra_context)
+
+
+class _UUID7(dj.Func):
+    """``UUID7``: Django's where Django and the database have it; else PostgreSQL 18's ``UUIDV7()`` and
+    ``ADORM_UUID7()`` on SQLite (without a shift). PostgreSQL before 18 refuses it."""
+
+    output_field = dj.UUIDField()
+
+    def native(self, connection: Any) -> Any:
+        """Django's ``UUID7`` of the same arguments when the database has the function, else ``None``."""
+        if _DJANGO_UUID7 is None or not getattr(connection.features, "supports_uuid7_function", False):
+            return None
+        return _DJANGO_UUID7(*self.get_source_expressions(), output_field=self.output_field)
+
+    def as_sql(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:  # noqa: ARG002
+        if _DJANGO_UUID7 is None:
+            raise DjangoNotSupportedError("UUID7 is not supported on this database backend.")
+        return compiler.compile(_DJANGO_UUID7(*self.get_source_expressions(), output_field=self.output_field))
+
+    def as_postgresql(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:
+        native = self.native(connection)
+        if native is not None:
+            return compiler.compile(native)
+        if connection.pg_version < 180000:
+            raise DjangoNotSupportedError("UUID7 requires PostgreSQL version 18 or later.")
+        template = "UUIDV7(CAST(%(expressions)s AS INTERVAL))" if self.source_expressions else "UUIDV7()"
+        return dj.Func.as_sql(self, compiler, connection, template=template, **extra_context)
+
+    def as_sqlite(self, compiler: Any, connection: Any, **extra_context: Any) -> tuple[str, Any]:
+        native = self.native(connection)
+        if native is not None:
+            return compiler.compile(native)
+        if self.source_expressions:
+            raise DjangoNotSupportedError("The shift argument to UUID7 is not supported on SQLite.")
+        return dj.Func.as_sql(self, compiler, connection, template="ADORM_UUID7()", **extra_context)
+
+
+_FALLBACK_VENDORS = ("postgresql", "sqlite")
+"""The vendors adorm runs ``UUID4`` and ``UUID7`` on where the installed Django lacks the function."""
+
+
+@register_translation(ax.UUID4, vendors=None if _DJANGO_UUID4 is not None else _FALLBACK_VENDORS)
+def _translate_uuid4(node: ax.UUID4, translate: Callable[[Any], Any]) -> Any:  # noqa: ARG001 - no arguments
+    function = _DJANGO_UUID4 if _DJANGO_UUID4 is not None else _UUID4
+    return function(**_output_options(node))
+
+
+@register_translation(ax.UUID7, vendors=None if _DJANGO_UUID7 is not None else _FALLBACK_VENDORS)
+def _translate_uuid7(node: ax.UUID7, translate: Callable[[Any], Any]) -> Any:
+    return _UUID7(*(translate(e) for e in node.expressions), **_output_options(node))
+
+
+if _DJANGO_UUID4 is None:
+    register_sqlite_function("ADORM_UUID4", 0, _sqlite_uuid4)
+if _DJANGO_UUID7 is None or not hasattr(uuid, "uuid7"):
+    register_sqlite_function("ADORM_UUID7", 0, _sqlite_uuid7)
+
+
 class _Translator:
     """Translates one `Query`; a subquery gets a translator of its own, with the outer query's as ``parent``."""
 
@@ -427,10 +781,38 @@ class _Translator:
         self.selected_annotations = tuple(name for name in self.annotation_names if name not in query.aliases)
         self.aliases: dict[str, Any] = {}
         self._applied: set[str] = set()
+        # The annotation names that stand for paths through an own transform in grouping and DISTINCT ON
+        self.columns_by_alias: dict[str, str] = {}
+        self.distinct_aliases: list[str] = []
         self._alias_numbers = itertools.count() if parent is None else parent._alias_numbers
 
     def path(self, name: str, lookup: type[Lookup] | None = None, *, implicit: bool = False) -> str:
         return orm_path(self.model, name, self.annotation_names, lookup, implicit=implicit)
+
+    def own_transform(self, name: str) -> tuple[list[str], int] | None:
+        """The Django path segments of the adorm path ``name`` and the index of its first transform with SQL of its
+        own or a translation; ``None`` without one."""
+        names, start = _orm_names(self.model, name, self.annotation_names)
+        index = _first_own_transform(names, start)
+        return None if index is None else (names, index)
+
+    def reference(self, name: str) -> Any:
+        """Django's expression for the adorm field path ``name``: an ``F`` of its Django path, with the transforms
+        from the first one with SQL of its own or a translation on applied as expressions."""
+        own = self.own_transform(name)
+        if own is None:
+            return dj.F(self.path(name))
+        names, index = own
+        return _apply_own_transforms(dj.F("__".join(names[:index])), names[index:])
+
+    def column(self, name: str) -> Any:
+        """The ``values_list()`` argument that selects the adorm name ``name``: an annotation's name, a Django path,
+        or the expression of a path with a transform that has SQL of its own or a translation."""
+        if name in self.annotation_names:
+            return name
+        if name in self.columns_by_alias:
+            return self.columns_by_alias[name]
+        return self.reference(name) if self.own_transform(name) is not None else self.path(name)
 
     def field_path(self, name: str) -> str | None:
         """The Django field path of the adorm path ``name``, following annotations that are plain field references;
@@ -462,9 +844,13 @@ class _Translator:
                 parts.append(queryset.values_list("pk") if part.query.row_format == "model" else queryset)
             return self.combined(parts)
         queryset = self.base()
+        if self.distinct_aliases:
+            raise NotSupportedError(
+                "the Django driver applies distinct() on a path through a transform with SQL of its own or a "
+                "translation only in the outermost query"
+            )
         if query.row_format != "model" and query.select:
-            names = self.annotation_names
-            queryset = queryset.values_list(*(n if n in names else self.path(n) for n in query.select))
+            queryset = queryset.values_list(*(self.column(n) for n in query.select))
         return queryset
 
     # Set operations
@@ -537,6 +923,14 @@ class _Translator:
     # Expressions and conditions
 
     def expression(self, node: Any) -> Any:
+        translation = _TRANSLATIONS.get(type(node))
+        if translation is not None:
+            translated = translation.function(node, self.expression)
+            template = None if translation.vendors is None else self.template(node)
+            return translated if template is None else _VendorTranslation(translation.vendors, translated, template)
+        template = self.template(node)
+        if template is not None:
+            return template
         if isinstance(node, ax.OuterRef):
             target: _Translator | None = self
             for _ in range(node.levels):
@@ -548,7 +942,7 @@ class _Translator:
                 reference = dj.OuterRef(reference)
             return reference
         if isinstance(node, ax.F):
-            return dj.F(self.path(node.name))
+            return self.reference(node.name)
         if isinstance(node, ax.Value):
             if node.output_type is None:
                 return dj.Value(node.value)
@@ -600,9 +994,25 @@ class _Translator:
                 return djf.JSONObject(**dict(zip(node.keys, arguments, strict=True)))
             if type(node) is ax.Extract:
                 return djf.Extract(arguments[0], node.lookup_name, **_output_options(node))
+            if isinstance(node, ax.Concat):
+                # A text result also for arguments of different field types (CharField and TextField).
+                return djf.Concat(*arguments, **(_output_options(node) or {"output_field": dj.TextField()}))
             implied = {"TruncDate": datetime.date, "TruncTime": datetime.time}.get(name)
             return FUNCTIONS[name](*arguments, **_output_options(node, implied))
         raise NotSupportedError(f"the Django driver does not translate {name}")
+
+    def template(self, node: Any) -> Any:
+        """The Django expression that renders the SQL template of a function (not an aggregate) of a class with SQL
+        of its own, or the condition of such a lookup ``node``; ``None`` for another node."""
+        if not _has_sql(type(node)):
+            return None
+        if isinstance(node, Lookup):
+            return self.own_lookup(node)
+        if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate):
+            arguments = [self.expression(e) for e in node.expressions]
+            options = {} if node.output_type is None else {"output_field": output_field(node.output_type)}
+            return _django_class(type(node), _TemplateFunc)(*arguments, **options)
+        return None
 
     def condition(self, node: ax.Q) -> dj.Q:
         children = [self.expression(child) for child in node.children]
@@ -623,15 +1033,31 @@ class _Translator:
             return getattr(value, _adorm_name(type(value), target.attname))
         return value
 
+    def own_lookup(self, node: Lookup) -> dj.Q:
+        """The condition of a lookup with SQL of its own."""
+        lhs = node.lhs
+        field = None
+        if isinstance(lhs, ax.F) and not isinstance(lhs, ax.OuterRef):
+            field = _path_field(self.model, self.path(lhs.name, type(node)))
+        rhs = node.rhs
+        value = tuple(self.operand(item, field) for item in rhs) if isinstance(rhs, tuple) else self.operand(rhs, field)
+        return dj.Q(_django_class(type(node), _TemplateLookup)(self.expression(lhs), value))
+
     def lookup(self, node: Lookup) -> dj.Q:
+        if _has_sql(type(node)):
+            return self.own_lookup(node)
         lhs = node.lhs
         field = None
         if isinstance(lhs, ax.F) and not isinstance(lhs, ax.OuterRef):
             key = self.path(lhs.name, type(node), implicit=isinstance(node, Exact) and node.implicit)
-            field = _path_field(self.model, key)
-            field_path = self.field_path(lhs.name)
-            if field_path is not None:
-                _check_key_lookup(self.model, field_path, node.lookup_name, f"{lhs.name}__{node.lookup_name}")
+            if self.own_transform(lhs.name) is not None:
+                key = f"_adorm{next(self._alias_numbers)}"
+                self.aliases[key] = self.reference(lhs.name)
+            else:
+                field = _path_field(self.model, key)
+                field_path = self.field_path(lhs.name)
+                if field_path is not None:
+                    _check_key_lookup(self.model, field_path, node.lookup_name, f"{lhs.name}__{node.lookup_name}")
         else:
             key = f"_adorm{next(self._alias_numbers)}"
             self.aliases[key] = self.expression(lhs)
@@ -669,14 +1095,24 @@ class _Translator:
         if key == path and value is None:
             return self.path(path), None
         q = self.lookup(build_lookup(key, value))
-        ((django_key, django_value),) = q.children
+        (child,) = q.children
+        if not isinstance(child, tuple) or child[0].partition("__")[0] in self.aliases:
+            raise NotSupportedError(
+                f"{key!r}: get_or_create() and update_or_create() take no lookup or transform with SQL of its own or "
+                "a translation"
+            )
+        django_key, django_value = child
         if key == path:
             # Written without a lookup name, as the key was; its "__" keeps it out of the created row's values.
             django_key = django_key.rpartition("__")[0]
         return django_key, django_value
 
     def order(self, order: ax.OrderBy) -> Any:
-        expression = self.expression(order.expression)
+        node = order.expression
+        if type(node) is ax.F and node.name in self.columns_by_alias:
+            expression = dj.F(self.columns_by_alias[node.name])
+        else:
+            expression = self.expression(node)
         options = {"nulls_first": order.nulls_first, "nulls_last": order.nulls_last}
         return expression.desc(**options) if order.descending else expression.asc(**options)
 
@@ -711,8 +1147,19 @@ class _Translator:
         after = [step for step in steps[first:] if not (step[0] == "annotate" and early(step[1]))]
         late = {name for name, _ in query.annotations[query.group_mark :]}
         queryset = self.replay(queryset, before)
-        names = (n if n in self.annotation_names else self.path(n) for n in query.group_by if n not in late)
-        return self.replay(queryset.values(*names), after)
+        names: list[str] = []
+        expressions: dict[str, Any] = {}
+        for name in query.group_by:
+            if name in late:
+                continue
+            if name in self.annotation_names:
+                names.append(name)
+            elif self.own_transform(name) is not None:
+                key = self.columns_by_alias[name] = f"_adorm{next(self._alias_numbers)}"
+                expressions[key] = self.reference(name)
+            else:
+                names.append(self.path(name))
+        return self.replay(queryset.values(*names, **expressions), after)
 
     def replay(self, queryset: Any, steps: Iterable[tuple[str, int]]) -> Any:
         """``queryset`` with the filters and annotations ``steps`` names by index, in that order. Each filter is a
@@ -752,12 +1199,19 @@ class _Translator:
                 raise ProgrammingError(f"{query.model} has no Django manager {query.manager!r}")
             queryset = manager.all()
         queryset = self.annotated(queryset)
+        distinct = query.distinct_fields if query.is_distinct else ()
+        for name in distinct:
+            if name not in self.annotation_names and self.own_transform(name) is not None:
+                # DISTINCT ON takes names: a path through an own transform is a selected annotation.
+                key = self.columns_by_alias[name] = f"_adorm{next(self._alias_numbers)}"
+                queryset = queryset.annotate(**{key: self.reference(name)})
+                self.distinct_aliases.append(key)
         ordering = [self.order(order) for order in query.ordering]
         queryset = self.with_aliases(queryset)
         if ordering:
             queryset = queryset.order_by(*ordering)
         if query.is_distinct:
-            queryset = queryset.distinct(*(self.path(name) for name in query.distinct_fields))
+            queryset = queryset.distinct(*(self.columns_by_alias.get(name) or self.path(name) for name in distinct))
         if query.is_sliced:
             queryset = queryset[query.low_mark : query.high_mark]
         if query.is_none:
@@ -882,9 +1336,11 @@ class _Translator:
             )
         else:
             names = query.select or (*self.field_names(), *self.selected_annotations)
-            fields = [(name, columns.add(name if name in self.annotation_names else self.path(name))) for name in names]
+            fields = [(name, columns.add(self.column(name), name)) for name in names]
             plan = _RowPlan(fields, None)
-        return TranslatedQuery(queryset.values_list(*columns.paths), columns.paths, plan)
+        for key in self.distinct_aliases:
+            columns.add(key)
+        return TranslatedQuery(queryset.values_list(*columns.values), columns.paths, plan)
 
     def field_names(self) -> list[str]:
         adorm = _adorm_model(self.model)

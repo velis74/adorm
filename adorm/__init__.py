@@ -163,6 +163,7 @@ from adorm.query import (
     When,
 )
 from adorm.settings import configure, ConnectionProfile, PoolSettings
+from adorm.uuids import uuid7
 
 __version__ = _distribution_version("adorm")
 
@@ -325,4 +326,5 @@ __all__ = [
     "prefetch_related_objects",
     "timeout",
     "__version__",
+    "uuid7",
 ]

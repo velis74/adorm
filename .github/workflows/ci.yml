@@ -38,13 +38,13 @@ jobs:
       - run: uv sync --locked
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run pytest
+      - run: uv run pytest -n 4
       - name: Role tests (CREATEROLE granted)
         run: |
           psql postgres://postgres:postgres@localhost:5432/postgres -c "ALTER ROLE adorm CREATEROLE"
           ADORM_TEST_CREATE_ROLES=1 uv run pytest tests/test_profiles_backends.py
       - name: Conformance suite on SQLite
-        run: uv run pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
+        run: uv run pytest -n 4 --ds=tests.djangoproject.settings_sqlite tests/conformance
       - run: uv build
 
   node:
@@ -99,7 +99,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:17
@@ -124,10 +124,10 @@ jobs:
       - run: uv sync --locked
       - name: Tests with coverage
         run: |
-          uv run coverage run -m pytest
-          uv run coverage run -a -m pytest --ds=tests.djangoproject.settings_sqlite tests/conformance
+          uv run pytest -n 4 --cov --cov-report=
+          uv run pytest -n 4 --cov --cov-append --cov-report= --ds=tests.djangoproject.settings_sqlite tests/conformance
           psql postgres://postgres:postgres@localhost:5432/postgres -c "ALTER ROLE adorm CREATEROLE"
-          ADORM_TEST_CREATE_ROLES=1 uv run coverage run -a -m pytest tests/test_profiles_backends.py
+          ADORM_TEST_CREATE_ROLES=1 uv run pytest --cov --cov-append --cov-report= tests/test_profiles_backends.py
           uv run coverage json
       - name: Incremental coverage check
         uses: velis74/incremental-coverage-check@v3

@@ -17,11 +17,11 @@ import time
 
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
-from functools import cache
+from functools import cache, partial
 from typing import Any
 
-from adorm.drivers.base import Capabilities, is_connection_error
-from adorm.drivers.django.translation import AGGREGATES, FUNCTIONS
+from adorm.drivers.base import Capabilities, Constructs, is_connection_error
+from adorm.drivers.django.translation import AGGREGATES, FUNCTIONS, own_constructs, sqlite_functions
 from adorm.drivers.postgresql import (
     columns_sql,
     integrity_details as postgresql_integrity_details,
@@ -57,6 +57,7 @@ __all__ = [
     "sqlite_integrity_details",
     "sqlite_interrupted",
     "vendor",
+    "with_own_constructs",
 ]
 
 _LOOKUP_NAMES = (
@@ -100,9 +101,25 @@ _TRANSFORM_NAMES = (
     "time",
 )
 
-READ_CAPABILITIES = Capabilities(
-    operations={"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"},
-    constructs={f"lookup.{name}" for name in _LOOKUP_NAMES}
+
+@cache
+def _own_constructs_of(vendor: str) -> Callable[[], frozenset[str]]:
+    """The ``extra`` of the `Constructs` `with_own_constructs()` builds for ``vendor``, one callable per vendor."""
+    return partial(own_constructs, vendor)
+
+
+def with_own_constructs(capabilities: Capabilities, vendor: str) -> Capabilities:
+    """``capabilities`` whose constructs also hold, each time they are read, the constructs defined for ``vendor``
+    after import (`adorm.drivers.django.translation.own_constructs()`): own functions, lookups and transforms with SQL
+    templates and registered translations. Of a `Constructs`, only the fixed ``names`` are kept; its ``extra`` is
+    replaced."""
+    constructs = capabilities.constructs
+    names = constructs.names if isinstance(constructs, Constructs) else constructs
+    return replace(capabilities, constructs=Constructs(names, _own_constructs_of(vendor)))
+
+
+_READ_CONSTRUCTS = frozenset(
+    {f"lookup.{name}" for name in _LOOKUP_NAMES}
     | {f"transform.{name}" for name in _TRANSFORM_NAMES}
     | {f"function.{name}" for name in FUNCTIONS}
     | {f"aggregate.{name}" for name in AGGREGATES}
@@ -129,11 +146,19 @@ READ_CAPABILITIES = Capabilities(
         "expression.Exists",
         "expression.OuterRef",
         "expression.CombinedExpression",
-    },
-    cancellation=True,
+    }
 )
-"""The reads and constructs the Django query translation supports on PostgreSQL; the native PostgreSQL driver declares
-them too."""
+
+READ_CAPABILITIES = with_own_constructs(
+    Capabilities(
+        operations={"select", "get", "first", "last", "count", "exists", "aggregate", "in_bulk"},
+        constructs=_READ_CONSTRUCTS,
+        cancellation=True,
+    ),
+    "postgresql",
+)
+"""The reads and constructs the Django query translation supports on PostgreSQL, with the constructs defined for
+PostgreSQL (`with_own_constructs()`); the native PostgreSQL driver declares them too."""
 
 _WRITES = frozenset(
     {
@@ -166,19 +191,22 @@ _CASE_SENSITIVE_PATTERNS = frozenset({"lookup.contains", "lookup.startswith", "l
 POSTGRESQL_ONLY = frozenset({"lookup.overlap", "clause.distinct_on"})
 """Constructs only PostgreSQL has: array overlap and ``DISTINCT ON``."""
 
-CAPABILITIES = Capabilities(
-    operations=READ_CAPABILITIES.operations | _WRITES,
-    constructs=READ_CAPABILITIES.constructs | _ROW_LOCKS | _ON_CONFLICT | {"clause.select_for_update.no_key"},
-    connection_options=POSTGRESQL_OPTIONS,
-    custom_options=True,
-    backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
-    max_channel_length=MAX_IDENTIFIER_LENGTH,
-    savepoints=True,
-    cancellation=True,
+CAPABILITIES = with_own_constructs(
+    Capabilities(
+        operations=READ_CAPABILITIES.operations | _WRITES,
+        constructs=_READ_CONSTRUCTS | _ROW_LOCKS | _ON_CONFLICT | {"clause.select_for_update.no_key"},
+        connection_options=POSTGRESQL_OPTIONS,
+        custom_options=True,
+        backend_events={NOTIFY, NOTICE, CONNECTION_LOST},
+        max_channel_length=MAX_IDENTIFIER_LENGTH,
+        savepoints=True,
+        cancellation=True,
+    ),
+    "postgresql",
 )
 """What `DjangoDriver` supports on PostgreSQL with psycopg 3: `READ_CAPABILITIES`, the writes, row locks, savepoints,
-the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`, custom options and the backend events `NOTIFY`,
-`NOTICE` and `CONNECTION_LOST`."""
+the connection options of `adorm.drivers.sql.POSTGRESQL_OPTIONS`, custom options, the backend events `NOTIFY`,
+`NOTICE` and `CONNECTION_LOST`, and the constructs defined for PostgreSQL (`with_own_constructs()`)."""
 
 PSYCOPG2_CAPABILITIES = replace(CAPABILITIES, backend_events=frozenset())
 """What `DjangoDriver` supports on PostgreSQL with psycopg 2: `CAPABILITIES` without backend events."""
@@ -189,52 +217,62 @@ _WRITE_LOCKED_ROWS = frozenset(
 """The row locks a SQLite transaction gives by holding the database's write lock from ``BEGIN IMMEDIATE`` on; Django
 sends no ``FOR UPDATE``."""
 
-SQLITE_CAPABILITIES = Capabilities(
-    operations=CAPABILITIES.operations,
-    constructs=(
-        READ_CAPABILITIES.constructs
-        - POSTGRESQL_ONLY
-        - {
-            "lookup.contains",
-            "lookup.startswith",
-            "lookup.endswith",
-            "lookup.contained_by",
-            "clause.combinator.slice",
-        }
-    )
-    | _ON_CONFLICT
-    | _WRITE_LOCKED_ROWS,
-    savepoints=True,
-    cancellation=True,
+SQLITE_CAPABILITIES = with_own_constructs(
+    Capabilities(
+        operations=CAPABILITIES.operations,
+        constructs=(
+            _READ_CONSTRUCTS
+            - POSTGRESQL_ONLY
+            - {
+                "lookup.contains",
+                "lookup.startswith",
+                "lookup.endswith",
+                "lookup.contained_by",
+                "clause.combinator.slice",
+            }
+        )
+        | _ON_CONFLICT
+        | _WRITE_LOCKED_ROWS,
+        savepoints=True,
+        cancellation=True,
+    ),
+    "sqlite",
 )
-"""What `DjangoDriver` supports on SQLite: `CAPABILITIES` without ``nowait`` and ``skip_locked`` row locks, connection
-options, backend events,
-the constructs of `POSTGRESQL_ONLY`, a sliced query in a set operation (``clause.combinator.slice``), the
-case-sensitive pattern lookups ``contains``, ``startswith`` and ``endswith``, which SQLite's ``LIKE`` matches without
-regard to case, and ``contained_by``, which Django does not implement for SQLite's JSON."""
+"""What `DjangoDriver` supports on SQLite, with the constructs defined for SQLite (`with_own_constructs()`):
+`CAPABILITIES` without ``nowait`` and ``skip_locked`` row locks, connection options, backend events, the constructs
+of `POSTGRESQL_ONLY`, a sliced query in a set operation (``clause.combinator.slice``), the case-sensitive pattern
+lookups ``contains``, ``startswith`` and ``endswith``, which SQLite's ``LIKE`` matches without regard to case, and
+``contained_by``, which Django does not implement for SQLite's JSON."""
 
-MYSQL_CAPABILITIES = Capabilities(
-    operations=CAPABILITIES.operations,
-    constructs=(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - {"clause.intersection", "clause.difference"})
-    | (_ROW_LOCKS - {"clause.select_for_update.of"})
-    | {"clause.on_conflict.ignore"},
-    savepoints=True,
-    cancellation=True,
+MYSQL_CAPABILITIES = with_own_constructs(
+    Capabilities(
+        operations=CAPABILITIES.operations,
+        constructs=(_READ_CONSTRUCTS - POSTGRESQL_ONLY - {"clause.intersection", "clause.difference"})
+        | (_ROW_LOCKS - {"clause.select_for_update.of"})
+        | {"clause.on_conflict.ignore"},
+        savepoints=True,
+        cancellation=True,
+    ),
+    "mysql",
 )
-"""What `DjangoDriver` supports on MySQL and MariaDB: `CAPABILITIES` without connection options, backend events,
+"""What `DjangoDriver` supports on MySQL and MariaDB, with the constructs defined for MySQL
+(`with_own_constructs()`): `CAPABILITIES` without connection options, backend events,
 ``FOR UPDATE OF`` (MariaDB has none), ``FOR NO KEY UPDATE``, ``ON CONFLICT ... DO UPDATE`` (MySQL's
 ``ON DUPLICATE KEY UPDATE`` takes no conflict target), ``INTERSECT``, ``EXCEPT`` and the constructs of
 `POSTGRESQL_ONLY`."""
 
-ORACLE_CAPABILITIES = Capabilities(
-    operations=CAPABILITIES.operations,
-    constructs=(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - {"lookup.contained_by"}) | _ROW_LOCKS,
-    savepoints=True,
-    cancellation=True,
+ORACLE_CAPABILITIES = with_own_constructs(
+    Capabilities(
+        operations=CAPABILITIES.operations,
+        constructs=(_READ_CONSTRUCTS - POSTGRESQL_ONLY - {"lookup.contained_by"}) | _ROW_LOCKS,
+        savepoints=True,
+        cancellation=True,
+    ),
+    "oracle",
 )
-"""What `DjangoDriver` supports on Oracle: `CAPABILITIES` without connection options, backend events,
-``FOR NO KEY UPDATE``, ``ON CONFLICT``, the constructs of `POSTGRESQL_ONLY` and ``contained_by``, which Django does
-not implement for Oracle's JSON."""
+"""What `DjangoDriver` supports on Oracle, with the constructs defined for Oracle (`with_own_constructs()`):
+`CAPABILITIES` without connection options, backend events, ``FOR NO KEY UPDATE``, ``ON CONFLICT``, the constructs of
+`POSTGRESQL_ONLY` and ``contained_by``, which Django does not implement for Oracle's JSON."""
 
 _FEATURE_CONSTRUCTS: tuple[tuple[str, str], ...] = (
     ("has_select_for_update", "clause.select_for_update"),
@@ -265,7 +303,7 @@ def features_capabilities(features: type) -> Capabilities:
     def flag(name: str) -> bool:
         return inspect.getattr_static(features, name, False) is True
 
-    constructs = set(READ_CAPABILITIES.constructs - POSTGRESQL_ONLY - _COMBINATORS - {"lookup.contained_by"})
+    constructs = set(_READ_CONSTRUCTS - POSTGRESQL_ONLY - _COMBINATORS - {"lookup.contained_by"})
     constructs |= {construct for name, construct in _FEATURE_CONSTRUCTS if flag(name)}
     if "clause.select_for_update" not in constructs:
         constructs -= _ROW_LOCKS
@@ -343,10 +381,9 @@ class Vendor:
         self._features = features
 
     def capabilities(self) -> Capabilities:
-        """What the driver supports on this vendor's databases."""
-        if self._features is None:
-            return features_capabilities(object)
-        return features_capabilities(self._features)
+        """What the driver supports on this vendor's databases, with the constructs defined for the vendor
+        (`with_own_constructs()`)."""
+        return with_own_constructs(features_capabilities(self._features or object), self.name)
 
     def slot_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """``settings``, the ``DATABASES`` entry a slot's connection opens with, adjusted for the vendor."""
@@ -357,6 +394,10 @@ class Vendor:
 
     def connected(self, connection: Any) -> None:
         """Configure the DB-API connection of the slot's `DjangoConnection` ``connection`` once it is open."""
+
+    def prepare_call(self, connection: Any) -> None:
+        """Prepare the open DB-API connection of `DjangoConnection` ``connection`` before each call, also the shared
+        connection of a ``TestCase``. Does nothing here."""
 
     def cancel(self, connection: Any, raw: Any) -> None:
         """Cancel the statement running on the DB-API connection ``raw`` of ``connection``. Does nothing here."""
@@ -561,6 +602,19 @@ class SQLite(Vendor):
         raw = connection.db.connection
         raw.execute("PRAGMA journal_mode=WAL")
         raw.set_progress_handler(connection._cancelled, PROGRESS_STEPS)
+
+    def prepare_call(self, connection: Any) -> None:
+        """Create the functions `adorm.drivers.django.register_sqlite_function()` registered that the DB-API
+        connection does not have yet."""
+        raw = connection.db.connection
+        applied = connection._sqlite_functions
+        if applied is None or applied[0] is not raw:
+            applied = connection._sqlite_functions = (raw, {})
+        created = applied[1]
+        for key, entry in sqlite_functions():
+            if created.get(key) is not entry:
+                raw.create_function(entry.name, entry.num_params, entry.function, deterministic=entry.deterministic)
+                created[key] = entry
 
     def cancel(self, connection: Any, raw: Any) -> None:
         connection._cancel_lock_wait()

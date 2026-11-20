@@ -122,6 +122,7 @@ __all__ = [
     "Upper",
     "Value",
     "When",
+    "sql_constructs",
 ]
 
 
@@ -540,6 +541,63 @@ class OrderBy(Node):
         _require(not (self.nulls_first and self.nulls_last), "nulls_first and nulls_last are mutually exclusive")
 
 
+_DEFAULT_TEMPLATE = "%(function)s(%(expressions)s)"
+
+
+def _check_sql(cls: type) -> None:
+    """Raise ``TypeError`` when the SQL attributes of ``cls`` (a `Func`, `Lookup` or `Transform` subclass) are not
+    strings: ``function``, ``template``, ``arg_joiner`` and the values of ``templates``, a mapping keyed by vendor."""
+    for name in ("function", "template", "arg_joiner"):
+        value = getattr(cls, name, None)
+        if value is not None and not isinstance(value, str):
+            raise TypeError(f"{cls.__name__}.{name} is a string, not {type(value).__name__}")
+    templates = getattr(cls, "templates", None)
+    if templates is None:
+        return
+    if not isinstance(templates, Mapping):
+        raise TypeError(f"{cls.__name__}.templates maps vendor names to templates, not {type(templates).__name__}")
+    for vendor, template in templates.items():
+        if not isinstance(vendor, str) or not isinstance(template, str):
+            raise TypeError(f"{cls.__name__}.templates maps vendor names to template strings")
+
+
+def _sql_template(cls: type, vendor: str, default: str | None = None) -> str | None:
+    """The SQL template of ``cls`` on databases of ``vendor`` (Django's ``connection.vendor`` names): its
+    ``templates[vendor]``, else its ``template``, else ``default`` when it names a ``function``; ``None`` when it has
+    no SQL for the vendor."""
+    templates = getattr(cls, "templates", None) or {}
+    if vendor in templates:
+        return templates[vendor]
+    template = getattr(cls, "template", None)
+    if template is not None:
+        return template
+    return default if getattr(cls, "function", None) is not None else None
+
+
+def _has_sql(cls: type) -> bool:
+    """Whether ``cls`` declares SQL of its own: a ``function``, a ``template`` or ``templates``."""
+    return any(getattr(cls, name, None) for name in ("function", "template", "templates"))
+
+
+def sql_constructs(vendor: str) -> frozenset[str]:
+    """The construct names of the functions (not aggregates), lookups and transforms defined so far that have SQL for
+    ``vendor`` (their ``sql_template(vendor)``): those a driver that renders SQL templates declares on a database of
+    that vendor."""
+    from adorm.query.lookups import Lookup, Transform
+
+    names: set[str] = set()
+    pending: list[type] = [Func, Lookup, Transform]
+    while pending:
+        cls = pending.pop()
+        if issubclass(cls, Aggregate):
+            continue
+        pending.extend(cls.__subclasses__())
+        construct = cls.construct
+        if construct and _has_sql(cls) and cls.sql_template(vendor) is not None:
+            names.add(construct)
+    return frozenset(names)
+
+
 class Func(Expression):
     """Base class of functions. Arguments that are strings are field references; use `Value` for a literal string.
 
@@ -548,6 +606,11 @@ class Func(Expression):
     ``"arguments"`` (the first argument of a known type; every argument has the result's type), ``"first"`` (the
     first argument) or ``"numeric"`` (``Decimal`` when an argument is a ``Decimal``, else ``float``). Its construct
     name is ``function.<class name>``.
+
+    A function of the application's own declares its SQL as Django's ``Func`` does: ``function`` (rendered as
+    ``%(function)s(%(expressions)s)``), ``template`` with ``%(expressions)s`` (the arguments joined with
+    ``arg_joiner``) and ``%(function)s``, or ``templates``, a template per database vendor. Drivers that render SQL
+    run it.
     """
 
     category: ClassVar[str] = "function"
@@ -556,6 +619,14 @@ class Func(Expression):
     max_args: ClassVar[int | None] = None
     default_output_type: ClassVar[type | None] = None
     output_from: ClassVar[str | None] = None
+    function: ClassVar[str | None] = None
+    """The SQL function's name."""
+    template: ClassVar[str | None] = None
+    """The SQL template for every vendor without one in ``templates``."""
+    templates: ClassVar[Mapping[str, str] | None] = None
+    """SQL templates by database vendor."""
+    arg_joiner: ClassVar[str] = ", "
+    """What joins the arguments in ``%(expressions)s``."""
     _fields = ("expressions", "output_type")
     expressions: tuple[Expression, ...]
 
@@ -563,6 +634,13 @@ class Func(Expression):
         super().__init_subclass__(**kwargs)
         if "construct" not in cls.__dict__:
             cls.construct = f"{cls.category}.{cls.__name__}"
+        _check_sql(cls)
+
+    @classmethod
+    def sql_template(cls, vendor: str) -> str | None:
+        """The SQL template on databases of ``vendor``: ``templates[vendor]``, else ``template``, else
+        ``%(function)s(%(expressions)s)`` when the class names a ``function``; ``None`` without one."""
+        return _sql_template(cls, vendor, _DEFAULT_TEMPLATE)
 
     def __init__(self, *expressions: Any, output_type: type | None = None) -> None:
         if type(self).construct is None:

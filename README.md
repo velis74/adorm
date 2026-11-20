@@ -57,20 +57,21 @@ needs no database server (Python's `sqlite3`).
 uv sync
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest
+uv run pytest -n 4         # four workers (pytest-xdist); without -n the tests run in one process
 npm install
 npm run lint              # eslint, markdownlint and type checks of the demo; `npm run lint -- --fix` fixes
 ```
 
 The tests read the test database URL from `ADORM_TEST_DATABASE_URL` (default
-`postgres://postgres@127.0.0.1:5432/adorm_test`). On that server they create and drop the database it names
-(`<name>`: `ADORM_TEST_DATABASE_NAME` when set, `adorm_test` when the URL names `postgres` or none) and the databases
+`postgres://postgres@127.0.0.1:5432/adorm_test`). On that server they create and drop the database it names (`<name>`:
+`ADORM_TEST_DATABASE_NAME` when set, `adorm_test` when the URL names `postgres` or none) and the databases
 `<name>_demo`, `<name>_demo_owner`, `<name>_limited`, `<name>_parallel` and `<name>_parallel_<n>` (the clones of
-`manage.py test --parallel`). Other databases and the server's roles are left untouched; runs with different names
-on one server leave each other's databases alone. A run that leaves any of these databases, or a role named
-`<name>_…`, on the server fails. Run the tests as a dedicated user with `CREATEDB`. Under a
-superuser the test of the pool's refusal handling is skipped, because a database's connection limit does not apply to
-a superuser, and so are the tests of the demo, which refuses a superuser:
+`manage.py test --parallel`). Under pytest-xdist each worker uses `<name>_<worker>` (`adorm_test_gw0` …) as its
+`<name>`, so workers share no database or role. Other databases and the server's roles are left untouched; runs with
+different names on one server leave each other's databases alone. A run that leaves any of these databases, or a role
+named `<name>_…`, on the server fails. Run the tests as a dedicated user with `CREATEDB`. Under a superuser the test of
+the pool's refusal handling is skipped, because a database's connection limit does not apply to a superuser, and so are
+the tests of the demo, which refuses a superuser:
 
 ```sql
 CREATE ROLE adorm LOGIN CREATEDB PASSWORD '...';

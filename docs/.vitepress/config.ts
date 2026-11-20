@@ -78,6 +78,7 @@ export default defineConfig({
           { text: 'Schema per tenant', link: '/howto/schema-per-tenant' },
           { text: 'Writing a driver', link: '/howto/writing-a-driver' },
           { text: 'Generating models', link: '/howto/generating-models' },
+          { text: 'Own expressions', link: '/howto/own-expressions' },
         ],
       },
       {

@@ -31,6 +31,7 @@ from adorm.drivers.django.vendors import (
     sqlite_integrity_details,
     Vendor,
     vendor,
+    with_own_constructs,
 )
 from adorm.exceptions import IntegrityError, InterfaceError, OperationalError, wrap_driver_error
 from adorm.executor import Pool, Router, set_runner
@@ -64,7 +65,8 @@ def test_postgresql_declares_everything_the_translation_supports():
 def test_other_databases_declare_no_postgresql_features(capabilities):
     assert capabilities.operations == CAPABILITIES.operations
     assert not capabilities.constructs & POSTGRESQL_ONLY
-    assert capabilities.constructs < CAPABILITIES.constructs
+    # The bundled constructs; own expressions may have SQL for one vendor only.
+    assert capabilities.constructs.names < CAPABILITIES.constructs.names
     assert capabilities.connection_options == frozenset()
     assert capabilities.backend_events == frozenset()
     assert capabilities.max_channel_length is None
@@ -184,7 +186,7 @@ def test_another_backend_declares_what_its_feature_flags_allow():
     bare = features_capabilities(NoLocks)
     assert not {name for name in bare.constructs if name.startswith("clause.select_for_update")}
     assert not bare.savepoints
-    assert Vendor("cockroachdb", Features).capabilities() == capabilities
+    assert Vendor("cockroachdb", Features).capabilities() == with_own_constructs(capabilities, "cockroachdb")
     assert vendor("cockroachdb", Features).name == "cockroachdb"
 
 
@@ -494,3 +496,22 @@ def test_the_error_of_a_cancelled_calls_statement_is_its_vendors_cancellation(na
     other = DjangoOperationalError("deadlock detected")
     other.__cause__ = _Database.OperationalError("deadlock detected")
     assert not current.is_cancellation(map_django_error(other, current))
+
+
+def test_wrapping_capabilities_for_another_vendor_declares_that_vendor_s_own_constructs_only():
+    from adorm.query import Func
+
+    class PostgresOnlyVendorsTest(Func):
+        arity = 1
+        templates = {"postgresql": "REVERSE(%(expressions)s)"}
+
+    class MysqlOnlyVendorsTest(Func):
+        arity = 1
+        templates = {"mysql": "REVERSE(%(expressions)s)"}
+
+    wrapped = with_own_constructs(CAPABILITIES, "mysql")
+    assert "function.PostgresOnlyVendorsTest" in CAPABILITIES.constructs
+    assert "function.PostgresOnlyVendorsTest" not in wrapped.constructs
+    assert "function.MysqlOnlyVendorsTest" in wrapped.constructs
+    assert "lookup.exact" in wrapped.constructs
+    assert wrapped.constructs.names == CAPABILITIES.constructs.names

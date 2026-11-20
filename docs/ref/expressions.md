@@ -151,17 +151,64 @@ sets `arity` (the exact number of arguments) or `min_args` and `max_args`, `defa
 A wrong number of arguments raises `TypeError`, as does instantiating `Func`. `output_type`, here and on aggregates,
 types the values compared with the function when it is encoded and must be a type
 [`adorm.codec.type_name()`](./encoding#adorm-codec-type-name-tp) names, else `TypeError`. A subclass has the construct
-name `function.<class name>`; a function a driver adds:
+name `function.<class name>`.
+
+A subclass that is not an aggregate declares its SQL with the class attributes of Django's `Func`; the drivers that
+render SQL (the Django driver and the native PostgreSQL driver) run it and declare its construct name on the vendors
+it has a template for, also when the class is defined after the driver was imported:
+
+| Attribute | Meaning |
+|---|---|
+| `function` | the SQL function's name; alone, it renders `%(function)s(%(expressions)s)` |
+| `template` | the SQL template: `%(expressions)s` is the arguments' SQL joined with `arg_joiner`, `%(function)s` the `function`; a literal `%` is `%%` |
+| `templates` | a mapping from Django's vendor names (`"postgresql"`, `"sqlite"` …) to templates; a vendor without one falls back to `template`, then to `function` |
+| `arg_joiner` | what joins the arguments in `%(expressions)s`; `", "` by default |
+
+A `template` or `function` without an entry in `templates` serves, and is declared on, every vendor, so it holds SQL
+every database runs; SQL of one dialect goes into `templates`. A wrong type (a template that is not a string,
+`templates` that is not a mapping of strings) raises `TypeError` when the class is defined. On a vendor without SQL
+the function is not declared, so the query raises `NotSupportedError` naming it before it runs. A function without
+SQL runs on a driver that translates it: a driver that adds it, or a translation registered with
+[`register_translation()`](/ref/drivers#adorm-drivers-django-register-translation-cls-vendors-none) for the Django
+drivers. Recipe: [Own expressions](/howto/own-expressions).
 
 ```python
 from adorm.query import Exact, Func, Query
 
 
-class Unaccent(Func):
+class FirstLetter(Func):
     arity = 1
+    default_output_type = str
+    template = "UPPER(SUBSTR(%(expressions)s, 1, 1))"
 
 
-Query("club.Member").filter(Exact(Unaccent("name"), "Zoe"))   # constructs: function.Unaccent, lookup.exact
+class YearMonth(Func):
+    arity = 1
+    default_output_type = str
+    templates = {
+        "postgresql": "TO_CHAR(%(expressions)s, 'YYYY-MM')",
+        "sqlite": "STRFTIME('%%Y-%%m', %(expressions)s)",
+    }
+
+
+Query("club.Member").filter(Exact(FirstLetter("last_name"), "N"))   # constructs: function.FirstLetter, lookup.exact
+```
+
+#### `sql_template(vendor)`
+
+A class method: the template on databases of `vendor`: `templates[vendor]`, else `template`, else
+`%(function)s(%(expressions)s)` when the class names a `function`; `None` without SQL for the vendor.
+
+### `adorm.query.sql_constructs(vendor)`
+
+The construct names of the functions (not aggregates), lookups and transforms defined so far whose
+`sql_template(vendor)` is not `None`, as a `frozenset`: those a driver that renders SQL templates declares on
+databases of `vendor` (with [`Constructs`](/ref/drivers#adorm-drivers-constructs-names-extra-none), so that classes
+defined later count too).
+
+```python
+sql_constructs("sqlite")    # frozenset({'function.FirstLetter', 'function.YearMonth', ...})
+sql_constructs("mysql")     # frozenset({'function.FirstLetter', ...})
 ```
 
 `output_from` gives the type of a function without an `output_type`, used to encode the values compared with it:
@@ -563,13 +610,26 @@ A random version 4 UUID, a new one for each row, as a `uuid.UUID`.
 A version 7 (time-ordered) UUID, a new one for each row, as a `uuid.UUID`. `shift` (a `timedelta` or an expression
 of a duration) moves its timestamp.
 
-The Django-translating drivers have both with Django 6.0 or later. With an older Django they are not among the
-driver's [capabilities](/topics/drivers#capabilities): a query that uses them raises `NotSupportedError` before it
-runs. `UUID7` needs PostgreSQL 18, or SQLite with Python 3.14 (without `shift`); on an older PostgreSQL the query
-raises `NotSupportedError`.
+The Django driver and the native PostgreSQL driver run both on PostgreSQL and SQLite with every Django version they
+support, with Django's function where Django and the database have it and otherwise with the database's own function
+or a SQLite function of adorm's ([UUID4 and UUID7](/ref/drivers#uuid4-and-uuid7)). PostgreSQL has a function for
+`UUID7` from version 18 on; before 18 the query raises `NotSupportedError`. On SQLite `shift` raises
+`NotSupportedError`. A `UUID7` value holds the Unix time in milliseconds in its first 48 bits, so values of later
+milliseconds sort later. Other databases have them where Django does.
 
 ```python
 Query("library.Note").update(code=UUID4())
+```
+
+#### `adorm.uuid7()`
+
+Returns a new version 7 UUID (RFC 9562) generated in Python: the Unix time in milliseconds in the first 48 bits, the
+version and variant bits, the rest random; `uuid.uuid7()` of the standard library from Python 3.14 on. As a field
+default (`models.UUIDField(default=adorm.uuid7)`) it fills the column on insert on every database; the Django driver's
+SQLite function behind `UUID7` calls it. Defined in `adorm.uuids`.
+
+```python
+adorm.uuid7()   # UUID('019aa0f2-7c3e-7a1b-9f4d-2b8e1c0d3a5f')
 ```
 
 ## Aggregates

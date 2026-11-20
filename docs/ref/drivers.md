@@ -264,7 +264,8 @@ thread instead (see [`ThreadedDriver`](#adorm-drivers-threadeddriver)).
 backend_events=frozenset(), savepoints=False, cancellation=False, max_channel_length=None, custom_options=False)`
 
 What a driver supports; a frozen, hashable dataclass. The four name fields take any iterable of strings, stored as
-`frozenset`; a plain string raises `TypeError`.
+`frozenset`; a plain string raises `TypeError`. `constructs` may also be a [`Constructs`](#adorm-drivers-constructs-names-extra-none),
+kept as given, which declares constructs defined after the driver's module was imported.
 
 | Field | Contents |
 |---|---|
@@ -326,6 +327,24 @@ caps.unsupported(operation)        # ["lookup.icontains"] for a select with an i
 caps.check(operation, "raw-sql")   # NotSupportedError: 'select' operation needs unsupported lookup.icontains (driver 'raw-sql')
 caps.check_options({"work_mem": "4MB"})   # NotSupportedError: unsupported connection options: work_mem
 caps.check_options({"app.user_id": "7"})  # NotSupportedError unless custom_options=True
+```
+
+### `adorm.drivers.Constructs(names=(), extra=None)`
+
+A read-only set of construct names: the fixed `names` (any iterable of strings; a plain string raises `TypeError`)
+and, each time the set is read (`in`, iteration, `len()`), those the callable `extra()` returns. A driver declares
+the constructs an application defines with it: functions, lookups and transforms with SQL templates
+([`sql_constructs()`](/ref/expressions#adorm-query-sql-constructs-vendor)) and registered translations. A set
+operation with another set (`-`, `|`, `&`) gives a `frozenset` of the names at that moment. Equality and hash
+follow the definition, not the current contents: two `Constructs` are equal when their `names` are equal and their
+`extra` is the same callable, and a `Constructs` never equals a plain set (`frozenset(constructs)` compares the
+contents). A `Capabilities` holding one stays hashable, its hash consistent with its equality.
+
+```python
+from adorm.query import sql_constructs
+
+constructs = Constructs({"lookup.exact", "function.Lower"}, lambda: sql_constructs("postgresql"))
+"function.FirstLetter" in constructs   # True once a Func subclass FirstLetter with a template exists
 ```
 
 ### `adorm.drivers.Operation`
@@ -913,7 +932,7 @@ fields); the other databases have the [capabilities of their vendor](#adorm-driv
 | Field | Value |
 |---|---|
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean`, `check_table` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`, `has_key`, `has_keys`, `has_any_keys`, `contained_by`; `transform.<name>` for `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, `date`, `time`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression` |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`, `has_key`, `has_keys`, `has_any_keys`, `contained_by`; `transform.<name>` for `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, `date`, `time`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression`; a [`Constructs`](#adorm-drivers-constructs-names-extra-none) that also holds the constructs defined for PostgreSQL ([`with_own_constructs()`](#adorm-drivers-django-vendors-with-own-constructs-capabilities-vendor)): `function.UUID4`, `function.UUID7` and the application's own expressions |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `role` |
 | `custom_options` | `True` |
@@ -1097,10 +1116,11 @@ own; `features` is the backend's `DatabaseFeatures` class.
 | Member | Does |
 |---|---|
 | `name` | Django's vendor name (`DatabaseWrapper.vendor`) |
-| `capabilities()` | what the driver supports: here [`features_capabilities(features)`](#adorm-drivers-django-vendors-features-capabilities-features) |
+| `capabilities()` | what the driver supports: here [`features_capabilities(features)`](#adorm-drivers-django-vendors-features-capabilities-features) with the constructs defined for the vendor ([`with_own_constructs()`](#adorm-drivers-django-vendors-with-own-constructs-capabilities-vendor)) |
 | `slot_settings(settings)` | the `DATABASES` entry a slot's connection opens with; here unchanged |
 | `check_settings(settings)` | raises `NotSupportedError` for an entry a slot cannot use; here nothing |
 | `connected(connection)` | configures the DB-API connection of a [`DjangoConnection`](#adorm-drivers-django-djangoconnection) once it is open; here nothing |
+| `prepare_call(connection)` | prepares the open DB-API connection before each call, also the shared connection of a `TestCase`; here nothing |
 | `cancel(connection, raw)` | cancels the statement running on the DB-API connection `raw`; here nothing |
 | `backend_pid(raw)` | the server's id of the session; here `None` |
 | `cancelled_error(db)` | the DB-API error a statement of a cancelled call raises before it runs, on Django's connection wrapper `db`; here the backend's `OperationalError` [`CALL_CANCELLED`](#adorm-drivers-django-vendors-call-cancelled); PostgreSQL psycopg 3's `QueryCanceled` (SQLSTATE `57014`), SQLite [`sqlite_interrupted()`](#adorm-drivers-django-vendors-sqlite-interrupted), MySQL error 1317 |
@@ -1130,6 +1150,9 @@ SQLite allows one writer at a time beside any number of readers.
 - `connected()` switches the database to WAL (`PRAGMA journal_mode=WAL`, kept in the database file), so reads run
   beside the writer, and installs a progress handler that stops the statements of a
   cancelled call every [`PROGRESS_STEPS`](#adorm-drivers-django-vendors-sqlite) (1000) virtual machine instructions.
+- `prepare_call()` creates the functions registered with
+  [`register_sqlite_function()`](#adorm-drivers-django-register-sqlite-function-name-num-params-function-deterministic-false)
+  that the connection lacks, before each call, on a slot's connection and on the shared connection of a `TestCase`.
 - `writes_wait_for_lock`: a write outside a transaction runs in one of its own; `take_write_lock(connection,
   atomic)` enters the outermost atomic block and retries while another connection holds the lock (`SQLITE_BUSY`,
   `SQLITE_LOCKED`), until the connection's busy timeout (`PRAGMA busy_timeout`) passes, with it set to 0 meanwhile
@@ -1169,20 +1192,30 @@ table and column of `ORA-01400`. Untested.
 constructs, `clause.combinator.slice` (Django refuses a sliced query in a set operation), `lookup.contains`,
 `lookup.startswith` and `lookup.endswith` (SQLite's `LIKE` ignores the case of ASCII letters), `lookup.contained_by`
 (Django has no JSON containment on SQLite), connection options and backend events. It has `clause.on_conflict.ignore`
-and `.update`, the set operations, savepoints and cancellation.
+and `.update`, the set operations, savepoints, cancellation and the constructs defined for SQLite
+([`with_own_constructs()`](#adorm-drivers-django-vendors-with-own-constructs-capabilities-vendor)).
 
 #### `adorm.drivers.django.vendors.MYSQL_CAPABILITIES`
 
 `CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `clause.select_for_update.of` (MariaDB has none; the vendor
 name does not tell MariaDB apart without connecting), `clause.select_for_update.no_key`, `clause.on_conflict.update`
 (`ON DUPLICATE KEY UPDATE` takes no conflict target), `clause.intersection`, `clause.difference` (MySQL before
-8.0.31), connection options and backend events.
+8.0.31), connection options and backend events; with the constructs defined for MySQL.
 
 #### `adorm.drivers.django.vendors.ORACLE_CAPABILITIES`
 
 `CAPABILITIES` without the `POSTGRESQL_ONLY` constructs, `lookup.contained_by` (Django has no JSON containment on
 Oracle), `clause.select_for_update.no_key`, `clause.on_conflict.ignore`, `clause.on_conflict.update`, connection
-options and backend events.
+options and backend events; with the constructs defined for Oracle.
+
+#### `adorm.drivers.django.vendors.with_own_constructs(capabilities, vendor)`
+
+Returns `capabilities` with its constructs as a [`Constructs`](#adorm-drivers-constructs-names-extra-none) that
+also holds, each time it is read,
+[`own_constructs(vendor)`](#adorm-drivers-django-translation-own-constructs-vendor): the functions, lookups and
+transforms with SQL for `vendor` and the translations registered for it, also those defined after import. Of a
+`Constructs` in `capabilities` only the fixed `names` are kept, so wrapping `CAPABILITIES` for another vendor
+declares that vendor's own constructs, not PostgreSQL's. Every vendor's capabilities are built with it.
 
 #### `adorm.drivers.django.vendors.POSTGRESQL_ONLY`
 
@@ -1297,8 +1330,22 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   rows selects the fields of `values()` or `values_list()` given after the set operation; the rows are built as the
   first combined query's rows, keyed by those names column by column (a different number of names raises
   `ProgrammingError`). As a subquery, a combined query of model rows selects its primary key.
-- A node without a translation (a function or aggregate class of a driver's own, such as a `Func` subclass a driver
-  adds) raises `NotSupportedError`; a `select_related()` path that is not a relation of the adorm model, or not a
+- A node of a class with a [registered translation](#adorm-drivers-django-register-translation-cls-vendors-none) becomes
+  what the translation returns, before anything else; with `vendors`, and a SQL template of the class, a Django
+  expression that compiles the translation on those vendors and the template on another. A `Func` subclass (not an
+  aggregate) with SQL of its own (`function`, `template`, `templates`) becomes a Django `Func` that renders the template
+  for the connection's vendor, its arguments translated, the parameters repeated for each `%(expressions)s`; a vendor
+  without a template raises Django's `NotSupportedError`. A `Lookup` subclass with a template becomes a Django lookup
+  whose parameters follow `%(lhs)s` and `%(rhs)s` in the template; a path through a `Transform` with SQL of its own or a
+  registered translation becomes Django's `F` of the path before it, wrapped per transform from there on in a Django
+  `Transform` that renders the template or in what the translation returns (a built-in transform after it raises
+  `NotSupportedError`), also in `values()` and as a lookup's left-hand side. In the grouping of `values()` before
+  `annotate()` and in `distinct()` with fields such a path is an annotation of its own, which `order_by()` of the same
+  path refers to; a subquery with `distinct()` on such a path raises `NotSupportedError`. `get_or_create()` and
+  `update_or_create()` take no such lookup or transform (`NotSupportedError`).
+- `Concat` without an `output_type` gets a `TextField` output field, so arguments of different text fields concatenate.
+- A node without a translation (a function or aggregate class of a driver's own without SQL) raises
+  `NotSupportedError`; a `select_related()` path that is not a relation of the adorm model, or not a
   foreign key or one-to-one relation, raises `ProgrammingError`. Unknown fields raise Django's `FieldError` when the
   query set is built.
 
@@ -1571,12 +1618,93 @@ Query("library.Author").annotate(rank=Value(None, output_type=int)).values("name
 
 A read-only mapping from adorm function class names to Django function classes of the same name: `Lower`, `Upper`,
 `Length`, `Coalesce`, `Concat`, `Now`, `TruncYear`, `TruncQuarter`, `TruncMonth`, `TruncWeek`, `TruncDay`,
-`TruncHour`, `TruncMinute`, `TruncSecond`, `TruncDate`, `TruncTime`. `Trunc` translates separately.
+`TruncHour`, `TruncMinute`, `TruncSecond`, `TruncDate`, `TruncTime`, and the functions of the comparison, JSON,
+date component, math, text and hash groups that Django has. `Trunc` translates separately; `UUID4` and `UUID7` have
+[registered translations](#uuid4-and-uuid7).
 
 ### `adorm.drivers.django.translation.AGGREGATES`
 
 A read-only mapping from adorm aggregate class names to Django aggregate classes of the same name: `Count`, `Sum`,
 `Avg`, `Min`, `Max`.
+
+### `adorm.drivers.django.register_translation(cls, *, vendors=None)`
+
+Registers a translation of the adorm class `cls` (a `Func`, `Lookup` or other `Node` subclass, or a `Transform`
+subclass, with a construct name) for the Django driver and the native PostgreSQL driver, and returns a decorator of
+the translation:
+
+- for a `Node` subclass, a callable `translation(node, translate)`: `node` is a node of exactly `cls`;
+  `translate(child)` returns the Django expression of a child node, one of `node.get_source_expressions()`; the
+  result is the Django expression of the node;
+- for a `Transform` subclass, a callable `translation(lhs)`: `lhs` is the Django expression of the transformed
+  value; the result is the Django expression of the transformed value. It applies wherever the transform's SQL
+  template would (lookup keys, `values()`, `F()`), and the same transforms may follow it;
+- the translation runs on databases of the vendors in `vendors` (Django's vendor names), on every vendor by
+  default, instead of the class's SQL template and the bundled translation; on a database of another vendor the
+  class's SQL template applies;
+- both drivers declare `cls.construct` on databases of the vendors in `vendors` and on those the class has a
+  template for, from the registration on;
+- a later registration for `cls` replaces the earlier one.
+
+A `cls` that is not an adorm expression or transform class with a construct name, and a string `vendors`, raise
+`TypeError`.
+Defined in `adorm.drivers.django.translation`. Recipe: [Own expressions](/howto/own-expressions).
+
+```python
+from django.db.models import Value
+from django.db.models.functions import Concat, Upper
+
+from adorm.drivers.django import register_translation
+
+
+class Shout(Func):
+    arity = 1
+    default_output_type = str
+
+
+@register_translation(Shout)
+def translate_shout(node, translate):
+    (argument,) = node.get_source_expressions()
+    return Concat(Upper(translate(argument)), Value("!"))
+```
+
+### `adorm.drivers.django.register_sqlite_function(name, num_params, function, *, deterministic=False)`
+
+Registers the Python callable `function` as the SQL function `name` of `num_params` arguments (`-1` for any number)
+on the Django driver's SQLite connections, as `sqlite3.Connection.create_function()` does, and returns `function`.
+[`SQLite.prepare_call()`](#adorm-drivers-django-vendors-sqlite) creates it on a connection before the connection's
+next call. `deterministic` tells SQLite that the result depends on the arguments only. A later registration of the same
+name (in any case) and number of arguments replaces the earlier one; a name that is not a non-empty string and a
+`function` that is not callable raise `TypeError`. Defined in `adorm.drivers.django.translation`.
+
+```python
+register_sqlite_function("app_reverse", 1, lambda text: None if text is None else text[::-1], deterministic=True)
+```
+
+### `adorm.drivers.django.translation.own_constructs(vendor)`
+
+The constructs the Django-based drivers declare on databases of `vendor` beyond their bundled ones, as a `frozenset`:
+[`sql_constructs(vendor)`](/ref/expressions#adorm-query-sql-constructs-vendor) and the classes with a translation
+registered for the vendor.
+
+### `adorm.drivers.django.translation.sqlite_functions()`
+
+The registered SQLite functions as a list of `((name in lower case, num_params), function)` pairs; each function has
+`name`, `num_params`, `function` and `deterministic`.
+
+### UUID4 and UUID7
+
+[`UUID4`](/ref/expressions#adorm-uuid4) and [`UUID7`](/ref/expressions#adorm-uuid7-shift-none) have translations
+registered with `register_translation()`. Each gives Django's function where the installed Django has it and, for
+`UUID7`, the database has it (`features.supports_uuid7_function`: PostgreSQL 18, SQLite with Python 3.14); otherwise:
+
+| Function | PostgreSQL | SQLite | Other vendors |
+|---|---|---|---|
+| `UUID4` | `GEN_RANDOM_UUID()` | `ADORM_UUID4()`, registered with `register_sqlite_function()`: `uuid.uuid4()` | Django's `UUID4`, which refuses a database without one |
+| `UUID7` | `UUIDV7()` (with the shift as an `interval`) on PostgreSQL 18 and later; before 18 Django's `NotSupportedError` (`UUID7 requires PostgreSQL version 18 or later.`) | `ADORM_UUID7()`, registered with `register_sqlite_function()`: [`adorm.uuid7()`](/ref/expressions#adorm-uuid7); a shift raises Django's `NotSupportedError` | Django's `UUID7`, which refuses a database without one |
+
+Where the installed Django has no such function, both are declared on PostgreSQL and SQLite only; with it, on every
+vendor.
 
 ### `adorm.drivers.django.translation.SELECT_RELATED_DEPTH`
 

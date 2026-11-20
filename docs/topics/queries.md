@@ -294,6 +294,26 @@ Query("club.Member").annotate(
 The [expression reference](/ref/expressions) documents every class; [Aggregation](/topics/aggregation) shows
 `aggregate()`, per-row and per-group aggregates, `alias()` and how to port Django code that aggregates.
 
+### Own functions, lookups and transforms
+
+An application adds functions, lookups and transforms of its own. A `Func`, `Lookup` or `Transform` subclass with a
+SQL `template` (or `templates`, one per database vendor) runs on the drivers that render SQL; for SQL a template
+cannot express, a translation into a Django expression registered with `register_translation()` runs on the Django
+driver and the native PostgreSQL driver. A driver declares such a construct from the moment the class or the
+translation exists; on a driver or vendor without it the query raises `NotSupportedError` before it runs.
+
+```python
+class FirstLetter(Func):
+    arity = 1
+    default_output_type = str
+    template = "UPPER(SUBSTR(%(expressions)s, 1, 1))"
+
+
+Member.objects.annotate(f=FirstLetter("last_name"))
+```
+
+The recipe [Own expressions](/howto/own-expressions) shows each kind; `UUID4` and `UUID7` use the same mechanism.
+
 ## Shaping the result
 
 `values()` and `values_list()` return dicts or tuples instead of model instances:
