@@ -496,3 +496,22 @@ def test_the_error_of_a_cancelled_calls_statement_is_its_vendors_cancellation(na
     other = DjangoOperationalError("deadlock detected")
     other.__cause__ = _Database.OperationalError("deadlock detected")
     assert not current.is_cancellation(map_django_error(other, current))
+
+
+def test_wrapping_capabilities_for_another_vendor_declares_that_vendor_s_own_constructs_only():
+    from adorm.query import Func
+
+    class PostgresOnlyVendorsTest(Func):
+        arity = 1
+        templates = {"postgresql": "REVERSE(%(expressions)s)"}
+
+    class MysqlOnlyVendorsTest(Func):
+        arity = 1
+        templates = {"mysql": "REVERSE(%(expressions)s)"}
+
+    wrapped = with_own_constructs(CAPABILITIES, "mysql")
+    assert "function.PostgresOnlyVendorsTest" in CAPABILITIES.constructs
+    assert "function.PostgresOnlyVendorsTest" not in wrapped.constructs
+    assert "function.MysqlOnlyVendorsTest" in wrapped.constructs
+    assert "lookup.exact" in wrapped.constructs
+    assert wrapped.constructs.names == CAPABILITIES.constructs.names

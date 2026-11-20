@@ -1210,8 +1210,9 @@ options and backend events; with the constructs defined for Oracle.
 Returns `capabilities` with its constructs as a [`Constructs`](#adorm-drivers-constructs-names-extra-none) that
 also holds, each time it is read,
 [`own_constructs(vendor)`](#adorm-drivers-django-translation-own-constructs-vendor): the functions, lookups and
-transforms with SQL for `vendor` and the translations registered for it, also those defined after import. Every
-vendor's capabilities are built with it.
+transforms with SQL for `vendor` and the translations registered for it, also those defined after import. Of a
+`Constructs` in `capabilities` only the fixed `names` are kept, so wrapping `CAPABILITIES` for another vendor
+declares that vendor's own constructs, not PostgreSQL's. Every vendor's capabilities are built with it.
 
 #### `adorm.drivers.django.vendors.POSTGRESQL_ONLY`
 

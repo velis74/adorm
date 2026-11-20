@@ -102,11 +102,20 @@ _TRANSFORM_NAMES = (
 )
 
 
+@cache
+def _own_constructs_of(vendor: str) -> Callable[[], frozenset[str]]:
+    """The ``extra`` of the `Constructs` `with_own_constructs()` builds for ``vendor``, one callable per vendor."""
+    return partial(own_constructs, vendor)
+
+
 def with_own_constructs(capabilities: Capabilities, vendor: str) -> Capabilities:
     """``capabilities`` whose constructs also hold, each time they are read, the constructs defined for ``vendor``
     after import (`adorm.drivers.django.translation.own_constructs()`): own functions, lookups and transforms with SQL
-    templates and registered translations."""
-    return replace(capabilities, constructs=Constructs(capabilities.constructs, partial(own_constructs, vendor)))
+    templates and registered translations. Of a `Constructs`, only the fixed ``names`` are kept; its ``extra`` is
+    replaced."""
+    constructs = capabilities.constructs
+    names = constructs.names if isinstance(constructs, Constructs) else constructs
+    return replace(capabilities, constructs=Constructs(names, _own_constructs_of(vendor)))
 
 
 _READ_CONSTRUCTS = frozenset(
