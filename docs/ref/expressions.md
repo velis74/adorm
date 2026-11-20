@@ -164,10 +164,11 @@ it has a template for, also when the class is defined after the driver was impor
 | `templates` | a mapping from Django's vendor names (`"postgresql"`, `"sqlite"` …) to templates; a vendor without one falls back to `template`, then to `function` |
 | `arg_joiner` | what joins the arguments in `%(expressions)s`; `", "` by default |
 
-A wrong type (a template that is not a string, `templates` that is not a mapping of strings) raises `TypeError` when
-the class is defined. On a vendor without SQL the function is not declared, so the query raises `NotSupportedError`
-naming it before it runs. A function without SQL runs on a driver that translates it: a driver that adds it, or a
-translation registered with
+A `template` or `function` without an entry in `templates` serves, and is declared on, every vendor, so it holds SQL
+every database runs; SQL of one dialect goes into `templates`. A wrong type (a template that is not a string,
+`templates` that is not a mapping of strings) raises `TypeError` when the class is defined. On a vendor without SQL
+the function is not declared, so the query raises `NotSupportedError` naming it before it runs. A function without
+SQL runs on a driver that translates it: a driver that adds it, or a translation registered with
 [`register_translation()`](/ref/drivers#adorm-drivers-django-register-translation-cls-vendors-none) for the Django
 drivers. Recipe: [Own expressions](/howto/own-expressions).
 
@@ -175,11 +176,10 @@ drivers. Recipe: [Own expressions](/howto/own-expressions).
 from adorm.query import Exact, Func, Query
 
 
-class Initials(Func):
-    arity = 2
+class FirstLetter(Func):
+    arity = 1
     default_output_type = str
-    template = "SUBSTR(%(expressions)s, 1, 1)"
-    arg_joiner = ", 1, 1) || SUBSTR("
+    template = "UPPER(SUBSTR(%(expressions)s, 1, 1))"
 
 
 class YearMonth(Func):
@@ -191,7 +191,7 @@ class YearMonth(Func):
     }
 
 
-Query("club.Member").filter(Exact(Initials("first_name", "last_name"), "AN"))   # constructs: function.Initials, lookup.exact
+Query("club.Member").filter(Exact(FirstLetter("last_name"), "N"))   # constructs: function.FirstLetter, lookup.exact
 ```
 
 #### `sql_template(vendor)`
@@ -207,8 +207,8 @@ databases of `vendor` (with [`Constructs`](/ref/drivers#adorm-drivers-constructs
 defined later count too).
 
 ```python
-sql_constructs("sqlite")    # frozenset({'function.Initials', 'function.YearMonth', ...})
-sql_constructs("mysql")     # frozenset({'function.Initials', ...})
+sql_constructs("sqlite")    # frozenset({'function.FirstLetter', 'function.YearMonth', ...})
+sql_constructs("mysql")     # frozenset({'function.FirstLetter', ...})
 ```
 
 `output_from` gives the type of a function without an `output_type`, used to encode the values compared with it:

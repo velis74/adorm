@@ -303,14 +303,13 @@ driver and the native PostgreSQL driver. A driver declares such a construct from
 translation exists; on a driver or vendor without it the query raises `NotSupportedError` before it runs.
 
 ```python
-class Monogram(Func):
-    arity = 2
+class FirstLetter(Func):
+    arity = 1
     default_output_type = str
-    template = "SUBSTR(%(expressions)s, 1, 1)"
-    arg_joiner = ", 1, 1) || SUBSTR("
+    template = "UPPER(SUBSTR(%(expressions)s, 1, 1))"
 
 
-Member.objects.annotate(m=Monogram("first_name", "last_name"))
+Member.objects.annotate(f=FirstLetter("last_name"))
 ```
 
 The recipe [Own expressions](/howto/own-expressions) shows each kind; `UUID4` and `UUID7` use the same mechanism.

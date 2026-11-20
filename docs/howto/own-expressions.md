@@ -25,28 +25,30 @@ driver was imported. The examples use a `Member` model with `first_name`, `last_
 ## 1. A function with one template
 
 The template is Django's: `%(expressions)s` is the arguments' SQL joined with `arg_joiner` (`", "` by default),
-`%(function)s` the class's `function`. A literal `%` is written `%%`.
+`%(function)s` the class's `function`. A literal `%` is written `%%`. One template serves every vendor, and the
+drivers declare the function on every vendor, so it holds SQL every database runs; SQL of one dialect (`||`, which
+MySQL reads as OR) goes into the templates per vendor of section 2.
 
 ```python
 from adorm.query import Func
 
 
-class Monogram(Func):
-    """The first letters of two strings."""
+class FirstLetter(Func):
+    """The first character of a string, in upper case."""
 
-    arity = 2
+    arity = 1
     default_output_type = str
-    template = "SUBSTR(%(expressions)s, 1, 1)"
-    arg_joiner = ", 1, 1) || SUBSTR("
+    function = "SUBSTR"
+    template = "UPPER(%(function)s(%(expressions)s, 1, 1))"
 ```
 
-`Monogram("first_name", "last_name")` renders `SUBSTR(first_name, 1, 1) || SUBSTR(last_name, 1, 1)`. It stands
-wherever an expression can: in `annotate()`, `filter()`, `order_by()` and `update()`.
+`FirstLetter("last_name")` renders `UPPER(SUBSTR(last_name, 1, 1))`. It stands wherever an expression can: in
+`annotate()`, `filter()`, `order_by()` and `update()`.
 
 ```python
-query = Member.objects.filter(first_name__in=["Ana", "Eva"]).annotate(m=Monogram("first_name", "last_name"))
-monograms = [row async for row in query.order_by("first_name").values_list("first_name", "m")]
-# [("Ana", "AN"), ("Eva", "EZ")]
+query = Member.objects.filter(first_name__in=["Ana", "Eva"]).annotate(f=FirstLetter("last_name"))
+first_letters = [row async for row in query.order_by("first_name").values_list("first_name", "f")]
+# [("Ana", "N"), ("Eva", "Z")]
 ```
 
 A function that is a SQL function of the same arguments only names it: `function = "SOUNDEX"` renders

@@ -344,7 +344,7 @@ contents). A `Capabilities` holding one stays hashable, its hash consistent with
 from adorm.query import sql_constructs
 
 constructs = Constructs({"lookup.exact", "function.Lower"}, lambda: sql_constructs("postgresql"))
-"function.Monogram" in constructs   # True once a Func subclass Monogram with a template exists
+"function.FirstLetter" in constructs   # True once a Func subclass FirstLetter with a template exists
 ```
 
 ### `adorm.drivers.Operation`

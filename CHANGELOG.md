@@ -25,8 +25,8 @@
   `arg_joiner`) or `templates`, one template per database vendor; the Django driver and the native PostgreSQL driver
   render it and declare its construct name on the vendors it has a template for, also for classes defined after the
   driver was imported. `adorm.drivers.django.register_translation()` registers a translation into a Django expression
-  of a function, lookup or transform for both drivers; `register_sqlite_function()` registers a Python function on the Django driver's SQLite
-  connections. `adorm.query.sql_constructs()`, `adorm.drivers.Constructs`. Recipe: own expressions.
+  of a function, lookup or transform for both drivers; `register_sqlite_function()` registers a Python function on
+  the Django driver's SQLite connections. `adorm.query.sql_constructs()`, `adorm.drivers.Constructs`. Recipe: own expressions.
 - `UUID4` and `UUID7` with Django 5.2 and 6: Django's function where Django and the database have it, else
   `GEN_RANDOM_UUID()` and PostgreSQL 18's `UUIDV7()` on PostgreSQL (`UUID7` is refused before 18) and SQLite functions
   of adorm's, generated in Python, on SQLite.

@@ -62,7 +62,7 @@ async def test_the_recipe_s_queries_give_the_values_it_states():
     for code in blocks():
         if is_query(code):
             await eval(code, namespace)  # noqa: S307 - the recipe's own code
-    assert namespace["monograms"] == [("Ana", "AN"), ("Eva", "EZ")]
+    assert namespace["first_letters"] == [("Ana", "N"), ("Eva", "Z")]
     assert namespace["months"] == ["1970-01"]
     assert namespace["reversed_names"] == ["anA"]
     assert namespace["same_start"] == ["Gaja"]
