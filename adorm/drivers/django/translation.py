@@ -455,9 +455,10 @@ def register_translation(cls: type, *, vendors: Iterable[str] | None = None) -> 
     An expression's translation gets a node of exactly ``cls`` and ``translate``, which translates a child node (one of
     ``node.get_source_expressions()``) into a Django expression, and returns the Django expression of the node. A
     transform's translation gets the Django expression of the transformed value and returns the Django expression of
-    the transformed value. A translation runs instead of the class's SQL template and the bundled translation. The
-    Django driver and the native PostgreSQL driver declare ``cls.construct`` on databases of ``vendors`` (Django's
-    vendor names; every vendor by default). A later registration for ``cls`` replaces the earlier one. Raises
+    the transformed value. A translation runs on databases of ``vendors`` (Django's vendor names; every vendor by
+    default) instead of the class's SQL template and the bundled translation; on another vendor the class's SQL
+    template applies. The Django driver and the native PostgreSQL driver declare ``cls.construct`` on databases of
+    ``vendors``. A later registration for ``cls`` replaces the earlier one. Raises
     ``TypeError`` when ``cls`` is not an adorm expression or transform class with a construct name, or ``vendors`` is
     a string.
     """
@@ -638,13 +639,46 @@ def _apply_own_transforms(expression: Any, names: Sequence[str]) -> Any:
                 "translation"
             )
         translation = _TRANSLATIONS.get(cls)
-        if translation is not None:
-            expression = translation.function(expression)
+        translated = None if translation is None else translation.function(expression)
+        if translation is not None and (translation.vendors is None or not _has_sql(cls)):
+            expression = translated
             continue
         output_type = cls.output_type(None)
         options = {} if output_type is None else {"output_field": output_field(output_type)}
-        expression = _django_class(cls, _TemplateTransform)(expression, **options)
+        template = _django_class(cls, _TemplateTransform)(expression, **options)
+        expression = template if translation is None else _VendorTranslation(translation.vendors, translated, template)
     return expression
+
+
+def _conditional(expression: Any) -> Any:
+    """``expression`` as a Django expression: a ``Q`` wrapped as a boolean expression."""
+    if isinstance(expression, dj.Q):
+        return dj.ExpressionWrapper(expression, output_field=dj.BooleanField())
+    return expression
+
+
+class _VendorTranslation(dj.Expression):
+    """A translation registered for some vendors, compiled on a database of one of them; the class's SQL template on
+    another."""
+
+    def __init__(self, vendors: frozenset[str], translated: Any, template: Any) -> None:
+        super().__init__()
+        self.vendors = vendors
+        self.translated = _conditional(translated)
+        self.template = _conditional(template)
+
+    def get_source_expressions(self) -> list[Any]:
+        return [self.translated, self.template]
+
+    def set_source_expressions(self, expressions: Sequence[Any]) -> None:
+        self.translated, self.template = expressions
+
+    def _resolve_output_field(self) -> Any:
+        found = self.translated._output_field_or_none
+        return found if found is not None else self.template._output_field_or_none
+
+    def as_sql(self, compiler: Any, connection: Any) -> tuple[str, Any]:
+        return compiler.compile(self.translated if connection.vendor in self.vendors else self.template)
 
 
 # UUID4 and UUID7: Django's functions where Django and the database have them, else the database's own function or a
@@ -891,11 +925,12 @@ class _Translator:
     def expression(self, node: Any) -> Any:
         translation = _TRANSLATIONS.get(type(node))
         if translation is not None:
-            return translation.function(node, self.expression)
-        if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate) and _has_sql(type(node)):
-            arguments = [self.expression(e) for e in node.expressions]
-            options = {} if node.output_type is None else {"output_field": output_field(node.output_type)}
-            return _django_class(type(node), _TemplateFunc)(*arguments, **options)
+            translated = translation.function(node, self.expression)
+            template = None if translation.vendors is None else self.template(node)
+            return translated if template is None else _VendorTranslation(translation.vendors, translated, template)
+        template = self.template(node)
+        if template is not None:
+            return template
         if isinstance(node, ax.OuterRef):
             target: _Translator | None = self
             for _ in range(node.levels):
@@ -965,6 +1000,19 @@ class _Translator:
             implied = {"TruncDate": datetime.date, "TruncTime": datetime.time}.get(name)
             return FUNCTIONS[name](*arguments, **_output_options(node, implied))
         raise NotSupportedError(f"the Django driver does not translate {name}")
+
+    def template(self, node: Any) -> Any:
+        """The Django expression that renders the SQL template of a function (not an aggregate) of a class with SQL
+        of its own, or the condition of such a lookup ``node``; ``None`` for another node."""
+        if not _has_sql(type(node)):
+            return None
+        if isinstance(node, Lookup):
+            return self.own_lookup(node)
+        if isinstance(node, ax.Func) and not isinstance(node, ax.Aggregate):
+            arguments = [self.expression(e) for e in node.expressions]
+            options = {} if node.output_type is None else {"output_field": output_field(node.output_type)}
+            return _django_class(type(node), _TemplateFunc)(*arguments, **options)
+        return None
 
     def condition(self, node: ax.Q) -> dj.Q:
         children = [self.expression(child) for child in node.children]

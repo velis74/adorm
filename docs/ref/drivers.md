@@ -1331,7 +1331,8 @@ Returns the [`TranslatedQuery`](#adorm-drivers-django-translation-translatedquer
   first combined query's rows, keyed by those names column by column (a different number of names raises
   `ProgrammingError`). As a subquery, a combined query of model rows selects its primary key.
 - A node of a class with a [registered translation](#adorm-drivers-django-register-translation-cls-vendors-none)
-  becomes what the translation returns, before anything else. A `Func` subclass (not an aggregate) with SQL of its
+  becomes what the translation returns, before anything else; with `vendors`, and a SQL template of the class, a
+  Django expression that compiles the translation on those vendors and the template on another. A `Func` subclass (not an aggregate) with SQL of its
   own (`function`, `template`, `templates`) becomes a Django `Func` that renders the template for the connection's
   vendor, its arguments translated, the parameters repeated for each `%(expressions)s`; a vendor without a template
   raises Django's `NotSupportedError`. A `Lookup` subclass with a template becomes a Django lookup whose parameters
@@ -1638,9 +1639,11 @@ the translation:
 - for a `Transform` subclass, a callable `translation(lhs)`: `lhs` is the Django expression of the transformed
   value; the result is the Django expression of the transformed value. It applies wherever the transform's SQL
   template would (lookup keys, `values()`, `F()`), and the same transforms may follow it;
-- the translation replaces the class's SQL template and the bundled translation;
-- both drivers declare `cls.construct` on databases of the vendors in `vendors` (Django's vendor names), on every
-  vendor by default, from the registration on;
+- the translation runs on databases of the vendors in `vendors` (Django's vendor names), on every vendor by
+  default, instead of the class's SQL template and the bundled translation; on a database of another vendor the
+  class's SQL template applies;
+- both drivers declare `cls.construct` on databases of the vendors in `vendors` and on those the class has a
+  template for, from the registration on;
 - a later registration for `cls` replaces the earlier one.
 
 A `cls` that is not an adorm expression or transform class with a construct name, and a string `vendors`, raise

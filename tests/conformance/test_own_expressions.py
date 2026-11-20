@@ -422,6 +422,88 @@ async def test_a_registered_translation_of_a_transform_in_a_lookup_key_and_in_va
     assert names == ["E"]
 
 
+class VendorTranslated(Func):
+    """Upper case by a PostgreSQL template; on SQLite by a translation registered for SQLite only."""
+
+    arity = 1
+    default_output_type = str
+    templates = {"postgresql": "UPPER(%(expressions)s)"}
+
+
+def lower(node, translate):
+    from django.db.models.functions import Lower as DjangoLower
+
+    (argument,) = node.get_source_expressions()
+    return DjangoLower(translate(argument))
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_a_translation_runs_only_on_the_vendors_it_is_registered_for(pool):
+    from adorm.drivers.django import register_translation
+
+    if VendorTranslated not in _registered:
+        register_translation(VendorTranslated, vendors={"sqlite"})(lower)
+        _registered.add(VendorTranslated)
+    assert "function.VendorTranslated" in constructs(pool)
+    query = Member.objects.filter(first_name="Ana").annotate(v=VendorTranslated("first_name"))
+    expected = "ANA" if vendor() == "postgresql" else "ana"
+    assert await rows(query.values_list("v", flat=True)) == [expected]
+
+
+@register_transform
+class VendorUpper(Transform):
+    """Upper case by a PostgreSQL template; on SQLite lower case by a translation registered for SQLite only."""
+
+    lookup_name = "vendor_upper"
+    templates = {"postgresql": "UPPER(%(expressions)s)"}
+
+    @classmethod
+    def applies_to(cls, field_type):
+        return field_type in (str, None)
+
+    @classmethod
+    def output_type(cls, field_type):  # noqa: ARG003 - the base class's signature
+        return str
+
+
+def lower_transform(lhs):
+    from django.db.models.functions import Lower as DjangoLower
+
+    return DjangoLower(lhs)
+
+
+@register_lookup
+class VendorEquals(Lookup):
+    """Equal ignoring case by a PostgreSQL template; on SQLite exactly equal, by a translation for SQLite only."""
+
+    lookup_name = "vendor_equals"
+    templates = {"postgresql": "UPPER(%(lhs)s) = UPPER(%(rhs)s)"}
+
+
+def first_name_equals(node, translate):  # noqa: ARG001 - the translation's signature
+    from django.db.models import Q as DjangoQ
+
+    return DjangoQ(first_name=node.rhs)
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver")
+async def test_a_transform_and_a_lookup_translation_run_only_on_their_vendors(pool):
+    from adorm.drivers.django import register_translation
+
+    if VendorUpper not in _registered:
+        register_translation(VendorUpper, vendors={"sqlite"})(lower_transform)
+        register_translation(VendorEquals, vendors={"sqlite"})(first_name_equals)
+        _registered.add(VendorUpper)
+    query = Member.objects.filter(first_name="Ana")
+    expected = "ANA" if vendor() == "postgresql" else "ana"
+    assert await rows(query.values_list("first_name__vendor_upper", flat=True)) == [expected]
+    assert await query.filter(first_name__vendor_upper=expected).count() == 1
+    ignoring_case = 1 if vendor() == "postgresql" else 0
+    assert await Member.objects.filter(first_name__vendor_equals="ana").count() == ignoring_case
+    assert await Member.objects.filter(first_name__vendor_equals="Ana").count() == 1
+    assert pool.in_use == 0
+
+
 @pytest.mark.usefixtures("club_data", "sql_driver")
 async def test_a_built_in_transform_after_an_own_transform_is_refused(pool):
     with pytest.raises(adorm.NotSupportedError, match="'year' only before a transform with SQL of its own"):
