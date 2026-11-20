@@ -4,6 +4,7 @@ open, the refusals of the translation, and adorm's own version 7 UUIDs."""
 
 from __future__ import annotations
 
+import datetime
 import time
 import uuid
 
@@ -39,6 +40,14 @@ class SameFirstLetter(Lookup):
     template = "SUBSTR(%(lhs)s, 1, 1) = SUBSTR(%(rhs)s, 1, 1)"
 
 
+@register_lookup
+class Equals(Lookup):
+    """Equality written as a template: the right-hand side is prepared by the left-hand side's field."""
+
+    lookup_name = "equals_by_template"
+    template = "%(lhs)s = %(rhs)s"
+
+
 @pytest.fixture
 def sql_driver(conformance_driver):
     if conformance_driver.name == "memory":
@@ -66,6 +75,26 @@ async def test_a_lookup_template_binds_parameters_in_the_order_it_names_them():
 async def test_get_or_create_refuses_a_lookup_with_a_template():
     with pytest.raises(adorm.NotSupportedError, match="get_or_create"):
         await Member.objects.get_or_create(first_name__same_first_letter="Gregor", defaults={"last_name": "X"})
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver", "router")
+async def test_a_lookup_template_compares_a_json_field_with_a_list():
+    result = await rows(Member.objects.filter(tags__equals_by_template=["junior"]).values_list("first_name", flat=True))
+    assert sorted(result) == ["Ana", "Filip", "Jana"]
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver", "router")
+async def test_a_lookup_template_converts_a_string_for_an_integer_field():
+    ana = await Member.objects.get(first_name="Ana")
+    result = await rows(Member.objects.filter(id__equals_by_template=str(ana.id)).values_list("first_name", flat=True))
+    assert result == ["Ana"]
+
+
+@pytest.mark.usefixtures("club_data", "sql_driver", "router")
+async def test_a_lookup_template_compares_a_date_field_with_a_date():
+    day = datetime.date(1970, 1, 10)
+    result = await rows(Member.objects.filter(birth_date__equals_by_template=day).values_list("first_name", flat=True))
+    assert result == ["Ana"]
 
 
 @pytest.mark.usefixtures("club_data", "router")

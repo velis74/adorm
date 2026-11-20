@@ -587,6 +587,14 @@ def _template_lookup_class() -> type:
 
         _adorm: Callable[[], type | None]
 
+        def get_prep_lookup(self) -> Any:
+            # A value compared with an unresolved left-hand side stays a direct value until resolve_expression(),
+            # where the left-hand side's field prepares it.
+            rhs = self.rhs
+            if not hasattr(rhs, "resolve_expression") and not hasattr(self.lhs, "output_field"):
+                return dj.Value(rhs) if isinstance(rhs, tuple) else rhs
+            return super().get_prep_lookup()
+
         def resolve_expression(self, *args: Any, **kwargs: Any) -> Any:
             resolved = super().resolve_expression(*args, **kwargs)
             resolved.rhs = resolved.get_prep_lookup()
