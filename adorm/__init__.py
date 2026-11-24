@@ -60,6 +60,7 @@ from adorm.models import (
     prefetch_related_objects,
     ReverseForeignKey,
     ReverseOneToOne,
+    TenantRelation,
 )
 from adorm.porting import client_base, expose
 from adorm.query import (
@@ -144,6 +145,8 @@ from adorm.query import (
     Substr,
     Sum,
     Tan,
+    TenantQuerySet,
+    TenantSchema,
     Trim,
     Trunc,
     TruncDate,
@@ -291,6 +294,9 @@ __all__ = [
     "SessionTimeout",
     "Subquery",
     "Sum",
+    "TenantQuerySet",
+    "TenantRelation",
+    "TenantSchema",
     "TransactionClosed",
     "TransactionManagementError",
     "TransactionOutcome",

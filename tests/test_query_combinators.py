@@ -10,7 +10,6 @@ import pytest
 from adorm import DatabaseError, NotSupportedError, ProgrammingError
 from adorm.drivers.django.translation import subquery, translate
 from adorm.operations import (
-    Aggregate,
     Count as CountOperation,
     Delete,
     Exists as ExistsOperation,
@@ -296,7 +295,6 @@ def test_reads_take_a_combined_query(operation):
 @pytest.mark.parametrize(
     ("action", "build"),
     [
-        ("aggregate", lambda q: Aggregate(q, {"n": Count("pk")})),
         ("update", lambda q: Update(q, {"name": "x"})),
         ("delete", Delete),
         ("in_bulk", InBulk),
@@ -375,7 +373,6 @@ async def test_query_set_methods_refused_after_a_set_operation_run_no_operation(
             build()
     for call in (
         combined.get(name="Ana"),
-        combined.aggregate(n=Count("pk")),
         combined.update(name="x"),
         combined.delete(),
         combined.in_bulk([1]),

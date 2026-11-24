@@ -35,6 +35,7 @@ from psycopg.types.json import Json, Jsonb
 from psycopg.types.numeric import Float4, Float8, Int2, Int4, Int8, IntNumeric, Oid
 from psycopg.types.range import Range
 
+from adorm.drivers.django.tenants import qualifying_operations
 from adorm.drivers.sql import numbered_placeholders, Statement
 from adorm.exceptions import NotSupportedError, TransactionManagementError
 
@@ -403,9 +404,10 @@ class DjangoCompiler:
     reads it to choose SQL for some constructs (``AnyValue``, ``JSONObject``, ``JSONArray``, ``UUID7``) and would
     otherwise connect to ask. ``params`` replace keys of the entry for this compiler, as a connection profile's
     ``params`` do. Parameters are bound for the entry's ``OPTIONS["server_side_binding"]``; the time zone name and the
-    ``DATE_TRUNC`` precision of date and time functions compile as literals. A construct that needs a
-    connection to compile (``SearchHeadline`` with options, which quotes them through psycopg) raises
-    ``NotSupportedError``. The entry must use Django's PostgreSQL backend on psycopg 3.
+    ``DATE_TRUNC`` precision of date and time functions compile as literals, and the tables of a tenant schema are
+    qualified with it (`adorm.drivers.django.tenants`). A construct that needs a connection to compile
+    (``SearchHeadline`` with options, which quotes them through psycopg) raises ``NotSupportedError``. The entry must
+    use Django's PostgreSQL backend on psycopg 3.
     """
 
     def __init__(self, alias: str = "default", *, server_version: int, params: Mapping[str, Any] | None = None):
@@ -416,7 +418,7 @@ class DjangoCompiler:
         if not is_psycopg3:
             raise NotSupportedError("Django's PostgreSQL backend runs on psycopg2; DjangoCompiler needs psycopg 3")
         wrapper.__dict__["pg_version"] = server_version
-        wrapper.ops = _literal_constants_operations(type(wrapper.ops))(wrapper)
+        wrapper.ops = qualifying_operations(_literal_constants_operations(type(wrapper.ops)))(wrapper)
         wrapper.features.max_query_params = MAX_QUERY_PARAMS
         wrapper.ensure_connection = wrapper.connect = self._refuse_connection
         wrapper.cursor = wrapper.chunked_cursor = self._cursor
@@ -530,6 +532,32 @@ class DjangoCompiler:
         else:
             return DjangoAggregation(DjangoStatement("", ()), lambda _record: dict(empty))
         return DjangoAggregation(statement, replay)
+
+    def compile_combined_aggregate(self, outer: Any) -> DjangoAggregation:
+        """Compile ``outer``, the Django ``AggregateQuery`` of an aggregate over a set operation
+        (`adorm.drivers.django.translation.combined_aggregation()`), into a `DjangoAggregation` that converts its row
+        as Django does. A set operation without rows compiles into an empty statement. The errors are those of
+        `compile()`."""
+        from adorm.drivers.django.translation import aggregate_values
+
+        # The inner query compiles on the compiler's alias: a thread-local alias of this call's own.
+        using = f"adorm-compile-{next(_ALIAS_NUMBERS)}"
+        connections[using] = self.connection
+        try:
+            compiler = outer.get_compiler(using)
+            sql_text, params = compiler.as_sql()
+        except EmptyResultSet:
+            empty = aggregate_values(outer, compiler, None)
+            return DjangoAggregation(DjangoStatement("", ()), lambda _record: dict(empty))
+        finally:
+            del connections[using]
+        timezone, naive = _result_timezone(self.connection)
+
+        def replay(record: Sequence[Any] | None) -> dict[str, Any]:
+            row = None if record is None else tuple(_psycopg_value(v, timezone, naive) for v in tuple(record))
+            return aggregate_values(outer, compiler, row)
+
+        return DjangoAggregation(self._statement(sql_text, params, compiler), replay)
 
     def replay(
         self,

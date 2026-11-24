@@ -23,7 +23,9 @@ from adorm.drivers.base import (
     ThreadedDriver,
 )
 from adorm.drivers.django.schema import expected_tables, model_schema_hash
+from adorm.drivers.django.tenants import qualifying_operations, tenant_scope
 from adorm.drivers.django.translation import (
+    aggregate_values,
     aggregation,
     bulk_create_options,
     check_bulk_create,
@@ -33,6 +35,7 @@ from adorm.drivers.django.translation import (
     clean_instance,
     clean_needs_row,
     column_fields,
+    combined_aggregation,
     django_model,
     field_kwargs,
     instance_row,
@@ -435,7 +438,10 @@ class DjangoConnection(ThreadedConnection):
         return None if raw is None else self.vendor.backend_pid(raw)
 
     def _adopt(self, db: Any) -> None:
-        """Use Django's connection wrapper ``db``."""
+        """Use Django's connection wrapper ``db``, with compilers that qualify tenant tables
+        (`adorm.drivers.django.tenants`)."""
+        self._ops_class = type(db.ops)
+        db.ops.__class__ = qualifying_operations(type(db.ops))
         self.db = db
         self.vendor = wrapper_vendor(db)
         self._lock_wake = threading.Event()
@@ -580,7 +586,10 @@ class DjangoConnection(ThreadedConnection):
         kind = operation.kind
         write = _WRITES.get(kind)
         if write is not None:
-            return write(self.alias, operation)
+            with tenant_scope(getattr(operation, "tenant_schema", None)):
+                return write(self.alias, operation)
+        if kind == "aggregate" and operation.query.is_combined:
+            return _combined_aggregate(self.alias, operation)
         if kind == "aggregate":
             queryset, expressions = aggregation(operation.query, operation.aggregations)
             return queryset.using(self.alias).aggregate(**expressions)
@@ -810,6 +819,7 @@ class DjangoConnection(ThreadedConnection):
         finally:
             # A direct driver's thread uses the wrapper with the alias's own settings again.
             db.settings_dict, db.Database, db.health_check_enabled, db.close_at = self._restore
+            db.ops.__class__ = self._ops_class
 
     def map_error(self, exc: BaseException) -> BaseException:
         return map_django_error(exc, self.vendor)
@@ -941,6 +951,14 @@ def _save(alias: str, operation: Any) -> dict[str, Any]:
     update_fields = None if operation.update_fields is None else [by_name[n] for n in operation.update_fields]
     instance.save(using=alias, update_fields=update_fields, force_update=operation.force_update)
     return instance_row(instance)
+
+
+def _combined_aggregate(alias: str, operation: Any) -> dict[str, Any]:
+    from django.db.models.sql.constants import SINGLE
+
+    outer = combined_aggregation(operation.query, operation.aggregations)
+    compiler = outer.get_compiler(alias)
+    return aggregate_values(outer, compiler, compiler.execute_sql(SINGLE))
 
 
 def _update(alias: str, operation: Any) -> int:

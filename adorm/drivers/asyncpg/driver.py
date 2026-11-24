@@ -26,9 +26,11 @@ from adorm.drivers.django.driver import (
     map_django_error,
 )
 from adorm.drivers.django.schema import expected_tables, model_schema_hash
+from adorm.drivers.django.tenants import tenant_scope
 from adorm.drivers.django.translation import (
     aggregation,
     check_in_bulk_field,
+    combined_aggregation,
     operation_model,
     translate,
     validation_error,
@@ -351,7 +353,8 @@ class AsyncpgConnection(DriverConnection):
                 return await self._check_table(operation)
             write = WRITES.get(operation.kind)
             if write is not None:
-                return await write(Writer(self), operation)
+                with tenant_scope(getattr(operation, "tenant_schema", None)):
+                    return await write(Writer(self), operation)
             return await self._read(operation)
         except asyncio.CancelledError:
             raise
@@ -379,8 +382,13 @@ class AsyncpgConnection(DriverConnection):
     async def _read(self, operation: Any) -> Any:
         kind = operation.kind
         if kind == "aggregate":
-            queryset, expressions = aggregation(operation.query, operation.aggregations)
-            compiled = self.compiler.compile_aggregate(queryset, expressions)
+            if operation.query.is_combined:
+                compiled = self.compiler.compile_combined_aggregate(
+                    combined_aggregation(operation.query, operation.aggregations)
+                )
+            else:
+                queryset, expressions = aggregation(operation.query, operation.aggregations)
+                compiled = self.compiler.compile_aggregate(queryset, expressions)
             if compiled.statement.empty:
                 return compiled.result(None)
             statement = compiled.statement

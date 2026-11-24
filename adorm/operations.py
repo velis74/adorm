@@ -11,15 +11,16 @@ import re
 import types
 
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, KW_ONLY
 from functools import cached_property
 from types import MappingProxyType
 from typing import Annotated, Any, ClassVar, get_args, get_origin, Self, Union
 
 from adorm.codec import Decoder, Encoder
+from adorm.exceptions import NotSupportedError
 from adorm.query.expressions import Expression, F, freeze_value, make_hashable, Node, OuterRef
 from adorm.query.lookups import build_lookup, LOOKUPS, split_lookup
-from adorm.query.query import check_model_label, Query
+from adorm.query.query import check_model_label, Query, TenantSchema
 from adorm.schema import SchemaSource
 
 __all__ = [
@@ -98,6 +99,36 @@ def _field_values(values: FieldValues, *, refs: bool = True) -> tuple[tuple[str,
 def _check_query(query: Any) -> None:
     if not isinstance(query, Query):
         raise TypeError(f"expected a Query, not {type(query).__name__}")
+
+
+def _refuse_tenant_schemas(operation: Any, what: str, nodes: Iterable[Node] | None = None) -> None:
+    """Raise `adorm.NotSupportedError` when a query of ``operation`` (its parts and subqueries included), or of
+    ``nodes`` when given, has a `TenantSchema`: ``what`` of such a query is not supported."""
+    for node in operation.nodes() if nodes is None else nodes:
+        for found in node.walk():
+            if isinstance(found, Query) and found.tenant_schema is not None:
+                raise NotSupportedError(f"{what} of a query in a tenant schema is not supported")
+
+
+def _check_tenant_schema(value: Any) -> None:
+    if value is not None and not isinstance(value, TenantSchema):
+        raise TypeError(f"tenant_schema is a TenantSchema or None, not {type(value).__name__}")
+
+
+def _encode_tenant_schema(encoder: Encoder, data: dict[str, Any], value: TenantSchema | None) -> dict[str, Any]:
+    if value is not None:
+        data["tenant_schema"] = encoder.node(value)
+    return data
+
+
+def _decode_tenant_schema(decoder: Decoder, data: Mapping[str, Any]) -> TenantSchema | None:
+    raw = data.get("tenant_schema")
+    if raw is None:
+        return None
+    node = decoder.node(raw)
+    if not isinstance(node, TenantSchema):
+        raise ValueError(f"tenant_schema is a TenantSchema, not {type(node).__name__}")
+    return node
 
 
 def _value_type(codec: Encoder | Decoder, name: str, extra: bool) -> Any:
@@ -209,55 +240,91 @@ def _step(model: Any, name: str) -> Any:
     raise _UnknownPathError(name)
 
 
-def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -> set[str] | None:
+class _Reached:
+    """What `_reach()` found: ``models`` (every label reached, concrete tables included), ``unqualified`` (the labels
+    whose tables are read or written without an explicit schema) and ``schemas`` (the schema names of the
+    `TenantSchema` scopes on the way)."""
+
+    __slots__ = ("models", "schemas", "unqualified")
+
+    def __init__(self, models: frozenset[str], unqualified: frozenset[str], schemas: frozenset[str]) -> None:
+        self.models = models
+        self.unqualified = unqualified
+        self.schemas = schemas
+
+
+def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -> _Reached | None:
     """``model`` and the labels of the models ``nodes`` (expressions of ``model``'s rows, which may name the
     ``annotations``) reach: every query's model, the targets of the relation paths of lookups, ``F()`` and
     ``OuterRef()`` references, ``values()``, ``only()``, ``defer()``, ``distinct()``, ``group_by``,
     ``select_for_update(of=...)`` and ``select_related()`` (without arguments: the non-null foreign keys, five
     relations deep), the ``through`` model of every many-to-many relation on a path, and the concrete tables of all of
     them (`_with_concrete_tables()`). A field, ``pk`` or an annotation ends a path, and so does a model that is not
-    registered; ``None`` when a path names anything else on a registered model."""
+    registered; ``None`` when a path names anything else on a registered model.
+
+    A query with a `TenantSchema` qualifies the tables of its scope's models in its subtree: they are left out of
+    ``unqualified``, and the scope's schema is in ``schemas``."""
     from adorm.models.relations import ForeignKey, ManyToMany
 
-    labels = {model}
+    schemas: set[str] = set()
 
-    def follow(start: str, path: str, names: frozenset[str]) -> None:
-        current = start
-        for index, segment in enumerate(path.split("__")):
-            if index == 0 and segment in names:
-                return
-            found = _model_class(current)
-            if found is None or found._meta is None:
-                return
-            relation = _step(found, segment)
-            if relation is _END:
-                return
-            if isinstance(relation, ManyToMany):
-                labels.add(relation.through)
-            labels.add(relation.target)
-            current = relation.target
+    def walk(
+        items: list[tuple[Node, tuple[tuple[str, frozenset[str]], ...]]], start: set[str], scoped_root: bool
+    ) -> tuple[set[str], set[str]]:
+        """The labels the subtrees of ``items`` reach and the unqualified ones among them."""
+        labels = set(start)
+        unqualified: set[str] = set()
 
-    def follow_non_null(label: str, depth: int) -> None:
-        found = _model_class(label)
-        if found is None or found._meta is None or depth > _SELECT_RELATED_DEPTH:
-            return
-        for relation in found.__adorm_relations__.values():
-            if not isinstance(relation, ForeignKey):
-                continue
-            info = found.__pydantic_fields__.get(relation.column)
-            if relation.column != found._meta.pk and (info is None or _admits_none(info.annotation)):
-                continue
-            labels.add(relation.target)
-            follow_non_null(relation.target, depth + 1)
+        def add(label: str) -> None:
+            labels.add(label)
+            unqualified.add(label)
 
-    # (node, the models of the enclosing queries with their annotation names, innermost last)
-    root = ((model, frozenset(annotations)),)
-    pending: list[tuple[Node, tuple[tuple[str, frozenset[str]], ...]]] = [(node, root) for node in nodes]
-    try:
+        def follow(begin: str, path: str, names: frozenset[str]) -> None:
+            current = begin
+            for index, segment in enumerate(path.split("__")):
+                if index == 0 and segment in names:
+                    return
+                found = _model_class(current)
+                if found is None or found._meta is None:
+                    return
+                relation = _step(found, segment)
+                if relation is _END:
+                    return
+                if isinstance(relation, ManyToMany):
+                    add(relation.through)
+                add(relation.target)
+                current = relation.target
+
+        def follow_non_null(label: str, depth: int) -> None:
+            found = _model_class(label)
+            if found is None or found._meta is None or depth > _SELECT_RELATED_DEPTH:
+                return
+            for relation in found.__adorm_relations__.values():
+                if not isinstance(relation, ForeignKey):
+                    continue
+                info = found.__pydantic_fields__.get(relation.column)
+                if relation.column != found._meta.pk and (info is None or _admits_none(info.annotation)):
+                    continue
+                add(relation.target)
+                follow_non_null(relation.target, depth + 1)
+
+        pending = list(items)
+        first = scoped_root
         while pending:
             node, owners = pending.pop()
+            if isinstance(node, Query) and node.tenant_schema is not None and not first:
+                scope = node.tenant_schema
+                schemas.add(scope.schema)
+                inner, inner_unqualified = walk([(node, owners)], set(), True)
+                labels.update(_with_concrete_tables(inner))
+                unqualified.update(_with_concrete_tables(inner_unqualified) - set(scope.models))
+                continue
+            first = False
             if isinstance(node, Query):
+                # A combined query reads the tables of its parts only.
                 labels.add(node.model)
+                if not node.is_combined:
+                    unqualified.add(node.model)
                 names = frozenset(name for name, _ in node.annotations)
                 paths = (
                     *node.select,
@@ -274,9 +341,9 @@ def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -
                     paths += tuple(path for path in node.for_update.of if path != "self")
                 for path in paths:
                     follow(node.model, path, names)
-                inner = (*owners, (node.model, names))
+                inner_owners = (*owners, (node.model, names))
                 children = (*node.filters, *(expression for _, expression in node.annotations), *node.ordering)
-                pending.extend((child, inner) for child in children)
+                pending.extend((child, inner_owners) for child in children)
                 # The combined queries are at the query's own level.
                 pending.extend((part, owners) for part in node.combined_queries)
             elif isinstance(node, OuterRef):
@@ -288,9 +355,22 @@ def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -
                 follow(owner, node.name, owner_names)
             else:
                 pending.extend((child, owners) for child in node.get_source_expressions())
+        return labels, unqualified
+
+    # (node, the models of the enclosing queries with their annotation names, innermost last)
+    root = ((model, frozenset(annotations)),)
+    items = [(node, root) for node in nodes]
+    try:
+        labels, unqualified = walk(items, {model}, False)
     except _UnknownPathError:
         return None
-    return _with_concrete_tables(labels)
+    if not any(isinstance(node, Query) and node.model == model for node, _ in items):
+        unqualified.add(model)
+    return _Reached(
+        frozenset(_with_concrete_tables(labels)),
+        frozenset(_with_concrete_tables(unqualified)),
+        frozenset(schemas),
+    )
 
 
 def _delete_models(label: str) -> frozenset[str] | None:
@@ -305,10 +385,41 @@ def _query_annotations(operation: Any) -> tuple[str, ...]:
     return tuple(name for name, _ in query.annotations) if isinstance(query, Query) else ()
 
 
+def _reach_of(operation: Any) -> _Reached | None:
+    """`_reach()` over the nodes of an operation on the rows of its ``model``, computed once per operation."""
+    cached = operation.__dict__.get("_adorm_reached", _MISSING)
+    if cached is _MISSING:
+        cached = _reach(operation.model, operation.nodes(), _query_annotations(operation))
+        operation.__dict__["_adorm_reached"] = cached
+    return cached
+
+
+_MISSING = object()
+
+
 def _reached(operation: Any) -> frozenset[str] | None:
     """The `Operation.models` of an operation on the rows of its ``model``: `_reach()` over its nodes."""
-    reached = _reach(operation.model, operation.nodes(), _query_annotations(operation))
-    return None if reached is None else frozenset(reached)
+    reached = _reach_of(operation)
+    return None if reached is None else reached.models
+
+
+def _reached_schemas(operation: Any) -> frozenset[str]:
+    """The `Operation.schemas` of an operation on the rows of its ``model``."""
+    reached = _reach_of(operation)
+    tenant_schema = getattr(operation, "tenant_schema", None)
+    found = frozenset() if reached is None else reached.schemas
+    return found | {tenant_schema.schema} if tenant_schema is not None else found
+
+
+def _reached_unqualified(operation: Any) -> frozenset[str] | None:
+    """The `Operation.unqualified_models` of an operation on the rows of its ``model``."""
+    models = operation.models
+    reached = _reach_of(operation)
+    if models is None or reached is None:
+        return None if models is None else models
+    unqualified = models - (reached.models - reached.unqualified)
+    tenant_schema = getattr(operation, "tenant_schema", None)
+    return unqualified - set(tenant_schema.models) if tenant_schema is not None else unqualified
 
 
 class Operation:
@@ -337,10 +448,30 @@ class Operation:
         one that touches other tables overrides it."""
         return None
 
+    @cached_property
+    def schemas(self) -> frozenset[str]:
+        """The schema names the operation qualifies tables with: those of the `TenantSchema` of its queries (combined
+        queries and subqueries included) and of its ``tenant_schema``; empty without one. Computed on first access,
+        without I/O."""
+        tenant_schema = getattr(self, "tenant_schema", None)
+        return frozenset() if tenant_schema is None else frozenset({tenant_schema.schema})
+
+    @cached_property
+    def unqualified_models(self) -> frozenset[str] | None:
+        """The labels of the models whose tables the operation reads or writes without an explicit schema, so that the
+        connection's search path or default database resolves them: `models` without the models a `TenantSchema`
+        qualifies where it applies. ``None`` when `models` is ``None``; `models` itself for an operation without a
+        schema."""
+        models = self.models
+        tenant_schema = getattr(self, "tenant_schema", None)
+        return models if models is None or tenant_schema is None else models - set(tenant_schema.models)
+
     def constructs(self) -> Iterator[str]:
         """Construct names used by the operation's nodes, possibly repeated."""
         for node in self.nodes():
             yield from node.constructs()
+        if getattr(self, "tenant_schema", None) is not None:
+            yield "clause.tenant_schema"
 
     def _identity(self) -> tuple[Any, ...]:
         return (type(self), tuple(make_hashable(getattr(self, f.name)) for f in fields(self)))  # type: ignore[arg-type]
@@ -402,6 +533,8 @@ class _QueryOperation(Operation):
         yield self.query
 
     models = cached_property(_reached)
+    schemas = cached_property(_reached_schemas)
+    unqualified_models = cached_property(_reached_unqualified)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         return {"query": encoder.node(self.query)}
@@ -493,6 +626,7 @@ class InBulk(_QueryOperation):
         super().__post_init__()
         query = self.query
         query.check_not_combined("in_bulk")
+        _refuse_tenant_schemas(self, "in_bulk()")
         if query.is_sliced:
             raise TypeError("cannot use in_bulk() on a query once a slice has been taken")
         if query.row_format != "model":
@@ -552,6 +686,31 @@ class InBulk(_QueryOperation):
 _FORBIDDEN_NAME = re.compile(r"['`\"\]\[;\s\x00-\x1F\x7F-\x9F]|#|--|/\*|\*/")
 
 
+def _combined_columns(query: Query) -> frozenset[str] | None:
+    """The column names of the rows of the combined ``query``: its selected names, or ``None`` for model rows, whose
+    columns are the first query's fields."""
+    return frozenset(query.select) if query.row_format != "model" and query.select else None
+
+
+def _check_combined_columns(query: Query, name: str, expression: Node) -> None:
+    """Raise ``TypeError`` when ``expression`` refers to anything but a column of the combined rows of ``query``."""
+    columns = _combined_columns(query)
+    pending: list[Node] = [expression]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Query):
+            continue
+        if isinstance(node, OuterRef):
+            raise TypeError(f"{name!r} aggregates combined rows, which have no outer query to refer to")
+        if isinstance(node, F):
+            if "__" in node.name:
+                raise TypeError(f"{name!r} aggregates combined rows: {node.name!r} is not a column of them")
+            if columns is not None and node.name not in columns:
+                raise TypeError(f"{name!r} aggregates combined rows: {node.name!r} is not a selected name")
+            continue
+        pending.extend(node.get_source_expressions())
+
+
 @dataclass(frozen=True, eq=False)
 class Aggregate(_QueryOperation):
     """The values of ``aggregations`` (name → expression that contains an aggregate) over the rows of ``query``.
@@ -560,10 +719,14 @@ class Aggregate(_QueryOperation):
     ``aggregations`` is a mapping or ``(name, expression)`` pairs, at least one. A name is a non-empty string without
     whitespace, control characters, quotes, backticks, brackets, ``;``, ``#``, ``--``, ``/*`` or ``*/``
     (``ValueError``); it may contain ``__`` (``"fee__sum"``) and may not repeat. An expression without an aggregate
-    outside a subquery raises ``TypeError``, and so does a query distinct on fields; a combined query
-    (`Query.is_combined`) raises `adorm.NotSupportedError`. The expressions refer to the
+    outside a subquery raises ``TypeError``, and so does a query distinct on fields. The expressions refer to the
     query's fields and annotations; over a sliced, distinct or grouped query, or one with aggregate annotations, they
     aggregate the query's rows as a subquery.
+
+    Over a combined query (`Query.is_combined`) the expressions aggregate the combined rows: each ``F`` outside a
+    subquery names a column of them, a field of the first query's model for model rows or a name the combined query
+    selects; a path with ``__`` and an ``OuterRef`` raise ``TypeError``. Such an aggregate uses the construct
+    ``aggregate.combined``.
     """
 
     kind: ClassVar[str] = "aggregate"
@@ -571,7 +734,6 @@ class Aggregate(_QueryOperation):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.query.check_not_combined("aggregate")
         if self.query.distinct_fields:
             raise TypeError("cannot aggregate a query distinct on fields")
         items = self.aggregations.items() if isinstance(self.aggregations, Mapping) else self.aggregations
@@ -586,7 +748,15 @@ class Aggregate(_QueryOperation):
             pairs.append((name, expression))
         if not pairs:
             raise TypeError("aggregate() needs at least one aggregation")
+        if self.query.is_combined:
+            for name, expression in pairs:
+                _check_combined_columns(self.query, name, expression)
         object.__setattr__(self, "aggregations", tuple(pairs))
+
+    def constructs(self) -> Iterator[str]:
+        yield from super().constructs()
+        if self.query.is_combined:
+            yield "aggregate.combined"
 
     def nodes(self) -> Iterator[Node]:
         yield self.query
@@ -627,6 +797,7 @@ class Delete(_QueryOperation):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.query.check_not_combined("delete")
+        _refuse_tenant_schemas(self, "delete")
         if self.query.is_sliced:
             raise TypeError("cannot delete from a query once a slice has been taken")
         if self.query.distinct_fields:
@@ -649,12 +820,16 @@ class DeleteInstance(Operation):
     cascade from it (the Django driver runs the model's ``delete()``; the native PostgreSQL driver refuses a model
     that overrides it). Result: ``(total, {label: count})``; a missing row deletes nothing.
 
-    ``pk`` is a value, not ``None`` (``ValueError``) and not an expression (``TypeError``).
+    ``pk`` is a value, not ``None`` (``ValueError``) and not an expression (``TypeError``). ``tenant_schema``, a
+    `TenantSchema` or ``None``, qualifies the tables of its models that the delete touches, cascades included; the
+    encoded form has ``"tenant_schema"`` only when there is one.
     """
 
     kind: ClassVar[str] = "delete_instance"
     model: str
     pk: Any
+    _: KW_ONLY
+    tenant_schema: TenantSchema | None = None
 
     def __post_init__(self) -> None:
         check_model_label(self.model)
@@ -663,6 +838,7 @@ class DeleteInstance(Operation):
         if isinstance(self.pk, Node):
             raise TypeError("the primary key is a value, not an expression")
         object.__setattr__(self, "pk", freeze_value(self.pk))
+        _check_tenant_schema(self.tenant_schema)
 
     @cached_property
     def models(self) -> frozenset[str] | None:
@@ -673,13 +849,15 @@ class DeleteInstance(Operation):
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
-            return {"model": self.model, "pk": encoder.operand(self.pk, encoder.field_type("pk"))}
+            data = {"model": self.model, "pk": encoder.operand(self.pk, encoder.field_type("pk"))}
+        return _encode_tenant_schema(encoder, data, self.tenant_schema)
 
     @classmethod
     def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
         model = check_model_label(_get(data, "model"))
+        tenant_schema = _decode_tenant_schema(decoder, data)
         with decoder.scope(model):
-            return cls(model, decoder.operand(_get(data, "pk"), decoder.field_type("pk")))
+            return cls(model, decoder.operand(_get(data, "pk"), decoder.field_type("pk")), tenant_schema=tenant_schema)
 
 
 @dataclass(frozen=True, eq=False)
@@ -704,6 +882,7 @@ class Update(_QueryOperation):
         if self.query.is_grouped:
             raise TypeError("cannot update a grouped query")
         object.__setattr__(self, "values", _field_values(self.values))
+        _refuse_tenant_schemas(self, "update")
 
     def nodes(self) -> Iterator[Node]:
         yield self.query
@@ -744,6 +923,7 @@ class Create(Operation):
         check_model_label(self.model)
         object.__setattr__(self, "values", _field_values(self.values, refs=False))
         Query(self.model, manager=self.manager)
+        _refuse_tenant_schemas(self, "create()")
         if self.manager is not None:
             for name, value in self.values:
                 _check_not_instance(value, f"the value of {name!r}")
@@ -824,6 +1004,7 @@ class BulkCreate(Operation):
         if isinstance(self.rows, str | bytes | Mapping) or not isinstance(self.rows, Iterable):
             raise TypeError("rows is an iterable of field values")
         object.__setattr__(self, "rows", tuple(_field_values(row, refs=False) for row in self.rows))
+        _refuse_tenant_schemas(self, "bulk_create()")
         size = self.batch_size
         if size is not None and (isinstance(size, bool) or not isinstance(size, int) or size <= 0):
             raise ValueError(f"batch_size is a positive integer or None, not {size!r}")
@@ -924,6 +1105,7 @@ class CreateFromParent(Operation):
             raise TypeError("the primary key is a value, not an expression")
         object.__setattr__(self, "parent_pk", freeze_value(self.parent_pk))
         object.__setattr__(self, "values", _field_values(self.values, refs=False))
+        _refuse_tenant_schemas(self, "create_from_parent()")
 
     def nodes(self) -> Iterator[Node]:
         return (value for _, value in self.values if isinstance(value, Node))
@@ -962,7 +1144,8 @@ class FullClean(Operation):
     messages by adorm field name (a foreign key's under its relation's name, the model's under ``"__all__"``).
 
     ``pk`` and the values are plain values, not expressions (``TypeError``); ``exclude`` is an iterable of names, not
-    a string (``TypeError``).
+    a string (``TypeError``). ``tenant_schema``, a `TenantSchema` or ``None``, qualifies the tables of its models in
+    the validation's queries; the encoded form has ``"tenant_schema"`` only when there is one.
     """
 
     kind: ClassVar[str] = "full_clean"
@@ -973,9 +1156,12 @@ class FullClean(Operation):
     validate_unique: bool = True
     validate_constraints: bool = True
     adding: bool = True
+    _: KW_ONLY
+    tenant_schema: TenantSchema | None = None
 
     def __post_init__(self) -> None:
         check_model_label(self.model)
+        _check_tenant_schema(self.tenant_schema)
         if isinstance(self.pk, Node):
             raise TypeError("the primary key is a value, not an expression")
         object.__setattr__(self, "pk", freeze_value(self.pk))
@@ -1015,7 +1201,7 @@ class FullClean(Operation):
                 "validate_unique": self.validate_unique,
                 "validate_constraints": self.validate_constraints,
                 "adding": self.adding,
-            }
+            } | _encode_tenant_schema(encoder, {}, self.tenant_schema)
 
     @classmethod
     def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
@@ -1032,6 +1218,7 @@ class FullClean(Operation):
                 validate_unique=_flag(data, "validate_unique"),
                 validate_constraints=_flag(data, "validate_constraints"),
                 adding=_flag(data, "adding"),
+                tenant_schema=_decode_tenant_schema(decoder, data),
             )
 
 
@@ -1045,7 +1232,9 @@ class Save(Operation):
 
     ``force_insert`` with ``force_update`` or ``update_fields``, ``force_update`` without ``pk`` and an
     ``update_fields`` name missing from ``values`` raise ``ValueError``. A value that refers to a field of the row
-    raises ``TypeError`` when the save inserts (no ``pk``, or ``force_insert``).
+    raises ``TypeError`` when the save inserts (no ``pk``, or ``force_insert``). ``tenant_schema``, a `TenantSchema`
+    or ``None``, qualifies the tables of its models that the save reads or writes; a query in a value with one raises
+    `adorm.NotSupportedError`. The encoded form has ``"tenant_schema"`` only when there is one.
     """
 
     kind: ClassVar[str] = "save"
@@ -1055,15 +1244,19 @@ class Save(Operation):
     update_fields: tuple[str, ...] | None = None
     force_insert: bool = False
     force_update: bool = False
+    _: KW_ONLY
+    tenant_schema: TenantSchema | None = None
 
     def __post_init__(self) -> None:
         check_model_label(self.model)
+        _check_tenant_schema(self.tenant_schema)
         if isinstance(self.pk, Node):
             raise TypeError("the primary key is a value, not an expression")
         object.__setattr__(self, "pk", freeze_value(self.pk))
         object.__setattr__(
             self, "values", _field_values(self.values, refs=self.pk is not None and not self.force_insert)
         )
+        _refuse_tenant_schemas(self, "a save with a value")
         if self.update_fields is not None:
             if isinstance(self.update_fields, str):
                 raise TypeError("update_fields is an iterable of field names, not a string")
@@ -1083,10 +1276,12 @@ class Save(Operation):
         return (value for _, value in self.values if isinstance(value, Node))
 
     models = cached_property(_reached)
+    schemas = cached_property(_reached_schemas)
+    unqualified_models = cached_property(_reached_unqualified)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
-            return {
+            data = {
                 "model": self.model,
                 "pk": encoder.operand(self.pk, encoder.field_type("pk")),
                 "values": _encode_values(encoder, self.values),
@@ -1094,6 +1289,7 @@ class Save(Operation):
                 "force_insert": self.force_insert,
                 "force_update": self.force_update,
             }
+        return _encode_tenant_schema(encoder, data, self.tenant_schema)
 
     @classmethod
     def _decode(cls, decoder: Decoder, data: Mapping[str, Any]) -> Operation:
@@ -1111,6 +1307,7 @@ class Save(Operation):
                 update_fields=update_fields,
                 force_insert=_flag(data, "force_insert"),
                 force_update=_flag(data, "force_update"),
+                tenant_schema=_decode_tenant_schema(decoder, data),
             )
 
 
@@ -1141,6 +1338,8 @@ class _LookupWrite(Operation):
             raise TypeError("cannot filter a query once a slice has been taken")
         object.__setattr__(self, "lookups", _lookups(self.lookups))
         object.__setattr__(self, "defaults", _field_values(self.defaults, refs=False))
+        values = (value for _, value in self.defaults if isinstance(value, Node))
+        _refuse_tenant_schemas(self, f"{self.kind}()", (self.query, *values))
 
     @property
     def model(self) -> str:
@@ -1227,6 +1426,8 @@ class UpdateOrCreate(_LookupWrite):
         super().__post_init__()
         if self.create_defaults is not None:
             object.__setattr__(self, "create_defaults", _field_values(self.create_defaults, refs=False))
+            values = (value for _, value in self.create_defaults if isinstance(value, Node))
+            _refuse_tenant_schemas(self, f"{self.kind}()", values)
 
     def nodes(self) -> Iterator[Node]:
         yield from super().nodes()

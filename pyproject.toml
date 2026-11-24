@@ -108,6 +108,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 # I001: generated modules sort imports for an application that installs adorm, where adorm is a third-party package.
 "tests/generated/*" = ["I001"]
 "tests/clubmodels/*" = ["I001"]
+"tests/tenancymodels/*" = ["I001"]
 "demo/models/*" = ["I001"]
 # N818: exception names mirror Django's (DoesNotExist, ObjectDoesNotExist …) and the executor's documented names.
 "adorm/exceptions.py" = ["N818"]

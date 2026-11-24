@@ -33,12 +33,27 @@ TENANTS = {"tenant_a": ["Ana"], "tenant_b": ["Bor", "Cene"]}
 """The tenant schemas and the first names of their members."""
 
 
+ACROSS_TENANTS = "## Reading across tenants"
+"""The heading of the recipe's section whose blocks read the tenant relation's models."""
+
+
+def defines_models(source: str) -> bool:
+    """Whether ``source`` defines a model class, which the recipe shows and does not run."""
+    return any(
+        isinstance(node, ast.ClassDef) and any("Model" in ast.unparse(base) for base in node.bases)
+        for node in ast.walk(ast.parse(source))
+    )
+
+
 def blocks() -> list[Any]:
-    """The compiled python blocks of the recipe, in order; a query block has top-level ``await``."""
-    text = RECIPE.read_text(encoding="utf-8")
+    """The compiled python blocks of the recipe before the section on reading across tenants, in order, without those
+    that define models; a query block has top-level ``await``."""
+    text = RECIPE.read_text(encoding="utf-8").partition(ACROSS_TENANTS)[0]
+    sources = [textwrap.dedent(match.group(2)) for match in PYTHON_FENCE.finditer(text)]
     return [
-        compile(textwrap.dedent(match.group(2)), str(RECIPE), "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
-        for match in PYTHON_FENCE.finditer(text)
+        compile(source, str(RECIPE), "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        for source in sources
+        if not defines_models(source)
     ]
 
 

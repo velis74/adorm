@@ -34,7 +34,7 @@ import pydantic
 from django.apps import apps
 from django.conf import settings as django_settings
 from django.core import validators as django_validators
-from django.core.exceptions import ImproperlyConfigured
+from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 from django.db import models
 from django.db.models import deletion
 from django.db.models.fields import NOT_PROVIDED
@@ -432,6 +432,166 @@ def _generic_relation(field: Any) -> RelationSpec:
         ct_field=python_name(content_type.name),
         for_concrete_model=field.for_concrete_model,
     )
+
+
+def _declarations(model: type[models.Model], include_parents: bool) -> dict[str, Any]:
+    """The `adorm.contrib.django.TenantRelation` declarations of ``model`` by attribute name: its own, those of its
+    abstract bases and, with ``include_parents``, those of its concrete parents."""
+    from adorm.contrib.django.tenants import TenantRelation
+
+    found: dict[str, Any] = {}
+    for klass in model.__mro__:
+        meta = getattr(klass, "_meta", None)
+        if meta is None or not isinstance(klass, type) or not issubclass(klass, models.Model):
+            continue
+        if klass is not model and not meta.abstract and not include_parents:
+            continue
+        for name, value in vars(klass).items():
+            if isinstance(value, TenantRelation) and name not in found:
+                found[name] = value
+    return found
+
+
+def _path_names(model: type[models.Model], path: str, where: str, *, end: bool) -> tuple[str, Any]:
+    """The adorm names of the Django query path ``path`` on ``model`` and the field it ends on; with ``end`` the path
+    ends on a field that is not a relation. A reverse relation may be named by its query name or its accessor. Raises
+    `CodegenError` for a path that does not resolve."""
+    current: Any = model
+    names: list[str] = []
+    field: Any = None
+    for segment in path.split("__"):
+        if current is None:
+            raise CodegenError(f"{where}: {path!r} continues after {names[-1]!r}, which is not a relation")
+        opts = current._meta
+        try:
+            field = opts.get_field(segment)
+        except FieldDoesNotExist:
+            field = next((rel for rel in opts.related_objects if rel.get_accessor_name() == segment), None)
+            if field is None:
+                raise CodegenError(f"{where}: {opts.label} has no field {segment!r} ({path!r})") from None
+        if isinstance(field, models.ForeignObjectRel):
+            names.append(python_name(field.get_accessor_name()))
+        elif segment == getattr(field, "attname", None) and segment != field.name:
+            names.append(python_name(segment))
+            current = None
+            continue
+        else:
+            names.append(python_name(field.name))
+        current = field.related_model if field.is_relation else None
+        if field.is_relation and current is None:
+            raise CodegenError(f"{where}: {path!r} follows {segment!r}, which is not a relation to one model")
+    if end and field.is_relation:
+        raise CodegenError(f"{where}: {path!r} does not end on a field that is not a relation")
+    return "__".join(names), field
+
+
+_SCHEMA_FUNCTIONS = ("Concat", "Lower", "Upper", "Replace", "Left", "Right", "LPad", "Coalesce")
+
+
+def _schema_source(model: type[models.Model], expression: Any, where: str) -> tuple[Any, ...]:
+    """The `adorm.codegen.spec.SchemaSource` of the Django expression ``expression`` of ``model``'s rows; raises
+    `CodegenError` for a class outside the supported set."""
+    from django.db.models import functions
+    from django.db.models.functions.text import ConcatPair
+
+    name = type(expression).__name__
+    if isinstance(expression, models.F):
+        return ("F", _path_names(model, expression.name, where, end=False)[0])
+    if isinstance(expression, models.Value):
+        value = expression.value
+        if not isinstance(value, str | int) or isinstance(value, bool):
+            raise CodegenError(f"{where}: the schema takes Value() of a str or an int, not {value!r}")
+        return ("Value", value)
+    if isinstance(expression, functions.Cast):
+        target = expression.output_field
+        if type(target) not in (models.CharField, models.TextField):
+            raise CodegenError(f"{where}: the schema takes Cast() to CharField or TextField only")
+        (source,) = expression.get_source_expressions()
+        return ("Cast", _schema_source(model, source, where), getattr(target, "max_length", None))
+    if isinstance(expression, functions.Concat):
+        arguments: list[Any] = []
+        pending = list(expression.get_source_expressions())
+        while pending:
+            item = pending.pop(0)
+            if isinstance(item, ConcatPair):
+                pending[:0] = item.get_source_expressions()
+            else:
+                arguments.append(item)
+        return ("Concat", tuple(_schema_source(model, argument, where) for argument in arguments))
+    if name in _SCHEMA_FUNCTIONS and type(expression) is getattr(functions, name):
+        return (name, tuple(_schema_source(model, argument, where) for argument in expression.get_source_expressions()))
+    raise CodegenError(
+        f"{where}: the schema expression uses {name}; F, Value, Concat, Lower, Upper, Replace, Left, Right, LPad, "
+        "Coalesce and Cast to CharField or TextField are supported"
+    )
+
+
+def _tenant_models(declaration: Any, where: str) -> tuple[str, ...]:
+    labels = {declaration.to}
+    for entry in declaration.tenant_models:
+        if "." in entry:
+            try:
+                labels.add(apps.get_model(entry)._meta.label)
+            except LookupError:
+                raise CodegenError(f"{where}: tenant_models names {entry!r}, which is not an installed model") from None
+            continue
+        try:
+            config = apps.get_app_config(entry)
+        except LookupError:
+            raise CodegenError(f"{where}: tenant_models names {entry!r}, which is no installed app or model") from None
+        labels.update(model._meta.label for model in config.get_models(include_auto_created=True))
+    return tuple(sorted(labels))
+
+
+def _tenant_relations(
+    model: type[models.Model], include_parents: bool, included: Collection[str] | None
+) -> list[RelationSpec]:
+    """The `RelationSpec` values of ``model``'s `adorm.contrib.django.TenantRelation` declarations."""
+    relations = []
+    for name, declaration in _declarations(model, include_parents).items():
+        where = f"{model._meta.label}.{name}"
+        try:
+            target = apps.get_model(declaration.to)
+        except LookupError:
+            raise CodegenError(f"{where}: {declaration.to} is not an installed model") from None
+        try:
+            field = target._meta.get_field(declaration.field)
+        except FieldDoesNotExist:
+            field = None
+        if (
+            not isinstance(field, models.ForeignKey)
+            or field.related_model._meta.concrete_model is not model._meta.concrete_model
+            or not field.target_field.primary_key
+        ):
+            raise CodegenError(
+                f"{where}: {declaration.to}.{declaration.field} is not a foreign key to the primary key of "
+                f"{model._meta.label}"
+            )
+        if isinstance(declaration.schema, str):
+            schema, source = _path_names(model, declaration.schema, where, end=True)[0], None
+        else:
+            schema, source = None, _schema_source(model, declaration.schema, where)
+        labels = _tenant_models(declaration, where)
+        if included is not None:
+            missing = [
+                label for label in labels if label not in included and not apps.get_model(label)._meta.auto_created
+            ]
+            if missing:
+                _warn(f"{where}: {' and '.join(missing)} not generated, so the relation fails when used")
+        relations.append(
+            RelationSpec(
+                "tenant",
+                python_name(name),
+                name,
+                target._meta.label,
+                column=python_name(field.attname),
+                schema=schema,
+                schema_source=source,
+                models=labels,
+                session=declaration.session,
+            )
+        )
+    return relations
 
 
 _CORE_MODULES = frozenset({"django.db.models.manager", "django.db.models.query", "builtins"})
@@ -929,6 +1089,7 @@ def _model_spec(model: type[models.Model], hashed: str, included: Collection[str
     else:
         fields = [field_spec(f) for f in (opts.concrete_fields if include_parents else opts.local_concrete_fields)]
     relations = _relations(model, include_parents, included)
+    relations += _tenant_relations(model, include_parents, included)
     managers = manager_specs(model, local=not include_parents, included=included)
     return ModelSpec(
         label=opts.label,

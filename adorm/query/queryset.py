@@ -293,7 +293,7 @@ class QuerySet:
     # Rows
 
     def _instance(self, row: Any) -> Model:
-        return self.model.from_row(row, executor=self.executor)
+        return self.model.from_row(row, executor=self.executor, tenant_schema=self.query.tenant_schema)
 
     def _format(self, row: Mapping[str, Any]) -> Any:
         row_format = self.query.row_format

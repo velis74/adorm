@@ -15,10 +15,11 @@ from adorm.exceptions import InterfaceError, ModelExceptionsMixin, ProtectedErro
 from adorm.models.managers import BoundModel, Manager
 from adorm.models.meta import ModelMeta
 from adorm.models.registry import registry
-from adorm.models.relations import ForeignKey, GenericForeignKey, Relation
+from adorm.models.relations import ForeignKey, GenericForeignKey, in_scope_of, Relation, TenantRelation
 
 if TYPE_CHECKING:
     from adorm.operations import Operation
+    from adorm.query.query import TenantSchema
 
 __all__ = [
     "Executor",
@@ -27,6 +28,7 @@ __all__ = [
     "get_generic_foreign_keys",
     "get_managers",
     "get_relations",
+    "get_tenant_relations",
     "set_executor_resolver",
 ]
 
@@ -58,20 +60,24 @@ class ModelState:
     of a reverse or many-to-many relation as a tuple; for a generic foreign key, the content type, the object id and
     the instance loaded for them. ``generic`` holds, by relation name, the instance assigned to a generic foreign key
     whose content type the next write resolves, with the object id and the content type id set at assignment.
+    ``tenant_schema`` is the `adorm.TenantSchema` of an instance read through a `adorm.TenantRelation`: the instance's
+    own operations and relation loads qualify the tables of its models with its schema. ``None`` otherwise.
     """
 
-    __slots__ = ("adding", "executor", "generic", "related")
+    __slots__ = ("adding", "executor", "generic", "related", "tenant_schema")
 
     def __init__(self) -> None:
         self.adding = True
         self.executor: Executor | None = None
         self.related: dict[str, Any] = {}
         self.generic: dict[str, tuple[Any, Any, Any]] = {}
+        self.tenant_schema: TenantSchema | None = None
 
     def __copy__(self) -> ModelState:
         state = ModelState()
         state.adding, state.executor, state.related = self.adding, self.executor, dict(self.related)
         state.generic = dict(self.generic)
+        state.tenant_schema = self.tenant_schema
         return state
 
     def __deepcopy__(self, memo: dict[int, Any]) -> ModelState:
@@ -79,14 +85,21 @@ class ModelState:
         state.adding, state.executor = self.adding, self.executor
         state.related = copy.deepcopy(self.related, memo)
         state.generic = copy.deepcopy(self.generic, memo)
+        state.tenant_schema = self.tenant_schema
         return state
 
     def __getstate__(self) -> dict[str, Any]:
-        return {"adding": self.adding, "related": self.related, "generic": self.generic}
+        tenant_schema = self.tenant_schema
+        scope = None if tenant_schema is None else (tenant_schema.schema, tenant_schema.models)
+        return {"adding": self.adding, "related": self.related, "generic": self.generic, "tenant_schema": scope}
 
     def __setstate__(self, data: dict[str, Any]) -> None:
+        from adorm.query.query import TenantSchema
+
         self.adding, self.executor, self.related = data["adding"], None, data["related"]
         self.generic = data.get("generic", {})
+        scope = data.get("tenant_schema")
+        self.tenant_schema = None if scope is None else TenantSchema(*scope)
 
     def __repr__(self) -> str:
         return f"ModelState(adding={self.adding!r}, related={sorted(self.related)!r})"
@@ -113,6 +126,11 @@ def get_relations(model: type[Model]) -> Mapping[str, Relation]:
 def get_generic_foreign_keys(model: type[Model]) -> Mapping[str, GenericForeignKey]:
     """The `GenericForeignKey` descriptors of ``model`` (inherited ones included) by attribute name."""
     return model.__adorm_generic_foreign_keys__
+
+
+def get_tenant_relations(model: type[Model]) -> Mapping[str, TenantRelation]:
+    """The `TenantRelation` descriptors of ``model`` (inherited ones included) by attribute name."""
+    return model.__adorm_tenant_relations__
 
 
 def get_managers(model: type[Model]) -> Mapping[str, Manager]:
@@ -160,15 +178,16 @@ class Model(ModelExceptionsMixin, BaseModel):
 
     Rows from the database become instances through `from_row()`, without validation. A field the row did not
     load (``only()``, ``defer()``) is deferred: reading it raises ``AttributeError``, assigning it sets it.
-    Instances are equal when they belong to the same model (label) and have the same non-``None`` primary key;
-    the hash follows. Instances of an abstract model compare and hash by identity. Names that are neither fields
+    Instances are equal when they belong to the same model (label), have the same non-``None`` primary key and the same
+    tenant schema (`ModelState.tenant_schema`; instances without one compare by model and key alone); the hash
+    follows. Instances of an abstract model compare and hash by identity. Names that are neither fields
     nor relations (annotations, ``to_attr`` of a prefetch) are pydantic extra values. ``Model.objects`` is the model
     bound to the current session; every `Manager` the class declares is accessed the same way.
     """
 
     model_config = ConfigDict(
         extra="allow",
-        ignored_types=(Relation, GenericForeignKey, BoundModel),
+        ignored_types=(Relation, GenericForeignKey, TenantRelation, BoundModel),
         serialize_by_alias=True,
         validate_by_name=True,
         validate_by_alias=True,
@@ -179,6 +198,7 @@ class Model(ModelExceptionsMixin, BaseModel):
     objects = Manager()
     __adorm_relations__: ClassVar[Mapping[str, Relation]] = {}
     __adorm_generic_foreign_keys__: ClassVar[Mapping[str, GenericForeignKey]] = {}
+    __adorm_tenant_relations__: ClassVar[Mapping[str, TenantRelation]] = {}
     __adorm_managers__: ClassVar[Mapping[str, Manager]] = {}
     _state: ModelState = PrivateAttr(default_factory=ModelState)
 
@@ -199,6 +219,7 @@ class Model(ModelExceptionsMixin, BaseModel):
                 if column not in fields:
                     raise TypeError(f"{cls.__name__}.{name} is stored in {column!r}, which is not a field")
         cls.__adorm_generic_foreign_keys__ = generic
+        cls.__adorm_tenant_relations__ = _collect(cls, TenantRelation)
         managers = _collect_managers(cls)
         clashes = sorted(name for name in managers if name in fields or name in relations)
         if clashes:
@@ -326,14 +347,18 @@ class Model(ModelExceptionsMixin, BaseModel):
         return taken
 
     @classmethod
-    def from_row(cls, row: Mapping[str, Any], *, executor: Executor | None = None) -> Any:
+    def from_row(
+        cls, row: Mapping[str, Any], *, executor: Executor | None = None, tenant_schema: TenantSchema | None = None
+    ) -> Any:
         """An instance of a stored row, built with ``model_construct()`` (no validation).
 
         ``row`` maps field names (or aliases) to values; ``pk`` stands for the primary key field. A field missing from
         it is deferred; a key that is a relation holds the related row (a mapping or an instance of the target,
         ``None`` for no related row) and fills the relation's cache; any other key becomes an extra value, which
         must not name an attribute of the class (``ValueError``). ``executor`` runs the instance's later operations
-        (``save()``, relation loads) and those of the related instances built here.
+        (``save()``, relation loads) and those of the related instances built here. ``tenant_schema`` is the
+        `adorm.TenantSchema` the row was read in: the instance and each related instance built here whose model it
+        qualifies get it as `ModelState.tenant_schema`.
         """
         meta = cls._require_meta()
         relations = cls.__adorm_relations__
@@ -352,11 +377,13 @@ class Model(ModelExceptionsMixin, BaseModel):
         state = instance._state
         state.adding = False
         state.executor = executor
+        if tenant_schema is not None and meta.label in tenant_schema.models:
+            state.tenant_schema = tenant_schema
         for name, value in related.items():
             if isinstance(value, Model):
                 relations[name]._check_target(value)
             elif value is not None:
-                value = relations[name].target_model().from_row(value, executor=executor)
+                value = relations[name].target_model().from_row(value, executor=executor, tenant_schema=tenant_schema)
             state.related[name] = value
         return instance
 
@@ -401,7 +428,7 @@ class Model(ModelExceptionsMixin, BaseModel):
         if meta is None or other_meta is None or meta.label != other_meta.label:
             return False
         pk = self.pk
-        return pk is not None and pk == other.pk
+        return pk is not None and pk == other.pk and self._schema_name() == other._schema_name()
 
     def __hash__(self) -> int:
         meta = type(self)._meta
@@ -410,7 +437,12 @@ class Model(ModelExceptionsMixin, BaseModel):
         pk = self.pk
         if pk is None:
             raise TypeError("a model instance without a primary key value is unhashable")
-        return hash((meta.label, pk))
+        schema = self._schema_name()
+        return hash((meta.label, pk)) if schema is None else hash((meta.label, pk, schema))
+
+    def _schema_name(self) -> str | None:
+        tenant_schema = self._state.tenant_schema
+        return None if tenant_schema is None else tenant_schema.schema
 
     def _executor(self) -> Executor:
         executor = self._state.executor
@@ -482,7 +514,13 @@ class Model(ModelExceptionsMixin, BaseModel):
             if name != meta.pk and name in assigned and name in self.__dict__
         }
         operation = Save(
-            meta.label, pk, values, update_fields=names, force_insert=force_insert, force_update=force_update
+            meta.label,
+            pk,
+            values,
+            update_fields=names,
+            force_insert=force_insert,
+            force_update=force_update,
+            tenant_schema=self._state.tenant_schema,
         )
         executor = self._executor()
         self._stored(await executor.execute(operation), executor)
@@ -553,7 +591,7 @@ class Model(ModelExceptionsMixin, BaseModel):
         if pk is None:
             raise cls.DoesNotExist(f"{cls.__name__} matching query does not exist.")
         executor = self._executor()
-        queryset = QuerySet(cls, executor, Query(meta.label)).filter(pk=pk)
+        queryset = QuerySet(cls, executor, in_scope_of(self, Query(meta.label))).filter(pk=pk)
         if fields is not None or len(load) < len(model_fields) - 1:
             queryset = queryset.only(*dict.fromkeys(load))
         fresh = await queryset.get()
@@ -609,6 +647,7 @@ class Model(ModelExceptionsMixin, BaseModel):
             validate_unique=validate_unique,
             validate_constraints=validate_constraints,
             adding=self._state.adding,
+            tenant_schema=self._state.tenant_schema,
         )
         cleaned = await self._executor().execute(operation)
         for name, value in (cleaned or {}).items():
@@ -632,7 +671,9 @@ class Model(ModelExceptionsMixin, BaseModel):
             raise ValueError(f"cannot delete a {meta.label} instance without a primary key value")
         executor = self._executor()
         try:
-            total, counts = await executor.execute(DeleteInstance(meta.label, pk))
+            total, counts = await executor.execute(
+                DeleteInstance(meta.label, pk, tenant_schema=self._state.tenant_schema)
+            )
         except (ProtectedError, RestrictedError) as exc:
             _bind_error_objects(exc, executor)
             raise

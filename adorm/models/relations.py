@@ -14,10 +14,12 @@ from typing import Annotated, Any, TYPE_CHECKING
 
 from adorm.exceptions import InterfaceError, ObjectDoesNotExist
 from adorm.models.contenttypes import CONTENT_TYPE_MODEL
+from adorm.query.expressions import check_field_path, Expression
 from adorm.query.query import check_model_label, Query
 
 if TYPE_CHECKING:
     from adorm.models.base import Model
+    from adorm.query.query import TenantSchema
 
 __all__ = [
     "ForeignKey",
@@ -27,6 +29,7 @@ __all__ = [
     "Relation",
     "ReverseForeignKey",
     "ReverseOneToOne",
+    "TenantRelation",
 ]
 
 _MISSING = object()
@@ -144,19 +147,34 @@ class ForeignKey(Relation):
         return await _load_one(self, instance, Query(self.target).filter(pk=instance.__dict__[self.column]))
 
 
+def tenant_scope(instance: Model, label: str) -> TenantSchema | None:
+    """The tenant schema of ``instance`` (`adorm.ModelState.tenant_schema`) when it qualifies the table of the model
+    ``label``; ``None`` otherwise."""
+    tenant_schema = instance._state.tenant_schema
+    return tenant_schema if tenant_schema is not None and label in tenant_schema.models else None
+
+
+def in_scope_of(instance: Model, query: Query) -> Query:
+    """``query`` in the tenant schema of ``instance`` when that qualifies the table of the query's model."""
+    tenant_schema = tenant_scope(instance, query.model)
+    return query if tenant_schema is None else query.in_tenant_schema(tenant_schema.schema, tenant_schema.models)
+
+
 async def _load_one(relation: Relation, instance: Model, query: Query) -> Model:
-    """The row of ``query`` as an instance of the relation's target, loaded on the owner's executor and cached."""
+    """The row of ``query`` as an instance of the relation's target, loaded on the owner's executor and cached; in the
+    owner's tenant schema when that qualifies the target's table."""
     from adorm.operations import Get
 
     target = relation.target_model()
     executor = instance._executor()
+    query = in_scope_of(instance, query)
     try:
         row = await executor.execute(Get(query))
     except ObjectDoesNotExist as exc:
         if type(exc) is not ObjectDoesNotExist:
             raise
         raise target.DoesNotExist(*exc.args) from exc
-    related = target.from_row(row, executor=executor)
+    related = target.from_row(row, executor=executor, tenant_schema=query.tenant_schema)
     instance._state.related[relation.name] = related
     return related
 
@@ -177,9 +195,13 @@ def target_queryset(relation: Relation, executor: Any) -> Any:
 
 
 def _related(relation: Relation, instance: Model, **lookups: Any) -> Any:
-    """The target's rows matching ``lookups`` (`target_queryset()` on the owner's executor, filtered); the rows a
-    prefetch cached for the relation serve the query set's ``async for``, ``count()`` and ``exists()``."""
+    """The target's rows matching ``lookups`` (`target_queryset()` on the owner's executor, filtered, in the owner's
+    tenant schema when that qualifies the target's table); the rows a prefetch cached for the relation serve the query
+    set's ``async for``, ``count()`` and ``exists()``."""
     queryset = target_queryset(relation, instance._executor()).filter(**lookups)
+    scoped = in_scope_of(instance, queryset.query)
+    if scoped is not queryset.query:
+        queryset = queryset._clone(scoped)
     cached = instance._state.related.get(relation.name, _MISSING)
     return queryset if cached is _MISSING else queryset._with_cache(cached)
 
@@ -531,4 +553,89 @@ class GenericForeignKey:
             return registry.get_for_content_type(cached.__dict__["app_label"], cached.__dict__["model"])
         return await content_types.get_model(
             content_type, session=executor, content_type_model=self.content_type_model(type(instance))
+        )
+
+
+def _check_dotted_path(value: Any, what: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value.split(".")) < 2 or not all(p.isidentifier() for p in value.split(".")):
+        raise ValueError(f"{what} is a dotted import path, not {value!r}")
+    return value
+
+
+class TenantRelation:
+    """A read-only reverse relation from a shared model to ``target``, a model whose rows live in several tenant
+    schemas: the rows of ``target`` whose field ``column`` holds the owner's primary key, in every schema the owner
+    belongs to.
+
+    ``schema`` is the field path from the owner to the schema name (``"organisations__organisation__schema_name"``),
+    or an expression of the owner's rows that gives it; the owner's rows the path reaches give its schemas. ``models``
+    holds the labels of the models whose tables live in each tenant schema, ``target`` included (``ValueError``
+    otherwise): a query through the relation qualifies their tables with the schema, the tables of other models stay
+    unqualified. ``session`` is ``None`` or the dotted import path of a function ``session(schema, executor)`` that
+    returns the executor of the instances read from ``schema``; without it they are bound to the executor that read
+    them. ``adorm generate`` emits the relation from `adorm.contrib.django.TenantRelation`.
+
+    On an instance it returns a `adorm.TenantQuerySet` of the owner's rows of ``target``; an instance without a primary
+    key value raises ``ValueError``. On the class it returns the descriptor. It is not a `Relation`: query paths do
+    not traverse it, and it is absent from `adorm.models.get_relations()`; `adorm.models.get_tenant_relations()` lists
+    it.
+    """
+
+    name: str
+
+    def __init__(
+        self, target: str, *, column: str, schema: str | Expression, models: Any, session: str | None = None
+    ) -> None:
+        self.target = check_model_label(target)
+        self.column = _check_field_name(column)
+        if isinstance(schema, str):
+            check_field_path(schema)
+        elif isinstance(schema, Expression):
+            if schema.contains_aggregate:
+                raise TypeError("the schema expression of a tenant relation cannot contain an aggregate")
+        else:
+            raise TypeError(f"schema is a field path or an expression, not {type(schema).__name__}")
+        self.schema = schema
+        if isinstance(models, str):
+            raise TypeError("models is an iterable of model labels, not a string")
+        self.models = frozenset(check_model_label(label) for label in models)
+        if self.target not in self.models:
+            raise ValueError(f"the models of a tenant relation include its target {self.target}")
+        self.session = _check_dotted_path(session, "session")
+        self._session_function: Any = None
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def target_model(self) -> type[Model]:
+        """The registered model class of ``target``; ``LookupError`` when none is registered."""
+        from adorm.models.registry import registry
+
+        return registry.get(self.target)
+
+    def session_for(self, schema: str, executor: Any) -> Any:
+        """The executor of an instance read from ``schema`` by ``executor``: the ``session`` function's, imported on
+        first use, or ``executor`` without one."""
+        if self.session is None:
+            return executor
+        if self._session_function is None:
+            from adorm.settings import import_object
+
+            self._session_function = import_object(self.session, "session function")
+        return self._session_function(schema, executor)
+
+    def __get__(self, instance: Model | None, owner: type | None = None) -> Any:
+        if instance is None:
+            return self
+        from adorm.query.tenants import TenantQuerySet
+
+        return TenantQuerySet(self, instance)
+
+    def __repr__(self) -> str:
+        session = "" if self.session is None else f", session={self.session!r}"
+        return (
+            f"{type(self).__name__}({self.target!r}, column={self.column!r}, schema={self.schema!r}, "
+            f"models={tuple(sorted(self.models))!r}{session})"
         )
