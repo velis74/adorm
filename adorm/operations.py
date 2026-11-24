@@ -320,11 +320,14 @@ def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -
                 unqualified.update(_with_concrete_tables(inner_unqualified) - set(scope.models))
                 continue
             first = False
-            if isinstance(node, Query):
-                # A combined query reads the tables of its parts only.
+            if isinstance(node, Query) and node.is_combined:
+                # A combined query reads the tables of its parts only; its selected names and ordering name columns of
+                # the combined rows, which join nothing.
                 labels.add(node.model)
-                if not node.is_combined:
-                    unqualified.add(node.model)
+                pending.extend((part, owners) for part in node.combined_queries)
+            elif isinstance(node, Query):
+                unqualified.add(node.model)
+                labels.add(node.model)
                 names = frozenset(_annotation_names(node))
                 paths = (
                     *node.select,
@@ -344,8 +347,6 @@ def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -
                 inner_owners = (*owners, (node.model, names))
                 children = (*node.filters, *(expression for _, expression in node.annotations), *node.ordering)
                 pending.extend((child, inner_owners) for child in children)
-                # The combined queries are at the query's own level.
-                pending.extend((part, owners) for part in node.combined_queries)
             elif isinstance(node, OuterRef):
                 if len(owners) > node.levels:
                     outer, outer_names = owners[-1 - node.levels]

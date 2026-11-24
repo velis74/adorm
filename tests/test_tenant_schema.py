@@ -78,6 +78,13 @@ def test_the_union_names_annotations_of_its_parts_in_ordering_and_aggregates():
         assert operation.unqualified_models == frozenset()
 
 
+def test_the_ordering_of_a_union_of_values_names_columns_and_joins_nothing():
+    parts = [enrolments(schema).values_list("team__name", flat=True) for schema in ("org_a", "org_b")]
+    operation = Select(parts[0].union(parts[1], all=True).order_by("team__name"))
+    assert operation.models == frozenset({"tenancy.Enrolment", "tenancy.Team"})
+    assert operation.unqualified_models == frozenset()
+
+
 def test_a_shared_table_joined_in_a_schema_stays_unqualified():
     operation = Select(enrolments("org_a").filter(person__name="Ana"))
     assert operation.models == {"tenancy.Enrolment", "tenancy.Person"}
