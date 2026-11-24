@@ -68,7 +68,7 @@ The tenant's session runs its queries in the tenant's schema, through its bound 
 
 ```python
 tenant = adorm.create_session("default", "tenant_a")
-await tenant.Member.objects.count()
+await tenant.bind(Member).count()
 with tenant.activate():
     await Member.objects.count()
 ```
