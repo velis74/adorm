@@ -112,6 +112,8 @@ The reach of a query or an expression:
 - every model a relation path reaches: lookups and `F()` references in filters, annotations, ordering, aggregates and
   written values (an `OuterRef()` path from the query it refers to), and the paths of `values()`, `values_list()`,
   `only()`, `defer()`, `distinct()`, grouping, `select_for_update(of=...)` and `select_related()`;
+- the selected names and the ordering of a combined query name columns of its rows and reach nothing; the names an
+  aggregate over it refers to are those its first query annotates or selects;
 - a many-to-many relation on a path adds its `through` model as well as its target, from either side;
 - `select_related()` without fields adds the targets of the non-null foreign keys, five relations deep, as Django
   follows them;
