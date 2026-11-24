@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import functools
-import logging
 import sys
 import threading
 import weakref
@@ -47,7 +46,6 @@ __all__ = [
     "shared_transaction_turns",
 ]
 
-logger = logging.getLogger("adorm.testing")
 
 TESTCASE_TRANSACTION_ENDED = (
     "the database rolled back the transaction of Django's TestCase, with the data of setUpTestData(); the test and "
@@ -72,6 +70,11 @@ _OPTIONS_SAVEPOINT = "adorm_options"
 
 _UNHELD_CALLS = frozenset({"connect_sync"})
 """The calls that do not use the database connection, so they run without holding it."""
+
+
+def _rolls_back(sql: Any) -> bool:
+    """Whether ``sql`` is a rollback, which may undo a ``SET LOCAL``."""
+    return isinstance(sql, str) and sql.lstrip()[:8].upper() == "ROLLBACK"
 
 
 def in_test_environment() -> bool:
@@ -170,8 +173,9 @@ class SharedTestConnection:
     transaction, or an operation outside a transaction, of a flow that does not run inside the open transaction waits
     until that transaction ends.
 
-    While connections use it (`attach()`), statements that other threads run through the wrapper (Django ORM code of the
-    test or of the code under test) hold it too, with ``defaults`` as their connection options. While a transaction is
+    From the first `attach()` until the test ends (`end()`), statements that other threads run through the wrapper
+    (Django ORM code of the test or of the code under test) hold it too, with ``defaults`` as their connection options,
+    set right before the statement. While a transaction is
     open that such a statement does not run inside (`overlapped()`), the statement's thread waits for a shared turn
     first (`TransactionTurns.take_blocking()`); a statement that cannot wait (no event loop has taken a turn, or it
     runs on that loop's thread) raises `TransactionOverlapError` (`check_isolated()`).
@@ -282,7 +286,7 @@ class SharedTestConnection:
         """Run ``sql`` in a savepoint of its own on the wrapper: a statement the database refuses rolls back only that
         savepoint, and the test's transaction stays usable. Without ``keep`` the savepoint is rolled back after a
         statement that succeeds as well."""
-        with self.wrapper.cursor() as cursor:
+        with self._options_cursor() as cursor:
             cursor.execute(f"SAVEPOINT {_OPTIONS_SAVEPOINT}")
             try:
                 cursor.execute(sql)
@@ -294,6 +298,14 @@ class SharedTestConnection:
                 cursor.execute(f"ROLLBACK TO SAVEPOINT {_OPTIONS_SAVEPOINT}")
             cursor.execute(f"RELEASE SAVEPOINT {_OPTIONS_SAVEPOINT}")
 
+    def _options_cursor(self) -> Any:
+        """A cursor of the wrapper that Django does not log: the statements of the options stay out of the test's
+        query log (``assertNumQueries()``, ``CaptureQueriesContext``)."""
+        from django.db.backends.utils import CursorWrapper
+
+        self.wrapper.ensure_connection()
+        return CursorWrapper(self.wrapper.create_cursor(), self.wrapper)
+
     def add_defaults(self, defaults: Mapping[str, Any]) -> None:
         """Record the options a connection of the alias starts with; until a ``SET LOCAL`` is sent they are the
         options known to be set."""
@@ -304,39 +316,41 @@ class SharedTestConnection:
 
     def attach(self) -> None:
         """Count a connection that uses the shared connection; the first installs the guard of other threads'
-        statements as the wrapper's outermost execute wrapper."""
+        statements as the wrapper's outermost execute wrapper, unless it is still installed."""
         with self._condition:
             self._attached += 1
-            if self._attached == 1:
+            if self._attached == 1 and self._guard_wrapper not in self.wrapper.execute_wrappers:
                 self.wrapper.execute_wrappers.insert(0, self._guard_wrapper)
 
     def detach(self) -> None:
-        """Undo `attach()`; the last one removes the guard and, during the test, sets the options back to
-        ``defaults`` for the test's own statements."""
+        """Undo `attach()`. The guard stays installed while the test runs: the next statement of the test's own code
+        sets the options back to ``defaults`` (`_guard()`); the guard removes itself after the test."""
         with self._condition:
             self._attached -= 1
-            last = self._attached == 0
-            if last:
-                try:
-                    self.wrapper.execute_wrappers.remove(self._guard_wrapper)
-                except ValueError:
-                    pass
-        if last and self.test.current():
-            try:
-                if getattr(self._holding, "active", False):
-                    self.apply_options(self.defaults)
-                else:
-                    with self.hold(_Foreign()):
-                        self.apply_options(self.defaults)
-            except Exception:
-                self.forget_options()
-                logger.warning("restoring the connection options of the TestCase connection failed", exc_info=True)
+            if self._attached == 0 and not self.test.current():
+                self._remove_guard()
+
+    def end(self) -> None:
+        """Remove the guard of a test that ended."""
+        with self._condition:
+            self._remove_guard()
+
+    def _remove_guard(self) -> None:
+        try:
+            self.wrapper.execute_wrappers.remove(self._guard_wrapper)
+        except ValueError:
+            pass
 
     def _guard(self, execute: Any, sql: Any, params: Any, many: bool, context: Any) -> Any:
         """Run a statement of a thread that does not hold the shared connection as a call of its own; while a
         transaction is open that the statement does not run inside, first wait for a shared turn
         (`TransactionTurns.take_blocking()`)."""
-        if getattr(self._holding, "active", False) or not self.test.current():
+        if getattr(self._holding, "active", False):
+            return execute(sql, params, many, context)
+        if not self.test.current():
+            with self._condition:
+                if self._attached == 0:
+                    self._remove_guard()
             return execute(sql, params, many, context)
         turn = None
         waited = False
@@ -345,12 +359,18 @@ class SharedTestConnection:
                 with self.hold(_Foreign()):
                     if waited or not self.overlapped():
                         self.check_isolated("statement of Django code")
-                        self.apply_options(self.defaults)
+                        # In a failed transaction only a rollback runs, and it needs no options.
+                        failed = _transaction_failed(self.wrapper)
+                        if not failed:
+                            self.apply_options(self.defaults)
                         try:
                             return execute(sql, params, many, context)
                         except BaseException:
                             self.forget_options()
                             raise
+                        finally:
+                            if failed or _rolls_back(sql):
+                                self.forget_options()
                 turn = self.turns.take_blocking("statement of Django code")
                 waited = True
         finally:
@@ -424,6 +444,8 @@ def shared_test_connection(test: TestDatabase) -> SharedTestConnection:
     with _shared_lock:
         shared = _shared.get(test.wrapper)
         if shared is None or not _same(shared.test.atomics, test.atomics):
+            if shared is not None:
+                shared.end()
             shared = _shared[test.wrapper] = SharedTestConnection(test)
         return shared
 
