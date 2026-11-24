@@ -829,3 +829,24 @@ async def test_writes_of_a_query_set_in_a_tenant_schema_are_refused(ana, tenants
             await write()
     assert seen == []
     assert await tenants.fetch("org_a", "SELECT id FROM {enrolment} WHERE role = 'x'") == []
+
+
+async def test_a_returned_instance_inserts_into_its_own_schema(ana, tenants):
+    enrolment = await ana.enrolments.order_by("joined").first()
+    schema = enrolment._state.tenant_schema.schema
+    copy = Enrolment.from_row(
+        {
+            "id": 100,
+            "person_id": ana.pk,
+            "team_id": None,
+            "role": "copy",
+            "joined": datetime.date(2025, 1, 1),
+            "fee": Decimal(3),
+        },
+        tenant_schema=enrolment._state.tenant_schema,
+    )
+    await copy.save(force_insert=True)
+    assert copy._state.tenant_schema == enrolment._state.tenant_schema
+    assert await tenants.fetch(schema, "SELECT role FROM {enrolment} WHERE role = 'copy'") == [("copy",)]
+    other = "org_a" if schema == "org_b" else "org_b"
+    assert await tenants.fetch(other, "SELECT role FROM {enrolment} WHERE role = 'copy'") == []
