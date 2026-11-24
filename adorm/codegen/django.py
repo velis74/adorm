@@ -36,6 +36,7 @@ from django.conf import settings as django_settings
 from django.core import validators as django_validators
 from django.core.exceptions import ImproperlyConfigured
 from django.db import models
+from django.db.models import deletion
 from django.db.models.fields import NOT_PROVIDED
 from django.db.models.fields.proxy import OrderWrt
 
@@ -63,6 +64,7 @@ from adorm.porting import get_client_base, is_exposed
 from adorm.query.queryset import QuerySet as AdormQuerySet
 
 __all__ = [
+    "delete_models_of",
     "exposed_methods",
     "field_spec",
     "introspect",
@@ -833,6 +835,73 @@ def _schema_hash(model: type[models.Model]) -> str:
     return compute_schema_hash(opts.label, python_name(opts.pk.attname), fields, relations, parents, managers)
 
 
+_DELETE_CASCADES = frozenset(filter(None, (deletion.CASCADE, getattr(deletion, "DB_CASCADE", None))))
+"""``on_delete`` handlers that delete the referring rows, whose own relations the deletion follows."""
+
+_DELETE_READS_OR_UPDATES = frozenset(
+    filter(
+        None,
+        (
+            deletion.PROTECT,
+            deletion.RESTRICT,
+            deletion.SET_NULL,
+            deletion.SET_DEFAULT,
+            getattr(deletion, "DB_SET_NULL", None),
+            getattr(deletion, "DB_SET_DEFAULT", None),
+        ),
+    )
+)
+"""``on_delete`` handlers that read the referring rows (``PROTECT``, ``RESTRICT``) or update them (``SET_NULL``,
+``SET_DEFAULT``), without following their relations."""
+
+
+def _is_set(on_delete: Any) -> bool:
+    deconstruct = getattr(on_delete, "deconstruct", None)
+    return callable(deconstruct) and deconstruct()[0] == "django.db.models.SET"
+
+
+def delete_models_of(model: type[models.Model]) -> tuple[str, ...]:
+    """The labels of the models whose tables deleting rows of the Django model ``model`` reads or writes, sorted: the
+    model, its multi-table inheritance parents and, through Django's deletion collector followed by model, every model
+    a relation to them cascades to (``CASCADE``, recursively), reads (``PROTECT``, ``RESTRICT``) or updates
+    (``SET_NULL``, ``SET_DEFAULT``, ``SET(...)``, without recursion), the models of generic relations
+    (``GenericRelation``, recursively) with ``contenttypes.ContentType``. ``DO_NOTHING`` relations are skipped. Another
+    ``on_delete`` callable is application code: its model is listed and the relation reported as `CodegenWarning`.
+
+    It follows the model graph, not rows: a model is listed whether or not any row refers to the deleted ones.
+    """
+    labels = {model._meta.label}
+    seen: set[Any] = set()
+    pending = [model._meta.concrete_model]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        opts = current._meta
+        labels.add(opts.label)
+        labels.update(parent._meta.label for parent in opts.get_parent_list())
+        for related in deletion.get_candidate_relations_to_delete(opts):
+            on_delete = related.field.remote_field.on_delete
+            target = related.related_model._meta.concrete_model
+            if on_delete is deletion.DO_NOTHING:
+                continue
+            if on_delete in _DELETE_CASCADES:
+                pending.append(target)
+                continue
+            labels.add(target._meta.label)
+            if on_delete not in _DELETE_READS_OR_UPDATES and not _is_set(on_delete):
+                _warn(
+                    f"{_where(related.field)}: on_delete={getattr(on_delete, '__name__', on_delete)!r} runs application"
+                    f" code when {opts.label} rows are deleted; its tables are not followed"
+                )
+        for field in opts.private_fields:
+            if hasattr(field, "bulk_related_objects"):
+                pending.append(field.related_model._meta.concrete_model)
+                labels.add("contenttypes.ContentType")
+    return tuple(sorted(labels))
+
+
 def model_spec(model: type[models.Model], *, included: Collection[str] | None = None) -> ModelSpec:
     """The `ModelSpec` of the Django model ``model``.
 
@@ -872,6 +941,7 @@ def _model_spec(model: type[models.Model], hashed: str, included: Collection[str
         doc=_doc(model),
         managers=managers,
         concrete_model=opts.concrete_model._meta.label if opts.proxy else None,
+        delete_models=delete_models_of(model),
     )
 
 
