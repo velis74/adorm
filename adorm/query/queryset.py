@@ -15,6 +15,7 @@ from typing import Any, Self, TYPE_CHECKING
 from adorm.exceptions import (
     InterfaceError,
     MultipleObjectsReturned,
+    NotSupportedError,
     ObjectDoesNotExist,
     ProtectedError,
     RestrictedError,
@@ -307,6 +308,13 @@ class QuerySet:
         values = tuple(row[name] for name in names)
         return values if row_format == "tuple" else _row_class(names)(*values)
 
+    def _refuse_tenant_schema(self, what: str) -> None:
+        """Raise `adorm.NotSupportedError` when the query (its parts included) has a `adorm.TenantSchema`: ``what``
+        inserts into the unqualified table, not the schema's."""
+        for query in (self.query, *self.query.combined_queries):
+            if query.tenant_schema is not None:
+                raise NotSupportedError(f"{what} of a query in a tenant schema is not supported")
+
     async def _run(self, operation: Operation) -> Any:
         try:
             return await self.executor.execute(operation)
@@ -481,6 +489,7 @@ class QuerySet:
         """
         from adorm.operations import Create
 
+        self._refuse_tenant_schema("create()")
         instance = self.model(**values)
         if instance._state.generic:
             await instance._resolve_generic_foreign_keys(self.executor)
@@ -514,6 +523,7 @@ class QuerySet:
         from adorm.models.base import Model
         from adorm.operations import BulkCreate
 
+        self._refuse_tenant_schema("bulk_create()")
         if batch_size is not None and (
             isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0
         ):
@@ -559,6 +569,7 @@ class QuerySet:
         from adorm.models.inheritance import child_values
         from adorm.operations import CreateFromParent
 
+        self._refuse_tenant_schema("create_from_parent()")
         link, parent_model, stored = child_values(self.model, values)
         if isinstance(parent, Model):
             link._check_target(parent)

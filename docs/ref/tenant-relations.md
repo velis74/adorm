@@ -161,7 +161,10 @@ An instance a tenant query set returns has its schema in
   schema's row;
 - `refresh_from_db()` reads it;
 - `await enrolment.team`, `team.enrolment_set` and `select_related()` rows of a model of `models` read the schema's
-  rows; `await enrolment.person` reads the shared row.
+  rows; `await enrolment.person` reads the shared row;
+- the writes of such a relation's query set (`team.enrolment_set.create()`, `bulk_create()`, `create_from_parent()`,
+  `update()`, `delete()`, `get_or_create()`, `update_or_create()`) and its `in_bulk()` raise `NotSupportedError`
+  without running an operation.
 
 Instances with the same primary key in two schemas are not equal and hash differently
 ([Equality and hash](./models#equality-and-hash)). With `session`, each instance is bound to the executor

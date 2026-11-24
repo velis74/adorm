@@ -810,3 +810,22 @@ async def test_one_schema_is_read_without_a_union(connect, tenants):
     ]
     first = await solo.enrolments.select_related("team").order_by("joined").first()
     assert (await first.team).name == "C team"
+
+
+async def test_writes_of_a_query_set_in_a_tenant_schema_are_refused(ana, tenants, seen):
+    enrolment = await ana.enrolments.filter(team__isnull=False).order_by("joined").first()
+    team = await enrolment.team
+    related = team.enrolment_set
+    new = Enrolment(person_id=ana.pk, team_id=team.pk, role="x", joined=datetime.date(2025, 1, 1), fee=Decimal(1))
+    seen.clear()
+    for write in (
+        lambda: related.create(person_id=ana.pk, role="x", joined=datetime.date(2025, 1, 1), fee=Decimal(1)),
+        lambda: related.bulk_create([new]),
+        lambda: related.update(role="x"),
+        lambda: related.delete(),
+        lambda: related.get_or_create(role="x"),
+    ):
+        with pytest.raises(NotSupportedError, match="tenant schema"):
+            await write()
+    assert seen == []
+    assert await tenants.fetch("org_a", "SELECT id FROM {enrolment} WHERE role = 'x'") == []
