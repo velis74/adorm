@@ -325,7 +325,7 @@ def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -
                 labels.add(node.model)
                 if not node.is_combined:
                     unqualified.add(node.model)
-                names = frozenset(name for name, _ in node.annotations)
+                names = frozenset(_annotation_names(node))
                 paths = (
                     *node.select,
                     *node.distinct_fields,
@@ -380,9 +380,17 @@ def _delete_models(label: str) -> frozenset[str] | None:
     return None if meta is None or meta.delete_models is None else frozenset(meta.delete_models)
 
 
+def _annotation_names(query: Query) -> tuple[str, ...]:
+    """The annotation names a path on ``query``'s rows may start with; for a combined query, those of its first
+    query, whose names the combined rows carry."""
+    while query.is_combined and not query.annotations:
+        query = query.combined_queries[0]
+    return tuple(name for name, _ in query.annotations)
+
+
 def _query_annotations(operation: Any) -> tuple[str, ...]:
     query = getattr(operation, "query", None)
-    return tuple(name for name, _ in query.annotations) if isinstance(query, Query) else ()
+    return _annotation_names(query) if isinstance(query, Query) else ()
 
 
 def _reach_of(operation: Any) -> _Reached | None:

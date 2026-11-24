@@ -67,6 +67,17 @@ def test_a_union_of_schemas_names_them_and_qualifies_their_tables():
     assert operation.unqualified_models == frozenset()
 
 
+def test_the_union_names_annotations_of_its_parts_in_ordering_and_aggregates():
+    def part(schema: str) -> Query:
+        return enrolments(schema).annotate(key=F("joined"), amount=F("fee"))
+
+    union = part("org_a").union(part("org_b"), all=True)
+    for operation in (Select(union.order_by("key")), Aggregate(union, {"total": Sum("amount")})):
+        assert operation.models == frozenset({"tenancy.Enrolment"})
+        assert operation.schemas == frozenset({"org_a", "org_b"})
+        assert operation.unqualified_models == frozenset()
+
+
 def test_a_shared_table_joined_in_a_schema_stays_unqualified():
     operation = Select(enrolments("org_a").filter(person__name="Ana"))
     assert operation.models == {"tenancy.Enrolment", "tenancy.Person"}
