@@ -38,7 +38,10 @@ def test_the_tables_of_the_scope_are_qualified_and_keep_their_name_as_alias(comp
 
 def test_a_self_join_alias_is_qualified(compile_sql):
     sql = compile_sql(enrolments().filter(team__enrolment__role="coach"))
-    assert 'INNER JOIN "org_a"."tenancy_enrolment" T3 ON ("tenancy_team"."id" = T3."team_id")' in sql
+    # Django 6 quotes the alias, Django 5.2 does not.
+    alias = '"T3"' if '"T3"' in sql else "T3"
+    assert f'INNER JOIN "org_a"."tenancy_enrolment" {alias} ON ("tenancy_team"."id" = {alias}."team_id")' in sql
+    assert sql.count('"org_a".') == 3
 
 
 def test_a_subquery_takes_the_scope_of_its_query(compile_sql):
