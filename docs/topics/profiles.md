@@ -101,10 +101,10 @@ ADORM = {
 - `"profiles": {}` configures no profile.
 
 The settings module cannot import code that imports models. A profile's hooks (`connect`, `on_acquire`,
-`on_release`) and the providers may be import paths, `"package.module.name"` or `"package.module:name"`; the app
-imports them in `ready()`, after the models are loaded. A driver given by import path stays a path in the profile;
-the app imports it in `ready()` to check the profile's hooks and options against it, so a misspelled driver path
-stops `django.setup()`.
+`on_release`, `content_types_key`, `check_operation`) and the providers may be import paths, `"package.module.name"`
+or `"package.module:name"`; the app imports them in `ready()`, after the models are loaded. A driver given by import
+path stays a path in the profile; the app imports it in `ready()` to check the profile's hooks and options against
+it, so a misspelled driver path stops `django.setup()`.
 
 ```python
 ADORM = {
@@ -188,20 +188,23 @@ A session whose `using` names no profile raises `InterfaceError` on its first op
 
 ## Hooks
 
-A profile has three optional hooks:
+A profile has five optional hooks: `connect`, `on_acquire`, `on_release`, `content_types_key` and `check_operation`.
 
 | Hook | Runs | Typical use |
 |---|---|---|
 | `connect(profile)` | when a slot opens its connection, instead of the driver's default | credentials from a vault, custom connection arguments |
 | `on_acquire(connection, profile, session)` | when a slot is assigned to a session, before its first request; returns `None` or a mapping of [connection options](/topics/options) for the session's lease | the current user's `role`, a custom option such as `app.user_id` for row-level security |
 | `on_release(connection, profile, session)` | when the session returns a usable slot to the pool; its return value is ignored | state outside the database connection, such as a log of who held the slot |
+| `content_types_key(profile, session)` | at a [content type](/ref/models#adorm-contenttypes) lookup; returns a hashable value, and lookups with equal values share a cache | a cache per tenant when each tenant's schema has its own content types |
+| `check_operation(operation, session)` | before every operation of the profile's sessions reaches a slot or a transaction; refuses it by raising ([refusing operations](#refusing-operations)) | refusing tenant tables when no tenant is current |
 
 `connection` is the target's connection: Django's connection wrapper for the Django driver, an
 `asyncpg.Connection` for asyncpg. `session` is the session that gets or returns the slot.
 
-A threaded driver runs `connect` and the hooks on the connection's thread; they must be plain functions. A coroutine
-function raises `TypeError` when the profile is created, or, for a driver given by import path, when its pool is
-created. An async driver awaits a hook's result when it is awaitable.
+A threaded driver runs `connect`, `on_acquire` and `on_release` on the connection's thread; they must be plain
+functions. A coroutine function raises `TypeError` when the profile is created, or, for a driver given by import path,
+when its pool is created. An async driver awaits a hook's result when it is awaitable. `content_types_key` and
+`check_operation` are plain functions with every driver and run in the calling task, on the event loop's thread.
 
 `on_acquire` runs in the context of the task that acquires the slot and can read the application's context
 variables, such as the current user; one profile and one pool can serve every user.
@@ -249,6 +252,62 @@ the release or the acquisition by up to the driver's `cancel_grace` seconds; the
 A slot that leaves the pool closes its connection, and the next request opens a new one; session state set by a
 hook's SQL never reaches another session. The [multiple database users](/howto/multiple-database-users) recipe
 returns the user's `role` from `on_acquire`.
+
+### Refusing operations
+
+`check_operation(operation, session)` runs for every operation of the profile's sessions: reads, writes,
+`full_clean()`, `refresh_from_db()`, the loads of related objects and generic foreign keys, content type lookups,
+[`adorm.check_schema()`](/ref/checks) and driver methods. It is called synchronously in the task that awaits the
+operation, with its context variables, before the operation reaches a slot or a transaction and before any I/O. It
+refuses the operation by raising: the awaited call raises that exception unchanged, and nothing reaches the database.
+Its return value is ignored; an awaitable one raises `TypeError` (a coroutine is closed, never awaited).
+
+`operation` is an [operation](/ref/operations#adorm-operations-operation): `operation.kind` names it and
+[`operation.models`](/ref/operations#models) holds the labels of the models whose tables it reads or writes (`None`
+when adorm cannot know them). `session` is the session it runs for, as given (`session.using`,
+`session.session_name`).
+
+```python
+TENANT_MODELS = frozenset({"clubs.Member", "clubs.Membership"})
+
+
+def check_operation(operation, session):
+    if current_tenant.get() is None and (operation.models is None or operation.models & TENANT_MODELS):
+        raise PermissionError(f"{operation.kind} of {operation.model} needs a tenant")
+```
+
+The order outside a transaction:
+
+1. the session's checks (`select_for_update()` outside a transaction raises `TransactionManagementError`);
+2. the session's profile is resolved (profile providers may run);
+3. `check_operation`;
+4. the driver's check (`NotSupportedError`, `SchemaMismatchError`);
+5. the connection options are resolved, a slot is acquired and `on_acquire` runs;
+6. the operation runs.
+
+Inside an `atomic()` block, `on_acquire` ran when the block was entered; an operation first checks that the block is
+open (`TransactionClosed`), then `check_operation` runs, before the operation waits for a savepoint of another task
+and before it is queued on the slot. A refused operation does not mark the block as failed: the block's next
+operations run and it commits. This holds for savepoint blocks and for tasks that inherit the block. The hook must
+not depend on what `on_acquire` did; both see the same session and the caller's context variables.
+
+`prefetch_related()` runs one operation per prefetch query, related level and batch of keys, so the hook runs for each;
+a refusal of any of them makes the whole call raise.
+
+Not checked, because they are not operations or are adorm's own:
+
+- entering `atomic()` (`BEGIN`), savepoints, commit and rollback: a session whose operations are refused can still
+  open an empty transaction;
+- [`listen()`](/ref/events#adorm-listen-channels-session-none) and connection options;
+- the pool's [start-up schema check](/topics/schema-checks#at-pool-start-up) (the `check_schema` pool setting), which
+  runs in a context of its own; [`adorm.check_schema()`](/ref/checks) is checked;
+- operations run through a runner set with [`set_runner()`](/ref/sessions#adorm-executor-set-runner-runner) that is
+  not a `Router`, or a transaction bound with
+  [`bind_transaction()`](/ref/transactions#adorm-executor-bind-transaction-session-transaction) that is not an
+  `Atomic`: they use no profile and run no profile hooks.
+
+When the pool of a profile is replaced while an operation waits for a slot, and the slot comes from the new pool, the
+new profile's `check_operation` runs too, after that pool's `on_acquire`.
 
 ## Profiles created at run time
 

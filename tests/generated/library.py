@@ -55,7 +55,11 @@ class LoanManager(Manager):
 class Author(Model):
     """A person who writes books."""
 
-    _meta = ModelMeta("library.Author", schema_hash="03c5fddf3c56af77")
+    _meta = ModelMeta(
+        "library.Author",
+        schema_hash="03c5fddf3c56af77",
+        delete_models=("library.Author", "library.Book_authors"),
+    )
     id: int | None = None
     name: str = Field(description="Full name as printed on the cover.", max_length=100)
     slug: str = Field(max_length=100, pattern="^[-a-zA-Z0-9_]+$")
@@ -76,7 +80,7 @@ class Author(Model):
 
 
 class Tag(Model):
-    _meta = ModelMeta("library.Tag", schema_hash="d86fea53ee739c01")
+    _meta = ModelMeta("library.Tag", schema_hash="d86fea53ee739c01", delete_models=("library.Tag", "library.Tagging"))
     id: int | None = None
     name: str = Field(min_length=2, max_length=40)
     books = ManyToMany("library.Book", through="library.Tagging", source_column="tag_id", target_column="book_id")
@@ -84,7 +88,24 @@ class Tag(Model):
 
 
 class Book(Model):
-    _meta = ModelMeta("library.Book", pk="isbn", schema_hash="ae7ad0e6a8e268ec", orm_names={"schema_": "schema"})
+    _meta = ModelMeta(
+        "library.Book",
+        pk="isbn",
+        schema_hash="ae7ad0e6a8e268ec",
+        orm_names={"schema_": "schema"},
+        delete_models=(
+            "contenttypes.ContentType",
+            "library.Book",
+            "library.Book_authors",
+            "library.Edition",
+            "library.Fine",
+            "library.Loan",
+            "library.Note",
+            "library.Placement",
+            "library.Reservation",
+            "library.Tagging",
+        ),
+    )
     isbn: str = Field(max_length=13, pattern="^\\d{13}$")
     title: str = Field(max_length=200)
     genre: Literal["fiction", "poetry", "science"] = "fiction"
@@ -117,7 +138,23 @@ class Book(Model):
 class Edition(Book):
     """A later edition: multi-table inheritance from `Book`."""
 
-    _meta = ModelMeta("library.Edition", pk="book_ptr_id", schema_hash="dd9c21876e3429bd")
+    _meta = ModelMeta(
+        "library.Edition",
+        pk="book_ptr_id",
+        schema_hash="dd9c21876e3429bd",
+        delete_models=(
+            "contenttypes.ContentType",
+            "library.Book",
+            "library.Book_authors",
+            "library.Edition",
+            "library.Fine",
+            "library.Loan",
+            "library.Note",
+            "library.Placement",
+            "library.Reservation",
+            "library.Tagging",
+        ),
+    )
     book_ptr_id: str | None = None
     number: int = Field(default=2, ge=0)
     released: datetime.date
@@ -125,11 +162,29 @@ class Edition(Book):
 
 
 class BookProxy(Book):
-    _meta = ModelMeta("library.BookProxy", pk="isbn", schema_hash="d4e7cbdc2a0fc320", concrete_model="library.Book")
+    _meta = ModelMeta(
+        "library.BookProxy",
+        pk="isbn",
+        schema_hash="d4e7cbdc2a0fc320",
+        concrete_model="library.Book",
+        delete_models=(
+            "contenttypes.ContentType",
+            "library.Book",
+            "library.BookProxy",
+            "library.Book_authors",
+            "library.Edition",
+            "library.Fine",
+            "library.Loan",
+            "library.Note",
+            "library.Placement",
+            "library.Reservation",
+            "library.Tagging",
+        ),
+    )
 
 
 class Tagging(Model):
-    _meta = ModelMeta("library.Tagging", schema_hash="228486c90f63c575")
+    _meta = ModelMeta("library.Tagging", schema_hash="228486c90f63c575", delete_models=("library.Tagging",))
     id: int | None = None
     book_id: str
     tag_id: int
@@ -146,6 +201,7 @@ class Note(Model):
         pk="code",
         schema_hash="387e7a453a16eb5e",
         orm_names={"json_": "json", "schema_": "schema", "model_dump_": "model_dump", "copy_": "copy"},
+        delete_models=("library.Note",),
     )
     code: uuid.UUID = Field(default_factory=uuid.uuid4)
     content_type_id: int
@@ -161,7 +217,11 @@ class Note(Model):
 
 
 class Shelf(Model):
-    _meta = ModelMeta("library.Shelf", schema_hash="0da6d1bb54e63889")
+    _meta = ModelMeta(
+        "library.Shelf",
+        schema_hash="0da6d1bb54e63889",
+        delete_models=("library.Placement", "library.Shelf"),
+    )
     id: int | None = None
     code: str = Field(max_length=10)
 
@@ -169,7 +229,12 @@ class Shelf(Model):
 class Placement(Model):
     """A book on a shelf: a foreign key to a field other than the primary key, and ``order_with_respect_to``."""
 
-    _meta = ModelMeta("library.Placement", schema_hash="f7e6558242d3b424", orm_names={"order_": "_order"})
+    _meta = ModelMeta(
+        "library.Placement",
+        schema_hash="f7e6558242d3b424",
+        orm_names={"order_": "_order"},
+        delete_models=("library.Placement",),
+    )
     id: int | None = None
     shelf_id: str
     book_id: str
@@ -180,7 +245,11 @@ class Placement(Model):
 class Reader(Model):
     """A library member: the query set's ``create()`` overrides Django's."""
 
-    _meta = ModelMeta("library.Reader", schema_hash="4bc9105f7d99ed50")
+    _meta = ModelMeta(
+        "library.Reader",
+        schema_hash="4bc9105f7d99ed50",
+        delete_models=("library.Fine", "library.Loan", "library.Reader", "library.Reservation"),
+    )
     id: int | None = None
     name: str = Field(max_length=100)
     email: str = Field(default="", max_length=254)
@@ -192,7 +261,7 @@ class Reader(Model):
 class LoanPolicy(Model):
     """Lending rules: the query set forbids deleting several at once."""
 
-    _meta = ModelMeta("library.LoanPolicy", schema_hash="8d4f4924c7125f38")
+    _meta = ModelMeta("library.LoanPolicy", schema_hash="8d4f4924c7125f38", delete_models=("library.LoanPolicy",))
     id: int | None = None
     name: str = Field(max_length=40)
     max_days: int = Field(default=14, ge=0)
@@ -202,7 +271,7 @@ class LoanPolicy(Model):
 class Loan(Model):
     """A book lent to a reader: the default manager hides archived loans and has driver methods."""
 
-    _meta = ModelMeta("library.Loan", schema_hash="2da03c23fce17cf6")
+    _meta = ModelMeta("library.Loan", schema_hash="2da03c23fce17cf6", delete_models=("library.Fine", "library.Loan"))
     id: int | None = None
     reader_id: int
     book_id: str
@@ -219,7 +288,7 @@ class Loan(Model):
 class Fine(Model):
     """A fine for a loan: the loan cannot be deleted while it has fines, and deleting a fine waives it."""
 
-    _meta = ModelMeta("library.Fine", schema_hash="d08442a5437d5bb8")
+    _meta = ModelMeta("library.Fine", schema_hash="d08442a5437d5bb8", delete_models=("library.Fine",))
     id: int | None = None
     loan_id: int
     amount: decimal.Decimal = Field(max_digits=6, decimal_places=2)
@@ -230,7 +299,12 @@ class Fine(Model):
 class Reservation(Model):
     """A hold on a copy of a book: model constraints, and a ``save()`` that validates the instance first."""
 
-    _meta = ModelMeta("library.Reservation", schema_hash="0226e06af4aa3b0d", orm_names={"copy_": "copy"})
+    _meta = ModelMeta(
+        "library.Reservation",
+        schema_hash="0226e06af4aa3b0d",
+        orm_names={"copy_": "copy"},
+        delete_models=("library.Reservation",),
+    )
     id: int | None = None
     reader_id: int
     book_id: str

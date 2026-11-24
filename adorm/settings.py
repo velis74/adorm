@@ -32,9 +32,11 @@ from adorm.executor.pool import (
 
 if TYPE_CHECKING:
     from adorm.executor.sessions import Session
+    from adorm.operations import Operation
 
 __all__ = [
     "ConnectionProfile",
+    "OperationCheck",
     "PoolSettings",
     "ProfileProvider",
     "ProfileRegistry",
@@ -52,6 +54,10 @@ __all__ = [
 
 Hook = Callable[[Any, "ConnectionProfile", "Session"], Any]
 """``hook(connection, profile, session)``: ``connection`` is the target's connection (`DriverConnection.target`)."""
+
+OperationCheck = Callable[["Operation", "Session"], None]
+"""``check_operation(operation, session)``: a plain function the pool calls before it runs ``operation`` for
+``session``; it refuses the operation by raising."""
 
 ProfileProvider = Callable[[str], "ConnectionProfile | None | Awaitable[ConnectionProfile | None]"]
 """``provider(name)`` returns the profile ``name``, ``None`` when it does not provide it, or an awaitable of either."""
@@ -144,6 +150,9 @@ class ConnectionProfile:
     - ``content_types_key(profile, session)`` returns a hashable value that splits the profile's content type cache
       (`adorm.content_types`): lookups with equal values share a cache. It is a plain function, called in the context
       of the lookup, e.g. to read the current tenant from a context variable.
+    - ``check_operation(operation, session)`` runs for every operation of the profile's sessions, synchronously in the
+      context of the awaiting task, before the operation reaches a slot or a transaction; it refuses the operation by
+      raising, and the awaited call raises that exception unchanged (`adorm.executor.Pool.check`).
 
     ``covered_receivers`` lists Django signal receivers by dotted path (``module.qualname``; a bound method by its
     class, ``module.Class.method``) whose work the application does itself: a driver that does not send Django's
@@ -170,6 +179,7 @@ class ConnectionProfile:
     options: Mapping[str, Any] = field(default_factory=dict)
     content_types_key: Callable[[Any, Any], Hashable] | None = None
     covered_receivers: Iterable[str] = ()
+    check_operation: OperationCheck | None = None
 
     def __post_init__(self) -> None:
         for what in ("name", "alias"):
@@ -192,6 +202,9 @@ class ConnectionProfile:
         key = self.content_types_key
         if key is not None and (not callable(key) or inspect.iscoroutinefunction(key)):
             raise TypeError(f"content_types_key of profile {self.name!r} is a plain function or None, not {key!r}")
+        check = self.check_operation
+        if check is not None and (not callable(check) or inspect.iscoroutinefunction(check)):
+            raise TypeError(f"check_operation of profile {self.name!r} is a plain function or None, not {check!r}")
         object.__setattr__(self, "covered_receivers", _covered_receivers(self.covered_receivers, self.name))
         options = check_profile_options(self.options, self.name)
         object.__setattr__(self, "options", options)

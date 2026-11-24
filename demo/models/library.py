@@ -12,7 +12,11 @@ __all__ = ["Author", "Tag", "Book", "Edition", "Reader", "Loan"]
 
 
 class Author(Model):
-    _meta = ModelMeta("library.Author", schema_hash="b56e60707fe2c608")
+    _meta = ModelMeta(
+        "library.Author",
+        schema_hash="b56e60707fe2c608",
+        delete_models=("library.Author", "library.Book_authors"),
+    )
     id: int | None = None
     name: str = Field(max_length=100)
     slug: str = Field(max_length=100, pattern="^[-a-zA-Z0-9_]+$")
@@ -27,14 +31,18 @@ class Author(Model):
 
 
 class Tag(Model):
-    _meta = ModelMeta("library.Tag", schema_hash="d86fea53ee739c01")
+    _meta = ModelMeta("library.Tag", schema_hash="d86fea53ee739c01", delete_models=("library.Book_tags", "library.Tag"))
     id: int | None = None
     name: str = Field(min_length=2, max_length=40)
     books = ManyToMany("library.Book", through="library.Book_tags", source_column="tag_id", target_column="book_id")
 
 
 class Book(Model):
-    _meta = ModelMeta("library.Book", schema_hash="f68deb1c236f7f8f")
+    _meta = ModelMeta(
+        "library.Book",
+        schema_hash="f68deb1c236f7f8f",
+        delete_models=("library.Book", "library.Book_authors", "library.Book_tags", "library.Edition", "library.Loan"),
+    )
     id: int | None = None
     title: str = Field(max_length=200)
     genre: Literal["novel", "poetry", "drama", "essay", "science"] = "novel"
@@ -53,7 +61,11 @@ class Book(Model):
 class Edition(Model):
     """A published edition of a book; the library owns ``copies`` copies, ``available`` of them on the shelf."""
 
-    _meta = ModelMeta("library.Edition", schema_hash="9e33af04fc82330d")
+    _meta = ModelMeta(
+        "library.Edition",
+        schema_hash="9e33af04fc82330d",
+        delete_models=("library.Edition", "library.Loan"),
+    )
     id: int | None = None
     book_id: int
     isbn: str = Field(max_length=13, pattern="^\\d{13}$")
@@ -68,7 +80,11 @@ class Edition(Model):
 
 
 class Reader(Model):
-    _meta = ModelMeta("library.Reader", schema_hash="dcc834797883514b")
+    _meta = ModelMeta(
+        "library.Reader",
+        schema_hash="dcc834797883514b",
+        delete_models=("library.Loan", "library.Reader"),
+    )
     id: int | None = None
     name: str = Field(max_length=100)
     email: str = Field(max_length=254)
@@ -79,7 +95,7 @@ class Reader(Model):
 class Loan(Model):
     """A copy of an edition lent to a reader; ``returned`` is empty while the reader has it."""
 
-    _meta = ModelMeta("library.Loan", schema_hash="4f49984b3e309f52")
+    _meta = ModelMeta("library.Loan", schema_hash="4f49984b3e309f52", delete_models=("library.Loan",))
     id: int | None = None
     edition_id: int
     reader_id: int

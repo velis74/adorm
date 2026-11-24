@@ -232,9 +232,9 @@ class _Writer:
         return [self.value(chunk) for chunk in chunks]
 
     def _explode_argument(self, arg: str, indent: str) -> list[str]:
-        # A keyword argument whose value is a dict or list literal is exploded one item per line.
+        # A keyword argument whose value is a dict, list or tuple literal is exploded one item per line.
         key, sep, value = arg.partition("=")
-        if sep and value[:1] in "{[" and value[-1:] in "}]":
+        if sep and value[:1] and value[-1:] == _CLOSING.get(value[:1]):
             items = _split_top_level(value[1:-1])
             if items:
                 lines = [f"{indent}{key}={value[0]}"]
@@ -248,6 +248,9 @@ class _Writer:
         if len(line) <= self.line_length or len(items) < 2:
             return [line]
         return [f"{head}{callee}[", *(f"{INDENT}{item}," for item in items), "]"]
+
+
+_CLOSING = {"{": "}", "[": "]", "(": ")"}
 
 
 def _split_top_level(text: str) -> list[str]:
@@ -348,6 +351,8 @@ class _ModuleRenderer:
             args.append(f"orm_names={self.writer.value(model.orm_names)}")
         if model.concrete_model is not None:
             args.append(f"concrete_model={self.writer.value(model.concrete_model)}")
+        if model.delete_models:
+            args.append(f"delete_models={self.writer.value(tuple(model.delete_models))}")
         return self.writer.call("_meta = ", self.imports.name("adorm", "ModelMeta"), args, INDENT)
 
     def literal_alias(self, model: ModelSpec, field: FieldSpec) -> None:

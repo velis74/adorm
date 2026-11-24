@@ -12,7 +12,11 @@ __all__ = ["Tag", "Activity", "Competition", "Attendance"]
 
 
 class Tag(Model):
-    _meta = ModelMeta("activities.Tag", schema_hash="b96b8008dc2ab8ea")
+    _meta = ModelMeta(
+        "activities.Tag",
+        schema_hash="b96b8008dc2ab8ea",
+        delete_models=("activities.Activity_tags", "activities.Tag"),
+    )
     id: int | None = None
     name: str = Field(max_length=40)
     activities = ManyToMany(
@@ -24,7 +28,16 @@ class Tag(Model):
 
 
 class Activity(Model):
-    _meta = ModelMeta("activities.Activity", schema_hash="e777f58f55e6af20")
+    _meta = ModelMeta(
+        "activities.Activity",
+        schema_hash="e777f58f55e6af20",
+        delete_models=(
+            "activities.Activity",
+            "activities.Activity_tags",
+            "activities.Attendance",
+            "activities.Competition",
+        ),
+    )
     id: int | None = None
     club_id: int
     coach_id: int | None = None
@@ -55,7 +68,17 @@ class Activity(Model):
 class Competition(Activity):
     """An activity with results: a multi-table inheritance child of `Activity`."""
 
-    _meta = ModelMeta("activities.Competition", pk="activity_ptr_id", schema_hash="ee19dd5905415214")
+    _meta = ModelMeta(
+        "activities.Competition",
+        pk="activity_ptr_id",
+        schema_hash="ee19dd5905415214",
+        delete_models=(
+            "activities.Activity",
+            "activities.Activity_tags",
+            "activities.Attendance",
+            "activities.Competition",
+        ),
+    )
     activity_ptr_id: int | None = None
     discipline: str = Field(max_length=60)
     entry_deadline: datetime.date | None = None
@@ -63,7 +86,7 @@ class Competition(Activity):
 
 
 class Attendance(Model):
-    _meta = ModelMeta("activities.Attendance", schema_hash="140b1e845d43ae76")
+    _meta = ModelMeta("activities.Attendance", schema_hash="140b1e845d43ae76", delete_models=("activities.Attendance",))
     id: int | None = None
     activity_id: int
     member_id: int

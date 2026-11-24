@@ -398,7 +398,8 @@ class ModelSpec:
     ones are on the base. ``managers`` are the managers the class declares; a plain ``objects`` is inherited from
     `adorm.Model` and not listed. ``schema_hash`` is `compute_schema_hash()` of the whole model, inherited fields
     included. ``doc`` is the class docstring. ``concrete_model`` is the label of the concrete model of a proxy model,
-    ``None`` for a concrete model.
+    ``None`` for a concrete model. ``delete_models`` are the labels of `adorm.ModelMeta.delete_models`, sorted; empty
+    when they are unknown.
     """
 
     label: str
@@ -411,6 +412,7 @@ class ModelSpec:
     doc: str | None = None
     managers: tuple[ManagerSpec, ...] = ()
     concrete_model: str | None = None
+    delete_models: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         names = [f.name for f in self.fields] + [r.name for r in self.relations] + [m.name for m in self.managers]

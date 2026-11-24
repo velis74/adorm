@@ -37,7 +37,11 @@ class Permission(Model):
     The permissions listed above are automatically created for each model.
     """
 
-    _meta = ModelMeta("auth.Permission", schema_hash="5ebc41e6e3ceb9e7")
+    _meta = ModelMeta(
+        "auth.Permission",
+        schema_hash="5ebc41e6e3ceb9e7",
+        delete_models=("auth.Group_permissions", "auth.Permission", "auth.User_user_permissions"),
+    )
     id: int | None = None
     name: str = Field(max_length=255)
     content_type_id: int
@@ -74,7 +78,11 @@ class Group(Model):
     messages.
     """
 
-    _meta = ModelMeta("auth.Group", schema_hash="3bb279e27bdb5ede")
+    _meta = ModelMeta(
+        "auth.Group",
+        schema_hash="3bb279e27bdb5ede",
+        delete_models=("auth.Group", "auth.Group_permissions", "auth.User_groups"),
+    )
     id: int | None = None
     name: str = Field(max_length=150)
     permissions = ManyToMany(
@@ -93,7 +101,11 @@ class User(Model):
     Username and password are required. Other fields are optional.
     """
 
-    _meta = ModelMeta("auth.User", schema_hash="3388958ccf53ea7e")
+    _meta = ModelMeta(
+        "auth.User",
+        schema_hash="3388958ccf53ea7e",
+        delete_models=("auth.User", "auth.User_groups", "auth.User_user_permissions", "library.Author"),
+    )
     id: int | None = None
     password: str = Field(max_length=128)
     last_login: datetime.datetime | None = None

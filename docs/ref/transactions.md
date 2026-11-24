@@ -127,6 +127,9 @@ Runs `operation` on the transaction's slot and returns its result, with the data
 `SET LOCAL`. Operations of a session's bound models reach the block through
 [`Session.execute()`](/ref/sessions#async-execute-operation).
 
+- The pool's [`check()`](/ref/pool#check-operation-session) runs the profile's `check_operation` hook first, right
+  after the check that the block is open: an exception it raises propagates unchanged, nothing is queued on the slot
+  and the block stays usable (it is not marked as failed).
 - An option the driver does not declare raises `NotSupportedError` before anything is sent.
 - While a savepoint block of another task is open directly inside this block, it first waits until that savepoint
   ends; after the `acquire_timeout` connection option in effect it raises `DeadlockError`.

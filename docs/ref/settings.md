@@ -58,7 +58,7 @@ adorm.configure(
 ### `adorm.ConnectionProfile`
 
 `ConnectionProfile(name, driver, alias="default", params={}, connect=None, on_acquire=None, on_release=None,
-pool=None, options={}, content_types_key=None, covered_receivers=())`
+pool=None, options={}, content_types_key=None, covered_receivers=(), check_operation=None)`
 
 A named connection profile, frozen. It satisfies the driver contract's
 [`Profile`](/ref/drivers#adorm-drivers-profile) protocol.
@@ -73,6 +73,7 @@ A named connection profile, frozen. It satisfies the driver contract's
 | `on_acquire` | `None`, or `on_acquire(connection, profile, session)`, run when a slot is assigned to `session`, before its first request; it returns `None` or a mapping of database [connection options](/ref/options) for the session's lease, the layer between `options` and the session's ([hooks](/topics/profiles#hooks)) |
 | `on_release` | `None`, or `on_release(connection, profile, session)`, run when `session` returns a usable slot to the pool; its return value is ignored |
 | `content_types_key` | `None`, or a plain function `content_types_key(profile, session)` returning a hashable value; [content type](/ref/models) lookups of the profile share a cache only when it returns equal values. It runs in the context of the lookup, so it can read a context variable (the current tenant). An unhashable value raises `TypeError` in the lookup |
+| `check_operation` | `None`, or an [`OperationCheck`](#adorm-settings-operationcheck), a plain function `check_operation(operation, session)` called for every operation of the profile's sessions before it reaches a slot or a transaction, in the context of the awaiting task; it refuses the operation by raising, and the awaited call raises that exception unchanged ([refusing operations](/topics/profiles#refusing-operations)). A value that is not callable, or a coroutine function, raises `TypeError` |
 | `pool` | `None`, or the [`PoolSettings`](#adorm-poolsettings) (or a mapping of its arguments) of the profile's pool |
 | `covered_receivers` | the Django signal receivers whose work the application does on the adorm side, by dotted path (`module.qualname`; a bound method by its class, `module.Class.method`; [`receiver_path()`](/ref/drivers#adorm-drivers-asyncpg-writes-receiver-path-receiver)); the [native PostgreSQL driver](/topics/postgresql-driver#signal-receivers) writes despite them, other drivers ignore the setting. Stored as a tuple without duplicates. A string instead of a list or a non-string entry raises `TypeError`, an entry without a module (no dot, an empty part) `ValueError` |
 | `options` | the profile's database [connection options](/ref/options), the first layer under the session's and `connection_options()` blocks; stored as a read-only copy. Values are checked as in [`check_options()`](/ref/options#adorm-executor-options-check-options-options); `acquire_timeout` and `commit_timeout` are pool settings and raise `ValueError` here. A name the driver does not declare raises `NotSupportedError`, when the profile is created with a driver instance or class, and when the pool is created for a driver given by import path |
@@ -84,6 +85,8 @@ SQL: the slot leaves the pool when the lease ends.
 - A threaded driver runs `connect` and the hooks on the connection's thread; they are plain functions. A coroutine
   function raises `TypeError` when the profile is created with a driver instance or class, or, for a driver given by
   import path, when the pool is created.
+- `content_types_key` and `check_operation` run on the event loop's thread with every driver; a coroutine function
+  raises `TypeError` when the profile is created.
 - A threaded hook that does not stop when cancelled extends the release or the acquisition by up to the driver's
   `cancel_grace`.
 - An async driver awaits a hook's result when it is awaitable.
@@ -177,6 +180,12 @@ pool; a provider may provide the name again on its next use.
 ### `adorm.settings.get_profile(name)`
 
 The registered profile `name`, `None` when there is none. Providers are not asked.
+
+### `adorm.settings.OperationCheck`
+
+The type of the `check_operation` hook of a [`ConnectionProfile`](#adorm-connectionprofile):
+`Callable[[Operation, Session], None]`. It is called with the [operation](/ref/operations#adorm-operations-operation)
+about to run and the [session](/ref/sessions) it runs for, and refuses the operation by raising.
 
 ### `adorm.settings.ProfileProvider`
 
@@ -274,7 +283,7 @@ a missing setting or `None` is an empty mapping.
 
 | Key | Value |
 |---|---|
-| `profiles` | as in `configure()`; a profile mapping's `connect`, `on_acquire`, `on_release` and `content_types_key` may also be import paths. Missing or `None`: [`default_profiles()`](#adorm-contrib-django-default-profiles); `{}`: no profile |
+| `profiles` | as in `configure()`; a profile mapping's `connect`, `on_acquire`, `on_release`, `content_types_key` and `check_operation` may also be import paths. Missing or `None`: [`default_profiles()`](#adorm-contrib-django-default-profiles); `{}`: no profile |
 | `providers` | a list of profile providers or their import paths |
 | `pool` | the default `PoolSettings` or a mapping of its arguments |
 | `debug` | the executor's [debug switch](/ref/transactions#debug-mode), a bool or `None`; missing: `None` |

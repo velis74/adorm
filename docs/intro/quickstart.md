@@ -58,7 +58,11 @@ The generated module is checked into the repository and regenerated after every 
 
 ```python
 class Author(Model):
-    _meta = ModelMeta("library.Author", schema_hash="5bbba558fb8a2821")
+    _meta = ModelMeta(
+        "library.Author",
+        schema_hash="5bbba558fb8a2821",
+        delete_models=("library.Author", "library.Book"),
+    )
     id: int | None = None
     name: str = Field(max_length=100)
     born: datetime.date | None = None
@@ -66,7 +70,11 @@ class Author(Model):
 
 
 class Book(Model):
-    _meta = ModelMeta("library.Book", schema_hash="c6b06aa3a5dc4a7a")
+    _meta = ModelMeta(
+        "library.Book",
+        schema_hash="c6b06aa3a5dc4a7a",
+        delete_models=("library.Book",),
+    )
     id: int | None = None
     title: str = Field(max_length=200)
     genre: Literal["fiction", "poetry", "science"] = "fiction"

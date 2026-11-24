@@ -12,7 +12,21 @@ __all__ = ["Club", "Member", "Membership"]
 
 
 class Club(Model):
-    _meta = ModelMeta("clubs.Club", schema_hash="e8c2eed312ab7b68")
+    _meta = ModelMeta(
+        "clubs.Club",
+        schema_hash="e8c2eed312ab7b68",
+        delete_models=(
+            "activities.Activity",
+            "activities.Activity_tags",
+            "activities.Attendance",
+            "activities.Competition",
+            "billing.Invoice",
+            "billing.InvoiceLine",
+            "billing.Payment",
+            "clubs.Club",
+            "clubs.Membership",
+        ),
+    )
     id: int | None = None
     name: str = Field(max_length=100)
     slug: str = Field(max_length=100, pattern="^[-a-zA-Z0-9_]+$")
@@ -27,7 +41,17 @@ class Club(Model):
 
 
 class Member(Model):
-    _meta = ModelMeta("clubs.Member", schema_hash="ce2ac49a8d9e7e5b")
+    _meta = ModelMeta(
+        "clubs.Member",
+        schema_hash="ce2ac49a8d9e7e5b",
+        delete_models=(
+            "activities.Activity",
+            "activities.Attendance",
+            "billing.Invoice",
+            "clubs.Member",
+            "clubs.Membership",
+        ),
+    )
     id: int | None = None
     first_name: str = Field(max_length=60)
     last_name: str = Field(max_length=60)
@@ -50,7 +74,7 @@ class Member(Model):
 
 
 class Membership(Model):
-    _meta = ModelMeta("clubs.Membership", schema_hash="0bb4fdf0e793ce70")
+    _meta = ModelMeta("clubs.Membership", schema_hash="0bb4fdf0e793ce70", delete_models=("clubs.Membership",))
     id: int | None = None
     club_id: int
     member_id: int

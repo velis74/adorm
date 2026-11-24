@@ -94,8 +94,8 @@ driver.check(operation, schema_hashes=client_hashes)
 
 Returns the schema hash of the model `label` as the driver's target defines it, computed as
 [`adorm generate`](/ref/codegen#adorm-generate) computes the hash in a generated model's
-[`ModelMeta`](/ref/models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none). `None`
-(the default) means the driver does not compute schema hashes and its models are not checked. Raises `LookupError`
+[`ModelMeta`](/ref/models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none).
+`None` (the default) means the driver does not compute schema hashes and its models are not checked. Raises `LookupError`
 when the target has no model `label`. Does no I/O.
 [`DjangoDriver`](#adorm-drivers-django-djangodriver) and [`AsyncpgDriver`](#adorm-drivers-asyncpg-asyncpgdriver)
 return [`model_schema_hash(label)`](#adorm-drivers-django-model-schema-hash-label) of the installed Django model.
@@ -372,6 +372,7 @@ A runtime-checkable protocol for the connection profile a connection is opened f
 | `connect` | `None`, or a callable that opens the target's connection in place of the driver's default: `connect(profile)` returns the target's connection. A threaded driver calls it in `connect_sync()` on the connection's thread; an async driver awaits its result in `open_connection()` |
 | `on_acquire`, `on_release` | optional; when present and not `None`, [hooks](/topics/profiles#hooks) the pool calls as `hook(connection, profile, session)` with the connection's [`target`](#adorm-drivers-driverconnection) |
 | `options` | optional; when present and not `None`, the profile's database [connection options](/ref/options), which the pool reads |
+| `check_operation` | optional; when present and not `None`, a plain function the pool calls as `check_operation(operation, session)` before an operation reaches a slot ([`Pool.check()`](/ref/pool#check-operation-session)) |
 | `covered_receivers` | optional; the dotted paths of Django signal receivers the [native PostgreSQL driver](/topics/postgresql-driver#signal-receivers) writes despite |
 
 ### `adorm.drivers.is_connection_error(exc)`
@@ -394,7 +395,8 @@ is_connection_error(OperationalError(sqlstate="57014"))   # False
 
 ### `adorm.drivers.operation_models(operation)`
 
-The labels of the models whose tables `operation` reads or writes, without repeats:
+The labels of the models whose adorm schema `operation` depends on, without repeats, the models a driver checks the
+[schema hash](/topics/schema-checks#the-schema-hash-at-use) of:
 
 - its `model`;
 - the model of every query inside it (a `Subquery`, `Exists`, `pk__in=queryset`, the parts of a `union()`);
@@ -403,7 +405,8 @@ The labels of the models whose tables `operation` reads or writes, without repea
   `defer()`, `distinct()` and `select_related()`. A many-to-many path reaches the related model; an `OuterRef()` path
   is resolved in the query it refers to; `select_related()` without fields adds no labels.
 
-Empty for an operation without a `model`.
+Empty for an operation without a `model`. [`Operation.models`](./operations#models) is the full set of the tables an
+operation reads or writes, with many-to-many through tables, parent tables and cascades.
 
 ```python
 from adorm.drivers import operation_models

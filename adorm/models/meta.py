@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -19,8 +19,11 @@ class ModelMeta:
     ``orm_names`` maps a field or relation name to the target ORM's name where the two differ (a generated model
     renames names that clash with pydantic); a model class's ``_meta`` also holds the entries of its model bases for
     the fields and relations it inherits. ``concrete_model`` is the label of the concrete model a proxy model stands
-    for (Django's ``concrete_model``), ``None`` for a concrete model. A model class declares it as ``_meta``; a class
-    without one is abstract (it cannot load or save rows).
+    for (Django's ``concrete_model``), ``None`` for a concrete model. ``delete_models`` holds the labels of the models
+    whose tables deleting rows of this model reads or writes (the target ORM's deletion collector, followed by model,
+    the model itself included), any iterable of labels stored as a ``frozenset``; ``None`` when they are unknown (a
+    model written by hand). A model class declares it as ``_meta``; a class without one is abstract (it cannot load or
+    save rows).
     """
 
     label: str
@@ -28,6 +31,7 @@ class ModelMeta:
     schema_hash: str | None = field(default=None, kw_only=True)
     orm_names: Mapping[str, str] | None = field(default=None, kw_only=True, hash=False)
     concrete_model: str | None = field(default=None, kw_only=True)
+    delete_models: Iterable[str] | None = field(default=None, kw_only=True, hash=False)
 
     def __post_init__(self) -> None:
         check_model_label(self.label)
@@ -39,6 +43,10 @@ class ModelMeta:
             check_model_label(self.concrete_model)
             if self.concrete_model == self.label:
                 raise ValueError(f"{self.label} cannot be a proxy of itself")
+        if self.delete_models is not None:
+            if isinstance(self.delete_models, str) or not isinstance(self.delete_models, Iterable):
+                raise TypeError("delete_models is an iterable of model labels, not a string")
+            object.__setattr__(self, "delete_models", frozenset(check_model_label(m) for m in self.delete_models))
         if self.orm_names is None:
             object.__setattr__(self, "orm_names", MappingProxyType({}))
         if not isinstance(self.orm_names, Mapping):

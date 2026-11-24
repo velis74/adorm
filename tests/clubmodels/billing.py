@@ -13,7 +13,11 @@ __all__ = ["Invoice", "InvoiceLine", "Payment"]
 
 
 class Invoice(Model):
-    _meta = ModelMeta("billing.Invoice", schema_hash="6e611d1a7beabf54")
+    _meta = ModelMeta(
+        "billing.Invoice",
+        schema_hash="6e611d1a7beabf54",
+        delete_models=("billing.Invoice", "billing.InvoiceLine", "billing.Payment"),
+    )
     id: int | None = None
     club_id: int
     member_id: int
@@ -31,7 +35,7 @@ class Invoice(Model):
 class InvoiceLine(Model):
     """A line billing a membership fee or an activity: ``item`` is a generic foreign key."""
 
-    _meta = ModelMeta("billing.InvoiceLine", schema_hash="229a2816290786d6")
+    _meta = ModelMeta("billing.InvoiceLine", schema_hash="229a2816290786d6", delete_models=("billing.InvoiceLine",))
     id: int | None = None
     invoice_id: int
     content_type_id: int
@@ -45,7 +49,7 @@ class InvoiceLine(Model):
 
 
 class Payment(Model):
-    _meta = ModelMeta("billing.Payment", pk="code", schema_hash="dc9f6cc8cd38f57f")
+    _meta = ModelMeta("billing.Payment", pk="code", schema_hash="dc9f6cc8cd38f57f", delete_models=("billing.Payment",))
     code: uuid.UUID = Field(default_factory=uuid.uuid4)
     invoice_id: int
     amount: decimal.Decimal = Field(ge=decimal.Decimal("0.01"), max_digits=10, decimal_places=2)

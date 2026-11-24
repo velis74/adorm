@@ -161,6 +161,9 @@ class Pool:
     lease ends. ``release_timeout`` is the number of seconds ``on_release`` may run before the slot leaves the pool
     instead.
 
+    The profile's ``check_operation`` attribute, when present and not ``None``, is a plain function `check()` calls
+    before an operation reaches a slot or a transaction (``TypeError`` for another value).
+
     ``connection_defaults`` are the database options the driver sets on each new connection
     (`Driver.connection_defaults()`). ``options`` are those, replaced by the profile's ``options`` attribute (when
     present and not ``None``), checked: the first layer of `adorm.connection_options()`. An option the driver does
@@ -204,6 +207,13 @@ class Pool:
         check_hook(getattr(profile, "connect", None), "connect", profile.name, driver.mode)
         self.on_acquire = self._hook(profile, "on_acquire")
         self.on_release = self._hook(profile, "on_release")
+        self.check_operation = getattr(profile, "check_operation", None)
+        if self.check_operation is not None and (
+            not callable(self.check_operation) or inspect.iscoroutinefunction(self.check_operation)
+        ):
+            raise TypeError(
+                f"check_operation of profile {profile.name!r} is a plain function or None, not {self.check_operation!r}"
+            )
         self.connection_defaults = check_profile_options(driver.connection_defaults(profile), profile.name)
         self.options = MappingProxyType(
             {**self.connection_defaults, **check_profile_options(getattr(profile, "options", None), profile.name)}
@@ -224,6 +234,20 @@ class Pool:
         self._waiters: deque[_Waiter] = deque()
         self._closing: set[asyncio.Task] = set()
         self._purge_handle: asyncio.TimerHandle | None = None
+
+    def check(self, operation: Operation, session: Session) -> None:
+        """Run the profile's ``check_operation`` hook as ``check_operation(operation, session)``, synchronously in the
+        caller's context; no I/O. An exception the hook raises propagates unchanged. A hook that returns an awaitable
+        raises ``TypeError`` (a coroutine is closed first); another return value is ignored."""
+        hook = self.check_operation
+        if hook is None:
+            return
+        result = hook(operation, session)
+        if inspect.isawaitable(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            raise TypeError(f"check_operation of profile {self.name!r} returned an awaitable; it is a plain function")
 
     def _hook(self, profile: Profile, what: str) -> Any:
         hook = getattr(profile, what, None)
@@ -918,14 +942,17 @@ class Router:
     async def run(self, session: Session, operation: Operation) -> Any:
         """Acquire a slot for ``session``, execute ``operation``, release the slot and return the result.
 
-        An operation the pool's driver does not support, or a database connection option in effect that it does not
-        declare, raises `NotSupportedError` before a slot is acquired (`Driver.check()`). The slot sets the database
-        options in effect (`resolve_options()`) before it executes the operation. A cancellation carries the
+        `Pool.check()` runs the profile's ``check_operation`` hook first, before a slot is acquired; when the pool is
+        retired meanwhile and the slot comes from the pool that replaced it, that pool's hook runs too, after its
+        ``on_acquire``. An operation the pool's driver does not support, or a database connection option in effect that
+        it does not declare, raises `NotSupportedError` before a slot is acquired (`Driver.check()`). The slot sets the
+        database options in effect (`resolve_options()`) before it executes the operation. A cancellation carries the
         operation's `CancellationOutcome`, final when the ``CancelledError`` is raised: `NOT_STARTED` while it waits
         for a slot, else that of `SlotLease.call()`. The enclosing `adorm.timeout()` blocks see the operation in
         the phase ``"waiting_for_slot"``, then ``"executing"``."""
         try:
             pool = await self.get_pool(session.using)
+            pool.check(operation, session)
             pool.driver.check(operation, capabilities=pool.capabilities)
             options = resolve_options(session, pool)
             pool.capabilities.check_options(options.database, pool.driver.name)
@@ -935,6 +962,7 @@ class Router:
                 # acquired from the pool that replaced a retired one
                 pool = lease.pool
                 try:
+                    pool.check(operation, session)
                     pool.driver.check(operation, capabilities=pool.capabilities)
                     options = resolve_options(session, pool)
                 except BaseException:

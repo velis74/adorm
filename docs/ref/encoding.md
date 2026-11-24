@@ -128,7 +128,7 @@ The schema of the model `label`, a frozen dataclass; the mappings are copied int
 | `pk` | the primary key field name |
 | `fields` | every concrete field name, including a foreign key's column field such as `club_id`, to its type hint |
 | `relations` | every relation name (forward, reverse and many-to-many) to the target model's label |
-| `orm_names` | a field or relation name to the target ORM's name where they differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none) |
+| `orm_names` | a field or relation name to the target ORM's name where they differ, as [`ModelMeta.orm_names`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none) |
 | `methods` | the [`MethodKey`](#adorm-schema-methodkey) of every driver method of the model's managers to its [`MethodSchema`](#adorm-schema-methodschema-positional-keyword-var-positional-none-var-keyword-none); a [`Call`](./operations#adorm-operations-call-query-method-target-queryset-args-kwargs-manager-none) encodes its arguments with those types |
 
 Raises `ValueError` for a label (also a relation target) that is not `"app_label.ModelName"`, a `pk` not in
