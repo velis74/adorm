@@ -540,11 +540,14 @@ async def test_the_tenant_guard_refuses_tenant_tables_without_a_tenant(make_rout
         lambda: Member.objects.count(),
         lambda: Club.objects.filter(members__level="advanced").exists(),
         lambda: listed(Club.objects.annotate(n=Count("activities"))),
-        lambda: listed(Club.objects.filter(slug=KOPER).prefetch_related("memberships")),
         lambda: Club.objects.filter(slug=KOPER).delete(),
     ):
         with pytest.raises(NoTenantError):
             await make()
     assert acquired == []
+    # The clubs' query reads only the shared table and runs; the guard refuses the memberships' prefetch query.
+    with pytest.raises(NoTenantError):
+        await listed(Club.objects.filter(slug=KOPER).prefetch_related("memberships"))
+    assert acquired == [adorm.current_session()]
     assert pool.in_use == 0
     assert await Club.objects.filter(slug=KOPER).count() == 1
