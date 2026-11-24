@@ -157,7 +157,7 @@ def test_the_models_a_delete_of_a_library_model_reaches():
     assert labels(delete_models_of(dj.Author)) == {"library.Author", "library.Book_authors"}
     edition = labels(delete_models_of(dj.Edition))
     assert {"library.Edition", "library.Book", "library.Book_authors", "library.Loan", "library.Fine"} <= edition
-    assert labels(delete_models_of(dj.BookProxy)) == labels(delete_models_of(dj.Book))
+    assert labels(delete_models_of(dj.BookProxy)) == labels(delete_models_of(dj.Book)) | {"library.BookProxy"}
 
 
 @isolate_apps("tests.djangoproject.library")
