@@ -853,6 +853,39 @@ async def set_operations_of_one_query():
     )
 
 
+# Tenant schemas: the default schema stands in for a tenant schema, so a qualified table reads the seeded rows.
+
+
+def _default_schema() -> str:
+    """The schema an unqualified table resolves to: ``main`` on SQLite, ``public`` on PostgreSQL."""
+    from django.db import connection
+
+    return "main" if connection.vendor == "sqlite" else "public"
+
+
+@case(
+    "select",
+    "count",
+    "lookup.exact",
+    "path.nested",
+    "clause.tenant_schema",
+    expected=(["Bojan", "Lara"], 2),
+)
+async def a_query_in_a_tenant_schema():
+    from adorm.operations import Count as CountOperation, Select
+    from adorm.query import Query
+
+    # clubs.Member is not a tenant model: its table stays unqualified.
+    query = (
+        Query("clubs.Membership")
+        .filter(club__slug="ljubljana-rowing", member__level="advanced")
+        .in_tenant_schema(_default_schema(), ("clubs.Membership", "clubs.Club"))
+    )
+    session = adorm.create_session()
+    selected = await session.execute(Select(query.values("member__first_name").order_by("member__first_name")))
+    return [row["member__first_name"] for row in selected], await session.execute(CountOperation(query))
+
+
 # Row formats and loaded fields
 
 
@@ -1588,6 +1621,21 @@ async def aggregate_operation():
         coach_fees=Sum("fee", filter=Q(role="coach")),
         paying=Count("pk", filter=Q(fee__gt=0)),
     )
+
+
+@case(
+    "aggregate",
+    "lookup.exact",
+    "lookup.gt",
+    "clause.union",
+    "aggregate.Count",
+    "aggregate.Sum",
+    "aggregate.combined",
+    expected={"n": 13, "total": FEES},
+)
+async def aggregate_over_a_union():
+    union = Membership.objects.filter(role="coach").union(Membership.objects.filter(fee__gt=0), all=True)
+    return await union.aggregate(n=Count("id"), total=Sum("fee"))
 
 
 def _django_aggregate_without_rows():
