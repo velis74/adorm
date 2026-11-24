@@ -286,7 +286,7 @@ class SharedTestConnection:
         """Run ``sql`` in a savepoint of its own on the wrapper: a statement the database refuses rolls back only that
         savepoint, and the test's transaction stays usable. Without ``keep`` the savepoint is rolled back after a
         statement that succeeds as well."""
-        with self.wrapper.cursor() as cursor:
+        with self._options_cursor() as cursor:
             cursor.execute(f"SAVEPOINT {_OPTIONS_SAVEPOINT}")
             try:
                 cursor.execute(sql)
@@ -297,6 +297,14 @@ class SharedTestConnection:
             if not keep:
                 cursor.execute(f"ROLLBACK TO SAVEPOINT {_OPTIONS_SAVEPOINT}")
             cursor.execute(f"RELEASE SAVEPOINT {_OPTIONS_SAVEPOINT}")
+
+    def _options_cursor(self) -> Any:
+        """A cursor of the wrapper that Django does not log: the statements of the options stay out of the test's
+        query log (``assertNumQueries()``, ``CaptureQueriesContext``)."""
+        from django.db.backends.utils import CursorWrapper
+
+        self.wrapper.ensure_connection()
+        return CursorWrapper(self.wrapper.create_cursor(), self.wrapper)
 
     def add_defaults(self, defaults: Mapping[str, Any]) -> None:
         """Record the options a connection of the alias starts with; until a ``SET LOCAL`` is sent they are the

@@ -27,6 +27,7 @@ from asgiref.sync import async_to_sync, sync_to_async
 from django.db import connections, DataError, transaction
 from django.db.models.signals import post_save
 from django.test import TestCase, TransactionTestCase
+from django.test.utils import CaptureQueriesContext
 
 import adorm
 
@@ -894,6 +895,23 @@ class SharedConnectionTests(TestCase):
             assert await sync_to_async(seen_on_test_connection)() in (None, "")
             assert await sync_to_async(names_on_test_thread)() == ["seed"]
 
+    async def test_the_options_stay_out_of_the_tests_query_log(self):
+        def on_acquire(_db, _profile, _session):
+            return {APP_USER: "alice"}
+
+        def captured():
+            with CaptureQueriesContext(connections["default"]) as queries:
+                names_on_test_thread()
+            return [query["sql"] for query in queries.captured_queries]
+
+        for _ in REPEAT:
+            async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire):
+                await tags().filter(name="opt-hook").count()
+                assert len(await sync_to_async(captured)()) == 1
+                await tags().filter(name="opt-hook").count()
+            assert len(await sync_to_async(captured)()) == 1
+            assert await sync_to_async(seen_on_test_connection)() in (None, "")
+
     async def test_sql_a_hook_runs_on_the_shared_connection_is_refused(self):
         def hook(db, _profile, _session):
             with db.cursor() as cursor:
@@ -1424,9 +1442,8 @@ async def test_an_alias_without_a_database_has_no_test_database():
 
 
 class FakeWrapper:
-    def __init__(self, *blocks, cursor=None):
+    def __init__(self, *blocks):
         self.atomic_blocks = list(blocks)
-        self.cursor = cursor
         self.execute_wrappers = []
 
 
@@ -1558,8 +1575,8 @@ class RecordingCursor:
 
 def test_options_are_set_locally_and_only_when_they_differ():
     statements = []
-    wrapper = FakeWrapper(cursor=lambda: RecordingCursor(statements))
-    shared = SharedTestConnection(TestDatabase("default", wrapper, ()))
+    shared = SharedTestConnection(TestDatabase("default", FakeWrapper(), ()))
+    shared._options_cursor = lambda: RecordingCursor(statements)
     shared.apply_options({})
     assert statements == []
     shared.apply_options({"statement_timeout": 5})
