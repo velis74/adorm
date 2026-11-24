@@ -58,6 +58,7 @@ writes.
 | `kind` | the operation's name for `Capabilities.operations` |
 | `model` | the model label |
 | `nodes()` | the query and the expressions of the operation |
+| `models` | the labels of the models whose tables the operation reads or writes, `None` when adorm cannot know them ([below](#models)) |
 | `constructs()` | construct names used by those nodes and their descendants, possibly repeated |
 | `to_dict(schema=None)` | JSON-safe data: `{"operation": kind, ...}`, values encoded by the types `schema` gives them |
 | `from_dict(data, schema=None)` | class method: the operation `to_dict()` produced with the same `schema` |
@@ -78,6 +79,67 @@ validates the decoded operation as its constructor does, raising `ValueError` wh
 `TypeError`. Both raise [`FieldError`](./exceptions#adorm-fielderror-message-none-model-none-key-none-original-none-sqlstate-none)
 for a field path the schema does not resolve. [Operation encoding](./encoding) documents the data and
 the typing of values.
+
+#### `models`
+
+The labels (`app_label.ModelName`, as [`ModelMeta.label`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none);
+`"app.Model_field"` for an automatic many-to-many through model) of the models whose tables the operation reads or
+writes, as a `frozenset`, by the model graph: a model counts when the operation can reach its table, whatever rows
+there are. `None` when adorm cannot know them. A profile's
+[`check_operation`](/topics/profiles#refusing-operations) hook reads it.
+
+It is computed from the process's [model registry](./models#adorm-models-registry) on first access and cached; it
+does no I/O and does not raise. The base class gives `None`, as do operations of third-party drivers; a subclass of a
+bundled operation inherits that class's computation, and a subclass that touches other tables overrides `models`.
+
+| Operation | `models` |
+|---|---|
+| `Select`, `Get`, `First`, `Last`, `Count`, `Exists`, `InBulk` | the reach of the query |
+| `Aggregate` | the reach of the query and of the aggregate expressions |
+| `Update` | the reach of the query and of the written values |
+| `Create`, `BulkCreate`, `Save`, `CreateFromParent` | the model and the reach of the written values; a child's parents (for `CreateFromParent`, the parent whose row it extends) |
+| `GetOrCreate`, `UpdateOrCreate` | the reach of the query, the lookups and the defaults |
+| `FullClean` | the model, and the target of each of its foreign keys (`ForeignKey.validate` reads it) |
+| `CheckTable` | the model and the `through` model of each relation named in `many_to_many` |
+| `Delete` | the reach of the query and the model's [`ModelMeta.delete_models`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none); `None` when that is `None` |
+| `DeleteInstance` | the model and its `ModelMeta.delete_models`; `None` when that is `None` |
+| `Call` | `None`: a driver method runs code of the target ORM |
+
+The reach of a query or an expression:
+
+- the model of every query: the operation's own, each `Subquery`, `Exists`, `pk__in=queryset` and each part of a
+  `union()`, `intersection()` or `difference()`;
+- every model a relation path reaches: lookups and `F()` references in filters, annotations, ordering, aggregates and
+  written values (an `OuterRef()` path from the query it refers to), and the paths of `values()`, `values_list()`,
+  `only()`, `defer()`, `distinct()`, grouping, `select_for_update(of=...)` and `select_related()`;
+- a many-to-many relation on a path adds its `through` model as well as its target, from either side;
+- `select_related()` without fields adds the targets of the non-null foreign keys, five relations deep, as Django
+  follows them;
+- every listed model adds its concrete tables: a proxy model its concrete model, a multi-table inheritance child its
+  parents, recursively.
+
+A path segment that is not a relation (a field, a transform, a JSON key, an annotation) ends the path; a relation to a
+model that is not registered adds its label and ends the path. A path the registry cannot resolve is left to the
+driver, which raises `FieldError`.
+
+```python
+Select(Member.objects.filter(clubs__name="Chess").query).models
+# frozenset({'clubs.Member', 'clubs.Membership', 'clubs.Club'})
+Select(Edition.objects.select_related("book_ptr").query).models
+# frozenset({'library.Edition', 'library.Book'})
+Delete(Tag.objects.filter(name="old").query).models
+# frozenset({'library.Tag', 'library.Tagging'})
+```
+
+Each prefetch query of `prefetch_related()` is an operation of its own with its own `models` (the link query of a
+many-to-many prefetch reads its `through` model only), and so is each load of a related object, a generic foreign key
+or a content type.
+
+`models` describes what adorm's handling of the operation touches. Code of the application that the target ORM runs
+during it is not part of it: on the Django driver, an overridden `save()`, `delete()` or `clean()`, signal receivers,
+custom manager methods, field validators, `limit_choices_to` and `on_delete` callables other than Django's (`SET()` of
+a callable included). The native PostgreSQL driver refuses most of these, or leaves their work to the application
+(`covered_receivers`).
 
 ### `adorm.operations.OPERATIONS`
 

@@ -43,11 +43,11 @@ class Member(Model):
 
 ### `adorm.Model`
 
-Base class of adorm models, a subclass of pydantic `BaseModel`. A model declares `_meta` (a
-[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)), its fields as pydantic
-fields and its relations as [`Relation`](#adorm-models-relation-target) descriptors. A subclass without its own `_meta`
-inherits its parent's; a model without any `_meta` is abstract: it cannot load or save rows and its instances compare by
-identity.
+Base class of adorm models, a subclass of pydantic `BaseModel`. A model declares `_meta`, a
+[`ModelMeta`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none);
+its fields as pydantic fields and its relations as [`Relation`](#adorm-models-relation-target) descriptors. A
+subclass without its own `_meta` inherits its parent's; a model without any `_meta` is abstract: it cannot load or
+save rows and its instances compare by identity.
 
 The model configuration:
 
@@ -296,7 +296,7 @@ Raises `ValueError` without a primary key value and [`InterfaceError`](./excepti
 reference that forbids the delete raises `ProtectedError` or `RestrictedError` with instances of the registered
 models as its objects, as [`QuerySet.delete()`](./queryset#async-delete) does; the instance keeps its primary key.
 
-### `adorm.ModelMeta(label, pk="id", *, schema_hash=None, orm_names=None, concrete_model=None)`
+### `adorm.ModelMeta(label, pk="id", *, schema_hash=None, orm_names=None, concrete_model=None, delete_models=None)`
 
 The identity of a model: its `label` (`"app_label.ModelName"`) and the name of its primary key field. A frozen
 dataclass; an invalid label or pk name raises `ValueError`.
@@ -313,6 +313,14 @@ dataclass; an invalid label or pk name raises `ValueError`.
   concrete model. [`adorm generate`](/howto/generating-models) sets it on every proxy. The content type of a proxy is
   its concrete model's ([`natural_key()`](#adorm-models-natural-key-model-for-concrete-model-true)). An invalid label,
   or the model's own label, raises `ValueError`.
+- `delete_models`: the labels of the models whose tables deleting rows of this model reads or writes, the model itself
+  included: the target ORM's deletion collector followed by model, by the model graph (a model counts whether or not
+  any row refers to the deleted ones). Any iterable of labels, stored as a `frozenset`; `None` (a model written by
+  hand) when they are unknown. [`adorm generate`](/howto/generating-models#cascade-targets) sets it on every model
+  ([`delete_models_of()`](./codegen#adorm-codegen-django-delete-models-of-model)); it is what
+  [`Operation.models`](./operations#models) gives for `Delete` and `DeleteInstance`. It depends on the `on_delete` of
+  other models, which the model's `schema_hash` does not cover: after such a change only `adorm generate --check`
+  detects a stale value. An invalid label raises `ValueError`, a string instead of an iterable `TypeError`.
 - `orm_name(name)`: the ORM name of the field or relation `name`, `name` itself when `orm_names` does not list it.
 
 ```python
@@ -665,7 +673,7 @@ The process's `ContentTypes` instance, used by generic foreign keys and prefetch
 
 `(app_label, model)` of the content type of the model class or instance `model`: the parts of its label, the model
 name lowercased. With `for_concrete_model` a proxy gives its concrete model's key
-([`ModelMeta.concrete_model`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none)).
+([`ModelMeta.concrete_model`](#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none)).
 Raises `TypeError` for anything but a model class or instance.
 
 ```python

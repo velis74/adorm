@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.1 - 2026-11-24
+
+- Connection profile hook `check_operation(operation, session)` (`ConnectionProfile.check_operation`, an import path
+  in the `ADORM` setting; type `adorm.settings.OperationCheck`): a plain function called for every operation of the
+  profile's sessions, in the awaiting task's context, before the operation reaches a slot or a transaction and before
+  any I/O, on every bundled driver and inside `atomic()` blocks. An exception it raises propagates unchanged and
+  nothing reaches the database; inside a block, the block stays usable. `adorm.executor.Pool.check()` runs it. The
+  pool's start-up schema check does not.
+- `Operation.models`: the labels of the models whose tables an operation reads or writes (relation paths, subqueries,
+  many-to-many through tables, `select_related()`, parent tables of multi-table inheritance, concrete models of
+  proxies, the cascades of a delete), `None` when adorm cannot know them (driver methods, third-party operations).
+- `ModelMeta.delete_models`: the models deleting rows of a model reads or writes, by Django's deletion collector
+  (`on_delete`), written by `adorm generate` (`adorm.codegen.django.delete_models_of()`,
+  `ModelSpec.delete_models`). Generate the models again to get it; without it `Operation.models` of a delete is
+  `None`.
+- How-to schema per tenant: the tenant in the session name, and refusing tenant tables without a tenant.
+
 ## 0.1.0 - 2026-11-20
 
 - Breaking: the native PostgreSQL driver refuses a write Django would send `pre_save`, `post_save`, `pre_delete` or

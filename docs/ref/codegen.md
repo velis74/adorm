@@ -54,12 +54,13 @@ status = main(["generate", "--check", "--settings", "myproject.settings", "-o", 
 The models of one app, rendered as the module `<label>.py`. A label that is not an identifier, or is a keyword,
 raises `ValueError`.
 
-### `adorm.codegen.ModelSpec(label, class_name, pk, fields, relations, schema_hash, base=None, doc=None, managers=(), concrete_model=None)`
+### `adorm.codegen.ModelSpec(label, class_name, pk, fields, relations, schema_hash, base=None, doc=None, managers=(), concrete_model=None, delete_models=())`
 
 A generated class: its label, class name, primary key field, own `fields` and `relations`, `schema_hash`, the label of
 the generated model it derives from (`base`, `None` for `Model`), its docstring and the `ManagerSpec` of every manager
 it declares (a plain `objects` is inherited from `Model` and not listed). `concrete_model` is the label of a proxy's
-concrete model, rendered into its [`ModelMeta`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none).
+concrete model, rendered into its [`ModelMeta`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none).
+`delete_models` are the sorted labels of `ModelMeta.delete_models`, rendered when not empty.
 `orm_names` gives the ORM names of its renamed fields and relations. Two fields, relations or managers with one name
 raise `ValueError`.
 
@@ -67,6 +68,8 @@ raise `ValueError`.
 ModelSpec("library.BookProxy", "BookProxy", "isbn", (), (), "d4e7cbdc2a0fc320", base="library.Book",
           concrete_model="library.Book")
 # _meta = ModelMeta("library.BookProxy", pk="isbn", schema_hash="d4e7cbdc2a0fc320", concrete_model="library.Book")
+ModelSpec("library.Tag", "Tag", "id", (), (), "d86fea53ee739c01", delete_models=("library.Tag", "library.Tagging"))
+# _meta = ModelMeta("library.Tag", schema_hash="d86fea53ee739c01", delete_models=("library.Tag", "library.Tagging"))
 ```
 
 ### `adorm.codegen.FieldSpec(name, orm_name, type, nullable=False, default=NO_DEFAULT, default_factory=None, db_filled=False, constraints={}, description=None, primary_key=False)`
@@ -331,6 +334,22 @@ The `ModelSpec` of a Django model class. `included` holds the labels generated w
 
 A composite primary key, and a model whose names give two fields or relations the same Python name, raise
 `CodegenError`.
+
+The spec's `delete_models` is [`delete_models_of(model)`](#adorm-codegen-django-delete-models-of-model).
+
+### `adorm.codegen.django.delete_models_of(model)`
+
+The sorted labels of the models whose tables deleting rows of a Django model class reads or writes, by Django's
+deletion collector followed by model: the model, its multi-table inheritance parents and every model a relation to
+them reaches. `CASCADE` and generic relations (`GenericRelation`, with `contenttypes.ContentType`) are followed
+recursively; `PROTECT`, `RESTRICT`, `SET_NULL`, `SET_DEFAULT` and `SET(...)` list the referring model without
+following it; `DO_NOTHING` is skipped. Another `on_delete` callable lists the referring model and is reported as
+`CodegenWarning`. A model counts whether or not any row refers to the deleted ones
+([cascade targets](/howto/generating-models#cascade-targets)).
+
+```python
+delete_models_of(apps.get_model("library.Tag"))    # ("library.Tag", "library.Tagging")
+```
 
 ### `adorm.codegen.django.manager_specs(model, *, local=False, included=None, exposed=None)`
 

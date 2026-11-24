@@ -55,6 +55,10 @@ A threaded driver cancels a hook by asking its thread to stop the running call
 ([`ThreadedConnection`](/ref/drivers#adorm-drivers-threadedconnection)). A hook that does not stop extends the
 release, or the acquisition, by up to the driver's `cancel_grace` seconds; the connection is then given up.
 
+The profile's `check_operation` attribute, when present and not `None`, is a plain function that
+[`check()`](#check-operation-session) calls before an operation reaches a slot; a value that is not callable, or a
+coroutine function, raises `TypeError`.
+
 A request for a slot:
 
 1. takes the idle slot returned last; an idle slot past `purge_stale_connections_at`, or not usable, met on the way
@@ -89,7 +93,7 @@ pool = Pool(AsyncpgDriver(), profile, check_schema="raise")              # refus
 |---|---|
 | `name` | the profile name |
 | `driver`, `profile`, `max_connections`, `acquire_timeout`, `commit_timeout`, `release_timeout`, `purge_stale_connections_at`, `check_schema` | the constructor arguments |
-| `on_acquire`, `on_release` | the profile's hooks, `None` when it has none |
+| `on_acquire`, `on_release`, `check_operation` | the profile's hooks, `None` when it has none |
 | `connection_defaults` | the database options the driver sets on every new connection for the profile, checked |
 | `options` | `connection_defaults` overridden by the profile's database connection options, checked, as a read-only mapping |
 | `capabilities` | what the driver supports for the profile ([`Driver.capabilities_for(profile)`](/ref/drivers#capabilities-for-profile)), read once; operations, connection options and channels are checked against it before a slot is acquired |
@@ -106,6 +110,15 @@ pool = Pool(AsyncpgDriver(), profile, check_schema="raise")              # refus
 #### `leases()`
 
 The unreleased leases holding a slot of the pool.
+
+#### `check(operation, session)`
+
+Runs the profile's [`check_operation`](/topics/profiles#refusing-operations) hook as
+`check_operation(operation, session)`, synchronously in the caller's context, and does no I/O; without a hook it
+does nothing. An exception the hook raises propagates unchanged. A hook that returns an awaitable raises `TypeError`
+(a coroutine is closed first, so it is never awaited); another return value is ignored.
+[`Router.run()`](#async-run-session-operation) and [`Atomic.execute()`](/ref/transactions#async-execute-operation)
+call it for every operation; the start-up schema check of `check_schema` does not.
 
 #### `async wait_closed()`
 
@@ -253,6 +266,10 @@ current task (the default), those of `held_leases()`.
 Acquires a slot for `session`, executes `operation`, releases the slot and returns the result. The slot is released
 also after an error or a cancellation.
 
+- The pool's [`check()`](#check-operation-session) runs first, after the session's profile is resolved and before
+  `Driver.check()`; an exception it raises propagates unchanged and no slot is acquired. When the pool is retired
+  meanwhile and the slot comes from the pool that replaced it, that pool's `check()` runs too, after its
+  `on_acquire`, and its refusal releases the slot.
 - An operation the pool's driver does not support for the profile (`capabilities`), and a database connection option in effect
   ([`resolve_options()`](/ref/options#adorm-executor-options-resolve-options-session-pool)) that it does not declare,
   raise `NotSupportedError` ([`Driver.check()`](/ref/drivers#check-operation-schema-hashes-none-capabilities-none))

@@ -137,6 +137,8 @@ runs them). A lookup is a relation path (`"memberships__member"`) or a [`Prefetc
 - Every building method keeps them; `prefetch_related(None)` clears them.
 - `async for`, `get()`, `first()`, `last()` and [`in_bulk()`](#async-in-bulk-id-list-none-field-name-pk) run the
   prefetches on the instances they return. No instances, no prefetch operation.
+- Each prefetch operation has its own [`models`](./operations#models) and passes the profile's
+  [`check_operation`](/topics/profiles#refusing-operations) hook on its own; a refused one makes the call raise.
 
 ```python
 clubs = Club.objects.order_by("slug").prefetch_related("memberships__member", "activities")
