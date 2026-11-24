@@ -315,6 +315,7 @@ async def person(name: str, people: dict[str, int]) -> Any:
 # The declaration
 
 
+@pytest.mark.django_db(transaction=True, databases="__all__")  # makemigrations reads the history of every database
 def test_the_django_declaration_creates_no_column_migration_or_check_message():
     call_command("makemigrations", "tenancy", "--check", "--dry-run", verbosity=0)
     assert [message for message in checks.run_checks() if "tenancy" in str(message.obj)] == []
