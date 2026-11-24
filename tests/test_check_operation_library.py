@@ -26,6 +26,7 @@ from tests.generated.library import (
     Fine,
     Loan,
     Note,
+    Placement,
     Reader,
     Reservation,
     Shelf,
@@ -165,6 +166,19 @@ async def test_self_relations_and_forward_paths(hook):
     # Without arguments: the non-null foreign keys only.
     assert await models_of(hook, lambda: listed(Loan.objects.select_related())) == {LOAN, READER, BOOK}
     assert await models_of(hook, lambda: listed(Author.objects.select_related())) == {AUTHOR}
+
+
+@pytest.mark.usefixtures("pool")
+async def test_a_path_through_a_relation_adorm_does_not_know_has_no_models(library, hook):  # noqa: ARG001
+    assert await models_of(hook, lambda: Book.objects.filter(reviews__code=NOTE).count()) is None
+    # Django resolves these paths and joins the tables: a foreign key to a field other than the primary key (not
+    # generated) and a reverse relation by its query name.
+    for make in (
+        lambda: Placement.objects.filter(shelf__code="A1").count(),
+        lambda: Book.objects.filter(tagging__tag__name="rare").count(),
+    ):
+        assert await models_of(hook, make) is None
+        assert await make() >= 0
 
 
 @pytest.mark.usefixtures("pool")
