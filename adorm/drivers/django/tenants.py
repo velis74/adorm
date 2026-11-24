@@ -76,6 +76,13 @@ def _qualified(compiler: Any, schema: str, table: str) -> str:
     return f"{quote(schema)}.{quote(table)}"
 
 
+def _quote_table(compiler: Any, table: str) -> str:
+    """``table`` quoted as the compiler writes it: ``quote_name()`` on Django 6.1 and later,
+    ``quote_name_unless_alias()`` before."""
+    quote = getattr(compiler, "quote_name", None) or compiler.quote_name_unless_alias
+    return quote(table)
+
+
 def _replace_head(sql: str, head: str, replacement: str, table: str) -> str:
     if not sql.startswith(head):
         raise _refuse(table)
@@ -104,7 +111,7 @@ class _QualifyingSelect:
         table = node.table_name
         if table not in tables:
             return sql, params
-        head = self.quote_name_unless_alias(table)  # type: ignore[attr-defined]
+        head = _quote_table(self, table)
         lead = f"{node.join_type} " if isinstance(node, Join) else ""
         alias = f" {head}" if node.table_alias == table else ""
         replacement = f"{lead}{_qualified(self, schema, table)}{alias}"
@@ -150,13 +157,13 @@ class _QualifyingInsert(_QualifyingWrite):
 class _QualifyingUpdate(_QualifyingWrite):
     def _head(self) -> tuple[str, str, str]:
         table = self.query.base_table  # type: ignore[attr-defined]
-        return table, "UPDATE ", self.quote_name_unless_alias(table)  # type: ignore[attr-defined]
+        return table, "UPDATE ", _quote_table(self, table)
 
 
 class _QualifyingDelete(_QualifyingWrite):
     def _head(self) -> tuple[str, str, str]:
         table = self.query.base_table  # type: ignore[attr-defined]
-        return table, "DELETE FROM ", self.quote_name_unless_alias(table)  # type: ignore[attr-defined]
+        return table, "DELETE FROM ", _quote_table(self, table)
 
 
 _COMPILERS: dict[type, type] = {}
