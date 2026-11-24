@@ -10,7 +10,8 @@
   pool's start-up schema check does not.
 - `Operation.models`: the labels of the models whose tables an operation reads or writes (relation paths, subqueries,
   many-to-many through tables, `select_related()`, parent tables of multi-table inheritance, concrete models of
-  proxies, the cascades of a delete), `None` when adorm cannot know them (driver methods, third-party operations).
+  proxies, the cascades of a delete), `None` when adorm cannot know them (driver methods, third-party operations, a
+  path through a relation the target ORM knows and adorm does not).
 - `ModelMeta.delete_models`: the models deleting rows of a model reads or writes, by Django's deletion collector
   (`on_delete`), written by `adorm generate` (`adorm.codegen.django.delete_models_of()`,
   `ModelSpec.delete_models`). Generate the models again to get it; without it `Operation.models` of a delete is

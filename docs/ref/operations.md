@@ -99,7 +99,7 @@ bundled operation inherits that class's computation, and a subclass that touches
 | `Update` | the reach of the query and of the written values |
 | `Create`, `BulkCreate`, `Save`, `CreateFromParent` | the model and the reach of the written values; a child's parents (for `CreateFromParent`, the parent whose row it extends) |
 | `GetOrCreate`, `UpdateOrCreate` | the reach of the query, the lookups and the defaults |
-| `FullClean` | the model, and the target of each of its foreign keys (`ForeignKey.validate` reads it) |
+| `FullClean` | the model, its parents and the target of each of its foreign keys (`ForeignKey.validate` reads it) |
 | `CheckTable` | the model and the `through` model of each relation named in `many_to_many` |
 | `Delete` | the reach of the query and the model's [`ModelMeta.delete_models`](./models#adorm-modelmeta-label-pk-id-schema-hash-none-orm-names-none-concrete-model-none-delete-models-none); `None` when that is `None` |
 | `DeleteInstance` | the model and its `ModelMeta.delete_models`; `None` when that is `None` |
@@ -118,9 +118,10 @@ The reach of a query or an expression:
 - every listed model adds its concrete tables: a proxy model its concrete model, a multi-table inheritance child its
   parents, recursively.
 
-A path segment that is not a relation (a field, a transform, a JSON key, an annotation) ends the path; a relation to a
-model that is not registered adds its label and ends the path. A path the registry cannot resolve is left to the
-driver, which raises `FieldError`.
+A field (with any transforms or JSON keys after it), `pk` or an annotation ends a path, and so does a relation to a
+model that is not registered, whose label is added. A path segment that names nothing adorm knows on a registered model
+(a relation the target ORM resolves but that has no adorm relation, such as a `GenericRelation`, a relation to a model
+that was not generated or a Django query name) makes `models` `None`: the driver may still join that table.
 
 ```python
 Select(Member.objects.filter(clubs__name="Chess").query).models
@@ -139,7 +140,8 @@ or a content type.
 during it is not part of it: on the Django driver, an overridden `save()`, `delete()` or `clean()`, signal receivers,
 custom manager methods, field validators, `limit_choices_to` and `on_delete` callables other than Django's (`SET()` of
 a callable included). The native PostgreSQL driver refuses most of these, or leaves their work to the application
-(`covered_receivers`).
+(`covered_receivers`). Neither is the target model's `Meta.ordering`: it orders a query without an ordering of its
+own, and a relation path in it joins that relation's table.
 
 ### `adorm.operations.OPERATIONS`
 

@@ -186,26 +186,51 @@ def _with_concrete_tables(labels: set[str]) -> set[str]:
     return labels
 
 
-def _reach(model: str, nodes: Iterable[Node]) -> set[str]:
-    """``model`` and the labels of the models ``nodes`` (expressions of ``model``'s rows) reach: every query's model,
-    the targets of the relation paths of lookups, ``F()`` and ``OuterRef()`` references, ``values()``, ``only()``,
-    ``defer()``, ``distinct()``, ``group_by``, ``select_for_update(of=...)`` and ``select_related()`` (without
-    arguments: the non-null foreign keys, five relations deep), the ``through`` model of every many-to-many relation
-    on a path, and the concrete tables of all of them (`_with_concrete_tables()`). A path segment that is not a
-    relation of a registered model ends the path."""
+class _UnknownPathError(Exception):
+    """A path segment that is neither a relation, a field nor an annotation of a registered model."""
+
+
+_END = object()
+"""`_step()` for a path segment that ends the path: a field, ``pk`` or an annotation."""
+
+
+def _step(model: Any, name: str) -> Any:
+    """The relation the path segment ``name`` names on the registered model class ``model``, `_END` for a field or
+    ``pk``; raises `_UnknownPathError` for another name (a relation the target ORM knows but adorm does not, such as a
+    ``GenericRelation`` or one to a model that is not generated)."""
+    relations = model.__adorm_relations__
+    if name == "pk" or name in model.__pydantic_fields__:
+        return _END
+    if name in relations:
+        return relations[name]
+    for adorm_name, orm_name in model._meta.orm_names.items():
+        if orm_name == name:
+            return relations.get(adorm_name, _END)
+    raise _UnknownPathError(name)
+
+
+def _reach(model: str, nodes: Iterable[Node], annotations: Iterable[str] = ()) -> set[str] | None:
+    """``model`` and the labels of the models ``nodes`` (expressions of ``model``'s rows, which may name the
+    ``annotations``) reach: every query's model, the targets of the relation paths of lookups, ``F()`` and
+    ``OuterRef()`` references, ``values()``, ``only()``, ``defer()``, ``distinct()``, ``group_by``,
+    ``select_for_update(of=...)`` and ``select_related()`` (without arguments: the non-null foreign keys, five
+    relations deep), the ``through`` model of every many-to-many relation on a path, and the concrete tables of all of
+    them (`_with_concrete_tables()`). A field, ``pk`` or an annotation ends a path, and so does a model that is not
+    registered; ``None`` when a path names anything else on a registered model."""
     from adorm.models.relations import ForeignKey, ManyToMany
 
     labels = {model}
 
-    def relations(label: str) -> Mapping[str, Any]:
-        found = _model_class(label)
-        return {} if found is None else found.__adorm_relations__
-
-    def follow(start: str, path: str) -> None:
+    def follow(start: str, path: str, names: frozenset[str]) -> None:
         current = start
-        for segment in path.split("__"):
-            relation = relations(current).get(segment)
-            if relation is None:
+        for index, segment in enumerate(path.split("__")):
+            if index == 0 and segment in names:
+                return
+            found = _model_class(current)
+            if found is None or found._meta is None:
+                return
+            relation = _step(found, segment)
+            if relation is _END:
                 return
             if isinstance(relation, ManyToMany):
                 labels.add(relation.through)
@@ -225,39 +250,46 @@ def _reach(model: str, nodes: Iterable[Node]) -> set[str]:
             labels.add(relation.target)
             follow_non_null(relation.target, depth + 1)
 
-    # (node, the models of the enclosing queries, innermost last)
-    pending: list[tuple[Node, tuple[str, ...]]] = [(node, (model,)) for node in nodes]
-    while pending:
-        node, owners = pending.pop()
-        if isinstance(node, Query):
-            labels.add(node.model)
-            paths = (
-                *node.select,
-                *node.distinct_fields,
-                *(node.only_fields or ()),
-                *node.deferred_fields,
-                *(node.group_by or ()),
-            )
-            if isinstance(node.select_related_fields, tuple):
-                paths += node.select_related_fields
-            elif node.select_related_fields:
-                follow_non_null(node.model, 1)
-            if node.for_update is not None:
-                paths += tuple(path for path in node.for_update.of if path != "self")
-            for path in paths:
-                follow(node.model, path)
-            inner = (*owners, node.model)
-            children = (*node.filters, *(expression for _, expression in node.annotations), *node.ordering)
-            pending.extend((child, inner) for child in children)
-            # The combined queries are at the query's own level.
-            pending.extend((part, owners) for part in node.combined_queries)
-        elif isinstance(node, OuterRef):
-            if len(owners) > node.levels:
-                follow(owners[-1 - node.levels], node.name)
-        elif isinstance(node, F):
-            follow(owners[-1], node.name)
-        else:
-            pending.extend((child, owners) for child in node.get_source_expressions())
+    # (node, the models of the enclosing queries with their annotation names, innermost last)
+    root = ((model, frozenset(annotations)),)
+    pending: list[tuple[Node, tuple[tuple[str, frozenset[str]], ...]]] = [(node, root) for node in nodes]
+    try:
+        while pending:
+            node, owners = pending.pop()
+            if isinstance(node, Query):
+                labels.add(node.model)
+                names = frozenset(name for name, _ in node.annotations)
+                paths = (
+                    *node.select,
+                    *node.distinct_fields,
+                    *(node.only_fields or ()),
+                    *node.deferred_fields,
+                    *(node.group_by or ()),
+                )
+                if isinstance(node.select_related_fields, tuple):
+                    paths += node.select_related_fields
+                elif node.select_related_fields:
+                    follow_non_null(node.model, 1)
+                if node.for_update is not None:
+                    paths += tuple(path for path in node.for_update.of if path != "self")
+                for path in paths:
+                    follow(node.model, path, names)
+                inner = (*owners, (node.model, names))
+                children = (*node.filters, *(expression for _, expression in node.annotations), *node.ordering)
+                pending.extend((child, inner) for child in children)
+                # The combined queries are at the query's own level.
+                pending.extend((part, owners) for part in node.combined_queries)
+            elif isinstance(node, OuterRef):
+                if len(owners) > node.levels:
+                    outer, outer_names = owners[-1 - node.levels]
+                    follow(outer, node.name, outer_names)
+            elif isinstance(node, F):
+                owner, owner_names = owners[-1]
+                follow(owner, node.name, owner_names)
+            else:
+                pending.extend((child, owners) for child in node.get_source_expressions())
+    except _UnknownPathError:
+        return None
     return _with_concrete_tables(labels)
 
 
@@ -268,9 +300,15 @@ def _delete_models(label: str) -> frozenset[str] | None:
     return None if meta is None or meta.delete_models is None else frozenset(meta.delete_models)
 
 
-def _reached(operation: Any) -> frozenset[str]:
+def _query_annotations(operation: Any) -> tuple[str, ...]:
+    query = getattr(operation, "query", None)
+    return tuple(name for name, _ in query.annotations) if isinstance(query, Query) else ()
+
+
+def _reached(operation: Any) -> frozenset[str] | None:
     """The `Operation.models` of an operation on the rows of its ``model``: `_reach()` over its nodes."""
-    return frozenset(_reach(operation.model, operation.nodes()))
+    reached = _reach(operation.model, operation.nodes(), _query_annotations(operation))
+    return None if reached is None else frozenset(reached)
 
 
 class Operation:
@@ -601,7 +639,8 @@ class Delete(_QueryOperation):
         """The models the query reaches and those deleting its model's rows reaches (`ModelMeta.delete_models`);
         ``None`` when the model's ``delete_models`` is unknown."""
         cascade = _delete_models(self.query.model)
-        return None if cascade is None else frozenset(_reach(self.query.model, self.nodes()) | cascade)
+        reached = _reached(self)
+        return None if cascade is None or reached is None else reached | cascade
 
 
 @dataclass(frozen=True, eq=False)
@@ -630,7 +669,7 @@ class DeleteInstance(Operation):
         """The model, its concrete tables and the models deleting its rows reaches (`ModelMeta.delete_models`);
         ``None`` when the model's ``delete_models`` is unknown."""
         cascade = _delete_models(self.model)
-        return None if cascade is None else frozenset(_reach(self.model, ()) | cascade)
+        return None if cascade is None else frozenset(_with_concrete_tables({self.model}) | cascade)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
