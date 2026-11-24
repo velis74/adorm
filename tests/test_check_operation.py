@@ -15,12 +15,13 @@ from django.test.utils import isolate_apps
 
 import adorm
 
-from adorm import ConnectionProfile, ModelMeta
+from adorm import ConnectionProfile, Model, ModelMeta
 from adorm.codegen import CodegenWarning
 from adorm.codegen.django import delete_models_of, model_spec
 from adorm.contrib.django import configure_from_settings, DEFAULT_DRIVER, settings_configuration
 from adorm.drivers.django import DjangoDriver
 from adorm.executor import Pool, Router, set_runner
+from adorm.models.registry import registry
 from tests import memory_driver as memory
 from tests.clubmodels.clubs import Club
 from tests.djangoproject.library import models as dj
@@ -293,4 +294,25 @@ def test_model_meta_stores_delete_models_as_a_frozenset():
 
 
 def test_a_model_written_by_hand_does_not_know_its_delete_models():
-    assert Club._meta.delete_models is None
+    class HandWritten(Model):
+        _meta = ModelMeta("library.HandWritten")
+        id: int | None = None
+
+    try:
+        assert HandWritten._meta.delete_models is None
+    finally:
+        registry.unregister("library.HandWritten")
+
+
+def test_a_generated_model_knows_its_delete_models():
+    assert Club._meta.delete_models == {
+        "clubs.Club",
+        "clubs.Membership",
+        "activities.Activity",
+        "activities.Activity_tags",
+        "activities.Attendance",
+        "activities.Competition",
+        "billing.Invoice",
+        "billing.InvoiceLine",
+        "billing.Payment",
+    }

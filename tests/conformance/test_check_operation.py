@@ -6,6 +6,7 @@ models whose tables an operation of the club models reads or writes."""
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime
 import inspect
 import threading
@@ -40,6 +41,8 @@ ATTENDANCE = "activities.Attendance"
 TAG = "activities.Tag"
 ACTIVITY_TAGS = "activities.Activity_tags"
 INVOICE = "billing.Invoice"
+INVOICE_LINE = "billing.InvoiceLine"
+PAYMENT = "billing.Payment"
 
 KOPER = "koper-sailing"
 
@@ -482,7 +485,16 @@ async def test_models_of_writes(driver, guarded, hook):  # noqa: ARG001
     assert await models_of(hook, membership.full_clean) == {MEMBERSHIP, CLUB, MEMBER}
 
 
-async def test_deletes_of_models_written_by_hand_have_no_models(guarded, hook):  # noqa: ARG001
+async def test_deletes_reach_the_models_adorm_generate_found(guarded, hook):  # noqa: ARG001
+    koper = await Club.objects.get(slug=KOPER)
+    reached = {CLUB, MEMBERSHIP, ACTIVITY, ACTIVITY_TAGS, ATTENDANCE, COMPETITION, INVOICE, INVOICE_LINE, PAYMENT}
+    assert koper._meta.delete_models == reached
+    assert await models_of(hook, Club.objects.filter(slug=KOPER).delete) == reached
+    assert await models_of(hook, koper.delete) == reached
+
+
+async def test_deletes_of_models_written_by_hand_have_no_models(guarded, hook, monkeypatch):  # noqa: ARG001
+    monkeypatch.setattr(Club, "_meta", dataclasses.replace(Club._meta, schema_hash=None, delete_models=None))
     koper = await Club.objects.get(slug=KOPER)
     assert koper._meta.delete_models is None
     assert await models_of(hook, Club.objects.filter(slug=KOPER).delete) is None

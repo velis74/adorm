@@ -8,7 +8,11 @@ __all__ = ["ContentType"]
 
 
 class ContentType(Model):
-    _meta = ModelMeta("contenttypes.ContentType", schema_hash="a3bc85b54f12cc4c")
+    _meta = ModelMeta(
+        "contenttypes.ContentType",
+        schema_hash="a3bc85b54f12cc4c",
+        delete_models=("billing.InvoiceLine", "contenttypes.ContentType"),
+    )
     id: int | None = None
     app_label: str = Field(max_length=100)
     model: str = Field(max_length=100)
