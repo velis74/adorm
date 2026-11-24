@@ -5,7 +5,7 @@ by the database; a returned enrolment writes to its own schema; writes through t
 
 Tenant schemas are PostgreSQL schemas, or SQLite databases attached under the schema names
 (``--ds=tests.djangoproject.settings_sqlite``). The test app ``tests.djangoproject.tenancy`` declares the relation
-``Person.enrolments``; its generated adorm models are ``tests.generated.tenancy``.
+``Person.enrolments``; its generated adorm models are ``tests.tenancymodels.tenancy``.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import pytest
 from django.core import checks
 from django.core.management import call_command
 from django.db import models as django_models
+from django.db.backends.signals import connection_created
 
 import adorm
 
@@ -48,8 +49,8 @@ from adorm.query import Query
 from tests.clubmodels.clubs import Membership
 from tests.conformance.drivers import on_sqlite
 from tests.djangoproject.tenancy import models as dj
-from tests.generated.tenancy import Enrolment, Organisation, Person, PersonOrganisation, Team
 from tests.library_data import in_thread
+from tests.tenancymodels.tenancy import Enrolment, Organisation, Person, PersonOrganisation, Team
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -241,17 +242,19 @@ async def tenants(people, club_data, tmp_path):
             finally:
                 conn.close()
 
-        def connect(profile):
-            from django.db import connections
+        def attach(sender, connection, **kwargs):  # noqa: ARG001 - a signal receiver
+            if connection.alias == "default":
+                for schema, file in files.items():
+                    connection.connection.execute(f"ATTACH DATABASE ? AS {schema}", (file,))
 
-            conn = sqlite3.connect(**connections[profile.alias].get_connection_params())
-            for schema, file in files.items():
-                conn.execute(f"ATTACH DATABASE ? AS {schema}", (file,))
-            return conn
-
-        store = SQLiteTenants(files)
-        store.profile = {"connect": connect}
-        yield store
+        # Django's SQLite backend opens connections without the profile's ``connect`` hook.
+        connection_created.connect(attach)
+        try:
+            store = SQLiteTenants(files)
+            store.profile = {}
+            yield store
+        finally:
+            connection_created.disconnect(attach)
         return
     conn = await asyncpg.connect(club_data)
     try:
