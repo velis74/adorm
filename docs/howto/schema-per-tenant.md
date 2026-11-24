@@ -204,7 +204,7 @@ ordering, the slice, counts and aggregates apply to all of them together:
 
 ```python
 person = await Person.objects.get(name="Ana")
-recent = [enrolment async for enrolment in person.enrolments.filter(role="player").order_by("-joined")[:10]]
+recent = [enrolment async for enrolment in person.enrolments.filter(role="coach").order_by("-joined")[:10]]
 enrolments = await person.enrolments.count()
 fees = await person.enrolments.aggregate(Sum("fee"), coaches=Count("id", filter=Q(role="coach")))
 teams = [name async for name in person.enrolments.order_by("team__name").values_list("team__name", flat=True)]
@@ -219,7 +219,7 @@ Writes through the relation itself (`create()`, `update()`, `delete()`) raise `N
 ```python
 enrolment = await person.enrolments.order_by("joined").first()
 enrolment.fee = 0
-await enrolment.save()                 # UPDATE "org_a"."tenancy_enrolment" ...
+await enrolment.save()                 # an UPDATE of the enrolment's schema's table
 team = await enrolment.team            # the team in the same schema
 ```
 
