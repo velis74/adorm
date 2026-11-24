@@ -395,8 +395,7 @@ class Atomic:
         """Run ``operation`` in this block, after a savepoint open inside it ends, with the database connection options
         in effect (`resolve_options()`). The pool's `Pool.check()` runs the profile's ``check_operation`` hook first; an
         exception it raises propagates unchanged and leaves the block usable. Raises `TransactionClosed` once the block
-        ends,
-        `TransactionManagementError` after an operation of the block failed and `NotSupportedError` for an option
+        ends, `TransactionManagementError` after an operation of the block failed and `NotSupportedError` for an option
         the driver does not declare."""
         try:
             self._check_open()
