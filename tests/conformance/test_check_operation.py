@@ -244,7 +244,7 @@ async def test_a_refused_operation_raises_the_hooks_error_and_takes_no_slot(guar
     assert acquired == []
     assert (guarded.size, guarded.in_use) == (size, 0)
     assert await Club.objects.count() == clubs_before
-    assert await Club.objects.filter(slug__startswith="refused").count() == 0
+    assert await Club.objects.filter(slug__in=["refused", "refused-bulk"]).count() == 0
     assert (await Club.objects.get(slug=KOPER)).city == "Koper"
     assert await Membership.objects.filter(club_id=koper.pk).count() == memberships_before
     assert acquired, "allowed operations acquire a slot again"
@@ -310,9 +310,10 @@ async def test_a_refusal_inside_a_transaction_leaves_it_usable(driver, guarded, 
                 await create_tag("kept-in-savepoint")
         await create_tag("kept")
     assert (await koper.get()).city == "After refusal"
-    assert await Tag.objects.filter(name__startswith="refused").count() == 0
+    assert await Tag.objects.filter(name__in=["refused", "refused-in-task", "refused-in-savepoint"]).count() == 0
     kept = {"kept", "kept-in-task"} | ({"kept-in-savepoint"} if driver.capabilities.savepoints else set())
-    assert {tag.name async for tag in Tag.objects.filter(name__startswith="kept")} == kept
+    created = Tag.objects.filter(name__in=["kept", "kept-in-task", "kept-in-savepoint"])
+    assert {tag.name async for tag in created} == kept
     assert guarded.in_use == 0
 
 
