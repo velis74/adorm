@@ -88,6 +88,7 @@ export default defineConfig({
           { text: 'QuerySet API', link: '/ref/queryset' },
           { text: 'Query', link: '/ref/query' },
           { text: 'Model API', link: '/ref/models' },
+          { text: 'Tenant relations', link: '/ref/tenant-relations' },
           { text: 'Operations', link: '/ref/operations' },
           { text: 'Operation encoding', link: '/ref/encoding' },
           { text: 'Lookups', link: '/ref/lookups' },

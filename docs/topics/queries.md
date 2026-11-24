@@ -372,15 +372,25 @@ cities = Club.objects.values_list("city", flat=True)
 
 The combined rows have the row format of the first query: model instances of its model when it selects model rows.
 After a set operation only `order_by()`, slicing, `values()` / `values_list()` and the reads (`async for`, `get()`
-without conditions, `first()`, `last()`, `count()`, `exists()`) apply to the combined rows; another set operation
-nests the combination. `filter()`, `annotate()`, `distinct()`, `only()`, `select_related()`, `prefetch_related()`,
-`aggregate()`, `update()`, `delete()` and the other methods raise `NotSupportedError`, as in Django:
+without conditions, `first()`, `last()`, `count()`, `exists()`, `aggregate()`) apply to the combined rows; another
+set operation nests the combination. `filter()`, `annotate()`, `distinct()`, `only()`, `select_related()`,
+`prefetch_related()`, `update()`, `delete()` and the other methods raise `NotSupportedError`, as in Django:
 
 ```python
 members = Member.objects.filter(level="advanced").union(Member.objects.filter(tags__contains=["junior"]))
 [member.first_name async for member in members.order_by("-first_name")[:3]]
 [name async for name in members.values_list("first_name", flat=True)]
 members.filter(club_id=1)         # NotSupportedError: cannot call filter() after union()
+```
+
+`aggregate()` over the combined rows aggregates them in the database, with their ordering and slice: its expressions
+name columns of the combined rows (the names `values()` gives, or the first model's fields for model rows), not paths
+through relations. Django refuses an aggregate over a set operation; adorm runs it as
+`SELECT SUM(...) FROM (<set operation>) subquery`:
+
+```python
+fees = Membership.objects.filter(role="coach").values("fee")
+await fees.union(Membership.objects.filter(active=False).values("fee"), all=True).aggregate(total=Sum("fee"))
 ```
 
 `values()` or `values_list()` after a set operation selects those fields in every combined query that selects model

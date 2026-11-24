@@ -54,7 +54,7 @@ The model configuration:
 | Setting | Value | Effect |
 |---|---|---|
 | `extra` | `"allow"` | names that are neither fields nor relations (annotations, the `to_attr` of a prefetch) are extra values |
-| `ignored_types` | `(Relation, <the objects descriptor>)` | relations and `objects` are class attributes, absent from validation, serialisation and the JSON schema |
+| `ignored_types` | `(Relation, GenericForeignKey, TenantRelation, <the objects descriptor>)` | relations and `objects` are class attributes, absent from validation, serialisation and the JSON schema |
 | `serialize_by_alias` | `True` | a field with an alias is dumped under the alias |
 | `validate_by_name`, `validate_by_alias` | `True` | input may use the field name or the alias |
 | `protected_namespaces` | `()` | field names may start with `model_` (a name equal to a pydantic attribute still raises) |
@@ -99,7 +99,10 @@ or aliases to values; `pk` stands for the primary key field.
   primary key field.
 
 `executor` runs the instance's later operations (`save()`, relation loads) and those of the related instances
-built from `row`. The row must contain the primary key (`ValueError`); an abstract model raises `TypeError`.
+built from `row`. The keyword argument `tenant_schema`, a [`TenantSchema`](./query#adorm-tenantschema-schema-models)
+or `None`, is the schema the row was read in: the instance gets it as `ModelState.tenant_schema` when its model is one
+of the schema's models, and so does each related instance built from `row` whose model is. The row must contain the
+primary key (`ValueError`); an abstract model raises `TypeError`.
 
 ```python
 member = Member.from_row({"id": 1, "name": "Ana", "club_id": 7, "visits": 3})
@@ -146,9 +149,12 @@ The primary key value, read and written through the field `_meta.pk` names.
 #### Equality and hash
 
 Two instances are equal when they belong to the same model (the same `_meta.label`, so a subclass instance equals
-its model's instance) and have the same primary key value that is not `None`. Other field values do not take part.
-An instance without a primary key value equals only itself and is unhashable (`TypeError`). The hash is
-`hash((label, pk))`. Instances of an abstract model compare and hash by identity.
+its model's instance), have the same primary key value that is not `None` and the same tenant schema
+(`ModelState.tenant_schema`, compared by schema name; `None` for both when neither was read in a tenant schema). Other
+field values do not take part. An instance without a primary key value equals only itself and is unhashable
+(`TypeError`). The hash is `hash((label, pk))`, or `hash((label, pk, schema))` for an instance with a tenant schema:
+rows with the same primary key in two tenant schemas are different instances. Instances of an abstract model compare
+and hash by identity.
 
 ```python
 a = Member.from_row({"id": 1, "name": "Ana"})
@@ -362,9 +368,18 @@ Per-instance state outside the fields, the instance's private attribute `_state`
 | `executor` | the executor that loaded or last saved the instance, `None` otherwise |
 | `related` | cached related instances by relation name; the prefetched rows of a reverse or many-to-many relation; for a generic foreign key the content type, the object id and the instance they were loaded for |
 | `generic` | by generic foreign key name, the assigned instance whose content type the next write resolves, with the object id and the content type id set at assignment (`None` when it was not cached) |
+| `tenant_schema` | the [`TenantSchema`](./query#adorm-tenantschema-schema-models) of an instance read in a tenant schema ([`TenantRelation`](./tenant-relations), a query with [`in_tenant_schema()`](./query#in-tenant-schema-schema-models)), `None` otherwise |
 
-A copy (`copy.copy()`, `model_copy()`) gets its own state with the same executor and a copy of the cache and the
-pending assignments; a deep copy deep-copies them. A pickled instance comes back without its executor.
+An instance with a `tenant_schema` runs its own operations in that schema, on any executor: `save()`, `delete()` and
+`full_clean()` pass it to [`Save`](./operations#adorm-operations-save-model-pk-values-update-fields-none-force-insert-false-force-update-false),
+`DeleteInstance` and `FullClean`, `refresh_from_db()` reads the schema's row, and a relation to a model of the schema
+(`await enrolment.team`, `team.enrolment_set`) reads the schema's rows. A relation to another model reads its table
+as the connection resolves it. A generic foreign key reads its content type as the session's
+[content types](#content-types) key gives it.
+
+A copy (`copy.copy()`, `model_copy()`) gets its own state with the same executor, tenant schema and a copy of the cache
+and the pending assignments; a deep copy deep-copies them. A pickled instance comes back without its executor and with
+its tenant schema.
 
 ## Relations
 
@@ -688,6 +703,15 @@ The `GenericForeignKey` descriptors of the model class `model`, inherited ones i
 
 ```python
 get_generic_foreign_keys(InvoiceLine)    # {"item": InvoiceLine.item}
+```
+
+### `adorm.models.get_tenant_relations(model)`
+
+The [`TenantRelation`](./tenant-relations#adorm-tenantrelation-target-column-schema-models-session-none) descriptors of
+the model class `model`, inherited ones included, by attribute name. They are not in `get_relations()`.
+
+```python
+get_tenant_relations(Person)    # {"enrolments": Person.enrolments}
 ```
 
 ### `adorm.models.parent_link(model)`

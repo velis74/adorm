@@ -143,6 +143,34 @@ a callable included). The native PostgreSQL driver refuses most of these, or lea
 (`covered_receivers`). Neither is the target model's `Meta.ordering`: it orders a query without an ordering of its
 own, and a relation path in it joins that relation's table.
 
+#### `schemas`
+
+The schema names the operation qualifies tables with, as a `frozenset`: the schema of each
+[`TenantSchema`](./query#adorm-tenantschema-schema-models) of its queries (combined queries and subqueries included)
+and of its `tenant_schema` (`Save`, `DeleteInstance`, `FullClean`). Empty for an operation without one. Computed on
+first access, without I/O.
+
+#### `unqualified_models`
+
+The labels of the models whose tables the operation reads or writes without an explicit schema, so that the
+connection's search path or default database resolves them: [`models`](#models) without the models a `TenantSchema`
+qualifies where it applies. A model reached inside a query with a `TenantSchema` counts only when the scope's `models`
+do not name it; `tenant_schema` of a write takes its models out. `None` when `models` is `None`; `models` itself for an
+operation without a schema. The base class gives `models` without `tenant_schema`'s models, so an operation of a
+third-party driver stays coherent.
+
+```python
+branch = Query("tenancy.Enrolment").filter(person_id=1, person__name="Ana")
+union = branch.in_tenant_schema("org_a", TENANT).union(branch.in_tenant_schema("org_b", TENANT), all=True)
+operation = Select(union)
+operation.schemas               # frozenset({'org_a', 'org_b'})
+operation.unqualified_models    # frozenset({'tenancy.Person'})
+```
+
+A [`check_operation`](/topics/profiles#refusing-operations) hook that guards tenant tables reads `unqualified_models`:
+an operation that names the schemas of its tenant tables passes, one that leaves them to the search path does not
+([Reading across tenants](/howto/schema-per-tenant#reading-across-tenants)).
+
 ### `adorm.operations.OPERATIONS`
 
 A read-only mapping of kind to operation class:
@@ -177,8 +205,9 @@ The rows of `query`: iterating, listing or awaiting a query. A query that is not
 `TypeError`, as for every operation that takes one.
 
 A query combined by a [set operation](./query#union-others-all-false) is accepted by `Select`, `Get`, `First`,
-`Last`, `Count` and `Exists`. `InBulk`, `Aggregate`, `Update`, `Delete`, `GetOrCreate` and `UpdateOrCreate` raise
-[`NotSupportedError`](./exceptions) for one (`cannot call update() after union()`).
+`Last`, `Count`, `Exists` and [`Aggregate`](#adorm-operations-aggregate-query-aggregations). `InBulk`, `Update`,
+`Delete`, `GetOrCreate` and `UpdateOrCreate` raise [`NotSupportedError`](./exceptions) for one (`cannot call update()
+after union()`).
 
 ```python
 Select(
@@ -261,6 +290,17 @@ The values of `aggregations` over the rows of `query`, a dict by name.
 Over a sliced, distinct (without fields) or grouped query, or one with an aggregating annotation, the expressions
 aggregate the query's rows as a subquery. Over no rows `Count` gives `0`, the other aggregates their `default` or
 `None`.
+
+Over a combined query (`union()`, `intersection()`, `difference()`) the expressions aggregate the combined rows, with
+their ordering and slice: `SELECT SUM("_adorm_c0") FROM (<set operation>) subquery`. Each `F` outside a subquery names
+a column of the combined rows: a name the combined query selects (`values()`, `values_list()`), or a field of the first
+query's model for model rows. A path with `__` and an `OuterRef` raise `TypeError`. The operation then uses the
+construct `aggregate.combined`.
+
+```python
+fees = Query("clubs.Membership").filter(role="coach").values("fee")
+Aggregate(fees.union(Query("clubs.Membership").filter(active=False).values("fee"), all=True), {"total": Sum("fee")})
+```
 
 ```python
 Aggregate(Query("clubs.Membership").filter(active=True), {"fees": Sum("fee"), "rows": Count("*")})
@@ -356,6 +396,12 @@ Result: the values the database set, at least the primary key.
 - `ValueError`: a name in `update_fields` without a value; `force_insert` with `force_update` or `update_fields`;
   `force_update` without a `pk`.
 
+The keyword argument `tenant_schema`, a [`TenantSchema`](./query#adorm-tenantschema-schema-models) or `None`, qualifies
+the tables of its models that the save reads or writes with its schema; the operation then uses the construct
+`clause.tenant_schema` and has `"tenant_schema"` in its encoded form. An instance read through a
+[`TenantRelation`](./tenant-relations) saves with it. A value with a query in a tenant schema raises
+`NotSupportedError`.
+
 ```python
 Save("club.Member", 5, {"name": "Ann", "age": 31}, update_fields=["age"])
 Save("club.Member", None, {"name": "New"})                  # insert
@@ -398,7 +444,8 @@ Validates an instance of `model` as the target validates one before a save (Djan
 Result: the instance's fields after cleaning, as a row. Errors raise `adorm.ValidationError` with the errors by
 adorm name (a foreign key's under its relation's name, the model's under `"__all__"`), each with its message, `code`
 and `params`. An expression as `pk` or value and a string `exclude` raise `TypeError`; an `exclude` name that is not
-an identifier raises `ValueError`.
+an identifier raises `ValueError`. The keyword argument `tenant_schema` qualifies the tables of its models in the
+validation's queries (unique checks, foreign keys), as for `Save`.
 
 ```python
 FullClean("billing.Invoice", 3, {"due": datetime.date(2025, 1, 1)}, exclude=["club"], adding=False)
@@ -408,6 +455,10 @@ FullClean("billing.Invoice", 3, {"due": datetime.date(2025, 1, 1)}, exclude=["cl
 
 Sets `values` on every row of `query`. Values may refer to fields. A sliced query, a query distinct on fields and a
 grouped query raise `TypeError`. Result: the number of rows matched.
+
+`Update`, `Delete`, `InBulk`, `GetOrCreate`, `UpdateOrCreate`, `Create`, `BulkCreate` and `CreateFromParent` raise
+`NotSupportedError` when their query, or a query in their values (a part or a subquery included), has a
+[`TenantSchema`](./query#adorm-tenantschema-schema-models): "update of a query in a tenant schema is not supported".
 
 ```python
 Update(Query("club.Member").filter(club__name="Chess"), {"fee": F("fee") * 1.1, "active": True})
@@ -429,7 +480,9 @@ Delete(Query("club.Member").filter(active=False, joined__lt=cutoff))
 Deletes the instance of `model` with primary key `pk` as the target deletes one instance, with the rows that cascade
 from it. On the Django driver the model's `delete()` runs, an override included. The native PostgreSQL driver deletes
 with Django's collector and raises `NotSupportedError` for a model with an override. A missing row deletes nothing.
-`pk` as `None` raises `ValueError`, as an expression `TypeError`. Result: `(total, {label: count})`.
+`pk` as `None` raises `ValueError`, as an expression `TypeError`. Result: `(total, {label: count})`. The keyword
+argument `tenant_schema` qualifies the tables of its models that the delete reads or writes, cascades included, as for
+`Save`.
 
 ```python
 DeleteInstance("billing.Payment", 7)          # Model.delete() of a Payment with pk 7

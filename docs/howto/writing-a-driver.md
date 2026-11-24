@@ -490,6 +490,12 @@ ADORM_TEST_DATABASE_URL=postgres://… uv run pytest tests/conformance -k psycop
   `ModelSchema.orm_names` from a schema source); a name it does not list is the same in the target.
 - `capabilities` lists exactly what the driver executes, including `savepoints` and `cancellation` when it
   implements them, and the conformance suite passes on it.
+- With `clause.tenant_schema`, every table of a model in a query's
+  [`TenantSchema`](/ref/query#adorm-tenantschema-schema-models) `models` is read as the schema's table, per query and
+  per query of a set operation, its subqueries included, and the `tenant_schema` of `Save`, `DeleteInstance` and
+  `FullClean` qualifies the tables of its models in every statement the write runs. With `aggregate.combined`, an
+  `Aggregate` over a combined query aggregates the combined rows. A driver without SQL declares neither, and a
+  [`TenantRelation`](/ref/tenant-relations) refuses to read on it.
 - With `clause.manager`, a query and a `Create` that name a manager run through that manager of the target ORM; with
   the operation `call`, a `Call` runs the method on the target manager `Call.manager` or its query set and returns model
   instances as `ModelRow` values ([managers and driver methods](/ref/drivers#managers-and-driver-methods)).

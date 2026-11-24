@@ -797,7 +797,7 @@ The [`ThreadedConnection`](#adorm-drivers-threadedconnection) of `DjangoDriver`.
 | Method | Does |
 |---|---|
 | `connect_sync()` | takes `django.db.connections[profile.alias]` of the connection's thread and its `vendor` (an `ENGINE` in `profile.params` other than the entry's raises `NotSupportedError`) ([`wrapper_vendor()`](#adorm-drivers-django-wrapper-vendor-db)); `profile.params` replace keys of that wrapper's `settings_dict` (the `DATABASES` entry itself is unchanged), and then `CONN_HEALTH_CHECKS` becomes `False`, `CONN_MAX_AGE` `None` and `OPTIONS["pool"]` is left out, so the connection is opened directly, never taken from Django's pool, and Django neither pings nor closes the connection the slot keeps; a connection of Django's pool that a `direct` driver's thread holds goes back to that pool first; `profile.connect(profile)`, when set, returns the DB-API connection that Django's `get_new_connection()` uses in place of the one it opens, and Django configures it (isolation level from `OPTIONS`, time zone, role); a psycopg 3 connection is opened with the wrapper's `get_connection_params()`, which carry Django's cursor class and type adapters; the vendor adjusts the settings ([`Vendor.slot_settings()`](#adorm-drivers-django-vendors-vendor-name-features-none)) and refuses those a slot cannot use (`check_settings()`, `NotSupportedError` before connecting); then `ensure_connection()` and `Vendor.connected()` (on SQLite: WAL and the progress handler). A thread's wrapper already connected with other `OPTIONS` (a `direct` driver's) is closed first |
-| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool` (for a combined query, whether its first row exists), `aggregate` → a dict by name (Django's `aggregate()` on the query set of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations)); a write runs as the table below shows. Every statement through the wrapper's cursor is watched (`connection.execute_wrapper()`): unless, searching its callers upward, a frame of Django's query compiler or a database backend (Django's or the alias's backend package) comes before a signal dispatch, an `on_commit()` callback runner or the driver's own code, it calls [`mark_custom_sql()`](#mark-custom-sql) (raw SQL of a `post_save` receiver, `Manager.raw()`); frames of instrumentation wrapping the cursor are skipped. Django's own refusal of what the database cannot run, raised before any SQL (a `django.db.NotSupportedError` or a `DatabaseError` without a database library's error as its cause), raises `NotSupportedError` without `original`, which leaves an open transaction usable |
+| `execute_sync(operation)` | a read [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query and evaluates it on `profile.alias`: `select` → list of rows, `get` → the row (Django's `get()`), `first` / `last` → the row or `None`, `count` → `int`, `exists` → `bool` (for a combined query, whether its first row exists), `aggregate` → a dict by name (Django's `aggregate()` on the query set of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations); over a combined query the `AggregateQuery` of [`combined_aggregation()`](#adorm-drivers-django-translation-combined-aggregation-query-aggregations), its row converted by [`aggregate_values()`](#adorm-drivers-django-translation-aggregate-values-outer-compiler-row)); a write runs as the table below shows, inside [`tenant_scope()`](#adorm-drivers-django-tenants-tenant-scope-tenant-schema) of its `tenant_schema`. Every statement through the wrapper's cursor is watched (`connection.execute_wrapper()`): unless, searching its callers upward, a frame of Django's query compiler or a database backend (Django's or the alias's backend package) comes before a signal dispatch, an `on_commit()` callback runner or the driver's own code, it calls [`mark_custom_sql()`](#mark-custom-sql) (raw SQL of a `post_save` receiver, `Manager.raw()`); frames of instrumentation wrapping the cursor are skipped. Django's own refusal of what the database cannot run, raised before any SQL (a `django.db.NotSupportedError` or a `DatabaseError` without a database library's error as its cause), raises `NotSupportedError` without `original`, which leaves an open transaction usable |
 | `begin_sync()` | enters an outermost `transaction.atomic(using=profile.alias)` block, on SQLite waiting for the write lock (below); a second `begin`, or a wrapper already inside an atomic block (a `direct` driver's thread inside Django code's `atomic()`), raises `TransactionManagementError`. On the shared connection of a Django `TestCase` the block is a savepoint of the test's transaction ([`SharedConnectionMixin`](/ref/testing#adorm-testing-django-sharedconnectionmixin)) |
 | `savepoint_sync(name)` | creates a Django savepoint (`savepoint()`) and adds it to the block's savepoint ids, so Django's `on_commit()` callbacks registered inside it belong to it; `name` already open, or no transaction, raises `TransactionManagementError` |
 | `release_savepoint_sync(name)` | releases the savepoint and the savepoints opened after it |
@@ -935,7 +935,7 @@ fields); the other databases have the [capabilities of their vendor](#adorm-driv
 | Field | Value |
 |---|---|
 | `operations` | `select`, `get`, `first`, `last`, `count`, `exists`, `aggregate`, `in_bulk`, `create`, `bulk_create`, `create_from_parent`, `save`, `update`, `delete`, `delete_instance`, `get_or_create`, `update_or_create`, `full_clean`, `check_table` |
-| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`, `has_key`, `has_keys`, `has_any_keys`, `contained_by`; `transform.<name>` for `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, `date`, `time`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression`; a [`Constructs`](#adorm-drivers-constructs-names-extra-none) that also holds the constructs defined for PostgreSQL ([`with_own_constructs()`](#adorm-drivers-django-vendors-with-own-constructs-capabilities-vendor)): `function.UUID4`, `function.UUID7` and the application's own expressions |
+| `constructs` | `lookup.<name>` for `exact`, `iexact`, `gt`, `gte`, `lt`, `lte`, `in`, `range`, `isnull`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`, `regex`, `iregex`, `overlap`, `has_key`, `has_keys`, `has_any_keys`, `contained_by`; `transform.<name>` for `year`, `iso_year`, `quarter`, `month`, `week`, `week_day`, `iso_week_day`, `day`, `hour`, `minute`, `second`, `date`, `time`; `path.nested`; `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.union`, `clause.intersection`, `clause.difference`, `clause.combinator.slice`, `clause.tenant_schema`, `aggregate.combined`, `clause.select_for_update` with `.nowait`, `.skip_locked`, `.of`, `.no_key`; `clause.on_conflict.ignore`, `clause.on_conflict.update`; `function.<name>` for `Lower`, `Upper`, `Length`, `Coalesce`, `Concat`, `Now`, `Trunc` and every `Trunc<kind>`; `aggregate.<name>` for `Count`, `Sum`, `Avg`, `Min`, `Max`, with `aggregate.distinct` and `aggregate.filter`; `expression.Case`, `expression.Subquery`, `expression.Exists`, `expression.OuterRef`, `expression.CombinedExpression`; a [`Constructs`](#adorm-drivers-constructs-names-extra-none) that also holds the constructs defined for PostgreSQL ([`with_own_constructs()`](#adorm-drivers-django-vendors-with-own-constructs-capabilities-vendor)): `function.UUID4`, `function.UUID7` and the application's own expressions |
 | `savepoints`, `cancellation` | `True` |
 | `connection_options` | [`POSTGRESQL_OPTIONS`](#adorm-drivers-sql-postgresql-options): `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`, `role` |
 | `custom_options` | `True` |
@@ -1605,6 +1605,21 @@ queryset, expressions = aggregation(Query("library.Author").alias(n=Count("books
 queryset.aggregate(**expressions)          # {"most": 3}
 ```
 
+### `adorm.drivers.django.translation.combined_aggregation(query, aggregations)`
+
+Returns Django's `AggregateQuery` of `aggregations` (`(name, expression)` pairs of an
+[`Aggregate`](/ref/operations#adorm-operations-aggregate-query-aggregations)) over the rows of the combined `query`:
+`SELECT <aggregates> FROM (<set operation>) subquery`. Each column of the combined rows becomes an annotation
+`_adorm_c<index>` of every combined query, and each aggregate, its `F` references renamed to those annotations, is
+resolved against the first combined query as Django resolves `aggregate()` over a subquery (`Ref`). Model rows select
+the fields the aggregates and the ordering name. The combined query's ordering and slice apply inside the subquery.
+
+### `adorm.drivers.django.translation.aggregate_values(outer, compiler, row)`
+
+Returns the result of the Django `AggregateQuery` `outer` from `row`, the row its `compiler` selected: a dict by
+name, each value converted by the aggregate's field as Django converts it. For `row` `None` (a set operation without
+rows) each aggregate's value over no rows: `0` for `Count`, the `default` or `None`.
+
 ### `adorm.drivers.django.translation.output_field(output_type)`
 
 Returns a new Django field instance for an adorm `output_type`: `bool` → `BooleanField`, `int` → `IntegerField`,
@@ -1714,6 +1729,57 @@ vendor.
 `5`: how many relations deep `select_related()` without paths follows non-null foreign keys, as Django's
 `Query.max_depth`.
 
+### `adorm.drivers.django.tenants`
+
+Schema qualification of tenant tables in the SQL Django's compiler builds, shared by the Django driver and the native
+PostgreSQL driver. A query with a [`TenantSchema`](/ref/query#adorm-tenantschema-schema-models) qualifies the tables
+of the scope's models: [`translate()`](#adorm-drivers-django-translation-translate-query) and the other translations
+`tag()` the Django query they build, and Django's clones of it keep the tag.
+
+The compiler classes of `qualifying_operations()` write each table of the scope as `schema.table` with the backend's
+`quote_name()` (`"org_a"."t"` on PostgreSQL and SQLite, `` `org_a`.`t` `` on MySQL, `[org_a].[t]` on SQL Server):
+
+- a `FROM` item or a join: Django's head of it (`"t"`, `INNER JOIN "t"`) becomes `"org_a"."t" "t"`, so column
+  references (`"t"."col"`) keep their alias; an alias of its own (`T3`) stays as it is;
+- an insert, an update or a delete: the table after `INSERT INTO`, `UPDATE` or `DELETE FROM`; `WHERE` and `RETURNING`
+  keep the table's name, which names the target table on these databases.
+
+No SQL text is scanned: parameters, joins to shared tables, table names inside other identifiers and string literals
+stay as Django renders them. A head of another shape (MySQL's `DELETE t FROM ...`) raises `NotSupportedError`; a table
+is never left unqualified. Subqueries compiled inside a scoped query take its scope; each query of a set operation
+compiles with its own. Each distinct list of schemas is a distinct SQL text, so the native PostgreSQL driver's statement
+cache holds one entry per combination. Raw SQL is not qualified.
+
+The Django driver installs the operations class on each slot's connection wrapper (and restores it when the slot
+closes); the native PostgreSQL driver on its compiler's wrapper. Without a tag or `tenant_scope()` the compilers
+compile as Django's.
+
+#### `adorm.drivers.django.tenants.qualifying_operations(ops_class)`
+
+`ops_class`, a Django database operations class, with a `compiler()` that returns compiler classes which qualify
+tenant tables; one class per `ops_class`, and `ops_class` itself when it already is one.
+
+#### `adorm.drivers.django.tenants.tag(django_query, tenant_schema)`
+
+Sets the scope of `tenant_schema` (nothing for `None`) on the Django `Query` `django_query`, under
+`SCOPE_ATTRIBUTE`.
+
+#### `adorm.drivers.django.tenants.tenant_scope(tenant_schema)`
+
+A context manager: every query compiled in the block, in the current context, qualifies the tables of
+`tenant_schema`'s models; nothing for `None`. The drivers run a write with a `tenant_schema` inside it, so the queries
+Django builds for it (the collector of a delete, the unique checks of `full_clean()`, the ORM queries of signal
+receivers on the Django driver) are qualified too.
+
+#### `adorm.drivers.django.tenants.scope_of(tenant_schema)`
+
+`(schema, db_tables)`: the schema of `tenant_schema` and the database tables of its models. A model that is not
+installed raises `ProgrammingError`.
+
+#### `adorm.drivers.django.tenants.SCOPE_ATTRIBUTE`
+
+`"_adorm_tenant_scope"`: the attribute of a Django `Query` that holds its scope.
+
 ## Native PostgreSQL driver
 
 `adorm.drivers.asyncpg` executes adorm operations on asyncpg, natively async. Importing it imports asyncpg, Django
@@ -1775,7 +1841,7 @@ connection with [`mark_custom_sql()`](#mark-custom-sql).
 
 | Method | Does |
 |---|---|
-| `_execute(operation)` | a read: [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`; for a combined query, whether its first row exists), `aggregate` → a dict by name ([`compile_aggregate()`](#compile-aggregate-query-aggregates) of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations); no statement runs when the query matches no rows), `in_bulk` → list of rows ([`check_in_bulk_field()`](#adorm-drivers-django-translation-check-in-bulk-field-operation), then one statement per [`IN_BULK_BATCH_SIZE`](#adorm-drivers-asyncpg-in-bulk-batch-size) ids). A write: the [`WRITES`](#adorm-drivers-asyncpg-writes-writes) method of a new [`Writer`](#adorm-drivers-asyncpg-writes-writer-connection), with the results of the Django driver. Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while a query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement, or a cancellation inside a transaction the write opened, can make the connection unusable. While the transaction is rollback-only (a write failed after its first statement, outside a savepoint of its own) every operation raises `TransactionManagementError` |
+| `_execute(operation)` | a read: [`translate()`](#adorm-drivers-django-translation-translate-query)s the operation's query, compiles it on the event loop and runs one statement: `select` → list of rows, `get` → the row (as Django's `get()`: no ordering unless sliced or `distinct()` on fields, at most [`MAX_GET_RESULTS`](#adorm-drivers-asyncpg-max-get-results) rows fetched, Django's messages), `first` / `last` → the row or `None` (ordered as Django's `first()` / `last()`, one row), `count` → `int` ([`compile_count()`](#compile-count-query-in-transaction-false)), `exists` → `bool` (Django's `Query.exists()`; for a combined query, whether its first row exists), `aggregate` → a dict by name ([`compile_aggregate()`](#compile-aggregate-query-aggregates) of [`aggregation()`](#adorm-drivers-django-translation-aggregation-query-aggregations), or [`compile_combined_aggregate()`](#compile-combined-aggregate-outer) of [`combined_aggregation()`](#adorm-drivers-django-translation-combined-aggregation-query-aggregations) for a combined query; no statement runs when the query matches no rows), `in_bulk` → list of rows ([`check_in_bulk_field()`](#adorm-drivers-django-translation-check-in-bulk-field-operation), then one statement per [`IN_BULK_BATCH_SIZE`](#adorm-drivers-asyncpg-in-bulk-batch-size) ids). A write: the [`WRITES`](#adorm-drivers-asyncpg-writes-writes) method of a new [`Writer`](#adorm-drivers-asyncpg-writes-writer-connection), with the results of the Django driver, inside [`tenant_scope()`](#adorm-drivers-django-tenants-tenant-scope-tenant-schema) of its `tenant_schema`. Errors go through `map_error()`; Django's `SynchronousOnlyOperation` while a query is built (a manager's `get_queryset()` that accesses the database) raises `NotSupportedError`. Only an error or a cancellation of a statement, or a cancellation inside a transaction the write opened, can make the connection unusable. While the transaction is rollback-only (a write failed after its first statement, outside a savepoint of its own) every operation raises `TransactionManagementError` |
 | `_execute(CheckTable)` | [`expected_tables(operation, compiler.connection, driver.name)`](#adorm-drivers-django-expected-tables-operation-connection-driver-none-check-types-true), then one [`columns_sql("$1")`](#adorm-drivers-postgresql-columns-sql-parameter) statement per table; the result is the [`table_problems()`](#adorm-drivers-postgresql-table-problems-table-rows) of every table after the `unknown_field` problems. A label without an installed Django model raises `SchemaMismatchError` before any statement |
 | `begin()` | `BEGIN`, or `BEGIN ISOLATION LEVEL <level>` for `OPTIONS["isolation_level"]` ([`ISOLATION_LEVELS`](#adorm-drivers-asyncpg-isolation-levels)); inside a transaction `TransactionManagementError` |
 | `commit()`, `rollback()` | `COMMIT`, `ROLLBACK`; a `COMMIT` whose status is `ROLLBACK` (the transaction failed earlier) raises `TransactionManagementError`, and so does `commit()` of a rollback-only transaction, after sending `ROLLBACK` instead |
@@ -2394,6 +2460,15 @@ aggregation.statement.sql     # 'SELECT SUM("library_book"."pages") AS "pages" F
 aggregation.result(await conn.fetchrow(aggregation.statement.sql, *aggregation.statement.params))
 # {"pages": 1525}
 ```
+
+#### `compile_combined_aggregate(outer)`
+
+Compiles `outer`, the `AggregateQuery` of an aggregate over a set operation
+([`combined_aggregation()`](#adorm-drivers-django-translation-combined-aggregation-query-aggregations)), into a
+`DjangoAggregation` whose `result()` converts the row with
+[`aggregate_values()`](#adorm-drivers-django-translation-aggregate-values-outer-compiler-row). The inner set operation
+compiles on the compiler's wrapper under a dedicated alias of the call, as for `compile_aggregate()`. A set operation
+without rows compiles into an empty statement.
 
 #### `replay(fn, answers, aliases=())`
 

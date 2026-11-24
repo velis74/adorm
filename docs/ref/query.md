@@ -54,6 +54,7 @@ q = (
 | `combinator` | `None`, or `"union"`, `"intersection"` or `"difference"`: the set operation that combines `combined_queries` |
 | `combinator_all` | whether a union keeps duplicate rows (`union(all=True)`) |
 | `combined_queries` | the combined queries, a tuple; empty without a set operation |
+| `tenant_schema` | a [`TenantSchema`](#adorm-tenantschema-schema-models) whose schema qualifies the tables of its models, `None` for the tables as the connection resolves them |
 | `is_combined` | whether `combinator` is set |
 | `is_sliced` | whether a slice limits the rows |
 | `is_empty` | whether the query returns no rows: `is_none`, or the slice leaves none (`high_mark <= low_mark`) |
@@ -306,9 +307,11 @@ combination.
   later `values()` gives. A key that names no column raises [`DatabaseError`](./exceptions)
   (`ORDER BY term does not match any column in the result set.`).
 - Combined model rows are ordered by the fields of the first combined query's model.
-- `filter()`, `exclude()`, `annotate()`, `alias()`, `distinct()`, `only()`, `defer()`, `select_related()` and
-  `select_for_update()` raise [`NotSupportedError`](./exceptions) (`cannot call filter() after union()`), as in
-  Django.
+- `filter()`, `exclude()`, `annotate()`, `alias()`, `distinct()`, `only()`, `defer()`, `select_related()`,
+  `select_for_update()` and `in_tenant_schema()` raise [`NotSupportedError`](./exceptions) (`cannot call filter()
+  after union()`), as in Django.
+- An [`Aggregate`](./operations#adorm-operations-aggregate-query-aggregations) aggregates the combined rows; its
+  expressions name their columns.
 
 ```python
 combined = adults.union(coaches)
@@ -335,6 +338,27 @@ first_two.union(Query("club.Member").none()).order_by("-name")[:5]   # a union: 
 first_two.union(Query("club.Member").none()).order_by("-name")       # ProgrammingError when read
 ```
 
+#### `in_tenant_schema(schema, models=())`
+
+The query with the tables of `models` (model labels) qualified with `schema`: `tenant_schema` becomes
+`TenantSchema(schema, models)`, and `None` as `schema` removes it. Every table of those models that the query reads,
+at any depth (the queried model, joins, subqueries, many-to-many link tables), is the schema's table: `"org_a"."t"` on
+PostgreSQL, `[org_a].[t]` on SQL Server, `` `org_a`.`t` `` on MySQL, the attached database `org_a` on SQLite. The tables
+of other models are left to the connection's search path or default database. A combined query raises
+`NotSupportedError`: each of its queries takes a schema of its own, and `|` and `&` require the same one. The query
+then uses the construct `clause.tenant_schema`.
+
+```python
+branch = Query("tenancy.Enrolment").filter(person_id=1)
+TENANT = ("tenancy.Enrolment", "tenancy.Team")
+branch.in_tenant_schema("org_a", TENANT).union(branch.in_tenant_schema("org_b", TENANT), all=True)
+# SELECT ... FROM "org_a"."tenancy_enrolment" "tenancy_enrolment" ... UNION ALL
+# SELECT ... FROM "org_b"."tenancy_enrolment" "tenancy_enrolment" ...
+```
+
+A [`TenantRelation`](./tenant-relations) builds these queries; the query writes of
+[operations](./operations#adorm-operations-update-query-values) refuse a query in a tenant schema.
+
 #### `check_not_combined(action)`
 
 Raises `NotSupportedError` (`cannot call <action>() after <combinator>()`) when the query is combined.
@@ -346,7 +370,7 @@ Raises `NotSupportedError` (`cannot call <action>() after <combinator>()`) when 
 - the construct names of the filters, the annotations and the ordering;
 - for the clauses in use: `clause.annotate` (an annotation that is not an alias), `clause.alias`, `clause.group_by`,
   `clause.distinct` or `clause.distinct_on`, `clause.only`, `clause.defer`, `clause.select_related`,
-  `clause.manager` and the names of `for_update`;
+  `clause.manager`, `clause.tenant_schema` and the names of `for_update`;
 - for a set operation: `clause.union`, `clause.intersection` or `clause.difference`, `clause.combinator.slice` when a
   combined query is sliced, followed by the construct names of the combined queries;
 - [`path.nested`](#adorm-query-nested-path) when a field of `values()`, `values_list()`, `group_by`, `only()`,
@@ -388,8 +412,23 @@ The construct names of `Query` clauses and set operations, `ForUpdate` options a
 a tuple: `clause.annotate`, `clause.alias`, `clause.group_by`, `clause.distinct`, `clause.distinct_on`,
 `clause.only`, `clause.defer`, `clause.select_related`, `clause.manager`, `clause.select_for_update` and
 `clause.select_for_update.<option>` for `nowait`, `skip_locked`, `of` and `no_key`, `clause.on_conflict.ignore`,
-`clause.on_conflict.update`, `clause.union`, `clause.intersection`, `clause.difference` and
-`clause.combinator.slice`.
+`clause.on_conflict.update`, `clause.union`, `clause.intersection`, `clause.difference`,
+`clause.combinator.slice`, `clause.tenant_schema` (a query or a write in a tenant schema) and `aggregate.combined` (an
+[`Aggregate`](./operations#adorm-operations-aggregate-query-aggregations) over a combined query).
+
+### `adorm.TenantSchema(schema, models)`
+
+The schema that qualifies the tables of the models `models` in a query
+([`Query.in_tenant_schema()`](#in-tenant-schema-schema-models)) or a write
+([`Save`](./operations#adorm-operations-save-model-pk-values-update-fields-none-force-insert-false-force-update-false),
+`DeleteInstance`, `FullClean`), a node with the attributes `schema` and `models`.
+
+- `schema` is a non-empty string without `"`, a backtick, `[`, `]`, NUL or another control character (`ValueError`):
+  the database's quoting of identifiers does not escape them, and schema names come from rows.
+- `models` is an iterable of model labels (a string raises `TypeError`), at least one, kept sorted and without
+  repeats.
+
+It is exported as `adorm.query.TenantSchema` and `adorm.TenantSchema`, and encoded as a node.
 
 ### `adorm.query.COMBINATORS`
 
