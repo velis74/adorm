@@ -24,6 +24,7 @@ import adorm
 from adorm import Count, Exists, NotSupportedError, OuterRef, Subquery, Sum
 from adorm.models.registry import registry
 from adorm.operations import _OPERATIONS, Operation
+from adorm.query.query import NESTED_PATH
 from tests.clubmodels.activities import Activity, Attendance, Competition, Tag
 from tests.clubmodels.billing import Invoice
 from tests.clubmodels.clubs import Club, Member, Membership
@@ -148,6 +149,11 @@ def supports(driver, kind: str) -> bool:
     return kind in driver.capabilities.operations
 
 
+def follows_relations(driver) -> bool:
+    """Whether the driver supports field paths through relations (`NESTED_PATH`)."""
+    return NESTED_PATH in driver.capabilities.constructs
+
+
 # Every operation reaches the hook once
 
 
@@ -180,7 +186,7 @@ async def test_every_operation_of_a_public_call_reaches_the_hook_once(driver, gu
     await step("bulk_create", lambda: Tag.objects.bulk_create([Tag(name="hooked-1"), Tag(name="hooked-2")]))
     tag.name = "hooked-renamed"
     await step("save", tag.save)
-    membership = await Membership.objects.filter(club__slug=KOPER).order_by("id").first()
+    membership = await Membership.objects.filter(club_id=koper.pk).order_by("id").first()
     if supports(driver, "full_clean"):
         await step("full_clean", membership.full_clean)
     assert await step("update", lambda: Tag.objects.filter(name="hooked-1").update(name="hooked-one")) == 1
@@ -483,7 +489,7 @@ async def test_deletes_of_models_written_by_hand_have_no_models(guarded, hook): 
     assert await models_of(hook, koper.delete) is None
 
 
-async def test_each_prefetch_query_is_an_operation_of_its_own(guarded, hook):  # noqa: ARG001
+async def test_each_prefetch_query_is_an_operation_of_its_own(driver, guarded, hook):  # noqa: ARG001
     def models_per_call(start: int = 0) -> list[list[str]]:
         return sorted(sorted(call.operation.models) for call in hook.calls[start:])
 
@@ -493,9 +499,10 @@ async def test_each_prefetch_query_is_an_operation_of_its_own(guarded, hook):  #
     hook.calls.clear()
     await listed(Club.objects.filter(slug=KOPER).prefetch_related("memberships"))
     assert models_per_call() == sorted([[CLUB], [MEMBERSHIP]])
-    hook.calls.clear()
-    await listed(Membership.objects.filter(club__slug=KOPER).prefetch_related("club"))
-    assert models_per_call() == sorted([[CLUB], [CLUB, MEMBERSHIP]])
+    if follows_relations(driver):
+        hook.calls.clear()
+        await listed(Membership.objects.filter(club__slug=KOPER).prefetch_related("club"))
+        assert models_per_call() == sorted([[CLUB], [CLUB, MEMBERSHIP]])
 
 
 async def test_a_refused_prefetch_query_fails_the_whole_call(guarded, hook):  # noqa: ARG001
@@ -524,7 +531,7 @@ def tenant_guard(operation, session):
         raise NoTenantError(f"{operation.kind} without a tenant")
 
 
-async def test_the_tenant_guard_refuses_tenant_tables_without_a_tenant(make_router, acquired):
+async def test_the_tenant_guard_refuses_tenant_tables_without_a_tenant(driver, make_router, acquired):
     def on_acquire(connection, profile, session):  # noqa: ARG001 - the hook's signature
         acquired.append(session)
 
@@ -533,7 +540,8 @@ async def test_the_tenant_guard_refuses_tenant_tables_without_a_tenant(make_rout
     ).pools[0]
     tenant = adorm.Session("default", "tenant_a")
     assert await tenant.bind(Member).count() > 0
-    assert await tenant.bind(Club).filter(members__level="advanced").exists()
+    if follows_relations(driver):
+        assert await tenant.bind(Club).filter(members__level="advanced").exists()
     assert await Club.objects.filter(slug=KOPER).count() == 1
     acquired.clear()
     for make in (
