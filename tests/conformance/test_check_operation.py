@@ -23,7 +23,7 @@ import adorm
 
 from adorm import Count, Exists, NotSupportedError, OuterRef, Subquery, Sum
 from adorm.models.registry import registry
-from adorm.operations import Operation
+from adorm.operations import _OPERATIONS, Operation
 from tests.clubmodels.activities import Activity, Attendance, Competition, Tag
 from tests.clubmodels.billing import Invoice
 from tests.clubmodels.clubs import Club, Member, Membership
@@ -130,12 +130,18 @@ async def models_of(hook: Hook, make: Callable[[], Any]) -> frozenset[str] | Non
     return call.operation.models
 
 
-@dataclass(frozen=True)
-class ThirdParty(Operation):
-    """An operation of a third-party driver, which no driver of the suite declares."""
+@pytest.fixture
+def third_party():
+    """An operation class of a third-party driver, which no driver of the suite declares; its kind is registered in
+    `OPERATIONS` for the test only."""
 
-    kind: ClassVar[str] = "test_check_operation_third_party"
-    model: str = CLUB
+    @dataclass(frozen=True)
+    class ThirdParty(Operation):
+        kind: ClassVar[str] = "test_check_operation_third_party"
+        model: str = CLUB
+
+    yield ThirdParty
+    del _OPERATIONS[ThirdParty.kind]
 
 
 def supports(driver, kind: str) -> bool:
@@ -261,13 +267,13 @@ async def test_a_hook_that_returns_an_awaitable_is_refused_and_nothing_runs(make
     assert (pool.size, pool.in_use) == (0, 0)
 
 
-async def test_an_operation_adorm_cannot_know_has_no_models_and_the_hook_decides(driver, guarded, hook):  # noqa: ARG001
+async def test_an_operation_adorm_cannot_know_has_no_models_and_the_hook_decides(driver, guarded, hook, third_party):  # noqa: ARG001
     session = adorm.current_session()
     with refusing(lambda operation, _session: operation.models is None), pytest.raises(RefusedError):
-        await session.execute(ThirdParty())
+        await session.execute(third_party())
     assert hook.calls[-1].operation.models is None
     with pytest.raises(NotSupportedError):
-        await session.execute(ThirdParty())
+        await session.execute(third_party())
     assert len(hook.calls) == 2, "the hook runs before the driver refuses an operation it does not declare"
 
 
