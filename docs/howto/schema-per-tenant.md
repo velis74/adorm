@@ -251,7 +251,8 @@ Limits:
 - The listing and the union are two statements: outside a transaction they can see different states of the shared
   tables. Inside `atomic()` they share the transaction.
 - Raw SQL (signal receivers' `cursor.execute()`) is not qualified.
-- On SQLite the tenants are attached databases (`ATTACH DATABASE ... AS org_a`, at most 10 by default, 125 at most)
+- On SQLite the tenants are databases attached to every connection (`ATTACH DATABASE ... AS org_a` in a
+  `connection_created` receiver; at most 10 by default, 125 at most)
   and a compound statement has at most 500 parts; foreign keys cannot cross databases.
 
 ## What the application ensures

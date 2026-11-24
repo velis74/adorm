@@ -134,7 +134,8 @@ Without schemas the result is empty and the second operation does not run: no ro
 target's `DoesNotExist`, and for `aggregate()` the values over no rows (`0` for `Count`, the `default` or `None`).
 `none()` and a slice that leaves no rows run no operation at all.
 
-The ordering and the slice apply to the rows of all schemas together. Each ordering key, a field path through any
+The ordering and the slice apply to the rows of all schemas together; the target model's `Meta.ordering` does not
+order them, so without `order_by()` the order is the database's. Each ordering key, a field path through any
 relation or an expression, is computed in each schema's query as a hidden column, and the union is ordered by those
 columns. Model rows carry the schema they come from as a hidden column too. An aggregate's argument is computed in each
 schema's query (its `filter` folded in as `Case(When(filter, then=argument))`) and aggregated over the union. A

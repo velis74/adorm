@@ -32,7 +32,8 @@
 - `adorm.TenantSchema` and `Query.in_tenant_schema(schema, models)`: the tables of the models qualify with the schema
   wherever the query reads them, on the Django driver for every Django backend (the backend's `quote_name()`) and on
   the native PostgreSQL driver (`adorm.drivers.django.tenants`). `Save`, `DeleteInstance` and `FullClean` take
-  `tenant_schema`; the query writes refuse a query in a tenant schema. Construct `clause.tenant_schema`.
+  `tenant_schema`; the query writes, and `create()`, `bulk_create()` and `create_from_parent()` of a query set, refuse
+  a query in a tenant schema. Construct `clause.tenant_schema`.
 - `Operation.schemas` and `Operation.unqualified_models`: the schemas an operation names and the models whose tables
   it leaves to the search path. The schema-per-tenant how-to's `check_operation` reads `unqualified_models`.
 - `aggregate()` over a set operation (`Aggregate` of a combined query): the expressions aggregate the combined rows,
