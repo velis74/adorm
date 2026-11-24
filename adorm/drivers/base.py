@@ -87,8 +87,9 @@ class Profile(Protocol):
     ``connect(profile)`` returns the target's connection; an async driver awaits the result. The pool also reads the
     optional ``on_acquire`` and ``on_release`` attributes, when present and not ``None``: hooks called as
     ``hook(connection, profile, session)`` with the connection's `DriverConnection.target`, and the optional
-    ``options`` attribute, the profile's database connection options. The native PostgreSQL driver reads the optional
-    ``covered_receivers`` attribute, the dotted paths of Django signal receivers it writes despite.
+    ``options`` attribute, the profile's database connection options, and the optional ``check_operation`` attribute,
+    called as ``check_operation(operation, session)`` before an operation reaches a slot. The native PostgreSQL driver
+    reads the optional ``covered_receivers`` attribute, the dotted paths of Django signal receivers it writes despite.
     """
 
     @property
@@ -311,12 +312,13 @@ def _check_keys(operation: Operation) -> None:
 
 
 def operation_models(operation: Any) -> tuple[str, ...]:
-    """The labels of the models whose tables ``operation`` reads or writes: its ``model``, the model of every query
+    """The labels of the models whose adorm schema ``operation`` depends on: its ``model``, the model of every query
     inside it (subqueries, ``pk__in=queryset``, the parts of a ``union()``) and every model a relation path of those
     queries reaches (lookups and ``F()`` references of filters, annotations, ordering and written values,
     ``values()``, ``only()``, ``defer()``, ``distinct()`` and ``select_related()`` paths), as far as the model
     registry resolves them. A path of an ``OuterRef()`` is resolved in the query it refers to. Empty for an operation
-    without a ``model``."""
+    without a ``model``. `adorm.operations.Operation.models` is the full set of the tables an operation reads or
+    writes (through tables, parent tables, cascades)."""
     from adorm.models.registry import registry
     from adorm.query.expressions import F, OuterRef
     from adorm.query.query import Query

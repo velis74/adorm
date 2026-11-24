@@ -8,11 +8,13 @@ data, with values encoded by the types a schema gives them (`adorm.codec`). Buil
 from __future__ import annotations
 
 import re
+import types
 
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, fields
+from functools import cached_property
 from types import MappingProxyType
-from typing import Any, ClassVar, Self
+from typing import Annotated, Any, ClassVar, get_args, get_origin, Self, Union
 
 from adorm.codec import Decoder, Encoder
 from adorm.query.expressions import Expression, F, freeze_value, make_hashable, Node, OuterRef
@@ -137,6 +139,140 @@ def _decode_query(decoder: Decoder, data: Mapping[str, Any]) -> Query:
     return query
 
 
+_SELECT_RELATED_DEPTH = 5
+"""How many relations deep ``select_related()`` without arguments follows non-null foreign keys (Django's
+``max_depth``)."""
+
+
+def _model_class(label: str) -> Any:
+    from adorm.models.registry import registry
+
+    try:
+        return registry.get(label)
+    except LookupError:
+        return None
+
+
+def _admits_none(hint: Any) -> bool:
+    if hint is None or hint is type(None) or hint is Any:
+        return True
+    origin = get_origin(hint)
+    if origin is Annotated:
+        return _admits_none(get_args(hint)[0])
+    if origin is Union or origin is types.UnionType:
+        return any(_admits_none(arg) for arg in get_args(hint))
+    return False
+
+
+def _with_concrete_tables(labels: set[str]) -> set[str]:
+    """``labels`` with the concrete model of each proxy model and the parents of each multi-table inheritance child,
+    as far as the model registry knows them."""
+    from adorm.models.inheritance import parent_link
+
+    pending = list(labels)
+    while pending:
+        model = _model_class(pending.pop())
+        meta = None if model is None else model._meta
+        if meta is None:
+            continue
+        if meta.concrete_model is not None:
+            found: str | None = meta.concrete_model
+        else:
+            link = parent_link(model)
+            found = None if link is None else link.target
+        if found is not None and found not in labels:
+            labels.add(found)
+            pending.append(found)
+    return labels
+
+
+def _reach(model: str, nodes: Iterable[Node]) -> set[str]:
+    """``model`` and the labels of the models ``nodes`` (expressions of ``model``'s rows) reach: every query's model,
+    the targets of the relation paths of lookups, ``F()`` and ``OuterRef()`` references, ``values()``, ``only()``,
+    ``defer()``, ``distinct()``, ``group_by``, ``select_for_update(of=...)`` and ``select_related()`` (without
+    arguments: the non-null foreign keys, five relations deep), the ``through`` model of every many-to-many relation
+    on a path, and the concrete tables of all of them (`_with_concrete_tables()`). A path segment that is not a
+    relation of a registered model ends the path."""
+    from adorm.models.relations import ForeignKey, ManyToMany
+
+    labels = {model}
+
+    def relations(label: str) -> Mapping[str, Any]:
+        found = _model_class(label)
+        return {} if found is None else found.__adorm_relations__
+
+    def follow(start: str, path: str) -> None:
+        current = start
+        for segment in path.split("__"):
+            relation = relations(current).get(segment)
+            if relation is None:
+                return
+            if isinstance(relation, ManyToMany):
+                labels.add(relation.through)
+            labels.add(relation.target)
+            current = relation.target
+
+    def follow_non_null(label: str, depth: int) -> None:
+        found = _model_class(label)
+        if found is None or found._meta is None or depth > _SELECT_RELATED_DEPTH:
+            return
+        for relation in found.__adorm_relations__.values():
+            if not isinstance(relation, ForeignKey):
+                continue
+            info = found.__pydantic_fields__.get(relation.column)
+            if relation.column != found._meta.pk and (info is None or _admits_none(info.annotation)):
+                continue
+            labels.add(relation.target)
+            follow_non_null(relation.target, depth + 1)
+
+    # (node, the models of the enclosing queries, innermost last)
+    pending: list[tuple[Node, tuple[str, ...]]] = [(node, (model,)) for node in nodes]
+    while pending:
+        node, owners = pending.pop()
+        if isinstance(node, Query):
+            labels.add(node.model)
+            paths = (
+                *node.select,
+                *node.distinct_fields,
+                *(node.only_fields or ()),
+                *node.deferred_fields,
+                *(node.group_by or ()),
+            )
+            if isinstance(node.select_related_fields, tuple):
+                paths += node.select_related_fields
+            elif node.select_related_fields:
+                follow_non_null(node.model, 1)
+            if node.for_update is not None:
+                paths += tuple(path for path in node.for_update.of if path != "self")
+            for path in paths:
+                follow(node.model, path)
+            inner = (*owners, node.model)
+            children = (*node.filters, *(expression for _, expression in node.annotations), *node.ordering)
+            pending.extend((child, inner) for child in children)
+            # The combined queries are at the query's own level.
+            pending.extend((part, owners) for part in node.combined_queries)
+        elif isinstance(node, OuterRef):
+            if len(owners) > node.levels:
+                follow(owners[-1 - node.levels], node.name)
+        elif isinstance(node, F):
+            follow(owners[-1], node.name)
+        else:
+            pending.extend((child, owners) for child in node.get_source_expressions())
+    return _with_concrete_tables(labels)
+
+
+def _delete_models(label: str) -> frozenset[str] | None:
+    """`ModelMeta.delete_models` of the model registered under ``label``; ``None`` when it is unknown."""
+    model = _model_class(label)
+    meta = None if model is None else model._meta
+    return None if meta is None or meta.delete_models is None else frozenset(meta.delete_models)
+
+
+def _reached(operation: Any) -> frozenset[str]:
+    """The `Operation.models` of an operation on the rows of its ``model``: `_reach()` over its nodes."""
+    return frozenset(_reach(operation.model, operation.nodes()))
+
+
 class Operation:
     """Base class of operations. A subclass sets ``kind`` and is registered in `OPERATIONS` under it; every
     operation has ``model``, the label of the model it reads or writes."""
@@ -154,6 +290,14 @@ class Operation:
     def nodes(self) -> Iterator[Node]:
         """The query and the expressions of the operation, without their descendants."""
         return iter(())
+
+    @cached_property
+    def models(self) -> frozenset[str] | None:
+        """The labels (``app_label.ModelName``) of the models whose tables the operation reads or writes, by the model
+        graph (reachability, not rows); ``None`` when adorm cannot know them. Computed from the model registry on first
+        access, without I/O. ``None`` here: a subclass of a bundled operation inherits that class's ``models``, and
+        one that touches other tables overrides it."""
+        return None
 
     def constructs(self) -> Iterator[str]:
         """Construct names used by the operation's nodes, possibly repeated."""
@@ -218,6 +362,8 @@ class _QueryOperation(Operation):
 
     def nodes(self) -> Iterator[Node]:
         yield self.query
+
+    models = cached_property(_reached)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         return {"query": encoder.node(self.query)}
@@ -450,6 +596,13 @@ class Delete(_QueryOperation):
         if self.query.row_format != "model":
             raise TypeError("cannot delete from a query after values() or values_list()")
 
+    @cached_property
+    def models(self) -> frozenset[str] | None:
+        """The models the query reaches and those deleting its model's rows reaches (`ModelMeta.delete_models`);
+        ``None`` when the model's ``delete_models`` is unknown."""
+        cascade = _delete_models(self.query.model)
+        return None if cascade is None else frozenset(_reach(self.query.model, self.nodes()) | cascade)
+
 
 @dataclass(frozen=True, eq=False)
 class DeleteInstance(Operation):
@@ -471,6 +624,13 @@ class DeleteInstance(Operation):
         if isinstance(self.pk, Node):
             raise TypeError("the primary key is a value, not an expression")
         object.__setattr__(self, "pk", freeze_value(self.pk))
+
+    @cached_property
+    def models(self) -> frozenset[str] | None:
+        """The model, its concrete tables and the models deleting its rows reaches (`ModelMeta.delete_models`);
+        ``None`` when the model's ``delete_models`` is unknown."""
+        cascade = _delete_models(self.model)
+        return None if cascade is None else frozenset(_reach(self.model, ()) | cascade)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
@@ -556,6 +716,8 @@ class Create(Operation):
 
     def nodes(self) -> Iterator[Node]:
         return (value for _, value in self.values if isinstance(value, Node))
+
+    models = cached_property(_reached)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
@@ -650,6 +812,8 @@ class BulkCreate(Operation):
     def nodes(self) -> Iterator[Node]:
         return (value for row in self.rows for _, value in row if isinstance(value, Node))
 
+    models = cached_property(_reached)
+
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
             data: dict[str, Any] = {
@@ -725,6 +889,8 @@ class CreateFromParent(Operation):
     def nodes(self) -> Iterator[Node]:
         return (value for _, value in self.values if isinstance(value, Node))
 
+    models = cached_property(_reached)
+
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
             return {
@@ -788,6 +954,17 @@ class FullClean(Operation):
         object.__setattr__(self, "exclude", names)
         for flag in ("validate_unique", "validate_constraints", "adding"):
             object.__setattr__(self, flag, bool(getattr(self, flag)))
+
+    @cached_property
+    def models(self) -> frozenset[str] | None:
+        """The model, its concrete tables (unique checks and constraints) and the targets of its foreign keys (each
+        assigned key is validated against its target), with theirs."""
+        from adorm.models.relations import ForeignKey
+
+        model = _model_class(self.model)
+        targets = () if model is None else model.__adorm_relations__.values()
+        labels = {self.model, *(r.target for r in targets if isinstance(r, ForeignKey))}
+        return frozenset(_with_concrete_tables(labels))
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
@@ -866,6 +1043,8 @@ class Save(Operation):
     def nodes(self) -> Iterator[Node]:
         return (value for _, value in self.values if isinstance(value, Node))
 
+    models = cached_property(_reached)
+
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         with encoder.scope(self.model):
             return {
@@ -933,6 +1112,8 @@ class _LookupWrite(Operation):
         yield self.query
         yield from (build_lookup(key, value) for key, value in self.lookups)
         yield from (value for _, value in self.defaults if isinstance(value, Node))
+
+    models = cached_property(_reached)
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:
         data: dict[str, Any] = {"query": encoder.node(self.query)}
@@ -1051,6 +1232,19 @@ class CheckTable(Operation):
         check_model_label(self.model)
         object.__setattr__(self, "fields", _names(self.fields, "fields") or ())
         object.__setattr__(self, "many_to_many", _names(self.many_to_many, "many_to_many") or ())
+
+    @cached_property
+    def models(self) -> frozenset[str] | None:
+        """The model, its concrete tables and the ``through`` model of each relation named in ``many_to_many``."""
+        from adorm.models.relations import ManyToMany
+
+        labels = {self.model}
+        model = _model_class(self.model)
+        if model is not None and model._meta is not None:
+            for name, relation in model.__adorm_relations__.items():
+                if isinstance(relation, ManyToMany) and model._meta.orm_name(name) in self.many_to_many:
+                    labels.add(relation.through)
+        return frozenset(_with_concrete_tables(labels))
 
     def _encode(self, encoder: Encoder) -> dict[str, Any]:  # noqa: ARG002 - names only
         return {"model": self.model, "fields": list(self.fields), "many_to_many": list(self.many_to_many)}
