@@ -24,7 +24,7 @@ import asyncpg
 import pytest
 
 from asgiref.sync import async_to_sync, sync_to_async
-from django.db import connections, transaction
+from django.db import connections, DataError, transaction
 from django.db.models.signals import post_save
 from django.test import TestCase, TransactionTestCase
 
@@ -169,7 +169,8 @@ class SharedConnectionTests(TestCase):
                 assert slot.connection.thread is not threading.main_thread()
             assert len(wrapper.execute_wrappers) == 1
         assert not wrapper.allow_thread_sharing
-        assert wrapper.execute_wrappers == []
+        # The guard stays until the test ends: the test's own statements run with the defaults.
+        assert len(wrapper.execute_wrappers) == 1
 
     async def assert_writes_stay_in_the_test(self, name):
         async with executor():
@@ -827,6 +828,72 @@ class SharedConnectionTests(TestCase):
                 assert ShowingConnection.seen["hook"] == ["alice"]
             assert await sync_to_async(seen_on_test_connection)() in (None, "")
 
+    async def test_django_code_runs_after_a_refused_operation_of_a_slot_with_hook_options(self):
+        """An operation the database refuses, of a lease with options from ``on_acquire``: the test's transaction
+        stays usable and Django code runs with the defaults, after the operation and once the last slot closes."""
+
+        def on_acquire(_db, _profile, _session):
+            return {APP_USER: "alice"}
+
+        for _ in REPEAT:
+            async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire):
+                with pytest.raises(adorm.DatabaseError):
+                    await tags().filter(name__regex="(").count()
+                assert await sync_to_async(seen_on_test_connection)() in (None, "")
+                ShowingConnection.seen = {}
+                await tags().filter(name="opt-hook").count()
+                assert ShowingConnection.seen["hook"] == ["alice"]
+                with pytest.raises(adorm.DatabaseError):
+                    await tags().filter(name__regex="(").count()
+            assert await sync_to_async(seen_on_test_connection)() in (None, "")
+            assert await sync_to_async(names_on_test_thread)() == ["seed"]
+
+    async def test_django_code_runs_after_a_refused_operation_in_a_transaction_with_hook_options(self):
+        """As above, with the refused operation inside ``atomic()``: the block rolls back, the test's transaction stays
+        usable."""
+
+        def on_acquire(_db, _profile, _session):
+            return {APP_USER: "alice"}
+
+        for _ in REPEAT:
+            async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire):
+                with pytest.raises(adorm.DatabaseError):
+                    async with adorm.atomic():
+                        await tags().filter(name__regex="(").count()
+                assert await sync_to_async(seen_on_test_connection)() in (None, "")
+                with pytest.raises(adorm.DatabaseError):
+                    async with adorm.atomic():
+                        await tags().filter(name__regex="(").count()
+            assert await sync_to_async(seen_on_test_connection)() in (None, "")
+            assert await sync_to_async(names_on_test_thread)() == ["seed"]
+
+    async def test_django_code_runs_after_its_refused_statement_in_a_savepoint_while_slots_use_hook_options(self):
+        """Django code that catches a statement the database refuses inside its own ``atomic()`` block, while slots
+        with options from ``on_acquire`` use the test's connection: the test's transaction stays usable."""
+
+        def on_acquire(_db, _profile, _session):
+            return {APP_USER: "alice"}
+
+        def refused_in_savepoint():
+            try:
+                with transaction.atomic():
+                    list(dj.Tag.objects.filter(name__regex="("))
+            except DataError:
+                return True
+            return False
+
+        for _ in REPEAT:
+            async with executor(driver=ShowingDriver(setting=APP_USER), on_acquire=on_acquire):
+                ShowingConnection.seen = {}
+                await tags().filter(name="opt-hook").count()
+                assert await sync_to_async(refused_in_savepoint)()
+                assert await sync_to_async(names_on_test_thread)() == ["seed"]
+                await tags().filter(name="opt-hook").count()
+                assert ShowingConnection.seen["hook"] == ["alice", "alice"]
+                assert await sync_to_async(refused_in_savepoint)()
+            assert await sync_to_async(seen_on_test_connection)() in (None, "")
+            assert await sync_to_async(names_on_test_thread)() == ["seed"]
+
     async def test_sql_a_hook_runs_on_the_shared_connection_is_refused(self):
         def hook(db, _profile, _session):
             with db.cursor() as cursor:
@@ -1360,6 +1427,7 @@ class FakeWrapper:
     def __init__(self, *blocks, cursor=None):
         self.atomic_blocks = list(blocks)
         self.cursor = cursor
+        self.execute_wrappers = []
 
 
 def fake_wrapper(*blocks):
@@ -1393,6 +1461,23 @@ def test_one_shared_connection_per_test():
     assert shared_test_connection(TestDatabase("default", wrapper, (block,))) is shared
     other = SimpleNamespace(_from_testcase=True)
     assert shared_test_connection(TestDatabase("default", wrapper, (other,))) is not shared
+
+
+def test_the_guard_of_a_test_that_ended_leaves_the_wrapper():
+    block = SimpleNamespace(_from_testcase=True)
+    wrapper = fake_wrapper(block)
+    shared = shared_test_connection(TestDatabase("default", wrapper, (block,)))
+    shared.attach()
+    shared.detach()
+    assert wrapper.execute_wrappers == [shared._guard_wrapper]  # the test still runs
+    wrapper.atomic_blocks[0] = other = SimpleNamespace(_from_testcase=True)
+    following = shared_test_connection(TestDatabase("default", wrapper, (other,)))
+    assert wrapper.execute_wrappers == []
+    following.attach()
+    following.detach()
+    wrapper.atomic_blocks.clear()
+    following._guard(lambda *_: "ran", "SELECT 1", None, False, None)
+    assert wrapper.execute_wrappers == []
 
 
 def test_the_shared_connection_class_extends_the_drivers_class():

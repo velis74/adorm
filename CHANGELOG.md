@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.2 - 2026-11-24
+
+- Test mode (`TestCase`): Django code that catches a statement the database refuses inside its own `atomic()` block
+  while slots with connection options use the test's connection no longer breaks the test's transaction. Before a
+  statement of Django code in a failed transaction (a rollback) no options are set; the options of Django code are set
+  right before its next statement, also after the last slot closes. The guard of Django code's statements stays
+  installed until the test ends (`SharedTestConnection.end()`).
+
 ## 0.1.1 - 2026-11-24
 
 - Connection profile hook `check_operation(operation, session)` (`ConnectionProfile.check_operation`, an import path
