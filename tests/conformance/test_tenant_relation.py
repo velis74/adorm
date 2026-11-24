@@ -764,3 +764,49 @@ def test_operations_name_their_schemas_and_unqualified_models():
 def test_a_schema_name_with_quoting_characters_is_refused(schema):
     with pytest.raises(ValueError):  # noqa: PT011 - the message is not part of the contract
         TenantSchema(schema, TENANT_MODELS)
+
+
+async def test_slices_aggregates_deferred_fields_annotations_and_subqueries_across_tenants(ana):
+    from adorm import Exists, OuterRef
+
+    assert (await ana.enrolments.order_by("joined")[:2].aggregate(Sum("fee")))["fee__sum"] == Decimal("17.25")
+    assert (await ana.enrolments.aggregate(n=Count("*")))["n"] == 5
+    assert (await ana.enrolments.aggregate(t=Count("team", distinct=True)))["t"] == 3
+    rows = [e async for e in ana.enrolments.only("role").order_by("joined")]
+    assert [origin(e) for e in rows] == BY_JOINED
+    rows = [e async for e in ana.enrolments.annotate(double=F("fee") * 2).order_by("-double")]
+    assert rows[0].double == Decimal("40.00")
+    teams = Team.objects.filter(pk=OuterRef("team_id"), name__in=["Sailors A", "Sailors B"])
+    rows = [e async for e in ana.enrolments.filter(Exists(teams)).order_by("joined")]
+    assert [origin(e) for e in rows] == [("org_b", 4), ("org_a", 1)]
+    rows = [e async for e in ana.enrolments.select_related("person").order_by("joined")]
+    assert {(await e.person).name for e in rows} == {"Ana"}
+    names = [n async for n in ana.enrolments.values_list("team__name", flat=True).order_by("team__name")]
+    assert [n for n in names if n is not None] == ["Climbers B", "Rowers A", "Sailors A", "Sailors B"]
+
+
+async def test_one_schema_is_read_without_a_union(connect, tenants):
+    def add():
+        organisation = dj.Organisation.objects.get(schema_name="org_c")
+        solo = dj.Person.objects.create(name="Solo")
+        dj.PersonOrganisation.objects.create(person=solo, organisation=organisation)
+        return solo.pk
+
+    pk = await in_thread(add)
+    await tenants.execute(
+        "org_c",
+        f"INSERT INTO {{enrolment}} (id, person_id, team_id, role, joined, fee) VALUES (7, {pk}, 1, 'coach', "
+        "'2024-06-01', 4.00), (8, " + str(pk) + ", NULL, 'member', '2024-07-01', 2.00)",
+    )
+    connect()
+    solo = await Person.objects.get(pk=pk)
+    assert [origin(e) async for e in solo.enrolments.order_by("-joined")] == [("org_c", 8), ("org_c", 7)]
+    assert await solo.enrolments.count() == 2
+    result = await solo.enrolments.aggregate(Sum("fee"), n=Count("id", filter=Q(role="coach")))
+    assert result == {"fee__sum": Decimal("6.00"), "n": 1}
+    assert [row async for row in solo.enrolments.values_list("role", flat=True).order_by("joined")] == [
+        "coach",
+        "member",
+    ]
+    first = await solo.enrolments.select_related("team").order_by("joined").first()
+    assert (await first.team).name == "C team"
