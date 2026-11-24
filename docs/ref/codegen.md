@@ -85,7 +85,7 @@ FieldSpec("json_", "json", TypeSpec("str"), default="", constraints={"max_length
 # json_: str = Field(default="", alias="json", max_length=20)
 ```
 
-### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False, ct_field=None, for_concrete_model=True)`
+### `adorm.codegen.RelationSpec(kind, name, orm_name, target, column=None, through=None, source_column=None, target_column=None, reverse=False, ct_field=None, for_concrete_model=True, schema=None, schema_source=None, models=(), session=None)`
 
 A relation. By `kind` it renders as:
 
@@ -96,15 +96,31 @@ A relation. By `kind` it renders as:
 | `"reverse_one_to_one"` | `ReverseOneToOne` | |
 | `"many_to_many"` | `ManyToMany` | `through`, `source_column`, `target_column`; `reverse` for the side that did not declare it |
 | `"generic_foreign_key"` | `GenericForeignKey` | `ct_field`, the content type foreign key to `target`; `column`, the object id field; `for_concrete_model=False` rendered when false |
+| `"tenant"` | [`TenantRelation`](./tenant-relations#adorm-tenantrelation-target-column-schema-models-session-none) | `column`, the tenant model's field with the owner's key; `schema`, the path to the schema name in adorm names, or `schema_source`, its expression; `models`, the sorted labels of the tenant models; `session` |
 
-`is_forward` is true for a foreign key and a declared many-to-many relation; the schema hash covers only those. A
-missing column, and a generic foreign key without `ct_field`, raise `ValueError`.
+`is_forward` is true for a foreign key and a declared many-to-many relation; the schema hash covers only those, so a
+tenant relation changes no hash and `adorm generate --check` keeps it current through the file comparison. A missing
+column, a generic foreign key without `ct_field`, and a tenant relation without exactly one of `schema` and
+`schema_source` or whose `models` are not sorted labels that include `target`, raise `ValueError`.
+
+`schema_source` is a tree of tuples, its paths in adorm names: `("F", path)`, `("Value", value)` (a `str` or an `int`),
+`("Cast", argument, max_length)` (a cast to `str`, `max_length` `None` or an `int`) and `(name, (argument, ...))` for
+`Concat`, `Lower`, `Upper`, `Replace`, `Left`, `Right`, `LPad` and `Coalesce`; each renders as adorm's class of the same
+name.
 
 ```python
 RelationSpec("generic_foreign_key", "item", "item", "contenttypes.ContentType", column="object_id",
              ct_field="content_type")
 # renders:  item = GenericForeignKey()
+RelationSpec("tenant", "enrolments", "enrolments", "tenancy.Enrolment", column="person_id",
+             schema="organisations__organisation__schema_name", models=("tenancy.Enrolment", "tenancy.Team"))
+# renders:  enrolments = TenantRelation("tenancy.Enrolment", column="person_id",
+#               schema="organisations__organisation__schema_name", models=("tenancy.Enrolment", "tenancy.Team"))
 ```
+
+The generator reads `RelationSpec(kind="tenant")` from the
+[`adorm.contrib.django.TenantRelation`](./tenant-relations#adorm-contrib-django-tenantrelation-to-field-schema-tenant-models-none-session-none)
+declarations of a Django model.
 
 ### `adorm.codegen.TypeSpec(name, args=(), values=(), nullable=False, model=False)`
 

@@ -138,6 +138,8 @@ _READ_CONSTRUCTS = frozenset(
         "clause.intersection",
         "clause.difference",
         "clause.combinator.slice",
+        "clause.tenant_schema",
+        "aggregate.combined",
         "function.Trunc",
         "aggregate.distinct",
         "aggregate.filter",

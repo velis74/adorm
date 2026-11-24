@@ -189,8 +189,14 @@ class FieldSpec:
 
 
 RelationKind = Literal[
-    "foreign_key", "reverse_foreign_key", "reverse_one_to_one", "many_to_many", "generic_foreign_key"
+    "foreign_key", "reverse_foreign_key", "reverse_one_to_one", "many_to_many", "generic_foreign_key", "tenant"
 ]
+
+SchemaSource = tuple[Any, ...]
+"""The expression of a tenant relation's schema as a tree: ``("F", path)``, ``("Value", value)`` (a ``str`` or an
+``int``), ``("Cast", argument, max_length)`` (a cast to ``str``; ``max_length`` ``None`` or an ``int``) or
+``(class name, (argument, ...))`` for ``Concat``, ``Lower``, ``Upper``, ``Replace``, ``Left``, ``Right``, ``LPad`` and
+``Coalesce``; paths are adorm names."""
 
 
 @dataclass(frozen=True)
@@ -203,7 +209,10 @@ class RelationSpec:
     ``target_column``; ``reverse`` marks the reverse side of a many-to-many relation declared on ``target``;
     ``generic_foreign_key``: `adorm.GenericForeignKey` with the content type in the foreign key ``ct_field`` (to
     ``target``, the content type model) and the object id in the field ``column``; ``for_concrete_model`` is its
-    ``for_concrete_model``. ``name`` is the Python name, ``orm_name`` the ORM's.
+    ``for_concrete_model``; ``tenant``: `adorm.TenantRelation` to the rows of ``target`` whose field ``column`` holds
+    the owner's key, in the schemas the path ``schema`` (adorm names) or the expression ``schema_source`` (a
+    `SchemaSource`) gives, with the tables of the models ``models`` (sorted labels) in each schema and the session
+    function ``session``. ``name`` is the Python name, ``orm_name`` the ORM's.
     """
 
     kind: RelationKind
@@ -217,10 +226,19 @@ class RelationSpec:
     reverse: bool = False
     ct_field: str | None = None
     for_concrete_model: bool = True
+    schema: str | None = None
+    schema_source: SchemaSource | None = None
+    models: tuple[str, ...] = ()
+    session: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind == "generic_foreign_key" and not self.ct_field:
             raise ValueError(f"the generic foreign key {self.name} needs ct_field")
+        if self.kind == "tenant":
+            if (self.schema is None) == (self.schema_source is None):
+                raise ValueError(f"the tenant relation {self.name} needs schema or schema_source")
+            if self.target not in self.models or list(self.models) != sorted(set(self.models)):
+                raise ValueError(f"the models of the tenant relation {self.name} are sorted labels with its target")
         if self.kind == "many_to_many":
             if not (self.through and self.source_column and self.target_column):
                 raise ValueError(f"the many-to-many relation {self.name} needs through, source_column, target_column")
@@ -423,7 +441,7 @@ class ModelSpec:
     @property
     def orm_names(self) -> dict[str, str]:
         """ORM names of the class's own renamed fields and relations, by Python name."""
-        relations = [(r.name, r.orm_name) for r in self.relations if r.kind != "generic_foreign_key"]
+        relations = [(r.name, r.orm_name) for r in self.relations if r.kind not in ("generic_foreign_key", "tenant")]
         items = [(f.name, f.orm_name) for f in self.fields] + relations
         return {name: orm_name for name, orm_name in items if name != orm_name}
 

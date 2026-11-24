@@ -120,9 +120,11 @@ await advanced.union(coaches).order_by("first_name").first()
 After a set operation, as in Django:
 
 - The building methods `order_by()`, slicing, `values()`, `values_list()`, `none()` and the set operations apply.
-- The terminal methods `async for`, `get()` without conditions, `first()`, `last()`, `count()` and `exists()` apply.
-- The other building methods, `prefetch_related()`, `get()` with conditions, `aggregate()`, `in_bulk()`, `update()`,
-  `delete()`, `get_or_create()` and `update_or_create()` raise `NotSupportedError` without running an operation.
+- The terminal methods `async for`, `get()` without conditions, `first()`, `last()`, `count()`, `exists()` and
+  `aggregate()` apply; the expressions of `aggregate()` name columns of the combined rows
+  ([`Aggregate`](./operations#adorm-operations-aggregate-query-aggregations)).
+- The other building methods, `prefetch_related()`, `get()` with conditions, `in_bulk()`, `update()`, `delete()`,
+  `get_or_create()` and `update_or_create()` raise `NotSupportedError` without running an operation.
 - `first()` and `last()` without `order_by()` order the combined rows by the primary key. Rows without the primary
   key column (`values()` / `values_list()` without it) make the driver raise `DatabaseError` (`ORDER BY term does not
   match any column in the result set.`).

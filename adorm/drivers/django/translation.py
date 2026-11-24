@@ -32,6 +32,7 @@ from django.db.models import functions as djf
 from django.db.models.expressions import Combinable, CombinedExpression
 from django.db.models.fields.reverse_related import ForeignObjectRel
 
+from adorm.drivers.django.tenants import tag
 from adorm.exceptions import DatabaseError, FieldError, NotSupportedError, ProgrammingError
 from adorm.models.registry import registry
 from adorm.models.relations import ForeignKey
@@ -46,8 +47,10 @@ __all__ = [
     "FUNCTIONS",
     "SELECT_RELATED_DEPTH",
     "TranslatedQuery",
+    "aggregate_values",
     "aggregation",
     "bulk_create_options",
+    "combined_aggregation",
     "check_bulk_create",
     "check_in_bulk_field",
     "child_instance",
@@ -1189,7 +1192,8 @@ class _Translator:
 
     def base(self) -> Any:
         """The Django query set of the model rows: manager, filters, annotations and grouping, ordering, distinct,
-        slice, none and row locks."""
+        slice, none and row locks; a query with a `TenantSchema` tags it with its scope
+        (`adorm.drivers.django.tenants`)."""
         query = self.query
         if query.manager is None:
             queryset = self.model._base_manager.all()
@@ -1224,6 +1228,7 @@ class _Translator:
                 of=tuple(name if name == "self" else self.path(name) for name in lock.of),
                 no_key=lock.no_key,
             )
+        tag(queryset.query, query.tenant_schema)
         return queryset
 
     # Columns and rows
@@ -1391,6 +1396,93 @@ def aggregation(query: Query, aggregations: Iterable[tuple[str, Any]]) -> tuple[
     queryset = translator.base()
     expressions = {name: translator.expression(value) for name, value in aggregations}
     return translator.with_aliases(queryset), expressions
+
+
+def combined_aggregation(query: Query, aggregations: Iterable[tuple[str, Any]]) -> Any:
+    """Django's ``AggregateQuery`` of ``aggregations`` (name and adorm expression pairs) over the rows of the combined
+    ``query``: ``SELECT <aggregates> FROM (<set operation>) subquery``.
+
+    Every column of the combined rows is an annotation ``_adorm_c<index>`` of each combined query, and an ``F`` of the
+    aggregations names a column (`adorm.operations.Aggregate`); model rows select the fields the aggregations and the
+    ordering name. The ordering and the slice apply to the combined rows."""
+    from django.db.models.sql.subqueries import AggregateQuery
+
+    pairs = list(aggregations)
+    if query.row_format != "model" and query.select:
+        names = query.select
+        parts = tuple(part.values(*names) if part.row_format == "model" else part for part in query.combined_queries)
+    else:
+        found: dict[str, None] = {}
+        for _, expression in pairs:
+            for node in _outer_nodes(expression):
+                if type(node) is ax.F:
+                    found[node.name] = None
+        for order in query.ordering:
+            for node in _outer_nodes(order.expression):
+                if type(node) is ax.F:
+                    found[node.name] = None
+        names = tuple(found) or ("pk",)
+        parts = tuple(part.values(*names) for part in query.combined_queries)
+    columns = {name: f"_adorm_c{index}" for index, name in enumerate(names)}
+    renamed = []
+    for part in parts:
+        selected = part.select or names
+        part = part.annotate(**{columns[name]: ax.F(source) for name, source in zip(names, selected, strict=True)})
+        renamed.append(part.values(*columns.values()))
+
+    def rename(node: Any) -> Any:
+        if type(node) is ax.F:
+            return ax.F(columns[node.name]) if node.name in columns else node
+        if isinstance(node, Query):
+            return node
+        changes = {}
+        for field_name in node._fields:
+            value = getattr(node, field_name)
+            if isinstance(value, ax.Node):
+                changes[field_name] = rename(value)
+            elif isinstance(value, tuple) and any(isinstance(item, ax.Node) for item in value):
+                changes[field_name] = tuple(rename(item) if isinstance(item, ax.Node) else item for item in value)
+        return node._replace(**changes) if changes else node
+
+    combined = query._replace(
+        select=tuple(columns.values()),
+        row_format="dict",
+        combined_queries=tuple(renamed),
+        ordering=tuple(rename(order) for order in query.ordering),
+    )
+    inner = _Translator(combined).selected().query
+    first = _Translator(renamed[0])
+    outer = AggregateQuery(inner.model, inner)
+    first_query = inner.combined_queries[0]
+    for name, expression in pairs:
+        translated = first.expression(rename(expression))
+        outer.annotations[name] = translated.resolve_expression(first_query, allow_joins=True, summarize=True)
+    inner.subquery = True
+    return outer
+
+
+def aggregate_values(outer: Any, compiler: Any, row: Sequence[Any] | None) -> dict[str, Any]:
+    """The result of the Django ``AggregateQuery`` ``outer`` from ``row``, the row its ``compiler`` selected
+    (``None`` for none): each value converted as Django converts it, by name; without a row each aggregate's value
+    over no rows."""
+    annotations = outer.annotation_select
+    if row is None:
+        empty = [expression.empty_result_set_value for expression in annotations.values()]
+        pairs = zip(annotations, empty, strict=True)
+        return {name: None if value is NotImplemented else value for name, value in pairs}
+    converters = compiler.get_converters(list(annotations.values()))
+    values = next(iter(compiler.apply_converters((list(row),), converters))) if converters else row
+    return dict(zip(annotations, values, strict=True))
+
+
+def _outer_nodes(node: Any) -> Iterator[Any]:
+    """``node`` and its descendants outside subqueries."""
+    yield node
+    if isinstance(node, Query):
+        return
+    for child in node.get_source_expressions():
+        if not isinstance(child, Query):
+            yield from _outer_nodes(child)
 
 
 def model_queryset(query: Query) -> Any:

@@ -16,7 +16,30 @@
   (`on_delete`), written by `adorm generate` (`adorm.codegen.django.delete_models_of()`,
   `ModelSpec.delete_models`). Generate the models again to get it; without it `Operation.models` of a delete is
   `None`.
-- How-to schema per tenant: the tenant in the session name, and refusing tenant tables without a tenant.
+- Tenant relations: a read-only reverse relation from a shared model to a model whose rows live in several tenant
+  schemas. Declared on the Django model with `adorm.contrib.django.TenantRelation(to, field=, schema=,
+  tenant_models=, session=)`, which adds no column, migration or system check; `adorm generate` checks it and emits
+  `adorm.TenantRelation` (`RelationSpec` kind `"tenant"`; the schema path, or an expression of `F`, `Value`,
+  `Concat`, `Lower`, `Upper`, `Replace`, `Left`, `Right`, `LPad`, `Coalesce` and `Cast`). `get_tenant_relations()`.
+- `adorm.TenantQuerySet`, what a tenant relation returns on an instance: one `Select` lists the instance's schemas,
+  one statement (`UNION ALL` of the schemas' tables) reads the rows, with `filter()`, `exclude()`, `annotate()`,
+  `order_by()`, slicing, `values()`, `values_list()`, `only()`, `defer()`, `select_related()`, `first()`, `last()`,
+  `get()`, `count()`, `exists()`, `aggregate()` and `schemas()` across all schemas. Writes through the relation,
+  `distinct()`, `prefetch_related()`, `select_for_update()` and set operations raise `NotSupportedError`.
+- An instance read in a tenant schema keeps it (`ModelState.tenant_schema`, `Model.from_row(tenant_schema=)`): its
+  `save()`, `delete()`, `full_clean()`, `refresh_from_db()` and loads of relations to the schema's models run in that
+  schema, on any session. Instances equal and hash by schema too when they have one.
+- `adorm.TenantSchema` and `Query.in_tenant_schema(schema, models)`: the tables of the models qualify with the schema
+  wherever the query reads them, on the Django driver for every Django backend (the backend's `quote_name()`) and on
+  the native PostgreSQL driver (`adorm.drivers.django.tenants`). `Save`, `DeleteInstance` and `FullClean` take
+  `tenant_schema`; the query writes, and `create()`, `bulk_create()` and `create_from_parent()` of a query set, refuse
+  a query in a tenant schema. Construct `clause.tenant_schema`.
+- `Operation.schemas` and `Operation.unqualified_models`: the schemas an operation names and the models whose tables
+  it leaves to the search path. The schema-per-tenant how-to's `check_operation` reads `unqualified_models`.
+- `aggregate()` over a set operation (`Aggregate` of a combined query): the expressions aggregate the combined rows,
+  named by their columns. Construct `aggregate.combined`.
+- How-to schema per tenant: the tenant in the session name, refusing tenant tables without a tenant, and reading
+  across tenants.
 
 ## 0.1.0 - 2026-11-20
 

@@ -5,6 +5,7 @@ from adorm.models.base import (
     get_generic_foreign_keys,
     get_managers,
     get_relations,
+    get_tenant_relations,
     Model,
     ModelState,
     set_executor_resolver,
@@ -23,6 +24,7 @@ from adorm.models.relations import (
     Relation,
     ReverseForeignKey,
     ReverseOneToOne,
+    TenantRelation,
 )
 
 __all__ = [
@@ -44,6 +46,7 @@ __all__ = [
     "Relation",
     "ReverseForeignKey",
     "ReverseOneToOne",
+    "TenantRelation",
     "content_types",
     "driver_method",
     "driver_methods",
@@ -51,6 +54,7 @@ __all__ = [
     "get_generic_foreign_keys",
     "get_managers",
     "get_relations",
+    "get_tenant_relations",
     "model_schema",
     "natural_key",
     "parent_link",

@@ -1,6 +1,8 @@
 """The how-to recipe docs/howto/schema-per-tenant.md on the PostgreSQL drivers: its definitions run once, its queries
 run, each tenant reads its own schema, and without a tenant its ``check_operation`` refuses the tenant tables while the
-shared ones run."""
+shared ones run. The blocks of its section on reading across tenants run on every SQL driver against the tenant
+schemas of `tests.conformance.test_tenant_relation`: its model declaration is the test app's ``Person``, and its
+queries run without a tenant under the recipe's hook."""
 
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import inspect
 import re
 import textwrap
 
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,9 +23,13 @@ from django.apps import apps
 
 import adorm
 
+from adorm import Count, Q, Sum
 from tests.clubmodels.activities import Tag
 from tests.clubmodels.clubs import Club, Member
 from tests.conformance.drivers import on_sqlite
+from tests.conformance.test_tenant_relation import people, sql_driver, tenants  # noqa: F401 - fixtures
+from tests.djangoproject.tenancy import models as tenancy_models
+from tests.tenancymodels.tenancy import Enrolment, Person
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -33,12 +40,33 @@ TENANTS = {"tenant_a": ["Ana"], "tenant_b": ["Bor", "Cene"]}
 """The tenant schemas and the first names of their members."""
 
 
-def blocks() -> list[Any]:
-    """The compiled python blocks of the recipe, in order; a query block has top-level ``await``."""
-    text = RECIPE.read_text(encoding="utf-8")
+ACROSS_TENANTS = "## Reading across tenants"
+"""The heading of the recipe's section whose blocks read the tenant relation's models."""
+
+
+def defines_models(source: str) -> bool:
+    """Whether ``source`` defines a model class, which the recipe shows and does not run."""
+    return any(
+        isinstance(node, ast.ClassDef) and any("Model" in ast.unparse(base) for base in node.bases)
+        for node in ast.walk(ast.parse(source))
+    )
+
+
+def sources(*, across: bool = False) -> list[str]:
+    """The python blocks of the recipe before the section on reading across tenants, or with ``across`` those of that
+    section, in order."""
+    before, _, after = RECIPE.read_text(encoding="utf-8").partition(ACROSS_TENANTS)
+    text = after.partition("\n## ")[0] if across else before
+    return [textwrap.dedent(match.group(2)) for match in PYTHON_FENCE.finditer(text)]
+
+
+def blocks(*, across: bool = False) -> list[Any]:
+    """The compiled python blocks of `sources()` without those that define models; a query block has top-level
+    ``await``."""
     return [
-        compile(textwrap.dedent(match.group(2)), str(RECIPE), "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
-        for match in PYTHON_FENCE.finditer(text)
+        compile(source, str(RECIPE), "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        for source in sources(across=across)
+        if not defines_models(source)
     ]
 
 
@@ -149,3 +177,45 @@ async def test_the_tenant_in_the_session(recipe, tenant_schemas, make_router):
             async with adorm.atomic():
                 assert await first_names(Member.objects) == names
     await assert_tenant_tables_are_refused(recipe, pool)
+
+
+def test_the_declaration_across_tenants_is_the_test_apps():
+    (source,) = [source for source in sources(across=True) if defines_models(source)]
+    (declared,) = [node for node in ast.parse(source).body if isinstance(node, ast.ClassDef)]
+    assert ast.get_source_segment(source, declared) == inspect.getsource(tenancy_models.Person).rstrip()
+
+
+async def test_reading_across_tenants(recipe, tenants, make_router):  # noqa: F811 - the imported fixture
+    profile = {"check_operation": recipe["check_operation"]}
+    make_router(profile=profile, max_connections=1, acquire_timeout=5)
+    # The tenancy app holds the shared models and the tenant models: its tenant tables are named.
+    hook_globals = recipe["check_operation"].__globals__
+    tenant_tables = hook_globals["tenant_tables"]
+    hook_globals["tenant_tables"] = lambda: frozenset({"tenancy.Enrolment", "tenancy.Team"})
+    try:
+        namespace = {**recipe, "adorm": adorm, "Person": Person, "Count": Count, "Q": Q, "Sum": Sum}
+        for code in blocks(across=True):
+            if is_query(code):
+                await eval(code, namespace)  # noqa: S307 - the recipe's own code
+            else:
+                exec(code, namespace)  # noqa: S102 - the recipe's own code
+        with pytest.raises(recipe["NoTenant"]):
+            await Enrolment.objects.count()
+    finally:
+        hook_globals["tenant_tables"] = tenant_tables
+    origins = [(enrolment._state.tenant_schema.schema, enrolment.pk) for enrolment in namespace["recent"]]
+    assert origins == [("org_a", 1), ("org_b", 4)]
+    assert namespace["enrolments"] == 5
+    assert namespace["fees"] == {"fee__sum": Decimal("43.75"), "coaches": 2}
+    assert [name for name in namespace["teams"] if name is not None] == [
+        "Climbers B",
+        "Rowers A",
+        "Sailors A",
+        "Sailors B",
+    ]
+    assert {person.name for person in namespace["people"]} == {"Ana"}
+    assert (namespace["enrolment"]._state.tenant_schema.schema, namespace["enrolment"].pk) == ("org_b", 4)
+    assert namespace["team"].name == "Sailors B"
+    assert await tenants.fetch("org_b", "SELECT fee FROM {enrolment} WHERE id = 4") in ([(0,)], [(Decimal(0),)])
+    assert (await tenants.enrolment("org_a", 1))[2] == Decimal("10.00")
+    assert namespace["session_for_schema"]("org_a", None).session_name == "org_a"

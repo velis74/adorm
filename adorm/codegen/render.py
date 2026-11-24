@@ -40,6 +40,7 @@ _RELATION_CLASSES = {
     "reverse_one_to_one": "ReverseOneToOne",
     "many_to_many": "ManyToMany",
     "generic_foreign_key": "GenericForeignKey",
+    "tenant": "TenantRelation",
 }
 
 
@@ -399,8 +400,33 @@ class _ModuleRenderer:
             return self.field(model, field)
         return [line]
 
+    def schema_source(self, node: Any) -> str:
+        """The source of a tenant relation's schema expression (`adorm.codegen.spec.SchemaSource`)."""
+        w = self.writer
+        kind = node[0]
+        callee = self.imports.name("adorm", kind)
+        if kind in ("F", "Value"):
+            return f"{callee}({w.value(node[1])})"
+        if kind == "Cast":
+            length = "" if node[2] is None else f", max_length={w.value(node[2])}"
+            return f"{callee}({self.schema_source(node[1])}, str{length})"
+        return f"{callee}({', '.join(self.schema_source(argument) for argument in node[1])})"
+
     def relation(self, relation: RelationSpec) -> list[str]:
         w = self.writer
+        if relation.kind == "tenant":
+            source = relation.schema_source
+            schema = w.value(relation.schema) if source is None else self.schema_source(source)
+            args = [
+                w.value(relation.target),
+                f"column={w.value(relation.column)}",
+                f"schema={schema}",
+                f"models={w.value(tuple(relation.models))}",
+            ]
+            if relation.session is not None:
+                args.append(f"session={w.value(relation.session)}")
+            callee = self.imports.name("adorm", _RELATION_CLASSES[relation.kind])
+            return w.call(f"{relation.name} = ", callee, args, INDENT)
         if relation.kind == "generic_foreign_key":
             defaults = relation.ct_field == "content_type" and relation.column == "object_id"
             args = [] if defaults else [w.value(relation.ct_field), w.value(relation.column)]

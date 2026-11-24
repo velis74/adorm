@@ -30,6 +30,8 @@ INSTALLED_APPS = [
     "tests.djangoproject.clubs",
     "tests.djangoproject.activities",
     "tests.djangoproject.billing",
+    # Shared and tenant models of the tenant relation.
+    "tests.djangoproject.tenancy",
 ]
 
 ADORM_EXPOSE = ["auth.User.objects.create_user"]

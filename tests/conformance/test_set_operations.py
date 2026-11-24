@@ -128,7 +128,6 @@ async def test_refused_methods_after_a_set_operation_need_no_slot(make_router, r
             with pytest.raises(NotSupportedError, match=r"after union\(\)"):
                 combined.filter(level="beginner")
             for call in (
-                lambda: combined.aggregate(n=Count("pk")),
                 lambda: combined.update(level="beginner"),
                 lambda: combined.delete(),
                 lambda: combined.get(first_name="Ana"),
@@ -328,3 +327,16 @@ async def test_a_set_operation_of_one_sliced_query_keeps_its_clauses_apart(route
         "Ana",
     ]
     assert [name async for name in first_two.difference(Member.objects.none())] == ["Ana", "David"]
+
+
+async def test_an_aggregate_over_a_union_aggregates_the_combined_rows(driver, router):  # noqa: ARG001
+    _require(driver, "clause.union", "aggregate.combined")
+    beginners, advanced = (Member.objects.filter(level=level) for level in ("beginner", "advanced"))
+    names = beginners.values("first_name").union(advanced.values("first_name"), all=True)
+    expected = await beginners.count() + await advanced.count()
+    assert await names.aggregate(n=Count("first_name"), rows=Count("*")) == {"n": expected, "rows": expected}
+    members = beginners.union(advanced, all=True)
+    assert await members.aggregate(Count("id")) == {"id__count": expected}
+    assert await members.order_by("first_name")[:2].aggregate(n=Count("id")) == {"n": min(2, expected)}
+    empty = beginners.none().union(advanced.none())
+    assert await empty.aggregate(n=Count("id")) == {"n": 0}

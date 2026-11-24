@@ -16,7 +16,16 @@ from typing import Any, ClassVar
 from adorm.exceptions import NotSupportedError
 from adorm.query.expressions import check_field_path, Expression, F, Node, OrderBy, Q
 
-__all__ = ["CLAUSES", "COMBINATORS", "NESTED_PATH", "ForUpdate", "Query", "as_query", "construct_names"]
+__all__ = [
+    "CLAUSES",
+    "COMBINATORS",
+    "NESTED_PATH",
+    "ForUpdate",
+    "Query",
+    "TenantSchema",
+    "as_query",
+    "construct_names",
+]
 
 _LABEL = re.compile(r"[A-Za-z_]\w*\.[A-Za-z_]\w*")
 
@@ -36,6 +45,7 @@ _SAME_WHEN_COMBINED = (
     "deferred_fields",
     "for_update",
     "manager",
+    "tenant_schema",
 )
 
 _OWN_WHEN_COMBINED = frozenset(
@@ -75,9 +85,12 @@ CLAUSES: tuple[str, ...] = (
     "clause.intersection",
     "clause.difference",
     "clause.combinator.slice",
+    "clause.tenant_schema",
+    "aggregate.combined",
 )
-"""The construct names of `Query` clauses and set operations, `ForUpdate` options and the conflict handling of
-`adorm.operations.BulkCreate`."""
+"""The construct names of `Query` clauses and set operations, `ForUpdate` options, the conflict handling of
+`adorm.operations.BulkCreate`, the tenant schema of a query or write (``clause.tenant_schema``) and an aggregate over
+a combined query (``aggregate.combined``)."""
 
 NESTED_PATH = "path.nested"
 """The construct name of a field path with several segments (``club__name``, ``joined__year``, ``address__street``): a
@@ -168,6 +181,47 @@ class ForUpdate(Node):
             check_field_path(name)
 
 
+_SCHEMA_FORBIDDEN = re.compile(r'["`\[\]\x00-\x1f\x7f]')
+
+
+def check_schema_name(schema: Any) -> str:
+    """Return ``schema`` when it is a schema name a `TenantSchema` takes: a non-empty string without ``"``, a backtick,
+    ``[``, ``]``, NUL or another control character; raise ``ValueError`` otherwise."""
+    if not isinstance(schema, str) or not schema or _SCHEMA_FORBIDDEN.search(schema):
+        raise ValueError(f"{schema!r} is not a schema name")
+    return schema
+
+
+class TenantSchema(Node):
+    """The schema that qualifies the tables of the models ``models`` (labels) in a query or a write.
+
+    ``schema`` is a non-empty string without quotes, backticks, brackets or control characters (``ValueError``):
+    the database's quoting of identifiers does not escape them. ``models`` is a sorted tuple of unique model labels,
+    at least one.
+    """
+
+    _fields = ("schema", "models")
+    schema: str
+    models: tuple[str, ...]
+
+    def __init__(self, schema: str, models: Iterable[str]) -> None:
+        if isinstance(models, str):
+            raise TypeError("models is an iterable of model labels, not a string")
+        labels = tuple(sorted({check_model_label(label) for label in models}))
+        if not labels:
+            raise ValueError("a tenant schema qualifies the tables of at least one model")
+        self._init(schema=check_schema_name(schema), models=labels)
+
+    def _check_decoded(self) -> None:
+        check_schema_name(self.schema)
+        if not isinstance(self.models, tuple) or not self.models:
+            raise ValueError("the models of a tenant schema are a non-empty list of model labels")
+        for label in self.models:
+            check_model_label(label)
+        if list(self.models) != sorted(set(self.models)):
+            raise ValueError("the models of a tenant schema are sorted and unique")
+
+
 def _outer_nodes(node: Node) -> Iterator[Node]:
     """``node`` and its descendants outside subqueries."""
     yield node
@@ -221,6 +275,10 @@ class Query(Node):
     ``None`` reads the model's rows without manager logic. A query with a manager uses the construct
     ``clause.manager``.
 
+    ``tenant_schema`` is ``None``, or the `TenantSchema` whose schema qualifies the tables of its models wherever the
+    query reads them: joins, subqueries and many-to-many link tables included (`in_tenant_schema()`); the query then
+    uses the construct ``clause.tenant_schema``.
+
     ``combinator`` is ``None``, or ``"union"``, ``"intersection"`` or ``"difference"`` for the set operation that
     combines the rows of ``combined_queries``; ``combinator_all`` keeps duplicate rows of a union. A combined query
     has no filters, annotations or other clauses of its own: its ``select`` and ``row_format`` describe the combined
@@ -251,6 +309,7 @@ class Query(Node):
         "combinator",
         "combinator_all",
         "combined_queries",
+        "tenant_schema",
     )
     ROW_FORMATS: ClassVar[tuple[str, ...]] = ROW_FORMATS
     model: str
@@ -276,6 +335,7 @@ class Query(Node):
     combinator: str | None
     combinator_all: bool
     combined_queries: tuple[Query, ...]
+    tenant_schema: TenantSchema | None
 
     def __init__(self, model: str, *, manager: str | None = None) -> None:
         self._init(
@@ -302,6 +362,7 @@ class Query(Node):
             combinator=None,
             combinator_all=False,
             combined_queries=(),
+            tenant_schema=None,
         )
 
     @property
@@ -586,6 +647,12 @@ class Query(Node):
             combined_queries=(self, *parts),
         )
 
+    def in_tenant_schema(self, schema: str | None, models: Iterable[str] = ()) -> Query:
+        """The query with the tables of ``models`` (labels) qualified with ``schema`` (`TenantSchema`); ``None``
+        removes the schema. A combined query raises `adorm.NotSupportedError`: the schema is set on its parts."""
+        self.check_not_combined("in_tenant_schema")
+        return self._replace(tenant_schema=None if schema is None else TenantSchema(schema, models))
+
     def distinct(self, *fields: str) -> Query:
         """Remove duplicate rows; with ``fields``, keep one row per distinct value of those fields."""
         self.check_not_combined("distinct")
@@ -654,6 +721,8 @@ class Query(Node):
             yield "clause.select_related"
         if self.manager is not None:
             yield "clause.manager"
+        if self.tenant_schema is not None:
+            yield "clause.tenant_schema"
         from adorm.query.lookups import transform_constructs
 
         yield from sorted(transform_constructs(self))
@@ -667,6 +736,8 @@ class Query(Node):
             raise ValueError("a query's ordering is OrderBy nodes")
         if self.for_update is not None and not isinstance(self.for_update, ForUpdate):
             raise ValueError("a query's for_update is a ForUpdate")
+        if self.tenant_schema is not None and not isinstance(self.tenant_schema, TenantSchema):
+            raise ValueError("a query's tenant_schema is a TenantSchema")
         if self.row_format not in ROW_FORMATS:
             raise ValueError(f"unknown row format {self.row_format!r}")
         if not isinstance(self.is_distinct, bool) or not isinstance(self.is_none, bool):
@@ -750,6 +821,8 @@ class Query(Node):
             parts.append(f"{self.combinator}={self.combined_queries!r}{all_rows}")
         if self.manager is not None:
             parts.append(f"manager={self.manager!r}")
+        if self.tenant_schema is not None:
+            parts.append(f"tenant_schema={self.tenant_schema!r}")
         if self.filters:
             parts.append(f"filters={self.filters!r}")
         for name in ("ordering", "select", "distinct_fields", "deferred_fields", "select_related_fields"):

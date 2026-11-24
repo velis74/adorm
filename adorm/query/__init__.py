@@ -156,8 +156,18 @@ from adorm.query.lookups import (
     WeekDay,
     Year,
 )
-from adorm.query.query import as_query, CLAUSES, COMBINATORS, construct_names, ForUpdate, NESTED_PATH, Query
+from adorm.query.query import (
+    as_query,
+    CLAUSES,
+    COMBINATORS,
+    construct_names,
+    ForUpdate,
+    NESTED_PATH,
+    Query,
+    TenantSchema,
+)
 from adorm.query.queryset import QuerySet
+from adorm.query.tenants import TenantQuerySet
 
 __all__ = [
     "Cast",
@@ -280,6 +290,8 @@ __all__ = [
     "Quarter",
     "Query",
     "QuerySet",
+    "TenantQuerySet",
+    "TenantSchema",
     "Range",
     "Regex",
     "ResolvedLookup",

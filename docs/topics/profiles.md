@@ -267,6 +267,12 @@ Its return value is ignored; an awaitable one raises `TypeError` (a coroutine is
 when adorm cannot know them). `session` is the session it runs for, as given (`session.using`,
 `session.session_name`).
 
+[`operation.unqualified_models`](/ref/operations#unqualified-models) holds those of them whose tables the operation
+leaves to the connection's search path or default database, and [`operation.schemas`](/ref/operations#schemas) the
+schemas it names explicitly ([`in_tenant_schema()`](/ref/query#in-tenant-schema-schema-models), a
+[tenant relation](/ref/tenant-relations)). A hook that guards tenant tables reads `unqualified_models`, so that an
+operation that names the schemas of its tenant tables passes. Without schemas both name the same models.
+
 ```python
 TENANT_MODELS = frozenset({"clubs.Member", "clubs.Membership"})
 
